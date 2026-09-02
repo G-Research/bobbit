@@ -13,9 +13,18 @@ export const TOOL_EXTENSION_ADAPTER_STATE_DIR = "tool-extension-activation";
 export const TOOL_EXTENSION_ADAPTER_MANIFEST = "manifest.json";
 export const TOOL_EXTENSION_ADAPTER_ENTRY = "extension.ts";
 
+export interface CapturedToolExtensionTarget {
+	/** Native physical path retained for the runtime import URL. */
+	physicalPath: string;
+	/** Separator-normalized, platform-case-normalized identity of physicalPath. */
+	targetIdentity: string;
+}
+
 export interface ToolExtensionTargetPlan {
-	/** Physical extension path. Different aliases of the same physical file are coalesced. */
+	/** Lexical extension path used to report the first encountered alias. */
 	targetPath: string;
+	/** Canonical target captured while the plan is grouped, when available. */
+	capturedTarget?: CapturedToolExtensionTarget;
 	/** Encounter-ordered path aliases resolving to the same physical target. */
 	targetAliases?: string[];
 	/** Exact winning catalogue names assigned to this extension, in encounter order. */
@@ -50,15 +59,62 @@ function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
-function normalizedPhysicalPath(targetPath: string): string {
-	const resolved = path.resolve(targetPath);
-	const physical = fs.realpathSync.native(resolved);
-	return process.platform === "win32" ? physical.toLowerCase() : physical;
+function identityForPhysicalPath(physicalPath: string): string {
+	const normalized = process.platform === "win32" ? physicalPath.toLowerCase() : physicalPath;
+	return normalized.replaceAll("\\", "/");
+}
+
+/** Resolve an extension path once, retaining both executable spelling and comparison identity. */
+export function captureToolExtensionTarget(targetPath: string): CapturedToolExtensionTarget {
+	const physicalPath = fs.realpathSync.native(path.resolve(targetPath));
+	return { physicalPath, targetIdentity: identityForPhysicalPath(physicalPath) };
 }
 
 /** Stable identity used to group aliases that resolve to the same physical extension file. */
-export function toolExtensionTargetIdentity(targetPath: string): string {
-	return normalizedPhysicalPath(targetPath).replaceAll("\\", "/");
+export function toolExtensionTargetIdentity(target: string | CapturedToolExtensionTarget): string {
+	return typeof target === "string"
+		? captureToolExtensionTarget(target).targetIdentity
+		: target.targetIdentity;
+}
+
+function lexicalPathIdentity(targetPath: string): string {
+	const resolved = path.resolve(targetPath);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function addAllowedToolName(plan: ToolExtensionTargetPlan, canonicalName: string): void {
+	if (!plan.allowedToolNames.some((name) => name.toLowerCase() === canonicalName.toLowerCase())) {
+		plan.allowedToolNames.push(canonicalName);
+	}
+}
+
+/**
+ * Add one winning tool to a physical-target plan. Repeated lexical paths reuse
+ * the plan's capture; a new lexical alias is resolved once to prove identity.
+ */
+export function planToolExtensionTarget(
+	plans: Map<string, ToolExtensionTargetPlan>,
+	targetPath: string,
+	canonicalName: string,
+): void {
+	const alias = path.resolve(targetPath);
+	const aliasIdentity = lexicalPathIdentity(alias);
+	for (const plan of plans.values()) {
+		if ([plan.targetPath, ...(plan.targetAliases ?? [])].some((candidate) => lexicalPathIdentity(candidate) === aliasIdentity)) {
+			addAllowedToolName(plan, canonicalName);
+			return;
+		}
+	}
+
+	const capturedTarget = captureToolExtensionTarget(alias);
+	let plan = plans.get(toolExtensionTargetIdentity(capturedTarget));
+	if (!plan) {
+		plan = { targetPath: alias, capturedTarget, targetAliases: [alias], allowedToolNames: [] };
+		plans.set(capturedTarget.targetIdentity, plan);
+	} else if (!plan.targetAliases?.some((candidate) => lexicalPathIdentity(candidate) === aliasIdentity)) {
+		plan.targetAliases = [...(plan.targetAliases ?? []), alias];
+	}
+	addAllowedToolName(plan, canonicalName);
 }
 
 function adapterSource(adapterId: string): string {
@@ -117,12 +173,18 @@ function validatePublishedAdapter(
  * call validates the content-addressed artifact it returns.
  */
 export function materializeToolExtensionAdapter(plan: ToolExtensionTargetPlan): MaterializedToolExtensionAdapter {
-	const targetIdentity = toolExtensionTargetIdentity(plan.targetPath);
+	const capturedTarget = plan.capturedTarget ?? captureToolExtensionTarget(plan.targetPath);
+	plan.capturedTarget ??= capturedTarget;
+	const expectedIdentity = identityForPhysicalPath(capturedTarget.physicalPath);
+	if (capturedTarget.targetIdentity !== expectedIdentity) {
+		throw new Error(`captured tool extension target identity does not match physical path: ${capturedTarget.physicalPath}`);
+	}
+	const targetIdentity = toolExtensionTargetIdentity(capturedTarget);
 	const targetAliases: string[] = [];
 	const seenAliases = new Set<string>();
 	for (const alias of [plan.targetPath, ...(plan.targetAliases ?? [])]) {
 		const resolved = path.resolve(alias);
-		const identity = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+		const identity = lexicalPathIdentity(resolved);
 		if (seenAliases.has(identity)) continue;
 		seenAliases.add(identity);
 		targetAliases.push(resolved);
@@ -184,7 +246,7 @@ export function materializeToolExtensionAdapter(plan: ToolExtensionTargetPlan): 
 	return {
 		adapterPath,
 		adapterId,
-		targetUrl: pathToFileURL(fs.realpathSync.native(path.resolve(plan.targetPath))).href,
+		targetUrl: pathToFileURL(capturedTarget.physicalPath).href,
 		manifest,
 	};
 }
