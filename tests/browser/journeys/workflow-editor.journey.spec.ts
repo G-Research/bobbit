@@ -41,6 +41,19 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
+	async function openWorkflowFromList(page: import("@playwright/test").Page, wfId: string): Promise<void> {
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab).toBeVisible({ timeout: 10_000 });
+		const workflowRow = tab.getByText(`Test Workflow ${wfId}`).first();
+		await expect(workflowRow).toBeVisible({ timeout: 10_000 });
+		// Preserve the user journey through the list row, but wait for the route-owned
+		// workflow identity rather than the provisional editor shell. Visibility alone
+		// can win the asynchronous reload and let a later render collapse the step.
+		await workflowRow.click();
+		await expect(page.locator(".wf-edit-container"))
+			.toHaveAttribute("data-workflow-id", wfId, { timeout: 15_000 });
+	}
+
 	async function gotoNewEditor(page: import("@playwright/test").Page, wfId: string, gates: any[]): Promise<void> {
 		const res = await rawApiFetch("/api/workflows", {
 			method: "POST",
@@ -56,20 +69,13 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		await openApp(page);
 		await navigateToHash(page, `#/settings/${projectId}/workflows`);
-		const tab = page.locator("[data-testid='workflows-tab']").first();
-		await expect(tab).toBeVisible({ timeout: 10_000 });
-		await tab.getByText(`Test Workflow ${wfId}`).first().click();
-		// Wait for edit view to render
-		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
+		await openWorkflowFromList(page, wfId);
 	}
 
 	async function openWorkflowEditor(page: import("@playwright/test").Page, wfId: string): Promise<void> {
 		await openApp(page);
 		await navigateToHash(page, `#/settings/${projectId}/workflows`);
-		const tab = page.locator("[data-testid='workflows-tab']").first();
-		await expect(tab).toBeVisible({ timeout: 10_000 });
-		await tab.getByText(`Test Workflow ${wfId}`).first().click();
-		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
+		await openWorkflowFromList(page, wfId);
 	}
 
 	function gateCard(page: import("@playwright/test").Page, index: number): import("@playwright/test").Locator {

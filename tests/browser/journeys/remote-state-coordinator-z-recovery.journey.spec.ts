@@ -63,11 +63,17 @@ test.describe("Journey: remote-state coordinator recovery", () => {
 			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
 			const automaticReadsBeforeTick = gitStatusRequests.filter((url) => url.includes("intent=automatic")).length;
 			scenario.holdNextGitFetch();
+			const automaticRequest = sessionPage.waitForRequest(
+				(request) => request.url().includes("intent=automatic"),
+				{ timeout: 15_000 },
+			);
 			await sessionPage.clock.fastForward(30_000);
-			await expect.poll(
-				() => gitStatusRequests.filter((url) => url.includes("intent=automatic")).length,
-				{ timeout: 5_000 },
-			).toBeGreaterThan(automaticReadsBeforeTick);
+			// The request event is the completion barrier for the browser timer. A
+			// fixed five-second count poll could expire while a contended Windows
+			// renderer had queued, but not yet dispatched, the eligible tick.
+			await automaticRequest;
+			expect(gitStatusRequests.filter((url) => url.includes("intent=automatic")).length)
+				.toBeGreaterThan(automaticReadsBeforeTick);
 			await expect.poll(() => scenario!.gitFetches(), { timeout: 10_000 }).toBe(2);
 			scenario.releaseHeldGitFetch();
 			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });

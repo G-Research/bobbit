@@ -19,10 +19,9 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PACK_TIMEOUT_MS = 3 * 60_000;
-// A measured hosted-Windows prewarm can exceed nine minutes while resolving a
-// fresh lock-free consumer. Keep other runners tight and give only Windows the
-// demonstrated network/install headroom.
-const INSTALL_TIMEOUT_MS = process.platform === "win32" ? 15 * 60_000 : 10 * 60_000;
+const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
+const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
+const CACHE_BATCH_SIZE = 32;
 // Hosted Windows may spend more than 10 seconds establishing the Job-backed
 // ownership handshake under concurrent runner load. This deadline covers only
 // process-tree ownership setup; command execution retains its separate budget.
@@ -238,10 +237,93 @@ function parsePackResult(stdout, expectedPackageName) {
 		typeof entry.filename !== "string" || entry.filename.length === 0 || basename(entry.filename) !== entry.filename) {
 		throw new Error(`npm pack reported an invalid result: ${JSON.stringify(entry)}`);
 	}
-	return entry.filename;
+	return entry;
 }
 
-/** Build, pack, and online-install the real tarball solely to warm npm's cache. */
+function readPackageLock(path, label) {
+	let parsed;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		throw new Error(`${label} is not valid JSON: ${error.message}`, { cause: error });
+	}
+	if (!parsed || typeof parsed !== "object" || parsed.lockfileVersion !== 3 ||
+		!parsed.packages || typeof parsed.packages !== "object" || Array.isArray(parsed.packages)) {
+		throw new Error(`${label} must be a package-lock v3 document with a packages object`);
+	}
+	return parsed;
+}
+
+function allowsRuntime(values, actual, field, location) {
+	if (values === undefined) return true;
+	const list = typeof values === "string" ? [values] : values;
+	if (!Array.isArray(list) || list.some(value => typeof value !== "string" || value.length === 0)) {
+		throw new Error(`${location} has an invalid ${field} constraint`);
+	}
+	if (!actual) return false;
+	if (list.length === 1 && list[0] === "any") return true;
+	let negated = 0;
+	let matched = false;
+	for (const value of list) {
+		const denied = value.startsWith("!");
+		const expected = denied ? value.slice(1) : value;
+		if (denied) {
+			negated++;
+			if (actual === expected) return false;
+		} else if (actual === expected) {
+			matched = true;
+		}
+	}
+	return matched || negated === list.length;
+}
+
+function runtimeLibc(platform = process.platform) {
+	if (platform !== "linux") return undefined;
+	const report = process.report?.getReport?.();
+	return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
+}
+
+function compatibleRegistryTarballs(lock, {
+	platform = process.platform,
+	arch = process.arch,
+	libc = runtimeLibc(platform),
+} = {}) {
+	const urls = new Set();
+	for (const [location, entry] of Object.entries(lock.packages)) {
+		if (!location || !entry || typeof entry !== "object") continue;
+		const resolved = entry.resolved;
+		if (typeof resolved !== "string" || !/^https:\/\//.test(resolved)) continue;
+		if (typeof entry.version !== "string" || entry.version.length === 0) {
+			throw new Error(`${location} has a registry tarball without an exact version`);
+		}
+		if (!allowsRuntime(entry.os, platform, "os", location) ||
+			!allowsRuntime(entry.cpu, arch, "cpu", location) ||
+			!allowsRuntime(entry.libc, libc, "libc", location)) continue;
+		urls.add(resolved);
+	}
+	return urls;
+}
+
+export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock, runtime = {}) {
+	const required = compatibleRegistryTarballs(consumerLock, runtime);
+	const alreadyCached = compatibleRegistryTarballs(repositoryLock, runtime);
+	return [...required].filter(url => !alreadyCached.has(url)).sort();
+}
+
+async function measured(label, operation) {
+	const start = Date.now();
+	console.log(`[packed-cache-prewarm] ${label}: started`);
+	try {
+		const result = await operation();
+		console.log(`[packed-cache-prewarm] ${label}: completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+		return result;
+	} catch (error) {
+		console.error(`[packed-cache-prewarm] ${label}: failed after ${((Date.now() - start) / 1000).toFixed(1)}s`);
+		throw error;
+	}
+}
+
+/** Resolve the fresh consumer online, then cache only tarballs absent from npm ci. */
 export async function prewarmPackedConsumerCache({
 	repoRoot = REPO_ROOT,
 	baseEnv = process.env,
@@ -249,10 +331,12 @@ export async function prewarmPackedConsumerCache({
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
 	tempParent = tmpdir(),
+	runtime,
 } = {}) {
-	await ensureDist();
+	await measured("build", () => ensureDist());
 	const packageName = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).name;
 	if (typeof packageName !== "string" || packageName.length === 0) throw new Error("package.json must declare a package name");
+	const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
 	const npm = resolveNpm(baseEnv);
 	let tempRoot;
 	try {
@@ -268,37 +352,62 @@ export async function prewarmPackedConsumerCache({
 		}, null, 2)}\n`);
 
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
-		const packed = await runCommand(npm.command, packArgs, {
-			cwd: repoRoot,
-			env: baseEnv,
-			timeoutMs: PACK_TIMEOUT_MS,
-			repoRoot,
+		const packed = await measured("pack", async () => {
+			const result = await runCommand(npm.command, packArgs, {
+				cwd: repoRoot,
+				env: baseEnv,
+				timeoutMs: PACK_TIMEOUT_MS,
+				repoRoot,
+			});
+			requireSuccess(result);
+			return result;
 		});
-		requireSuccess(packed);
-		const filename = parsePackResult(packed.stdout, packageName);
-		const tarballPath = resolve(packDir, filename);
+		const packEntry = parsePackResult(packed.stdout, packageName);
+		const tarballPath = resolve(packDir, packEntry.filename);
 		const tarball = await stat(tarballPath).catch(() => undefined);
 		if (!tarball?.isFile()) throw new Error(`npm pack did not create ${tarballPath}`);
+		console.log(`[packed-cache-prewarm] pack: ${packEntry.entryCount ?? "?"} files, ${packEntry.size ?? "?"} packed bytes, ${packEntry.unpackedSize ?? "?"} unpacked bytes`);
 
-		const installArgs = [
+		const consumerEnv = packedConsumerNpmEnv(consumerDir, baseEnv);
+		const resolveArgs = [
 			...npm.argsPrefix,
 			"install",
+			"--package-lock-only",
 			"--ignore-scripts",
 			"--no-audit",
 			"--no-fund",
 			tarballPath,
 		];
-		const installed = await runCommand(npm.command, installArgs, {
-			cwd: consumerDir,
-			env: packedConsumerNpmEnv(consumerDir, baseEnv),
-			timeoutMs: INSTALL_TIMEOUT_MS,
-			repoRoot,
+		await measured("resolve lock", async () => {
+			const result = await runCommand(npm.command, resolveArgs, {
+				cwd: consumerDir,
+				env: consumerEnv,
+				timeoutMs: LOCK_RESOLUTION_TIMEOUT_MS,
+				repoRoot,
+			});
+			requireSuccess(result);
 		});
-		requireSuccess(installed);
-		console.log(`[packed-cache-prewarm] cached dependencies selected by ${filename}`);
+		const consumerLock = readPackageLock(join(consumerDir, "package-lock.json"), "generated consumer package-lock.json");
+		const missingTarballs = lockedTarballsMissingFromRepository(consumerLock, repositoryLock, runtime);
+		console.log(`[packed-cache-prewarm] cache: ${missingTarballs.length} tarballs absent from the repository lock`);
+		for (let offset = 0; offset < missingTarballs.length; offset += CACHE_BATCH_SIZE) {
+			const batch = missingTarballs.slice(offset, offset + CACHE_BATCH_SIZE);
+			const batchNumber = Math.floor(offset / CACHE_BATCH_SIZE) + 1;
+			const batchCount = Math.ceil(missingTarballs.length / CACHE_BATCH_SIZE);
+			await measured(`cache batch ${batchNumber}/${batchCount}`, async () => {
+				const result = await runCommand(npm.command, [...npm.argsPrefix, "cache", "add", ...batch], {
+					cwd: consumerDir,
+					env: consumerEnv,
+					timeoutMs: CACHE_BATCH_TIMEOUT_MS,
+					repoRoot,
+				});
+				requireSuccess(result);
+			});
+		}
+		console.log(`[packed-cache-prewarm] cached dependencies selected by ${packEntry.filename}`);
 	} finally {
 		if (tempRoot) {
-			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+			await measured("cleanup", () => rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }));
 		}
 	}
 }

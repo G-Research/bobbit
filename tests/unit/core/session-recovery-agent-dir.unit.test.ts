@@ -158,7 +158,7 @@ function it(name: string, run: (context: TestContext) => void | Promise<void>): 
 }
 
 afterAll(() => {
-	fs.rmSync(tmpRoot, { recursive: true, force: true });
+	fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("recoverSessionFile with configurable agent directories", () => {
