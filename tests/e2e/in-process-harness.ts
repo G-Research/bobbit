@@ -24,7 +24,7 @@ import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "no
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
-import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
+import { withDistServerImportWarmup } from "./test-utils/dist-import-lock.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
@@ -238,13 +238,16 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// with scaffolding and produces spurious ENOENT.
 		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
+		// Playwright workers share one transform cache. Let the first worker finish
+		// ordered dist/server imports before siblings begin; after readiness, every
+		// sibling imports concurrently rather than joining an all-worker lock queue.
 		const {
 			setProjectRoot,
 			scaffoldBobbitDir,
 			loadOrCreateToken,
 			createGateway,
 			registerRpcBridgeFactory,
-		} = await withDistServerImportLock(async () => {
+		} = await withDistServerImportWarmup(async () => {
 			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
