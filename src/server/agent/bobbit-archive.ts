@@ -41,6 +41,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/token",                // src/server/auth/token.ts (admin token)
 	"state/sessions.json",        // global session registry (spans projects)
 	"state/projects.json",        // global project registry (spans projects)
+	"state/worktree-pools.json",  // durable pre-built worktree ownership
 
 	// TLS / OAuth / DNS challenge
 	"state/tls/",                 // src/server/auth/tls.ts (ca.crt, server.crt, server.key)

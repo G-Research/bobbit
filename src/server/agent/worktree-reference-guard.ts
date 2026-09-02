@@ -49,23 +49,23 @@ function liveRecords(
 	return records;
 }
 
-/** Collect exact worktree roots referenced by live sessions. */
+/**
+ * Collect exact worktree references for a consumer that will canonicalize them.
+ * Preserve spelling here: lowercasing before native realpath can select a
+ * different existing path on a case-sensitive filesystem.
+ */
 export function collectLiveSessionWorktreePaths(
 	sessions: Iterable<WorktreeReferenceRecord | PersistedSession>,
 	options?: WorktreeReferenceOptions,
 ): Set<string> {
 	const paths = new Set<string>();
+	const add = (candidate?: string): void => {
+		if (candidate) paths.add(candidate);
+	};
 	for (const session of liveRecords(sessions, options)) {
-		const worktreePath = normalizeWorktreeHostPath(session.worktreePath);
-		if (worktreePath) paths.add(worktreePath);
-		const cwd = normalizeWorktreeHostPath(session.cwd);
-		if (cwd) paths.add(cwd);
-		if (session.repoWorktrees) {
-			for (const wt of Object.values(session.repoWorktrees)) {
-				const normalized = normalizeWorktreeHostPath(wt);
-				if (normalized) paths.add(normalized);
-			}
-		}
+		add(session.worktreePath);
+		add(session.cwd);
+		for (const worktreePath of Object.values(session.repoWorktrees ?? {})) add(worktreePath);
 	}
 	return paths;
 }

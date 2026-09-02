@@ -142,6 +142,10 @@ function isCoveredByAllowlist(segment: string): boolean {
 	return false;
 }
 
+test("durable worktree pool authority is gateway-owned", () => {
+	assert.ok(GATEWAY_OWNED_FILES.includes("state/worktree-pools.json"));
+});
+
 test("every bobbitStateDir() write site segment is in GATEWAY_OWNED_FILES or annotated `// archive-safe`", () => {
 	const sites = findWriteSites();
 	assert.ok(sites.length > 0, "regex should have found SOME write sites; check pattern drift");
