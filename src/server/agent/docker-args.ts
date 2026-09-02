@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bobbitDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import {
 	activeAgentSessionsDir,
 	ensurePrivateSessionRoot,
@@ -38,17 +38,37 @@ import { TOOLS_DIR } from "./tool-manager.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { TOOL_EXTENSION_ADAPTER_STATE_DIR } from "./tool-extension-activation.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
-export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
+export interface SandboxStateMount {
+	sub: string;
+	readOnly?: boolean;
+	/** Generated state shared by the gateway rather than owned by one project. */
+	headquarters?: boolean;
+}
+
+export const SANDBOX_STATE_MOUNTS: SandboxStateMount[] = [
 	{ sub: "sessions" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
 	{ sub: "aigw-dns-guard", readOnly: true },
+	{ sub: TOOL_EXTENSION_ADAPTER_STATE_DIR, readOnly: true, headquarters: true },
 ];
+
+/** Resolve the physical source used by Docker and its immutable mount checks. */
+export function sandboxStateMountHostPath(
+	mount: SandboxStateMount,
+	stateDir: string,
+	sessionId?: string,
+): string {
+	if (mount.headquarters) return path.join(bobbitStateDir(), mount.sub);
+	if (mount.sub === "sessions" && sessionId) return sessionStateSessionsRoot(stateDir, sessionId);
+	return path.join(stateDir, mount.sub);
+}
 
 /** Validated legacy E2E run ID. Invalid/unset values deliberately preserve production names. */
 export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
@@ -356,7 +376,8 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
 	// Generated extension state dirs (`google-code-assist`,
-	// `tool-result-error-bridge`, and `aigw-dns-guard`) hold content-addressed pi-coding-agent
+	// `tool-result-error-bridge`, `aigw-dns-guard`, and `tool-extension-activation`)
+	// hold content-addressed pi-coding-agent
 	// extensions loaded via `--extension`. remapArgsForContainer rewrites their
 	// host paths to `/bobbit-state/<subdir>/...`; those container paths only
 	// resolve if the subdirs are bind-mounted here. They contain only generated
@@ -368,12 +389,14 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// reused by later sessions. The `:ro` flag closes that hole at the kernel
 	// mount level; the gateway also revalidates cached contents before reuse as
 	// defense-in-depth (see google-code-assist-provider-extension.ts,
-	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
+	// tool-result-error-bridge-extension.ts, aigw-manager.ts, and
+	// tool-extension-activation.ts).
 	if (stateDir) {
-		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
-			const sharedHostPath = path.join(stateDir, sub);
+		for (const mount of SANDBOX_STATE_MOUNTS) {
+			const { sub, readOnly } = mount;
+			const sharedHostPath = sandboxStateMountHostPath(mount, stateDir);
 			const hostPath = sub === "sessions" && sessionId
-				? ensurePrivateSessionRoot(sessionStateSessionsRoot(stateDir, sessionId), sharedHostPath)
+				? ensurePrivateSessionRoot(sandboxStateMountHostPath(mount, stateDir, sessionId), sharedHostPath)
 				: sharedHostPath;
 			if (!(sub === "sessions" && sessionId)) fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
