@@ -128,6 +128,19 @@ export interface ToolInfo {
 	diagnostics?: ToolExtensionDiagnostic[];
 }
 
+/** One entry in a read-consistent catalogue generation. Dynamic overlays have no YAML provenance. */
+export interface ResolvedToolCatalogueEntry {
+	tool: ToolInfo;
+	resolved?: ResolvedEntity<ToolInfo>;
+	location?: { baseDir: string; groupDir: string };
+}
+
+/** A live, per-call catalogue generation; callers may reuse it throughout one request. */
+export interface ResolvedToolCatalogue {
+	tools: ToolInfo[];
+	byName: ReadonlyMap<string, ResolvedToolCatalogueEntry>;
+}
+
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
@@ -662,6 +675,21 @@ export class ToolManager {
 		return resolved ? this.diagnosticEntry(resolved.entry, resolved.tool) : undefined;
 	}
 
+	private toolInfoFromBase(tool: BaseToolInfo): ToolInfo {
+		return {
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			detail_docs: tool.detail_docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+			...contributionFields(tool),
+			grantPolicy: tool.grantPolicy,
+			params: tool.params,
+		};
+	}
+
 	private configGroupHasInvalidExtension(groupDir: string): boolean {
 		let invalid = false;
 		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
@@ -988,23 +1016,27 @@ export class ToolManager {
 		return unique;
 	}
 
-	/** Returns all tools, re-scanning the YAML directory on every call. */
-	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
-		const tools = this.resolveYamlSnapshot();
-		const result: ToolInfo[] = tools.map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			group: tool.group,
-			docs: tool.docs,
-			detail_docs: tool.detail_docs,
-			hasRenderer: !!tool.renderer,
-			rendererFile: tool.renderer,
-			...contributionFields(tool),
-			grantPolicy: tool.grantPolicy,
-			params: tool.params,
-		}));
+	/**
+	 * Resolve YAML winners, provenance, locations, and dynamic overlays once.
+	 * The result is intentionally not cached across calls: request handlers can
+	 * reuse one generation without hiding file or activation changes from the next.
+	 */
+	getResolvedToolCatalogue(scopedContext?: ScopedToolContext): ResolvedToolCatalogue {
+		const hydrated = this.resolveHydratedSnapshot();
+		const result: ToolInfo[] = [];
+		const byName = new Map<string, ResolvedToolCatalogueEntry>();
+		for (const { entry, tool: base } of hydrated) {
+			const tool = this.toolInfoFromBase(base);
+			const identity = tool.name.toLowerCase();
+			result.push(tool);
+			byName.set(identity, {
+				tool,
+				resolved: this.diagnosticEntry(entry, base),
+				location: { baseDir: base.baseDir, groupDir: base.groupDir },
+			});
+		}
 		for (const ext of this.externalTools.values()) {
-			result.push({
+			const tool: ToolInfo = {
 				name: ext.name,
 				description: ext.description,
 				group: ext.group,
@@ -1014,21 +1046,34 @@ export class ToolManager {
 				rendererFile: undefined,
 				grantPolicy: undefined,
 				params: undefined,
-			});
+			};
+			result.push(tool);
+			if (!byName.has(tool.name.toLowerCase())) byName.set(tool.name.toLowerCase(), { tool });
 		}
-		const byLower = new Map<string, ToolInfo>();
-		for (const tool of result) byLower.set(tool.name.toLowerCase(), tool);
+
+		// Retain the existing overlay target: an external registration that collides
+		// with YAML receives Pi providers, while the first (YAML) row remains the
+		// authoritative case-insensitive catalogue winner.
+		const overlayTargets = new Map<string, ToolInfo>();
+		for (const tool of result) overlayTargets.set(tool.name.toLowerCase(), tool);
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
-			const existing = byLower.get(entry.runtimeName.toLowerCase());
+			const identity = entry.runtimeName.toLowerCase();
+			const existing = overlayTargets.get(identity);
 			if (existing) {
 				existing.providers = [...(existing.providers ?? []), ...entry.providers];
 				continue;
 			}
-			const info = this.piToolInfoFromGroup(entry);
-			result.push(info);
-			byLower.set(info.name.toLowerCase(), info);
+			const tool = this.piToolInfoFromGroup(entry);
+			result.push(tool);
+			overlayTargets.set(identity, tool);
+			if (!byName.has(identity)) byName.set(identity, { tool });
 		}
-		return result;
+		return { tools: result, byName };
+	}
+
+	/** Returns all tools from one fresh, read-consistent catalogue generation. */
+	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
+		return this.getResolvedToolCatalogue(scopedContext).tools;
 	}
 
 	/** Returns a single tool's full detail, or undefined if not found. Case-insensitive lookup. */

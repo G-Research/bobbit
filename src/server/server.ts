@@ -79,7 +79,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
+import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ResolvedToolCatalogueEntry, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost, type InvokeRequest } from "./extension-host/module-host-worker.js";
@@ -88,7 +88,7 @@ import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaEr
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { PackLocalDataError, PackLocalDataResolver } from "./extension-host/pack-local-data.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
-import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
+import { resolvePackIdentity, resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import {
 	HostProjectReadInputError,
@@ -5990,14 +5990,13 @@ async function handleApiRoute(
 	});
 	const toolOriginForScope = (scope: PackScope): "builtin" | "server" | "user" | "project" =>
 		scope === "global-user" ? "user" : scope;
-	/** Serialize runtime fields and provenance from the same authoritative manager winner. */
+	/** Serialize runtime fields and provenance from one authoritative catalogue generation. */
 	const withResolvedToolOrigin = (
-		scopedToolManager: ToolManager,
-		tool: Record<string, unknown>,
+		catalogueEntry: ResolvedToolCatalogueEntry,
 		projectId?: string,
 	): Record<string, unknown> => {
-		const name = typeof tool.name === "string" ? tool.name : "";
-		const resolved = name ? scopedToolManager.getResolvedToolEntry(name) : undefined;
+		const tool = catalogueEntry.tool as unknown as Record<string, unknown>;
+		const resolved = catalogueEntry.resolved;
 		if (!resolved) return { ...tool, origin: tool.origin ?? "mcp" };
 		const market = resolved.origin.kind === "market";
 		const detail: Record<string, unknown> = {
@@ -6010,7 +6009,7 @@ async function handleApiRoute(
 			originPackName: market ? (resolved.origin.manifest?.name ?? null) : null,
 		};
 		if (market) {
-			const packId = resolvePackIdentityForTool(scopedToolManager, name).packId;
+			const packId = resolvePackIdentity(catalogueEntry.location, catalogueEntry.tool.name).packId;
 			if (packId) detail.packId = packId;
 			if (packDeclaresLocalData(projectId, packId)) detail.hasLocalData = true;
 		}
@@ -10354,21 +10353,25 @@ async function handleApiRoute(
 		const effectiveConfigProjectId = projectScope.effectiveProjectId;
 		const scopedToolManager = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
 		const scopedContext = piExtensionToolScopeContext({ projectId: effectiveConfigProjectId });
+		const scopedCatalogue = scopedToolManager.getResolvedToolCatalogue(scopedContext);
 		const tools: Array<Record<string, unknown>> = [];
 		const seen = new Set<string>();
-		for (const tool of scopedToolManager.getAvailableTools(scopedContext)) {
+		for (const tool of scopedCatalogue.tools) {
 			const identity = tool.name.toLowerCase();
 			if (seen.has(identity)) continue;
-			tools.push(withResolvedToolOrigin(scopedToolManager, tool as unknown as Record<string, unknown>, effectiveConfigProjectId));
+			const entry = scopedCatalogue.byName.get(identity);
+			if (!entry) continue;
+			tools.push(withResolvedToolOrigin(entry, effectiveConfigProjectId));
 			seen.add(identity);
 		}
 		// MCP registrations are process-level dynamic overlays. Project managers own
 		// their scoped YAML/Pi winners, while the server manager owns these external
 		// rows; only append identities that are not YAML entries in either manager.
 		if (scopedToolManager !== toolManager) {
-			for (const external of toolManager.getAvailableTools(scopedContext)) {
+			const serverCatalogue = toolManager.getResolvedToolCatalogue(scopedContext);
+			for (const external of serverCatalogue.tools) {
 				const identity = external.name.toLowerCase();
-				if (seen.has(identity) || toolManager.getResolvedToolEntry(external.name)) continue;
+				if (seen.has(identity) || serverCatalogue.byName.get(identity)?.resolved) continue;
 				tools.push({ ...external, origin: external.origin ?? "mcp" });
 				seen.add(identity);
 			}
@@ -10396,17 +10399,17 @@ async function handleApiRoute(
 			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));
 			const identity = name.toLowerCase();
 			const piTool = piRows.find((row) => String(row.name ?? "").toLowerCase() === identity);
-			const yamlWinner = scopedToolManager.getResolvedToolEntry(name);
-			const scopedTool = yamlWinner
-				? scopedToolManager.getAvailableTools(scopedContext).find((candidate) => candidate.name.toLowerCase() === identity)
-				: scopedToolManager.getToolByName(name, scopedContext);
-			const externalTool = scopedToolManager !== toolManager && !toolManager.getResolvedToolEntry(name)
-				? toolManager.getToolByName(name, scopedContext)
-				: undefined;
-			const tool = scopedTool ?? externalTool;
+			const scopedCatalogue = scopedToolManager.getResolvedToolCatalogue(scopedContext);
+			const scopedEntry = scopedCatalogue.byName.get(identity);
+			let catalogueEntry = scopedEntry;
+			if (!catalogueEntry && scopedToolManager !== toolManager) {
+				const serverEntry = toolManager.getResolvedToolCatalogue(scopedContext).byName.get(identity);
+				if (serverEntry && !serverEntry.resolved) catalogueEntry = serverEntry;
+			}
+			const tool = catalogueEntry?.tool;
 			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
-			const detail = tool
-				? withResolvedToolOrigin(scopedToolManager, tool as unknown as Record<string, unknown>, effectiveConfigProjectId)
+			const detail = catalogueEntry
+				? withResolvedToolOrigin(catalogueEntry, effectiveConfigProjectId)
 				: { ...(piTool as Record<string, unknown>) };
 			if (tool && piTool) appendPiExtensionToolRows([detail], [piTool]);
 			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
