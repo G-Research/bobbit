@@ -80,6 +80,7 @@ function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy
 const allowedToolsCache = new Map<string, EffectiveTool[]>();
 const missingProviderWarningKeys = new Set<string>();
 const inactiveProviderDebugKeys = new Set<string>();
+const ambiguousRolePolicyWarningKeys = new Set<string>();
 
 interface InactiveToolContributionLike {
 	reason: string;
@@ -221,6 +222,25 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
  *
  * Normalizes old policy values internally: `always-allow`→allow, `ask-once`/`always-ask`→ask, `never-ask`→never.
  */
+function caseInsensitiveRoleToolPolicy(
+	toolName: string,
+	policies: Record<string, GrantPolicy> | undefined,
+): GrantPolicy | undefined {
+	if (!policies) return undefined;
+	if (Object.prototype.hasOwnProperty.call(policies, toolName)) return policies[toolName];
+	const identity = toolName.toLowerCase();
+	const matches = Object.entries(policies).filter(([key]) => key.toLowerCase() === identity);
+	if (matches.length === 0) return undefined;
+	if (matches.length > 1) {
+		const warningKey = `${identity}\0${matches.map(([key]) => key).join("\0")}`;
+		if (!ambiguousRolePolicyWarningKeys.has(warningKey)) {
+			ambiguousRolePolicyWarningKeys.add(warningKey);
+			console.warn(`[tool-activation] Ambiguous case-only role policies for "${toolName}"; using stable first match "${matches[0][0]}"`);
+		}
+	}
+	return matches[0][1];
+}
+
 export function resolveGrantPolicy(
 	toolName: string,
 	toolGroup: string | undefined,
@@ -240,8 +260,15 @@ export function resolveGrantPolicy(
 
 	const mcpKeys = mcpPolicyKeys(toolName);
 
-	// 1. Role-level tool-specific override (exact tool name match)
-	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
+	// 1. Role-level tool-specific override. Preserve exact declared spelling as
+	// authoritative, then case-fold ordinary YAML tool identity. MCP hierarchy
+	// remains exact and is handled below.
+	const exactRolePolicy = role?.toolPolicies?.[toolName];
+	if (exactRolePolicy) return normalizePolicy(exactRolePolicy);
+	if (!mcpKeys) {
+		const canonicalRolePolicy = caseInsensitiveRoleToolPolicy(toolName, role?.toolPolicies);
+		if (canonicalRolePolicy) return normalizePolicy(canonicalRolePolicy);
+	}
 
 	// 2. Role-level MCP hierarchy: exact/operation/package/server/wildcard.
 	// Role policy is the most authoritative grant-policy source for tools that
@@ -443,11 +470,21 @@ export type EffectiveTool =
  *   3. Otherwise → `yaml` (so unknown-tool typos still surface through the
  *      provider-lookup `"has no provider"` warn in `computeToolActivationArgs`).
  */
+function caseInsensitiveMapValue<T>(map: ReadonlyMap<string, T> | undefined, name: string): T | undefined {
+	const exact = map?.get(name);
+	if (exact !== undefined) return exact;
+	const identity = name.toLowerCase();
+	for (const [key, value] of map ?? []) {
+		if (key.toLowerCase() === identity) return value;
+	}
+	return undefined;
+}
+
 function tagAllowedToolFromProviders(
 	name: string,
 	providers?: ReadonlyMap<string, { type?: string }>,
 ): EffectiveTool {
-	const provider = providers?.get(name);
+	const provider = caseInsensitiveMapValue(providers, name);
 	if (provider?.type === "pi-extension") return { kind: "pi-extension", name };
 	if (provider) return { kind: "yaml", name };
 	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
@@ -1372,7 +1409,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			// unrestricted/all-tools branch (both flow through here), so a disabled
 			// tool is never registered even for a role-less / all-tools session.
 			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
-			const provider = providers.get(entry.name);
+			const provider = caseInsensitiveMapValue(providers, entry.name);
 			if (!provider) {
 				const inactive = inactiveToolContribution(toolManager, entry.name, scopedContext);
 				if (inactive) {
@@ -1389,8 +1426,10 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 				if (provider.tool === "bash") {
 					// bash comes from the extension beside the winning bash definition,
 					// not from the file-builtins set.
-					extensionPaths.add(toolManager.resolveToolExtensionPath?.("bash", "extension.ts")
-						?? toolManager.getExtensionPath("shell", "extension.ts"));
+					const bashExtension = typeof toolManager.resolveToolExtensionPath === "function"
+						? toolManager.resolveToolExtensionPath("bash", "extension.ts")
+						: toolManager.getExtensionPath("shell", "extension.ts");
+					if (bashExtension) extensionPaths.add(bashExtension);
 					continue;
 				}
 				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {

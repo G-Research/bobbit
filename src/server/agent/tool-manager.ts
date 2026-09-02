@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -119,6 +120,15 @@ export interface ResolvedToolCatalogueEntry {
 export interface ResolvedToolCatalogue {
 	tools: ToolInfo[];
 	byName: ReadonlyMap<string, ResolvedToolCatalogueEntry>;
+}
+
+type HydratedToolSnapshot = Array<{
+	entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
+	tool: BaseToolInfo;
+}>;
+
+interface ToolReadGeneration {
+	value?: HydratedToolSnapshot;
 }
 
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
@@ -352,6 +362,56 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
 }
 
 /**
+ * Shared pre-merge loader for mutable user tool scopes. Invalid extension
+ * definitions are omitted before PackResolver sees them, allowing the valid
+ * lower winner and provenance to reappear consistently.
+ */
+export function loadValidatedUserTools(
+	toolsDir: string,
+	scope: "server" | "global-user" | "project",
+	options: { omitHistoricalAgentSnapshot?: boolean } = {},
+): { tools: ToolInfo[]; diagnostics: ToolExtensionDiagnostic[] } {
+	let scanned = scanToolsDir(toolsDir, toolsDir);
+	if (options.omitHistoricalAgentSnapshot && isHistoricalUnmodifiedAgentGroup(toolsDir)) {
+		scanned = scanned.filter((tool) => tool.groupDir !== "agent");
+	}
+	const groupDiagnostics = collectInvalidConfigGroupExtensionDiagnostics(toolsDir, scanned);
+	const toolDiagnostics = collectInvalidConfigToolDiagnostics(scanned);
+	const seen = new Set<string>();
+	const diagnostics = [...groupDiagnostics, ...toolDiagnostics]
+		.map((diagnostic) => ({ ...diagnostic, scope }))
+		.filter((diagnostic) => {
+			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	for (const diagnostic of diagnostics) logToolExtensionDiagnostic(diagnostic);
+
+	const invalidGroups = new Set(groupDiagnostics.map((diagnostic) => diagnostic.groupDir));
+	const invalidNames = new Set(toolDiagnostics.map((diagnostic) => diagnostic.toolName.toLowerCase()));
+	const valid = scanned.filter((tool) =>
+		!invalidNames.has(tool.name.toLowerCase())
+		&& !toolDependsOnInvalidGroupExtension(tool, invalidGroups),
+	);
+	return {
+		tools: valid.map((tool) => attachToolRuntimeDefinition({
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			detail_docs: tool.detail_docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+			...contributionFields(tool),
+			grantPolicy: tool.grantPolicy,
+			params: tool.params,
+		}, tool)),
+		diagnostics,
+	};
+}
+
+/**
  * Load tool definitions over an ordered cascade of layers (low→high priority):
  *
  *   builtin (lowest)  <  market-pack roots (low→high)  <  config-level toolsDir
@@ -532,14 +592,8 @@ export class ToolManager {
 	 */
 	private marketRootsProvider?: () => Array<string | MarketToolRoot>;
 	private resolvedToolEntriesProvider?: () => ResolvedEntity<ToolInfo>[];
-	private toolReadGenerationDepth = 0;
-	private hydratedSnapshot?: {
-		generation: number;
-		value: Array<{
-			entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
-			tool: BaseToolInfo;
-		}>;
-	};
+	/** Per-async-operation immutable YAML generation; concurrent setups never share it. */
+	private readonly toolReadGeneration = new AsyncLocalStorage<ToolReadGeneration>();
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
@@ -553,7 +607,6 @@ export class ToolManager {
 	 */
 	setResolvedToolEntriesProvider(provider: () => ResolvedEntity<ToolInfo>[]): void {
 		this.resolvedToolEntriesProvider = provider;
-		this.hydratedSnapshot = undefined;
 	}
 
 	private resolvedEntries(): Array<ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>> {
@@ -613,27 +666,27 @@ export class ToolManager {
 
 	/**
 	 * Reuse one authoritative generation across a bounded synchronous operation.
-	 * Nesting is safe; the outermost caller always drops the lease in `finally`.
-	 * No snapshot survives the operation, so the next read observes live YAML,
-	 * customization, marketplace, and activation state without a TTL.
+	 * Nested reads inherit the caller's generation; unrelated operations stay live.
 	 */
 	withToolReadGenerationSync<T>(operation: () => T): T {
-		this.toolReadGenerationDepth++;
-		try {
-			return operation();
-		} finally {
-			this.toolReadGenerationDepth--;
-			if (this.toolReadGenerationDepth === 0) this.hydratedSnapshot = undefined;
-		}
+		if (this.toolReadGeneration.getStore()) return operation();
+		return this.toolReadGeneration.run({}, operation);
+	}
+
+	/**
+	 * Capture one immutable generation across awaited setup work. Async-local
+	 * ownership prevents one session's snapshot from leaking into concurrent API
+	 * reads or another session setup.
+	 */
+	withToolReadGeneration<T>(operation: () => Promise<T>): Promise<T> {
+		if (this.toolReadGeneration.getStore()) return operation();
+		return this.toolReadGeneration.run({}, operation);
 	}
 
 	/** One read-consistent, source-aware YAML snapshot. */
-	private resolveHydratedSnapshot(): Array<{
-		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
-		tool: BaseToolInfo;
-	}> {
-		const cached = this.hydratedSnapshot;
-		if (this.toolReadGenerationDepth > 0 && cached?.generation === _toolResolutionGeneration) return cached.value;
+	private resolveHydratedSnapshot(): HydratedToolSnapshot {
+		const generation = this.toolReadGeneration.getStore();
+		if (generation?.value) return generation.value;
 
 		const entries = this.resolvedEntries();
 		const value = entries.map((entry) => {
@@ -645,9 +698,7 @@ export class ToolManager {
 				tool: this.hydrateResolvedEntry(entry, sourceBaseDir),
 			};
 		});
-		if (this.toolReadGenerationDepth > 0) {
-			this.hydratedSnapshot = { generation: _toolResolutionGeneration, value };
-		}
+		if (generation) generation.value = value;
 		return value;
 	}
 
@@ -717,7 +768,6 @@ export class ToolManager {
 	 */
 	setMarketToolRootsProvider(provider: () => Array<string | MarketToolRoot>): void {
 		this.marketRootsProvider = provider;
-		this.hydratedSnapshot = undefined;
 	}
 
 	/** Resolve the current ordered market-pack `tools/` roots (low→high), normalized. */
@@ -809,18 +859,21 @@ export class ToolManager {
 	}
 
 	/**
-	 * Resolve an extension relative to the exact winning tool definition.
-	 * Prefer the winner's declared bobbit-extension filename; a fallback is useful
-	 * for fixed group support modules which have no provider declaration.
+	 * Resolve the extension required by the exact winning provider. Named tools
+	 * never fall back merely because their group happens to contain extension.ts.
+	 * Builtin bash is the intentional exception: Bobbit supplies it through the
+	 * support extension beside the winning YAML definition.
 	 */
 	resolveToolExtensionPath(toolName: string, fallbackFilename?: string): string | undefined {
 		const identity = toolName.toLowerCase();
 		const tool = this.resolveYamlSnapshot().find((candidate) => candidate.name.toLowerCase() === identity);
-		if (!tool) return undefined;
-		const bobbitExtension = tool.provider?.type === "bobbit-extension";
-		const filename = bobbitExtension
-			? (tool.provider?.extension ?? fallbackFilename ?? "extension.ts")
-			: fallbackFilename;
+		if (!tool?.provider) return undefined;
+		let filename: string | undefined;
+		if (tool.provider.type === "bobbit-extension") {
+			filename = tool.provider.extension;
+		} else if (tool.provider.type === "builtin" && tool.provider.tool === "bash") {
+			filename = fallbackFilename ?? "extension.ts";
+		}
 		if (!filename) return undefined;
 		return path.resolve(tool.baseDir, tool.groupDir, filename);
 	}
@@ -838,7 +891,6 @@ export class ToolManager {
 				// revert can change the winner of every project manager.
 				_scanCache.delete(this.toolsDir);
 				_toolResolutionGeneration++;
-				this.hydratedSnapshot = undefined;
 				return true;
 			}
 		} catch { /* not found */ }
@@ -976,48 +1028,12 @@ export class ToolManager {
 	 * Used by the config cascade to determine which tools are server/project overrides.
 	 */
 	getLocalTools(): ToolInfo[] {
-		// Scan only the config-level tools dir — no builtins. Apply the same
-		// invalid direct group-extension filtering as runtime resolution so the
-		// config cascade and /api/tools do not advertise overrides that launch will skip.
-		let scanned = scanToolsDir(this.toolsDir, this.toolsDir);
-		if (isHistoricalUnmodifiedAgentGroup(this.toolsDir)) {
-			scanned = scanned.filter((tool) => tool.groupDir !== "agent");
-		}
-		const invalidGroupExtensions = new Set<string>();
-		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
-			logToolExtensionDiagnostic(diagnostic);
-			invalidGroupExtensions.add(diagnostic.groupDir);
-		}
-		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
-		return tools.map((tool) => attachToolRuntimeDefinition({
-			name: tool.name,
-			description: tool.description,
-			group: tool.group,
-			docs: tool.docs,
-			detail_docs: tool.detail_docs,
-			hasRenderer: !!tool.renderer,
-			rendererFile: tool.renderer,
-			...contributionFields(tool),
-			grantPolicy: tool.grantPolicy,
-			params: tool.params,
-		}, tool));
+		return loadValidatedUserTools(this.toolsDir, "project", { omitHistoricalAgentSnapshot: true }).tools;
 	}
 
 	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
-	getToolDiagnostics(): ToolExtensionDiagnostic[] {
-		const diagnostics = [
-			...collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir),
-			...collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir)),
-		];
-		const seen = new Set<string>();
-		const unique = diagnostics.filter((diagnostic) => {
-			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
-			if (seen.has(key)) return false;
-			seen.add(key);
-			return true;
-		});
-		for (const diagnostic of unique) logToolExtensionDiagnostic(diagnostic);
-		return unique;
+	getToolDiagnostics(scope: "server" | "project" = "project"): ToolExtensionDiagnostic[] {
+		return loadValidatedUserTools(this.toolsDir, scope, { omitHistoricalAgentSnapshot: true }).diagnostics;
 	}
 
 	/**
@@ -1040,6 +1056,10 @@ export class ToolManager {
 			});
 		}
 		for (const ext of this.externalTools.values()) {
+			const identity = ext.name.toLowerCase();
+			// Dynamic registrations are fallback definitions. A YAML winner owns the
+			// semantic identity everywhere, including case-only collisions.
+			if (byName.has(identity)) continue;
 			const tool: ToolInfo = {
 				name: ext.name,
 				description: ext.description,
@@ -1052,12 +1072,9 @@ export class ToolManager {
 				params: undefined,
 			};
 			result.push(tool);
-			if (!byName.has(tool.name.toLowerCase())) byName.set(tool.name.toLowerCase(), { tool });
+			byName.set(identity, { tool });
 		}
 
-		// Retain the existing overlay target: an external registration that collides
-		// with YAML receives Pi providers, while the first (YAML) row remains the
-		// authoritative case-insensitive catalogue winner.
 		const overlayTargets = new Map<string, ToolInfo>();
 		for (const tool of result) overlayTargets.set(tool.name.toLowerCase(), tool);
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
@@ -1080,36 +1097,9 @@ export class ToolManager {
 		return this.getResolvedToolCatalogue(scopedContext).tools;
 	}
 
-	/** Returns a single tool's full detail, or undefined if not found. Case-insensitive lookup. */
+	/** Returns a single canonical catalogue winner. Case-insensitive lookup. */
 	getToolByName(name: string, scopedContext?: ScopedToolContext): ToolInfo | undefined {
-		const nameLower = name.toLowerCase();
-		// Check external tools (case-insensitive)
-		for (const ext of this.externalTools.values()) {
-			if (ext.name.toLowerCase() === nameLower) {
-				const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined, providers: pi?.providers };
-			}
-		}
-		const tools = this.resolveYamlSnapshot();
-		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
-		if (base) {
-			const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-			return {
-				name: base.name,
-				description: base.description,
-				group: base.group,
-				docs: base.docs,
-				detail_docs: base.detail_docs,
-				hasRenderer: !!base.renderer,
-				rendererFile: base.renderer,
-				...contributionFields(base),
-				grantPolicy: base.grantPolicy,
-				params: base.params,
-				providers: pi?.providers,
-			};
-		}
-		const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-		return pi ? this.piToolInfoFromGroup(pi) : undefined;
+		return this.getResolvedToolCatalogue(scopedContext).byName.get(name.toLowerCase())?.tool;
 	}
 
 	/**
@@ -1175,14 +1165,16 @@ export class ToolManager {
 			included.add(tool.name.toLowerCase());
 		}
 
-		// Include external tools (e.g. MCP) — no params, no inlined docs.
+		// Include external fallback tools only when YAML does not own the identity.
 		for (const ext of this.externalTools.values()) {
-			if (requested && !requested.has(ext.name.toLowerCase())) continue;
+			const identity = ext.name.toLowerCase();
+			if (included.has(identity)) continue;
+			if (requested && !requested.has(identity)) continue;
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
 			grouped.get(group)!.entries.push({ name: ext.name, summary });
-			included.add(ext.name.toLowerCase());
+			included.add(identity);
 		}
 
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
@@ -1238,16 +1230,14 @@ export class ToolManager {
 		return sections.join("\n");
 	}
 
-	/** Returns the provider info for a tool, or undefined if not found. */
+	/** Returns the canonical winner's provider, or undefined if not found. */
 	getToolProvider(name: string, scopedContext?: ScopedToolContext): ToolProvider | undefined {
 		const identity = name.toLowerCase();
+		const base = this.resolveYamlSnapshot().find((tool) => tool.name.toLowerCase() === identity);
+		if (base) return base.provider;
 		const ext = [...this.externalTools.values()].find((candidate) => candidate.name.toLowerCase() === identity);
 		if (ext) return ext.provider;
-		const tools = this.resolveYamlSnapshot();
-		const base = tools.find((t) => t.name.toLowerCase() === identity);
-		if (base?.provider) return base.provider;
-		const pi = this.scopedPiToolGroups(scopedContext).get(name.toLowerCase());
-		const provider = pi?.providers[0];
+		const provider = this.scopedPiToolGroups(scopedContext).get(identity)?.providers[0];
 		return provider ? { type: "pi-extension", providerKey: provider.providerKey } : undefined;
 	}
 
@@ -1287,18 +1277,25 @@ export class ToolManager {
 		};
 	}
 
-	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
+	/** Returns all canonical providers while preserving each winner's display spelling. */
 	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
 		const tools = this.resolveYamlSnapshot();
 		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
+		const identities = new Set<string>();
 		for (const tool of tools) {
+			identities.add(tool.name.toLowerCase());
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
 		}
 		for (const [name, ext] of this.externalTools) {
+			const identity = name.toLowerCase();
+			if (identities.has(identity)) continue;
+			identities.add(identity);
 			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
 		}
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
-			if (map.has(entry.runtimeName)) continue;
+			const identity = entry.runtimeName.toLowerCase();
+			if (identities.has(identity)) continue;
+			identities.add(identity);
 			const provider = entry.providers[0];
 			map.set(entry.runtimeName, { type: "pi-extension", providerKey: provider.providerKey, groupDir: '', baseDir: '' });
 		}
@@ -1347,7 +1344,6 @@ export class ToolManager {
 			// cache is also dropped so same-length writes remain immediately visible.
 			_scanCache.delete(this.toolsDir);
 			_toolResolutionGeneration++;
-			this.hydratedSnapshot = undefined;
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);
