@@ -3610,6 +3610,8 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private readonly worktreePoolRecords: PoolRecordSink;
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
+	/** One explicit-deletion owner per project; failures clear the slot for retry. */
+	private worktreePoolRemovals = new Map<string, Promise<void>>();
 	/**
 	 * Pool deletion admission is irreversible for a manager lifetime, even when
 	 * later project cleanup fails. Retrying drain/forget remains safe, but a stale
@@ -7161,23 +7163,12 @@ export class SessionManager {
 		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
 		// `setupTimeoutResolver` reads `worktree_setup_timeout_ms` so the project
 		// default applies to per-component setup during pool prebuild.
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot, commandRunner: this.commandRunner, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime, recordStore: this.worktreePoolRecords, projectId });
+		const pool = this.createWorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot, projectId });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
 		// reclaim them as orphaned pool entries on restart.
-		const runtimeRecords: WorktreeReferenceRecord[] = [...this.sessions.values()].map(session => ({
-			id: session.id,
-			worktreePath: session.worktreePath,
-			cwd: session.cwd,
-			repoWorktrees: session.repoWorktrees
-				? Object.fromEntries(session.repoWorktrees.map(worktree => [worktree.repo, worktree.worktreePath]))
-				: undefined,
-		}));
-		const activeWorktreePaths = collectLiveSessionWorktreePaths([
-			...this.getAllPersistedSessionsForWorktreeGuard(),
-			...runtimeRecords,
-		]);
+		const activeWorktreePaths = this.collectLiveWorktreePaths();
 
 		let initialization!: Promise<void>;
 		initialization = pool.initialize(activeWorktreePaths)
@@ -7222,6 +7213,99 @@ export class SessionManager {
 		return this.worktreePoolRecords;
 	}
 
+	private createWorktreePool(options: {
+		repoPath: string;
+		targetSize: number;
+		componentsResolver?: () => import("./project-config-store.js").Component[];
+		worktreeRoot?: string;
+		baseRefResolver?: () => string | undefined;
+		setupTimeoutResolver?: () => number | string | undefined;
+		projectRoot?: string;
+		projectId: string;
+	}): WorktreePool {
+		return new WorktreePool({
+			...options,
+			commandRunner: this.commandRunner,
+			remotePolicy: this.remoteGitPolicy,
+			worktreeSetupRuntime: this.worktreeSetupRuntime,
+			recordStore: this.worktreePoolRecords,
+		});
+	}
+
+	private collectLiveWorktreePaths(): Set<string> {
+		const runtimeRecords: WorktreeReferenceRecord[] = [...this.sessions.values()].map(session => ({
+			id: session.id,
+			worktreePath: session.worktreePath,
+			cwd: session.cwd,
+			repoWorktrees: session.repoWorktrees
+				? Object.fromEntries(session.repoWorktrees.map(worktree => [worktree.repo, worktree.worktreePath]))
+				: undefined,
+		}));
+		return collectLiveSessionWorktreePaths([
+			...this.getAllPersistedSessionsForWorktreeGuard(),
+			...runtimeRecords,
+		]);
+	}
+
+	/**
+	 * Rebuild only the ownership-validation surface needed by explicit deletion.
+	 * A zero target prevents fill: durable rows become actionable solely through
+	 * WorktreePool's exact record + Git identity + live-reference adoption checks.
+	 */
+	private async createDormantWorktreePoolForRemoval(projectId: string): Promise<WorktreePool> {
+		const context = this.projectContextManager?.getExisting(projectId);
+		if (!context) {
+			throw new Error(`Cannot safely remove recorded worktree pool for project "${projectId}": project context is unavailable`);
+		}
+		const projectRoot = context.project.rootPath;
+		const config = context.projectConfigStore;
+		const components = config.getComponents();
+		const isMultiRepo = components.some(component => component.repo !== ".");
+		// Match boot's repository identity. Failure must preserve the durable record:
+		// falling back to a guessed root would either orphan proof or weaken ownership.
+		const repoPath = isMultiRepo ? projectRoot : await getRepoRoot(projectRoot, this.commandRunner);
+		return this.createWorktreePool({
+			repoPath,
+			targetSize: 0,
+			componentsResolver: () => config.getComponents(),
+			worktreeRoot: config.get("worktree_root") || undefined,
+			baseRefResolver: () => config.get("base_ref"),
+			setupTimeoutResolver: () => config.get("worktree_setup_timeout_ms") || undefined,
+			projectRoot,
+			projectId,
+		});
+	}
+
+	private async removeWorktreePoolOwned(projectId: string): Promise<void> {
+		let pool = this.worktreePools.get(projectId);
+		const initializing = this.worktreePoolInitializations.get(projectId);
+		if (pool && initializing) {
+			// Stop the published boot pool without draining it. drain() before its
+			// adoption settles would clear the durable record while leaving the
+			// recorded worktree untouched. The zero-sized deletion pool below then
+			// revalidates the surviving record without permitting a fill.
+			await pool.stop();
+			if (this.worktreePools.get(projectId) === pool) this.worktreePools.delete(projectId);
+			await initializing.catch(() => undefined);
+			pool = undefined;
+		} else if (!pool && initializing) {
+			// Cover the narrow failed-init gap where its catch removed the pool before
+			// its finally removed the initialization marker.
+			await initializing.catch(() => undefined);
+			pool = this.worktreePools.get(projectId);
+		}
+		if (!pool && this.worktreePoolRecords.read(projectId).entries.length > 0) {
+			pool = await this.createDormantWorktreePoolForRemoval(projectId);
+			await pool.initialize(this.collectLiveWorktreePaths());
+		}
+		if (pool) {
+			await pool.drain();
+			if (this.worktreePools.get(projectId) === pool) this.worktreePools.delete(projectId);
+		}
+		this.worktreePoolRecords.forget(projectId);
+		await this.worktreePoolRecords.flush();
+	}
+
 	/** Drain and remove a project's worktree pool (for project deletion). */
 	async removeWorktreePool(projectId: string): Promise<void> {
 		// Fence synchronously before drain yields: a stale boot callback must never
@@ -7231,12 +7315,17 @@ export class SessionManager {
 			this.worktreePools.delete(projectId);
 			return;
 		}
-		const pool = this.worktreePools.get(projectId);
-		if (pool) {
-			await pool.drain();
-			this.worktreePools.delete(projectId);
+		const pending = this.worktreePoolRemovals.get(projectId);
+		if (pending) return pending;
+		const removal = this.removeWorktreePoolOwned(projectId);
+		this.worktreePoolRemovals.set(projectId, removal);
+		try {
+			await removal;
+		} finally {
+			if (this.worktreePoolRemovals.get(projectId) === removal) {
+				this.worktreePoolRemovals.delete(projectId);
+			}
 		}
-		this.worktreePoolRecords.forget(projectId);
 	}
 
 	async initMcp(cwd: string): Promise<void> {
