@@ -1,4 +1,4 @@
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -298,6 +298,43 @@ function layerTool(layer: string, policy: ToolDefinition["policy"] = "ask"): Too
 }
 
 describe("tool resolution parity", () => {
+	it("scans each normalized winner source root once per fresh snapshot", () => {
+		const fixture = createFixture({ builtinSibling: true });
+		const toolsBase = path.resolve(fixture.builtinConfigDir, "tools");
+		const entries = fixture.cascade.resolveToolsEntries("normal-project");
+		assert.equal(entries.length, 2, "fixture must expose two winners from one source root");
+
+		const aliasedEntries = entries.map((entry, index) => index === 0 ? entry : {
+			...entry,
+			source: {
+				...entry.source,
+				baseDir: `${toolsBase}${path.sep}agent${path.sep}..`,
+			},
+		});
+		fixture.projectManager.setResolvedToolEntriesProvider(() => aliasedEntries);
+		__resetToolScanCache();
+
+		const originalReaddirSync = fs.readdirSync.bind(fs);
+		let sourceRootReads = 0;
+		const readdirSpy = vi.spyOn(fs, "readdirSync").mockImplementation(((...args: unknown[]) => {
+			if (path.resolve(String(args[0])) === toolsBase) sourceRootReads++;
+			return (originalReaddirSync as (...callArgs: unknown[]) => unknown)(...args);
+		}) as typeof fs.readdirSync);
+		try {
+			assert.deepEqual(
+				fixture.projectManager.getAvailableTools().map((tool) => tool.name).sort(),
+				["session_prompt", "session_status"],
+			);
+			assert.equal(
+				sourceRootReads,
+				2,
+				"one snapshot should fingerprint and scan a shared normalized source root only once",
+			);
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
 	it("uses an ordinary server user override as the project catalogue and runtime winner", () => {
 		const fixture = createFixture({ server: layerTool("server") });
 		const builtin = new ToolManager(path.join(fixture.root, "empty"), path.join(fixture.builtinConfigDir, "tools"))
