@@ -54,11 +54,8 @@ jobs:
 
       - name: Unit gate
         run: npm run test:unit
-        # Hosted Windows repeatedly exceeded per-file wall budgets with two
-        # workers after the first universal native pack joined the built-in band.
-        # Serialize there; an empty value elsewhere preserves the normal cap.
         env:
-          VITEST_MAX_WORKERS: ${{ runner.os == 'Windows' && '1' || '' }}
+          VITEST_MAX_WORKERS: '3'
 
   browser:
     name: Browser (${{ matrix.os }}, Node 22.19.0)
@@ -69,15 +66,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # Hosted Windows showed event-loop starvation at two concurrent Browser
-        # workers; keep the less constrained Linux and macOS runners at two.
-        include:
-          - os: ubuntu-latest
-            workers: 2
-          - os: windows-latest
-            workers: 1
-          - os: macos-latest
-            workers: 2
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -104,15 +92,14 @@ jobs:
       - name: Browser gate
         run: npm run test:browser
         env:
-          BOBBIT_V2_PLAYWRIGHT_WORKERS: ${{ matrix.workers }}
+          BOBBIT_V2_PLAYWRIGHT_WORKERS: '2'
 
   e2e:
     name: E2E (${{ matrix.os }}, Node 22.19.0)
     if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     # Hosted Windows can spend over nine minutes preparing the lock-free packed
-    # consumer before the authoritative suite begins, then runs Browser-backed
-    # groups serially to avoid gateway fixture starvation.
+    # consumer before the authoritative suite begins.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -158,7 +145,7 @@ jobs:
       - name: E2E gate
         run: npm run test:e2e
         env:
-          E2E_V2_PW_WORKERS: ${{ runner.os == 'Windows' && '1' || '' }}
+          E2E_V2_PW_WORKERS: '2'
 
   release-contract:
     name: Release contract

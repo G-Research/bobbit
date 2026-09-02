@@ -128,8 +128,8 @@ describe("native CI qualification workflows", () => {
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
 		assert.deepEqual(
 			unitGates[0]?.env,
-			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '1' || '' }}" },
-			"hosted Windows must serialize Vitest files while an empty non-Windows override retains the normal fixed cap",
+			{ VITEST_MAX_WORKERS: "3" },
+			"every native runner must use the standard fixed Vitest worker count",
 		);
 	});
 
@@ -179,25 +179,14 @@ describe("native CI qualification workflows", () => {
 			assert.equal(gate.if, undefined, `${jobId} gate must execute in every PR matrix job`);
 		}
 
-		assert.deepEqual(
-			jobs.browser.strategy.matrix,
-			{
-				os: expectedOs,
-				include: [
-					{ os: "ubuntu-latest", workers: 2 },
-					{ os: "windows-latest", workers: 1 },
-					{ os: "macos-latest", workers: 2 },
-				],
-			},
-			"hosted Windows must use one Browser worker while Linux and macOS retain two",
-		);
+		assert.deepEqual(jobs.browser.strategy.matrix, { os: expectedOs });
 		assert.deepEqual(stepByName(jobs.browser.steps, "Browser gate").env, {
-			BOBBIT_V2_PLAYWRIGHT_WORKERS: "${{ matrix.workers }}",
-		});
+			BOBBIT_V2_PLAYWRIGHT_WORKERS: "2",
+		}, "every native runner must use two Browser workers");
 		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs });
 		assert.deepEqual(stepByName(jobs.e2e.steps, "E2E gate").env, {
-			E2E_V2_PW_WORKERS: "${{ runner.os == 'Windows' && '1' || '' }}",
-		}, "hosted Windows must serialize Playwright-backed E2E groups while other runners retain the normal worker count");
+			E2E_V2_PW_WORKERS: "2",
+		}, "every native runner must use two Playwright-backed E2E workers");
 	});
 
 	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {
