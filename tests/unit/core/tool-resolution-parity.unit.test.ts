@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
 import { BuiltinConfigProvider } from "../../../src/server/agent/builtin-config.js";
 import { ConfigCascade } from "../../../src/server/agent/config-cascade.js";
@@ -15,6 +17,11 @@ import {
 	resolveGrantPolicy,
 } from "../../../src/server/agent/tool-activation.js";
 import { generateToolGuardExtension } from "../../../src/server/agent/tool-guard-extension.js";
+import {
+	TOOL_EXTENSION_ADAPTER_MANIFEST,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.js";
 import { ToolManager, __resetToolScanCache, type ToolInfo } from "../../../src/server/agent/tool-manager.js";
 import { resolvePackIdentityForTool } from "../../../src/server/extension-host/pack-identity.js";
 
@@ -49,6 +56,7 @@ interface FixtureOptions {
 	disabled?: Record<string, string[]>;
 	activation?: Record<string, DisabledRefs>;
 	builtinSibling?: boolean;
+	builtinReadSession?: boolean;
 }
 
 interface Fixture {
@@ -165,6 +173,14 @@ function createFixture(options: FixtureOptions = {}): Fixture {
 			providerExtension: "status-extension.ts",
 		}, "session_status");
 	}
+	if (options.builtinReadSession) {
+		writeTool(builtinConfigDir, {
+			policy: "allow",
+			description: "builtin read session",
+			declaredName: "read_session",
+			providerExtension: "extension.ts",
+		}, "read_session");
+	}
 	if (options.server) writeTool(serverConfigDir, options.server);
 	if (options.globalUser) writeTool(globalUserConfigDir, options.globalUser);
 	if (options.project) writeTool(projectConfigDir, options.project);
@@ -270,6 +286,37 @@ function catalogueEntry(
 function expectedToolsBase(entry: ResolvedEntity<ToolInfo>): string {
 	assert.notEqual(entry.origin.path, "", `winning ${entry.origin.id} provenance must retain its physical root`);
 	return path.join(entry.origin.path, "tools");
+}
+
+function extensionPaths(args: readonly string[]): string[] {
+	return args.filter((_arg, index) => index > 0 && args[index - 1] === "--extension");
+}
+
+function assertActivationUsesFilteredTarget(
+	activation: ReturnType<typeof computeToolActivationArgs>,
+	targetPath: string,
+	allowedNames?: readonly string[],
+): string {
+	const targets = JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+	const expectedUrl = pathToFileURL(fs.realpathSync.native(path.resolve(targetPath))).href;
+	const target = Object.entries(targets).find(([, url]) => url === expectedUrl);
+	assert.ok(target, `activation must map one filtered adapter to ${targetPath}`);
+	const [adapterId] = target;
+	const adapterPath = extensionPaths(activation.args).find((candidate) => {
+		try {
+			const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+			return manifest.adapterId === adapterId;
+		} catch {
+			return false;
+		}
+	});
+	assert.ok(adapterPath, `activation must emit the adapter for ${targetPath}, never the raw target`);
+	assert.notEqual(path.resolve(adapterPath), path.resolve(targetPath));
+	if (allowedNames) {
+		const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(adapterPath), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+		assert.deepEqual(manifest.allowedToolNames, allowedNames);
+	}
+	return adapterPath;
 }
 
 interface RuntimeWinnerOptions {
@@ -389,10 +436,7 @@ function assertRuntimeWinner(
 
 	const activation = computeToolActivationArgs([{ kind: "yaml", name: lookupName }], manager);
 	const extensionPath = path.resolve(expectedToolsBase(catalogue), "agent", `${catalogue.item.name.toLowerCase()}-extension.ts`);
-	assert.ok(
-		activation.args.some((arg) => path.resolve(arg) === extensionPath),
-		`${message}: activation must load the winner extension`,
-	);
+	assertActivationUsesFilteredTarget(activation, extensionPath, [catalogue.item.name]);
 
 	assert.deepEqual(
 		resolvePackIdentityForTool(manager, catalogue.item.name),
@@ -446,6 +490,59 @@ function layerTool(layer: string, policy: ToolDefinition["policy"] = "ask"): Too
 		summary: `${layer} winning summary`,
 		providerExtension: "session_prompt-extension.ts",
 	};
+}
+
+function writeCollisionExtension(extensionPath: string, origin: string, counterKey: string): void {
+	writeFile(extensionPath, `
+import { Type } from "typebox";
+export default function extension(pi) {
+  const counters = globalThis[${JSON.stringify(counterKey)}] ??= {};
+  counters[${JSON.stringify(origin)}] = (counters[${JSON.stringify(origin)}] ?? 0) + 1;
+  for (const name of ["read_session", "session_prompt"]) {
+    pi.registerTool({
+      name,
+      label: name,
+      description: ${JSON.stringify(origin)} + ":" + name,
+      parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text", text: ${JSON.stringify(origin)} + ":" + name }] }),
+    });
+  }
+}
+`);
+}
+
+type PiRunnerConstructorArgs = ConstructorParameters<typeof ExtensionRunner>;
+interface RealPiLoadResult {
+	extensions: PiRunnerConstructorArgs[0];
+	runtime: PiRunnerConstructorArgs[1];
+	errors: Array<{ path: string; error: string }>;
+}
+
+async function loadWithRealPi(extensionPathsToLoad: string[], cwd: string): Promise<RealPiLoadResult> {
+	const packageEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const loaderUrl = pathToFileURL(path.join(path.dirname(packageEntry), "core", "extensions", "loader.js")).href;
+	const loader = await import(loaderUrl) as {
+		loadExtensions(paths: string[], cwd: string): Promise<RealPiLoadResult>;
+	};
+	return loader.loadExtensions(extensionPathsToLoad, cwd);
+}
+
+async function executeOrigin(runner: ExtensionRunner, toolName: string): Promise<string> {
+	const definition = runner.getToolDefinition(toolName);
+	assert.ok(definition, `${toolName} must be registered`);
+	const result = await definition.execute("test-call", {}, undefined, undefined, runner.createContext());
+	const first = result.content[0];
+	assert.equal(first?.type, "text");
+	return first.type === "text" ? first.text : "";
+}
+
+function withActivationEnvironment<T>(activation: ReturnType<typeof computeToolActivationArgs>, operation: () => Promise<T>): Promise<T> {
+	const previous = process.env[TOOL_EXTENSION_TARGETS_ENV];
+	process.env[TOOL_EXTENSION_TARGETS_ENV] = activation.env[TOOL_EXTENSION_TARGETS_ENV];
+	return operation().finally(() => {
+		if (previous === undefined) delete process.env[TOOL_EXTENSION_TARGETS_ENV];
+		else process.env[TOOL_EXTENSION_TARGETS_ENV] = previous;
+	});
 }
 
 interface PrecedenceLayer {
@@ -526,6 +623,109 @@ describe("tool resolution parity", () => {
 			assertPolicySurfaces(fixture.projectManager, "SESSION_PROMPT", winner.policy);
 		});
 	}
+
+	it("filters same-group extension collisions to exact authoritative winners with real Pi", async () => {
+		const fixture = createFixture({
+			builtinReadSession: true,
+			builtin: {
+				...layerTool("builtin", "never"),
+				providerExtension: "extension.ts",
+			},
+			project: {
+				...layerTool("project", "ask"),
+				providerExtension: "extension.ts",
+			},
+		});
+		const counterKey = `__bobbit_extension_collision_${path.basename(fixture.root)}`;
+		const builtinTarget = path.join(fixture.builtinConfigDir, "tools", "agent", "extension.ts");
+		const projectTarget = path.join(fixture.projectConfigDir, "tools", "agent", "extension.ts");
+		writeCollisionExtension(builtinTarget, "builtin", counterKey);
+		writeCollisionExtension(projectTarget, "project", counterKey);
+		writeFile(
+			path.join(fixture.builtinConfigDir, "tools", "_builtins", "extension.ts"),
+			"export default function extension() {}\n",
+		);
+		__resetToolScanCache();
+
+		assert.equal(catalogueEntry(fixture, "read_session").origin.id, "builtin");
+		assert.equal(catalogueEntry(fixture, "SESSION_PROMPT").origin.id, "user:project");
+		const providers = fixture.projectManager.getToolProviders();
+		assert.equal([...providers.entries()].find(([name]) => name.toLowerCase() === "read_session")?.[1].baseDir, path.join(fixture.builtinConfigDir, "tools"));
+		assert.equal([...providers.entries()].find(([name]) => name.toLowerCase() === "session_prompt")?.[1].baseDir, path.join(fixture.projectConfigDir, "tools"));
+
+		const run = async (names: string[]): Promise<void> => {
+			const activation = computeToolActivationArgs(
+				names.map((name) => ({ kind: "yaml" as const, name })),
+				fixture.projectManager,
+			);
+			assertActivationUsesFilteredTarget(activation, builtinTarget, ["read_session"]);
+			assertActivationUsesFilteredTarget(activation, projectTarget, ["session_prompt"]);
+			assert.equal(extensionPaths(activation.args).includes(builtinTarget), false);
+			assert.equal(extensionPaths(activation.args).includes(projectTarget), false);
+
+			const before = { ...(Reflect.get(globalThis, counterKey) as Record<string, number> | undefined) };
+			const loaded = await withActivationEnvironment(activation, () => loadWithRealPi(extensionPaths(activation.args), fixture.root));
+			assert.deepEqual(loaded.errors, []);
+			const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, fixture.root, null as never, null as never);
+			assert.equal(await executeOrigin(runner, "read_session"), "builtin:read_session");
+			assert.equal(await executeOrigin(runner, "session_prompt"), "project:session_prompt");
+			const after = Reflect.get(globalThis, counterKey) as Record<string, number>;
+			assert.equal(after.builtin, (before.builtin ?? 0) + 1, "builtin target factory must execute once");
+			assert.equal(after.project, (before.project ?? 0) + 1, "project target factory must execute once");
+		};
+
+		try {
+			await run(["READ_SESSION", "read_session", "session_prompt", "SESSION_PROMPT"]);
+			await run(["SESSION_PROMPT", "session_prompt", "read_session", "READ_SESSION"]);
+		} finally {
+			Reflect.deleteProperty(globalThis, counterKey);
+		}
+	});
+
+	it("loads only the lower extension owner when a colliding higher tool is disabled", async () => {
+		const fixture = createFixture({
+			builtinReadSession: true,
+			builtin: {
+				...layerTool("builtin-low", "ask"),
+				providerExtension: "extension.ts",
+			},
+			market: [{
+				scope: "project",
+				packName: "disabled-high",
+				tool: { ...layerTool("project-high", "allow"), providerExtension: "extension.ts" },
+			}],
+			disabled: { "project:disabled-high": ["SESSION_PROMPT"] },
+		});
+		const counterKey = `__bobbit_extension_fallback_${path.basename(fixture.root)}`;
+		const builtinTarget = path.join(fixture.builtinConfigDir, "tools", "agent", "extension.ts");
+		const highRoot = fixture.marketEntries.find((entry) => entry.id === "market:project:disabled-high")!.path;
+		const highTarget = path.join(highRoot, "tools", "agent", "extension.ts");
+		writeCollisionExtension(builtinTarget, "builtin-low", counterKey);
+		writeCollisionExtension(highTarget, "project-high", counterKey);
+		writeFile(
+			path.join(fixture.builtinConfigDir, "tools", "_builtins", "extension.ts"),
+			"export default function extension() {}\n",
+		);
+		__resetToolScanCache();
+
+		const activation = computeToolActivationArgs([
+			{ kind: "yaml", name: "SESSION_PROMPT" },
+			{ kind: "yaml", name: "read_session" },
+		], fixture.projectManager);
+		assertActivationUsesFilteredTarget(activation, builtinTarget, ["session_prompt", "read_session"]);
+		assert.equal(Object.values(JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV]) as Record<string, string>).includes(pathToFileURL(highTarget).href), false);
+
+		try {
+			const loaded = await withActivationEnvironment(activation, () => loadWithRealPi(extensionPaths(activation.args), fixture.root));
+			assert.deepEqual(loaded.errors, []);
+			const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, fixture.root, null as never, null as never);
+			assert.equal(await executeOrigin(runner, "read_session"), "builtin-low:read_session");
+			assert.equal(await executeOrigin(runner, "session_prompt"), "builtin-low:session_prompt");
+			assert.deepEqual(Reflect.get(globalThis, counterKey), { "builtin-low": 1 });
+		} finally {
+			Reflect.deleteProperty(globalThis, counterKey);
+		}
+	});
 
 	it("hydrates authoritative winners without rereading their source root", () => {
 		const fixture = createFixture({ builtinSibling: true });
@@ -764,7 +964,7 @@ describe("tool resolution parity", () => {
 			"agent",
 			"session_prompt-extension.ts",
 		);
-		assert.ok(activation.args.includes(expectedExtension), "lowercase allowlist must activate the mixed-case winner extension");
+		assertActivationUsesFilteredTarget(activation, expectedExtension, ["Session_Prompt"]);
 		assert.equal(activation.args.some((arg) => arg.includes("collision")), false, "external loser must not leak into activation");
 
 		assert.equal(fixture.projectManager.getToolByName("external_only")?.description, "external fallback control");
@@ -801,7 +1001,11 @@ describe("tool resolution parity", () => {
 		assert.equal(diagnostics[0].toolName, "session_prompt");
 		assert.match(diagnostics[0].message, /missing-global-helper|session_prompt-extension/i);
 		const activation = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], invalid.projectManager);
-		assert.ok(activation.args.includes(path.join(invalid.serverConfigDir, "tools", "agent", "session_prompt-extension.ts")));
+		assertActivationUsesFilteredTarget(
+			activation,
+			path.join(invalid.serverConfigDir, "tools", "agent", "session_prompt-extension.ts"),
+			["session_prompt"],
+		);
 		assert.equal(activation.args.includes(invalidExtension), false);
 
 		const valid = createFixture({
