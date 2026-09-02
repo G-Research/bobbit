@@ -7,10 +7,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { parseToolsDir } from "../../../src/server/agent/builtin-config.ts";
 import { computeToolActivationArgs, type EffectiveTool } from "../../../src/server/agent/tool-activation.ts";
 import { ToolManager, __resetToolScanCache } from "../../../src/server/agent/tool-manager.ts";
+import {
+	TOOL_EXTENSION_ADAPTER_MANIFEST,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.ts";
 import { __setToolModuleLoadProbeForTesting, preflightConfigExtensionFile } from "../../../src/server/agent/tool-extension-preflight.ts";
 
 const roots: string[] = [];
@@ -69,6 +75,31 @@ function extensionPaths(args: string[]): string[] {
 
 function nonBuiltinExtensionPaths(args: string[]): string[] {
 	return extensionPaths(args).filter((p) => !p.endsWith(path.join("_builtins", "extension.ts")));
+}
+
+function assertFilteredAdapter(
+	activation: ReturnType<typeof computeToolActivationArgs>,
+	targetPath: string,
+	allowedToolNames: readonly string[],
+): string {
+	const targets = JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+	const targetUrl = pathToFileURL(fs.realpathSync.native(path.resolve(targetPath))).href;
+	const target = Object.entries(targets).find(([, url]) => url === targetUrl);
+	assert.ok(target, `expected filtered adapter target ownership for ${targetPath}`);
+	const [adapterId] = target;
+	const adapterPath = extensionPaths(activation.args).find((candidate) => {
+		try {
+			const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+			return manifest.adapterId === adapterId;
+		} catch {
+			return false;
+		}
+	});
+	assert.ok(adapterPath, `expected emitted adapter for ${targetPath}`);
+	assert.notEqual(path.resolve(adapterPath), path.resolve(targetPath), "raw extension target must not reach argv");
+	const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(adapterPath), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+	assert.deepEqual(manifest.allowedToolNames, allowedToolNames);
+	return adapterPath;
 }
 
 function captureToolDiagnostics(fn: () => void): string {
@@ -146,10 +177,7 @@ describe("tool startup resilience", () => {
 
 		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
 		const activeExtensions = nonBuiltinExtensionPaths(result.args);
-		assert.ok(
-			activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.builtinAgentExtension)),
-			`expected bundled agent extension activation, got ${JSON.stringify(activeExtensions)}`,
-		);
+		assertFilteredAdapter(result, fixture.builtinAgentExtension, ["session_prompt"]);
 		assert.ok(
 			!activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)),
 			"broken config agent extension must not become runtime activation",
@@ -265,7 +293,7 @@ describe("tool startup resilience", () => {
 		const diagnostics = tm.getToolDiagnostics();
 
 		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(builtinBuiltinsExtension)));
-		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(builtinShellExtension)));
+		assertFilteredAdapter(result, builtinShellExtension, ["bash"]);
 		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(configBuiltinsExtension)));
 		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(configShellExtension)));
 		assert.ok(diagnostics.some((d) => d.groupDir === "_builtins" && /broken config builtins/.test(d.message)));
@@ -307,8 +335,8 @@ describe("tool startup resilience", () => {
 
 		assert.equal(tm.getToolByName("session_prompt")?.description, "bundled session prompt");
 		assert.equal(tm.getToolByName("valid_agent_tool")?.description, "valid config agent tool");
-		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.builtinAgentExtension)));
-		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(validExtension)));
+		assertFilteredAdapter(result, fixture.builtinAgentExtension, ["session_prompt"]);
+		assertFilteredAdapter(result, validExtension, ["valid_agent_tool"]);
 		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
 	});
 
@@ -328,11 +356,10 @@ describe("tool startup resilience", () => {
 		__resetToolScanCache();
 		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
 		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
-		const activeExtensions = nonBuiltinExtensionPaths(result.args);
 
 		assert.deepEqual(tm.getToolDiagnostics(), []);
 		assert.equal(tm.getToolByName("session_prompt")?.description, "valid copied config session prompt override");
-		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
+		assertFilteredAdapter(result, fixture.configAgentExtension, ["session_prompt"]);
 	});
 
 	it("preserves valid TypeScript overrides that import project-local packages", () => {
@@ -355,11 +382,10 @@ describe("tool startup resilience", () => {
 		__resetToolScanCache();
 		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
 		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
-		const activeExtensions = nonBuiltinExtensionPaths(result.args);
 
 		assert.deepEqual(tm.getToolDiagnostics(), []);
 		assert.equal(tm.getToolByName("session_prompt")?.description, "valid project-local package override");
-		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
+		assertFilteredAdapter(result, fixture.configAgentExtension, ["session_prompt"]);
 	});
 
 	it("does not depend on dev-only esbuild for runtime preflight", () => {

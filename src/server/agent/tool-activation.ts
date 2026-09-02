@@ -6,7 +6,7 @@
  *    → Controlled via `--tools` flag
  * 2. **Bobbit extensions** (.bobbit/config/tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
  *    → Resolved beside each winning tool definition, controlled via `--extension` flag
- *    → Goal/team extensions are also added separately by session-manager (duplicates are harmless)
+ *    → Lifecycle-required tools join the same filtered activation plan
  *
  * Provider info is read from .bobbit/config/tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
@@ -461,6 +461,19 @@ export type EffectiveTool =
 	| { kind: "yaml"; name: string }
 	| { kind: "mcp"; name: string }
 	| { kind: "pi-extension"; name: string };
+
+/** Exact capabilities retained for Bobbit-owned session lifecycle surfaces. */
+export function requiredLifecycleToolNames(session: {
+	goalId?: string;
+	assistantType?: string;
+	roleName?: string;
+}): string[] {
+	if (session.assistantType) return ["propose_goal"];
+	if (!session.goalId) return [];
+	return session.roleName === "team-lead"
+		? ["team_spawn", "task_create"]
+		: ["task_create"];
+}
 
 /**
  * Tag a flat tool name into an `EffectiveTool` at the boundary where a
@@ -1370,7 +1383,10 @@ export function writeMcpProxyExtensions(
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
-export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext, requiredToolNames?: readonly string[]): ToolActivationResult {
+	if ((requiredToolNames?.length ?? 0) > 16) {
+		throw new Error("Tool activation accepts at most 16 required tool names");
+	}
 	const generationOwner = toolManager as (ToolManager & ToolReadGenerationProvider) | undefined;
 	if (typeof generationOwner?.withToolReadGenerationSync === "function") {
 		return generationOwner.withToolReadGenerationSync(() => computeToolActivationArgsInGeneration(
@@ -1380,12 +1396,13 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			mcpExtensionPaths,
 			disabledTools,
 			scopedContext,
+			requiredToolNames,
 		));
 	}
-	return computeToolActivationArgsInGeneration(allowedTools, toolManager, _cwd, mcpExtensionPaths, disabledTools, scopedContext);
+	return computeToolActivationArgsInGeneration(allowedTools, toolManager, _cwd, mcpExtensionPaths, disabledTools, scopedContext, requiredToolNames);
 }
 
-function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext): ToolActivationResult {
+function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext, requiredToolNames?: readonly string[]): ToolActivationResult {
 	// pi 0.70+ unified `--tools <list>` into an allowlist over BOTH builtins and
 	// extension-registered tools, which broke our old "--tools <only-builtins>
 	// + --extension shell" pattern (every extension tool got stripped). We now
@@ -1461,13 +1478,16 @@ function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], t
 	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
 	// every session spawn. The `"has no provider"` branch below fires only for
 	// genuinely unknown YAML tool names (typos in role allowedTools, etc.).
-	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>) => {
+	const collect = (
+		entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>,
+		honourDisabledTools = true,
+	) => {
 		for (const entry of entries) {
 			if (entry.kind === "mcp" || entry.kind === "pi-extension") continue;
-			// Goal-metadata disabled tool: drop in BOTH the allowlist branch and the
-			// unrestricted/all-tools branch (both flow through here), so a disabled
-			// tool is never registered even for a role-less / all-tools session.
-			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
+			// Ordinary allowlist activation honours goal metadata. Lifecycle-required
+			// capabilities intentionally retain their established availability and are
+			// still governed by the generated policy guard.
+			if (honourDisabledTools && disabledTools?.has(entry.name.toLowerCase())) continue;
 			const providerEntry = caseInsensitiveMapEntry(providers, entry.name);
 			const provider = providerEntry?.[1];
 			if (!provider || !providerEntry) {
@@ -1512,6 +1532,9 @@ function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], t
 		// Explicit allowlist (possibly empty ⇒ register no tools). Must NOT fall
 		// through to the unrestricted branch when empty.
 		collect(allowedTools);
+	}
+	if (requiredToolNames?.length) {
+		collect(requiredToolNames.map((name) => ({ kind: "yaml" as const, name })), false);
 	}
 
 	env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");

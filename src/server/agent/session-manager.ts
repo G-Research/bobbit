@@ -144,7 +144,7 @@ import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, requiredLifecycleToolNames, tagAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -5781,27 +5781,18 @@ export class SessionManager {
 		}
 	}
 
-	private extensionArgs(...paths: Array<string | undefined>): string[] {
-		return paths.flatMap((extensionPath) => extensionPath ? ["--extension", extensionPath] : []);
-	}
-
-	/** Resolve named extensions only when the winning provider requires one. */
-	private getGoalToolsExtensionPath(projectId?: string): string | undefined {
-		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("task_create", "extension.ts");
-		return path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts");
-	}
-
-	private getTeamLeadExtensionPath(projectId?: string): string | undefined {
-		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("team_spawn", "extension.ts");
-		return path.join(bobbitConfigDir(), "tools", "team", "extension.ts");
-	}
-
-	private getProposalToolsExtensionPath(projectId?: string): string | undefined {
-		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("propose_goal", "extension.ts");
-		return path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts");
+	/** Fixed raw paths retained only for lifecycle setups without a ToolManager. */
+	private lifecycleCompatibilityExtensionArgs(session: {
+		goalId?: string;
+		assistantType?: string;
+		roleName?: string;
+	}): string[] {
+		const paths: Record<string, string> = {
+			task_create: path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts"),
+			team_spawn: path.join(bobbitConfigDir(), "tools", "team", "extension.ts"),
+			propose_goal: path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts"),
+		};
+		return requiredLifecycleToolNames(session).flatMap((name) => ["--extension", paths[name]]);
 	}
 
 	getProjectContextManager(): ProjectContextManager | null {
@@ -7396,6 +7387,7 @@ export class SessionManager {
 		grantedTools?: string[],
 		sandboxed = false,
 		preparedRuntime?: PreparedScopedToolRuntime,
+		requiredToolNames?: readonly string[],
 	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
@@ -7416,8 +7408,17 @@ export class SessionManager {
 			? writeMcpProxyExtensions(mcpManager, flatNames, role, toolManager, groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
-		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
+		// Builtin + bobbit-extension activation, including exact lifecycle-required
+		// names resolved from this immutable manager generation.
+		const activation = computeToolActivationArgs(
+			filteredAllowed,
+			toolManager,
+			cwd,
+			mcpExtPaths,
+			disabledTools,
+			toolScope,
+			requiredToolNames,
+		);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
@@ -13532,24 +13533,17 @@ export class SessionManager {
 		if (restoredToolRuntime.toolManager) bridgeOptions.toolManager = restoredToolRuntime.toolManager;
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		const restoredAllowedNames = await this.withPreparedToolGeneration(restoredToolRuntime, async () => {
-			// Restore extension args for goal/team sessions
-			if (ps.goalId && !ps.assistantType) {
-				const isTeamLead = ps.role === "team-lead";
-				if (isTeamLead) {
-					// Team leads need both when both winning providers are extensions.
-					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(ps.projectId), this.getGoalToolsExtensionPath(ps.projectId));
-				} else {
-					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(ps.projectId));
-				}
-			}
-
-			// Restore proposal tools extension for assistant sessions
-			if (ps.assistantType) {
-				bridgeOptions.args = bridgeOptions.args || [];
-				const proposalExtPath = this.getProposalToolsExtensionPath(ps.projectId);
-				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-					bridgeOptions.args.push("--extension", proposalExtPath);
-				}
+			const requiredToolNames = requiredLifecycleToolNames({
+				goalId: ps.goalId,
+				assistantType: ps.assistantType,
+				roleName: ps.role,
+			});
+			if (!restoredToolRuntime.toolManager) {
+				bridgeOptions.args = this.lifecycleCompatibilityExtensionArgs({
+					goalId: ps.goalId,
+					assistantType: ps.assistantType,
+					roleName: ps.role,
+				});
 			}
 
 			// Restore tool activation. Roleless normal sessions still use the general
@@ -13594,7 +13588,7 @@ export class SessionManager {
 				(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 			const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 			await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime);
+			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime, requiredToolNames);
 			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -17186,29 +17180,25 @@ export class SessionManager {
 			};
 			if (replacementSession.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = replacementSession.goalId;
-				// Re-attach extensions: team leads need both team + goal tools, others just goal tools
-				const isTeamLead = replacementSession.role === "team-lead";
-				if (isTeamLead) {
-					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(replacementSession.projectId), this.getGoalToolsExtensionPath(replacementSession.projectId));
-				} else if (!bridgeOptions.args?.includes("--extension")) {
-					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(replacementSession.projectId));
-				}
 			}
-
-			// Re-attach proposal tools extension for assistant sessions
-			if (session.assistantType) {
-				bridgeOptions.args = bridgeOptions.args || [];
-				const proposalExtPath = this.getProposalToolsExtensionPath(replacementSession.projectId);
-				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-					bridgeOptions.args.push("--extension", proposalExtPath);
-				}
+			const requiredToolNames = requiredLifecycleToolNames({
+				goalId: replacementSession.goalId,
+				assistantType: replacementSession.assistantType,
+				roleName: replacementSession.role,
+			});
+			if (!replacementToolRuntime.toolManager) {
+				bridgeOptions.args = this.lifecycleCompatibilityExtensionArgs({
+					goalId: replacementSession.goalId,
+					assistantType: replacementSession.assistantType,
+					roleName: replacementSession.role,
+				});
 			}
 
 			// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 			// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 			// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 			await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
-			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime);
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime, requiredToolNames);
 			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -20145,24 +20135,20 @@ export class SessionManager {
 					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 				}
 
-				// Restore goal extension
 				if (session.goalId) {
 					bridgeOptions.env!.BOBBIT_GOAL_ID = session.goalId;
-					const isTeamLead = session.role === "team-lead";
-					if (isTeamLead) {
-						bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(session.projectId), this.getGoalToolsExtensionPath(session.projectId));
-					} else {
-						bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(session.projectId));
-					}
 				}
-
-				// Restore proposal tools extension for assistant sessions
-				if (session.assistantType) {
-					bridgeOptions.args = bridgeOptions.args || [];
-					const proposalExtPath = this.getProposalToolsExtensionPath(session.projectId);
-					if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-						bridgeOptions.args.push("--extension", proposalExtPath);
-					}
+				const requiredToolNames = requiredLifecycleToolNames({
+					goalId: session.goalId,
+					assistantType: session.assistantType,
+					roleName: session.role,
+				});
+				if (!forceAbortToolRuntime.toolManager) {
+					bridgeOptions.args = this.lifecycleCompatibilityExtensionArgs({
+						goalId: session.goalId,
+						assistantType: session.assistantType,
+						roleName: session.role,
+					});
 				}
 
 				// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
@@ -20191,7 +20177,7 @@ export class SessionManager {
 					? effective
 					: (effective.length > 0 ? effective : undefined);
 				await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime);
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime, requiredToolNames);
 				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
