@@ -83,14 +83,94 @@ async function createTeamLeadSession(gateway: any, scope: any, projectId: string
 	return gateway.sessionManager.getSession(session.id);
 }
 
+type ToolWinnerSnapshot = Pick<
+	ToolRow,
+	"name" | "group" | "grantPolicy" | "origin" | "overrides" | "originPackId" | "originPackName"
+>;
+
+function toolWinnerSnapshot(tool: ToolRow): ToolWinnerSnapshot {
+	return {
+		name: tool.name,
+		group: tool.group,
+		grantPolicy: tool.grantPolicy,
+		origin: tool.origin,
+		overrides: tool.overrides,
+		originPackId: tool.originPackId,
+		originPackName: tool.originPackName,
+	};
+}
+
+async function expectAskCatalogueWinner(
+	gateway: any,
+	projectId: string,
+	expected?: ToolWinnerSnapshot,
+): Promise<ToolWinnerSnapshot> {
+	const listTool = (await projectToolList(gateway, projectId))
+		.find((tool) => tool.name.toLowerCase() === TOOL_NAME);
+	expect(listTool, "session_prompt appears in the project tool list").toBeDefined();
+	const detail = await projectToolDetail(gateway, projectId);
+	const mixedCaseDetail = await projectToolDetail(gateway, projectId, "SESSION_PROMPT");
+	const snapshot = toolWinnerSnapshot(listTool!);
+	expect(snapshot.grantPolicy).toBe("ask");
+	expect(toolWinnerSnapshot(detail)).toEqual(snapshot);
+	expect(toolWinnerSnapshot(mixedCaseDetail)).toEqual(snapshot);
+	if (expected) expect(snapshot).toEqual(expected);
+	return snapshot;
+}
+
+async function expectNewSessionPolicy(
+	gateway: any,
+	scope: any,
+	projectId: string,
+	cwd: string,
+	group: string,
+	policy: "allow" | "ask" | "never",
+): Promise<void> {
+	const session = await createTeamLeadSession(gateway, scope, projectId, cwd);
+	const allowedTools = session.allowedTools.map((name: string) => name.toLowerCase());
+	if (policy === "never") expect(allowedTools).not.toContain(TOOL_NAME);
+	else expect(allowedTools).toContain(TOOL_NAME);
+
+	const guard = generatedGuardForSession(gateway, session.id);
+	if (policy === "ask") {
+		expect(guard.askPolicies[TOOL_NAME]).toEqual({ policy: "ask", group });
+		expect(guard.neverPolicies[TOOL_NAME]).toBeUndefined();
+	} else if (policy === "never") {
+		expect(guard.askPolicies[TOOL_NAME]).toBeUndefined();
+		expect(guard.neverPolicies[TOOL_NAME]).toEqual({ policy: "never", group });
+	} else {
+		expect(guard.askPolicies[TOOL_NAME]).toBeUndefined();
+		expect(guard.neverPolicies[TOOL_NAME]).toBeUndefined();
+	}
+}
+
+async function setProjectRolePolicy(
+	gateway: any,
+	projectId: string,
+	inheritedPolicies: Record<string, string>,
+	policy: "allow" | "never",
+): Promise<void> {
+	await jsonResponse(
+		await gateway.api(`/api/roles/${ROLE_NAME}?projectId=${encodeURIComponent(projectId)}`, {
+			method: "PUT",
+			body: JSON.stringify({
+				projectId,
+				toolPolicies: { ...inheritedPolicies, [TOOL_NAME]: policy },
+			}),
+		}),
+		`set project team-lead session_prompt policy to ${policy}`,
+	);
+}
+
 test.describe.serial("tool catalogue and generated guard parity", () => {
-	test("Headquarters session_prompt ask override immediately governs a normal project's new team-lead guard", async ({ gateway, scope }) => {
+	test("server and project YAML ask winners stay stable while role policy governs each new guard", async ({ gateway, scope }) => {
 		const fixtureId = randomUUID();
 		const projectRoot = path.join(gateway.bobbitDir, `tool-resolution-parity-${fixtureId}`);
 		const serverAgentTools = path.join(gateway.bobbitDir, "config", "tools", "agent");
 		const backupRoot = path.join(gateway.bobbitDir, `.tool-resolution-parity-backup-${fixtureId}`);
 		const backupAgentTools = path.join(backupRoot, "agent");
 		const hadServerAgentTools = existsSync(serverAgentTools);
+		let projectId = "";
 
 		mkdirSync(path.join(projectRoot, ".bobbit", "config", "tools"), { recursive: true });
 		if (hadServerAgentTools) {
@@ -117,20 +197,21 @@ test.describe.serial("tool catalogue and generated guard parity", () => {
 				}),
 				"register normal project",
 			);
-			scope.trackProject(project.id);
+			projectId = project.id;
+			scope.trackProject(projectId);
 
-			// Warm both read surfaces at the builtin policy before mutating the same
-			// live gateway. This makes the following ask assertions an invalidation test.
-			const builtinListTool = (await projectToolList(gateway, project.id)).find((tool) => tool.name === TOOL_NAME);
-			const builtinDetail = await projectToolDetail(gateway, project.id);
+			// Warm list and detail at the builtin policy before mutating the live gateway.
+			const builtinListTool = (await projectToolList(gateway, projectId)).find((tool) => tool.name === TOOL_NAME);
+			const builtinDetail = await projectToolDetail(gateway, projectId);
 			expect(builtinListTool).toMatchObject({ name: TOOL_NAME, grantPolicy: "never", origin: "builtin" });
-			expect(builtinDetail).toMatchObject({ name: TOOL_NAME, grantPolicy: "never", origin: "builtin" });
+			expect(toolWinnerSnapshot(builtinDetail)).toEqual(toolWinnerSnapshot(builtinListTool!));
 
 			const role = await jsonResponse(
-				await gateway.api(`/api/roles/${ROLE_NAME}?projectId=${encodeURIComponent(project.id)}`),
+				await gateway.api(`/api/roles/${ROLE_NAME}?projectId=${encodeURIComponent(projectId)}`),
 				"project team-lead role",
 			);
-			expect(role.toolPolicies?.[TOOL_NAME], "control: team-lead has no explicit session_prompt override").toBeUndefined();
+			const inheritedRolePolicies = { ...(role.toolPolicies ?? {}) } as Record<string, string>;
+			expect(inheritedRolePolicies[TOOL_NAME], "control: team-lead has no explicit session_prompt override").toBeUndefined();
 
 			await jsonResponse(
 				await gateway.api(`/api/tools/${TOOL_NAME}/customize?scope=server&projectId=headquarters`, { method: "POST" }),
@@ -144,50 +225,92 @@ test.describe.serial("tool catalogue and generated guard parity", () => {
 				"set Headquarters policy to ask",
 			);
 
-			const listTool = (await projectToolList(gateway, project.id)).find((tool) => tool.name === TOOL_NAME);
-			const detail = await projectToolDetail(gateway, project.id);
-			const mixedCaseDetail = await projectToolDetail(gateway, project.id, "SESSION_PROMPT");
-			expect(listTool).toMatchObject({
+			const serverWinner = await expectAskCatalogueWinner(gateway, projectId);
+			expect(serverWinner).toMatchObject({
 				name: TOOL_NAME,
-				grantPolicy: "ask",
 				origin: "server",
 				overrides: "builtin",
+				originPackId: null,
+				originPackName: null,
 			});
-			expect(detail).toMatchObject(listTool!);
-			expect(mixedCaseDetail).toMatchObject(listTool!);
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, serverWinner.group, "ask");
 
-			const askSession = await createTeamLeadSession(gateway, scope, project.id, projectRoot);
-			expect(askSession.allowedTools.map((name: string) => name.toLowerCase())).toContain(TOOL_NAME);
-			const askGuard = generatedGuardForSession(gateway, askSession.id);
-			expect(askGuard.askPolicies[TOOL_NAME]).toEqual({ policy: "ask", group: listTool!.group });
-			expect(askGuard.neverPolicies[TOOL_NAME]).toBeUndefined();
+			await jsonResponse(
+				await gateway.api(`/api/roles/${ROLE_NAME}/customize?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "POST" }),
+				"customize project team-lead role for server winner",
+			);
+			await setProjectRolePolicy(gateway, projectId, inheritedRolePolicies, "allow");
+			await expectAskCatalogueWinner(gateway, projectId, serverWinner);
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, serverWinner.group, "allow");
 
-			// Revert through the same API and prove the already-warm catalogue and a
-			// newly generated session guard both immediately reveal builtin `never`.
+			await setProjectRolePolicy(gateway, projectId, inheritedRolePolicies, "never");
+			await expectAskCatalogueWinner(gateway, projectId, serverWinner);
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, serverWinner.group, "never");
+
+			await jsonResponse(
+				await gateway.api(`/api/roles/${ROLE_NAME}/override?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }),
+				"revert project team-lead role after server winner",
+			);
 			await jsonResponse(
 				await gateway.api(`/api/tools/${TOOL_NAME}/override?scope=server&projectId=headquarters`, { method: "DELETE" }),
 				"revert Headquarters override",
 			);
-			const revertedListTool = (await projectToolList(gateway, project.id)).find((tool) => tool.name === TOOL_NAME);
-			const revertedDetail = await projectToolDetail(gateway, project.id);
-			expect(revertedListTool).toMatchObject({ name: TOOL_NAME, grantPolicy: "never", origin: "builtin" });
-			expect(revertedDetail).toMatchObject(revertedListTool!);
 
-			const neverSession = await createTeamLeadSession(gateway, scope, project.id, projectRoot);
-			expect(neverSession.allowedTools.map((name: string) => name.toLowerCase())).not.toContain(TOOL_NAME);
-			const neverGuard = generatedGuardForSession(gateway, neverSession.id);
-			expect(neverGuard.askPolicies[TOOL_NAME]).toBeUndefined();
-			expect(neverGuard.neverPolicies[TOOL_NAME]).toEqual({ policy: "never", group: revertedListTool!.group });
+			// The server winner is now the shipped builtin again. Override only this
+			// project and prove the same catalogue/role-policy split at project scope.
+			const revertedListTool = (await projectToolList(gateway, projectId)).find((tool) => tool.name === TOOL_NAME);
+			const revertedDetail = await projectToolDetail(gateway, projectId, "SESSION_PROMPT");
+			expect(revertedListTool).toMatchObject({ name: TOOL_NAME, grantPolicy: "never", origin: "builtin" });
+			expect(toolWinnerSnapshot(revertedDetail)).toEqual(toolWinnerSnapshot(revertedListTool!));
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, revertedListTool!.group, "never");
+
+			await jsonResponse(
+				await gateway.api(`/api/tools/${TOOL_NAME}/customize?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "POST" }),
+				"customize project session_prompt tool",
+			);
+			await jsonResponse(
+				await gateway.api(`/api/tools/${TOOL_NAME}?projectId=${encodeURIComponent(projectId)}`, {
+					method: "PUT",
+					body: JSON.stringify({ projectId, grantPolicy: "ask" }),
+				}),
+				"set project session_prompt policy to ask",
+			);
+
+			const projectWinner = await expectAskCatalogueWinner(gateway, projectId);
+			expect(projectWinner).toMatchObject({
+				name: TOOL_NAME,
+				origin: "project",
+				overrides: "builtin",
+				originPackId: null,
+				originPackName: null,
+			});
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, projectWinner.group, "ask");
+
+			await jsonResponse(
+				await gateway.api(`/api/roles/${ROLE_NAME}/customize?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "POST" }),
+				"customize project team-lead role for project winner",
+			);
+			await setProjectRolePolicy(gateway, projectId, inheritedRolePolicies, "allow");
+			await expectAskCatalogueWinner(gateway, projectId, projectWinner);
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, projectWinner.group, "allow");
+
+			await setProjectRolePolicy(gateway, projectId, inheritedRolePolicies, "never");
+			await expectAskCatalogueWinner(gateway, projectId, projectWinner);
+			await expectNewSessionPolicy(gateway, scope, projectId, projectRoot, projectWinner.group, "never");
 		} finally {
-			// The server override copies the whole agent group. Restore it byte-for-byte
-			// rather than assuming this fork started empty, then force one live read so
-			// subsequent fork-mates cannot observe a stale winner.
+			// Restore every mutable fixture independently so one cleanup failure cannot
+			// prevent the remaining role/tool state from being put back.
+			if (projectId) {
+				await gateway.api(`/api/roles/${ROLE_NAME}/override?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
+				await gateway.api(`/api/tools/${TOOL_NAME}/override?scope=project&projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
+			}
 			await gateway.api(`/api/tools/${TOOL_NAME}/override?scope=server&projectId=headquarters`, { method: "DELETE" }).catch(() => undefined);
 			rmSync(serverAgentTools, { recursive: true, force: true });
 			if (hadServerAgentTools && existsSync(backupAgentTools)) {
 				cpSync(backupAgentTools, serverAgentTools, { recursive: true });
 			}
 			rmSync(backupRoot, { recursive: true, force: true });
+			if (projectId) await gateway.api(`/api/tools?projectId=${encodeURIComponent(projectId)}`).catch(() => undefined);
 			await gateway.api("/api/tools?projectId=headquarters").catch(() => undefined);
 		}
 	});
