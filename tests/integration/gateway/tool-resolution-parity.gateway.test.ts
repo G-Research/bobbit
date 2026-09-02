@@ -69,14 +69,13 @@ function generatedGuardForSession(gateway: any, sessionId: string): {
 }
 
 async function createTeamLeadSession(gateway: any, scope: any, projectId: string, cwd: string): Promise<any> {
-	const session = await jsonResponse(
-		await gateway.api("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ projectId, cwd, roleId: ROLE_NAME }),
-		}),
-		"create team-lead session",
-	);
-	scope.trackSession(session.id);
+	const session = await scope.createSession({
+		projectId,
+		cwd,
+		roleId: ROLE_NAME,
+		sandboxed: false,
+		worktree: false,
+	});
 	await expect.poll(
 		() => gateway.sessionManager.getSession(session.id)?.status,
 		{ timeout: 10_000, interval: 25, message: `team-lead session ${session.id} becomes idle` },
