@@ -50,6 +50,7 @@ function makePool(opts: {
 	recordStore: MemoryPoolRecordStore;
 	projectId?: string;
 	components?: Component[];
+	realpathNativeImpl?: (value: string) => Promise<string>;
 }) {
 	const mutations: string[][] = [];
 	const commandRunner: CommandRunner = {
@@ -67,6 +68,7 @@ function makePool(opts: {
 		commandRunner,
 		remotePolicy: { skipNonLocalRemoteGit: true },
 		resolveRepoToplevelImpl: async () => opts.repoPath,
+		realpathNativeImpl: opts.realpathNativeImpl ?? (async value => path.resolve(value)),
 		componentsResolver: opts.components ? () => opts.components! : undefined,
 		recordStore: opts.recordStore,
 		projectId: opts.projectId ?? PROJECT_ID,
@@ -191,6 +193,20 @@ describe("worktree pool reuses recorded entries across a restart", () => {
 			await pool.stop();
 		}
 	});
+
+	it("never promotes a remaining external entry when another external entry is claimed", async () => {
+		const recordStore = new MemoryPoolRecordStore();
+		const { pool } = makePool({ repoPath, liveWorktrees: [], recordStore });
+		pool.registerExternalEntry("pool/_pool-external-one", path.resolve("virtual-record-wt", "external-one"));
+		pool.registerExternalEntry("pool/_pool-external-two", path.resolve("virtual-record-wt", "external-two"));
+		try {
+			assert.ok(await pool.claim("session/external-one"));
+			assert.equal(pool.size, 1, "the second external entry remains claimable in memory");
+			assert.deepEqual(recordStore.read(PROJECT_ID).entries, [], "external test-seam entries are never restart authority");
+		} finally {
+			await pool.stop();
+		}
+	});
 });
 
 describe("multi-repository pool adoption", () => {
@@ -207,8 +223,15 @@ describe("multi-repository pool adoption", () => {
 		webBranch?: string;
 		failWebList?: boolean;
 	}) {
+		const mutationCommands: string[][] = [];
 		const commandRunner: CommandRunner = {
 			execFile: async (_file, args, options) => {
+				if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+					return { stdout: String(options?.cwd), stderr: "" };
+				}
+				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD") {
+					return { stdout: "abc123", stderr: "" };
+				}
 				if (args[0] === "worktree" && args[1] === "list") {
 					if (options?.cwd === members[1]!.repoPath && overrides?.failWebList) throw new Error("list failed");
 					const member = members.find(candidate => candidate.repoPath === options?.cwd);
@@ -216,18 +239,21 @@ describe("multi-repository pool adoption", () => {
 					const branch = member.repo === "web" ? overrides?.webBranch ?? branchName : branchName;
 					return { stdout: gitWorktreeListOutput(member.repoPath, [{ path: member.worktreePath, branch }]), stderr: "" };
 				}
+				mutationCommands.push([...args]);
 				return { stdout: "", stderr: "" };
 			},
 		};
-		return new WorktreePool({
+		const pool = new WorktreePool({
 			repoPath: root,
 			targetSize: 0,
 			componentsResolver: () => components,
 			commandRunner,
 			resolveRepoToplevelImpl: async () => root,
+			realpathNativeImpl: async value => path.resolve(value),
 			recordStore,
 			projectId: PROJECT_ID,
 		});
+		return { pool, mutationCommands };
 	}
 
 	function recordedStore(): MemoryPoolRecordStore {
@@ -238,12 +264,33 @@ describe("multi-repository pool adoption", () => {
 
 	it("adopts a complete set only after every member has an exact Git identity match", async () => {
 		const store = recordedStore();
-		const pool = createMultiPool(store);
+		const { pool } = createMultiPool(store);
 		await pool.initialize();
 		try {
 			assert.deepEqual(pool.snapshotEntries().entries[0]?.worktrees, members);
 		} finally {
 			await pool.stop();
+		}
+	});
+
+	it("rejects missing, extra, or reordered members before worktree mutation", async () => {
+		const variants = [
+			[members[0]!],
+			[...members, { repo: "docs", repoPath: path.join(root, "docs"), worktreePath: path.join(container, "docs") }],
+			[members[1]!, members[0]!],
+		];
+		for (const worktrees of variants) {
+			const store = new MemoryPoolRecordStore();
+			store.replace(PROJECT_ID, root, [{ branchName, worktreePath: container, worktrees, createdAt: 1 }]);
+			const { pool, mutationCommands } = createMultiPool(store);
+			await pool.initialize();
+			try {
+				assert.deepEqual(pool.snapshotEntries().entries, []);
+				assert.deepEqual(store.read(PROJECT_ID).entries, [], "the incomplete authority record must be revoked");
+				assert.deepEqual(mutationCommands, [], "a rejected set must cause no Git mutation");
+			} finally {
+				await pool.stop();
+			}
 		}
 	});
 
@@ -255,7 +302,7 @@ describe("multi-repository pool adoption", () => {
 		for (const worktrees of invalidMembers) {
 			const store = new MemoryPoolRecordStore();
 			store.replace(PROJECT_ID, root, [{ branchName, worktreePath: container, worktrees, createdAt: 1 }]);
-			const pool = createMultiPool(store);
+			const { pool } = createMultiPool(store);
 			await pool.initialize();
 			try {
 				assert.deepEqual(pool.snapshotEntries().entries, []);
@@ -271,7 +318,7 @@ describe("multi-repository pool adoption", () => {
 		try {
 			for (const overrides of [{ webBranch: "feature/user" }, { failWebList: true }]) {
 				const store = recordedStore();
-				const pool = createMultiPool(store, overrides);
+				const { pool } = createMultiPool(store, overrides);
 				await pool.initialize();
 				try {
 					assert.deepEqual(pool.snapshotEntries().entries, []);
@@ -288,7 +335,7 @@ describe("multi-repository pool adoption", () => {
 	it("rejects the complete set when a live session references a member or container descendant", async () => {
 		for (const livePath of [members[1]!.worktreePath, path.join(container, "api", "packages", "app")]) {
 			const store = recordedStore();
-			const pool = createMultiPool(store);
+			const { pool } = createMultiPool(store);
 			await pool.initialize(new Set([livePath]));
 			try {
 				assert.deepEqual(pool.snapshotEntries().entries, []);
@@ -302,6 +349,109 @@ describe("multi-repository pool adoption", () => {
 
 describe("worktree pool adoption refuses anything it cannot prove it owns", () => {
 	const repoPath = path.resolve("virtual-record-repo");
+
+	it("does not collapse case-distinct POSIX-style identities", async () => {
+		const recordStore = new MemoryPoolRecordStore();
+		const recordedPath = path.resolve("virtual-case-wt", "User");
+		const gitPath = path.resolve("virtual-case-wt", "user");
+		recordStore.replace(PROJECT_ID, repoPath, [{ branchName: "pool/_pool-case", worktreePath: recordedPath, createdAt: 1 }]);
+		const { pool, mutations } = makePool({
+			repoPath,
+			liveWorktrees: [{ path: gitPath, branch: "pool/_pool-case" }],
+			recordStore,
+			realpathNativeImpl: async value => path.resolve(value),
+		});
+		try {
+			await pool.initialize();
+			assert.deepEqual(pool.snapshotEntries().entries, []);
+			assert.deepEqual(recordStore.read(PROJECT_ID).entries, []);
+			assert.deepEqual(mutations, [], "case-distinct rejection must not mutate Git");
+		} finally {
+			await pool.stop();
+		}
+	});
+
+	it("preserves legal whitespace and POSIX backslash bytes in canonical identities", async () => {
+		const variants = [
+			{ recorded: path.resolve("virtual-byte-wt", "owner "), listed: path.resolve("virtual-byte-wt", "owner") },
+		];
+		if (process.platform !== "win32") {
+			variants.push({
+				recorded: path.resolve("virtual-byte-wt", "owner\\child"),
+				listed: path.resolve("virtual-byte-wt", "owner", "child"),
+			});
+		}
+		for (const [index, variant] of variants.entries()) {
+			const branchName = `pool/_pool-bytes-${index}`;
+			const recordStore = new MemoryPoolRecordStore();
+			recordStore.replace(PROJECT_ID, repoPath, [{ branchName, worktreePath: variant.recorded, createdAt: 1 }]);
+			const { pool, mutations } = makePool({
+				repoPath,
+				liveWorktrees: [{ path: variant.listed, branch: branchName }],
+				recordStore,
+				realpathNativeImpl: async value => path.resolve(value),
+			});
+			try {
+				await pool.initialize();
+				assert.deepEqual(pool.snapshotEntries().entries, []);
+				assert.deepEqual(recordStore.read(PROJECT_ID).entries, []);
+				assert.deepEqual(mutations, [], "byte-distinct rejection must not mutate Git");
+			} finally {
+				await pool.stop();
+			}
+		}
+	});
+
+	it("uses native realpath identity for recorded, Git-listed, and live aliases", async () => {
+		const canonicalPath = path.resolve("virtual-alias-wt", "canonical");
+		const aliasPath = path.resolve("virtual-alias-wt", "alias");
+		const identities = new Map([[aliasPath, canonicalPath]]);
+		const realpathNativeImpl = async (value: string) => identities.get(path.resolve(value)) ?? path.resolve(value);
+
+		for (const activePaths of [undefined, new Set([aliasPath])]) {
+			const recordStore = new MemoryPoolRecordStore();
+			recordStore.replace(PROJECT_ID, repoPath, [{ branchName: "pool/_pool-alias", worktreePath: aliasPath, createdAt: 1 }]);
+			const { pool, mutations } = makePool({
+				repoPath,
+				liveWorktrees: [{ path: canonicalPath, branch: "pool/_pool-alias" }],
+				recordStore,
+				realpathNativeImpl,
+			});
+			try {
+				await pool.initialize(activePaths);
+				assert.equal(pool.size, activePaths ? 0 : 1, activePaths ? "a live alias must exclude adoption" : "an exact canonical alias may be adopted");
+				assert.deepEqual(mutations, [], "identity validation must not mutate Git");
+			} finally {
+				await pool.stop();
+			}
+		}
+	});
+
+	it("rejects ambiguous duplicate Git rows that resolve to one identity", async () => {
+		const canonicalPath = path.resolve("virtual-duplicate-wt", "canonical");
+		const aliasPath = path.resolve("virtual-duplicate-wt", "alias");
+		const recordStore = new MemoryPoolRecordStore();
+		recordStore.replace(PROJECT_ID, repoPath, [{ branchName: "pool/_pool-duplicate", worktreePath: canonicalPath, createdAt: 1 }]);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const { pool, mutations } = makePool({
+			repoPath,
+			liveWorktrees: [
+				{ path: canonicalPath, branch: "pool/_pool-duplicate" },
+				{ path: aliasPath, branch: "pool/_pool-duplicate" },
+			],
+			recordStore,
+			realpathNativeImpl: async value => path.resolve(value) === aliasPath ? canonicalPath : path.resolve(value),
+		});
+		try {
+			await pool.initialize();
+			assert.deepEqual(pool.snapshotEntries().entries, []);
+			assert.deepEqual(recordStore.read(PROJECT_ID).entries, []);
+			assert.deepEqual(mutations, [], "ambiguous Git inventory must not mutate Git");
+		} finally {
+			warn.mockRestore();
+			await pool.stop();
+		}
+	});
 
 	it("ignores a pool-shaped worktree that was never recorded", async () => {
 		// The original invariant: shape alone is not evidence. An empty record must
@@ -414,11 +564,15 @@ describe("worktree pool adoption refuses anything it cannot prove it owns", () =
 	});
 
 	it("SessionManager excludes persisted live cwd descendants but not archived rows", async () => {
-		const recordedPath = path.resolve("virtual-persisted-live-wt", "pool-_pool-persisted");
+		const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-live-ref-"));
+		const liveRepoPath = path.join(testRoot, "repo");
+		const recordedPath = path.join(testRoot, "worktrees", "pool-_pool-persisted");
+		fs.mkdirSync(path.join(liveRepoPath), { recursive: true });
+		fs.mkdirSync(path.join(recordedPath, "packages", "app"), { recursive: true });
 		const branchName = "pool/_pool-persisted";
 		const commandRunner: CommandRunner = {
 			execFile: async (_file, args) => args[0] === "worktree" && args[1] === "list"
-				? { stdout: gitWorktreeListOutput(repoPath, [{ path: recordedPath, branch: branchName }]), stderr: "" }
+				? { stdout: gitWorktreeListOutput(liveRepoPath, [{ path: recordedPath, branch: branchName }]), stderr: "" }
 				: { stdout: "", stderr: "" },
 		};
 		const cases = [
@@ -426,26 +580,30 @@ describe("worktree pool adoption refuses anything it cannot prove it owns", () =
 			{ label: "live component", row: { repoWorktrees: { api: recordedPath }, archived: false }, adopted: false },
 			{ label: "archived cwd", row: { cwd: path.join(recordedPath, "packages", "app"), archived: true }, adopted: true },
 		];
-		for (const testCase of cases) {
-			const recordStore = new MemoryPoolRecordStore();
-			recordStore.replace(PROJECT_ID, repoPath, [{ branchName, worktreePath: recordedPath, createdAt: 1 }]);
-			const manager = Object.create(SessionManager.prototype) as SessionManager;
-			Object.assign(manager as unknown as Record<string, unknown>, {
-				projectContextManager: null,
-				sessions: new Map(),
-				worktreePools: new Map(),
-				worktreePoolInitializations: new Map(),
-				worktreePoolRecords: recordStore,
-				commandRunner,
-				remoteGitPolicy: { skipNonLocalRemoteGit: true },
-				worktreeSetupRuntime: {},
-				getAllPersistedSessionsForWorktreeGuard: () => [{ id: "persisted-session", ...testCase.row }],
-			});
+		try {
+			for (const testCase of cases) {
+				const recordStore = new MemoryPoolRecordStore();
+				recordStore.replace(PROJECT_ID, liveRepoPath, [{ branchName, worktreePath: recordedPath, createdAt: 1 }]);
+				const manager = Object.create(SessionManager.prototype) as SessionManager;
+				Object.assign(manager as unknown as Record<string, unknown>, {
+					projectContextManager: null,
+					sessions: new Map(),
+					worktreePools: new Map(),
+					worktreePoolInitializations: new Map(),
+					worktreePoolRecords: recordStore,
+					commandRunner,
+					remoteGitPolicy: { skipNonLocalRemoteGit: true },
+					worktreeSetupRuntime: {},
+					getAllPersistedSessionsForWorktreeGuard: () => [{ id: "persisted-session", ...testCase.row }],
+				});
 
-			await manager.initWorktreePoolForProject(PROJECT_ID, repoPath, undefined, 0);
-			const entries = manager.getWorktreePool(PROJECT_ID)?.snapshotEntries().entries ?? [];
-			assert.equal(entries.length, testCase.adopted ? 1 : 0, testCase.label);
-			await manager.getWorktreePool(PROJECT_ID)?.stop();
+				await manager.initWorktreePoolForProject(PROJECT_ID, liveRepoPath, undefined, 0);
+				const entries = manager.getWorktreePool(PROJECT_ID)?.snapshotEntries().entries ?? [];
+				assert.equal(entries.length, testCase.adopted ? 1 : 0, testCase.label);
+				await manager.getWorktreePool(PROJECT_ID)?.stop();
+			}
+		} finally {
+			fs.rmSync(testRoot, { recursive: true, force: true });
 		}
 	});
 
@@ -461,6 +619,7 @@ describe("worktree pool adoption refuses anything it cannot prove it owns", () =
 			commandRunner,
 			remotePolicy: { skipNonLocalRemoteGit: true },
 			resolveRepoToplevelImpl: async () => repoPath,
+			realpathNativeImpl: async value => path.resolve(value),
 		});
 		try {
 			await pool.initialize();

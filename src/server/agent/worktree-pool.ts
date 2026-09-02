@@ -27,9 +27,10 @@
 
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { promises as fs } from "node:fs";
+import nodeFs, { promises as fs } from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult, type RemoteGitPolicy } from "../skills/git.js";
+import { promisify } from "node:util";
+import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, isGitRepoRoot, hasResolvedHead, type WorktreeResult, type RemoteGitPolicy } from "../skills/git.js";
 import { runComponentSetups, resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
@@ -41,7 +42,6 @@ import {
 	type RepositoryMutationCoordinator,
 } from "../skills/repository-mutation-coordinator.js";
 import { isBobbitPoolBranch, parseGitWorktreeList, type WorktreePoolSnapshot } from "./worktree-inventory.js";
-import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import type { PoolEntryRecord, PoolRecordSink } from "./worktree-pool-record.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "./bounded-async-work.js";
@@ -92,6 +92,8 @@ interface PoolEntry {
 	/** Multi-repo: per-repo worktree entries. Absent for single-repo. */
 	worktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	createdAt: number;
+	/** Only fill-created or strictly re-adopted entries may become restart authority. */
+	durable: boolean;
 }
 
 /** Result of a pool claim. */
@@ -129,6 +131,19 @@ const realWorktreePoolFs: WorktreePoolFs = {
 	rename: (oldPath, newPath) => fs.rename(oldPath, newPath),
 };
 
+const nativeRealpath = promisify(nodeFs.realpath.native) as (value: string) => Promise<string>;
+
+/** Format a native-realpath result without discarding legal POSIX path bytes. */
+function formatCanonicalHostPath(value: string): string | undefined {
+	if (!value) return undefined;
+	const resolved = path.normalize(value);
+	if (process.platform !== "win32") return resolved;
+	const rootLength = path.parse(resolved).root.length;
+	let normalized = resolved.replace(/\\/g, "/");
+	while (normalized.length > rootLength && normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+	return normalized;
+}
+
 export interface WorktreePoolOptions {
 	repoPath: string;
 	targetSize?: number;
@@ -143,6 +158,8 @@ export interface WorktreePoolOptions {
 	fsImpl?: WorktreePoolFs;
 	cleanupWorktreeImpl?: typeof cleanupWorktree;
 	resolveRepoToplevelImpl?: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
+	/** Narrow adoption seam; production uses native realpath and fails closed. */
+	realpathNativeImpl?: (value: string) => Promise<string>;
 	/** Test seam; production uses the process-wide canonical common-dir coordinator. */
 	repositoryMutationCoordinator?: RepositoryMutationCoordinator;
 	/** Exact durable ownership records used to reuse entries across restarts. */
@@ -275,6 +292,7 @@ export class WorktreePool {
 	private readonly fsImpl: WorktreePoolFs;
 	private readonly cleanupWorktreeImpl: typeof cleanupWorktree;
 	private readonly resolveRepoToplevelImpl: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
+	private readonly realpathNativeImpl: (value: string) => Promise<string>;
 	private readonly repositoryMutationCoordinator: RepositoryMutationCoordinator;
 	private readonly recordStore?: PoolRecordSink;
 	private readonly projectId?: string;
@@ -337,6 +355,7 @@ export class WorktreePool {
 		this.fsImpl = opts.fsImpl ?? realWorktreePoolFs;
 		this.cleanupWorktreeImpl = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 		this.resolveRepoToplevelImpl = opts.resolveRepoToplevelImpl ?? resolveRepoToplevel;
+		this.realpathNativeImpl = opts.realpathNativeImpl ?? nativeRealpath;
 		this.repositoryMutationCoordinator = opts.repositoryMutationCoordinator ?? repositoryMutationCoordinator;
 		this.recordStore = opts.recordStore;
 		this.projectId = opts.projectId;
@@ -964,6 +983,7 @@ export class WorktreePool {
 							worktreePath: set.container,
 							worktrees: set.worktrees,
 							createdAt: Date.now(),
+							durable: true,
 						};
 					} else {
 						if (counters) counters.singleRepoEntries++;
@@ -983,6 +1003,7 @@ export class WorktreePool {
 							branchName: result.branchName,
 							worktreePath: result.worktreePath,
 							createdAt: Date.now(),
+							durable: true,
 						};
 					}
 
@@ -1041,12 +1062,14 @@ export class WorktreePool {
 
 	private recordEntries(): void {
 		if (!this.recordStore || !this.projectId) return;
-		const entries: PoolEntryRecord[] = this.pool.map(entry => ({
-			branchName: entry.branchName,
-			worktreePath: entry.worktreePath,
-			...(entry.worktrees ? { worktrees: entry.worktrees.map(worktree => ({ ...worktree })) } : {}),
-			createdAt: entry.createdAt,
-		}));
+		const entries: PoolEntryRecord[] = this.pool
+			.filter(entry => entry.durable)
+			.map(entry => ({
+				branchName: entry.branchName,
+				worktreePath: entry.worktreePath,
+				...(entry.worktrees ? { worktrees: entry.worktrees.map(worktree => ({ ...worktree })) } : {}),
+				createdAt: entry.createdAt,
+			}));
 		try {
 			this.recordStore.replace(this.projectId, this.repoPath, entries);
 		} catch (error) {
@@ -1064,49 +1087,85 @@ export class WorktreePool {
 		const recorded = this.recordStore.read(this.projectId);
 		if (recorded.entries.length === 0) return;
 
-		if (!recorded.repoPath
-			|| normalizeWorktreeHostPath(recorded.repoPath) !== normalizeWorktreeHostPath(this.repoPath)) {
-			console.log(`[worktree-pool] Discarding ${recorded.entries.length} recorded entry(ies): repository path changed`);
-			this.recordStore.replace(this.projectId, this.repoPath, []);
+		const identityCache = new Map<string, Promise<string | undefined>>();
+		const canonicalIdentity = (candidate: string): Promise<string | undefined> => {
+			if (!candidate) return Promise.resolve(undefined);
+			const resolved = path.resolve(candidate);
+			let pending = identityCache.get(resolved);
+			if (!pending) {
+				pending = this.realpathNativeImpl(resolved)
+					.then(formatCanonicalHostPath)
+					.catch(() => undefined);
+				identityCache.set(resolved, pending);
+			}
+			return pending;
+		};
+		const revokeRecords = (reason: string): void => {
+			console.log(`[worktree-pool] Discarding ${recorded.entries.length} recorded entry(ies): ${reason}`);
+			this.recordStore!.replace(this.projectId!, this.repoPath, []);
+		};
+
+		const [recordedRepoIdentity, currentRepoIdentity] = await Promise.all([
+			recorded.repoPath ? canonicalIdentity(recorded.repoPath) : Promise.resolve(undefined),
+			canonicalIdentity(this.repoPath),
+		]);
+		if (!recordedRepoIdentity || !currentRepoIdentity || recordedRepoIdentity !== currentRepoIdentity) {
+			revokeRecords("repository path changed or could not be verified");
 			return;
 		}
 
-		const active = [...(activeWorktreePaths ?? [])]
-			.map(candidate => normalizeWorktreeHostPath(candidate))
-			.filter((candidate): candidate is string => !!candidate);
-		const conflictsWithLiveSession = (candidatePath: string): boolean => {
-			const candidate = normalizeWorktreeHostPath(candidatePath);
-			if (!candidate) return true;
-			return active.some(reference =>
-				reference === candidate
+		const active = await Promise.all([...(activeWorktreePaths ?? [])].map(canonicalIdentity));
+		if (active.some(reference => !reference)) {
+			revokeRecords("a live-session path could not be verified");
+			return;
+		}
+		const activeIdentities = active as string[];
+		const conflictsWithLiveSession = (candidate: string): boolean => activeIdentities.some(reference =>
+			reference === candidate
 				|| reference.startsWith(`${candidate}/`)
 				|| candidate.startsWith(`${reference}/`),
-			);
-		};
+		);
 
 		const components = this.componentsResolver?.() ?? [];
 		const configuredRepos = [...new Set(components.map(component => component.repo))];
 		const expectsMultiRepo = configuredRepos.some(repo => repo !== ".");
+		const expectedEligibleRepos: string[] = [];
+		if (expectsMultiRepo) {
+			const configuredBaseRef = (this.baseRefResolver?.() ?? "").trim();
+			for (const repo of configuredRepos) {
+				const repoPath = path.join(this.repoPath, repo === "." ? "" : repo);
+				if (await isGitRepoRoot(repoPath, this.commandRunner)
+					&& (configuredBaseRef || await hasResolvedHead(repoPath, this.commandRunner))) {
+					expectedEligibleRepos.push(repo);
+				}
+			}
+		}
+
 		const gitLists = new Map<string, Promise<Map<string, string | undefined>>>();
-		const listGitWorktrees = (repoPath: string): Promise<Map<string, string | undefined>> => {
-			const key = normalizeWorktreeHostPath(repoPath) ?? repoPath;
-			let pending = gitLists.get(key);
+		const listGitWorktrees = async (repoPath: string): Promise<Map<string, string | undefined>> => {
+			const repoIdentity = await canonicalIdentity(repoPath);
+			if (!repoIdentity) throw new Error("repository path could not be canonicalized");
+			let pending = gitLists.get(repoIdentity);
 			if (!pending) {
 				pending = this.execGit(["worktree", "list", "--porcelain"], { cwd: repoPath, timeout: 10_000 })
-					.then(({ stdout }) => new Map(parseGitWorktreeList(stdout.toString()).map(worktree => [
-						normalizeWorktreeHostPath(worktree.path) ?? "",
-						worktree.branch,
-					])));
-				gitLists.set(key, pending);
+					.then(async ({ stdout }) => {
+						const worktrees = new Map<string, string | undefined>();
+						for (const worktree of parseGitWorktreeList(stdout.toString())) {
+							const identity = await canonicalIdentity(worktree.path);
+							if (!identity) throw new Error(`Git-listed worktree path could not be canonicalized: ${worktree.path}`);
+							if (worktrees.has(identity)) throw new Error(`Git listed ambiguous duplicate worktree identity: ${identity}`);
+							worktrees.set(identity, worktree.branch);
+						}
+						return worktrees;
+					});
+				gitLists.set(repoIdentity, pending);
 			}
 			return pending;
 		};
-		const gitMatches = async (repoPath: string, worktreePath: string, branchName: string): Promise<boolean> => {
-			const normalized = normalizeWorktreeHostPath(worktreePath);
-			if (!normalized) return false;
+		const gitMatches = async (repoPath: string, worktreeIdentity: string, branchName: string): Promise<boolean> => {
 			try {
 				const worktrees = await listGitWorktrees(repoPath);
-				return worktrees.has(normalized) && worktrees.get(normalized) === branchName;
+				return worktrees.has(worktreeIdentity) && worktrees.get(worktreeIdentity) === branchName;
 			} catch (error) {
 				console.warn(`[worktree-pool] Could not verify recorded worktree in ${repoPath}; leaving it untouched:`, error);
 				return false;
@@ -1118,49 +1177,63 @@ export class WorktreePool {
 		const adoptedBranches = new Set<string>();
 		let rejected = 0;
 		for (const entry of recorded.entries) {
-			let usable = isPoolBranch(entry.branchName) && !conflictsWithLiveSession(entry.worktreePath);
+			const entryIdentity = await canonicalIdentity(entry.worktreePath);
+			let usable = isPoolBranch(entry.branchName)
+				&& !!entryIdentity
+				&& !conflictsWithLiveSession(entryIdentity);
 			if (usable && entry.worktrees) {
 				const repoNames = entry.worktrees.map(worktree => worktree.repo);
-				const repoPaths = entry.worktrees.map(worktree => normalizeWorktreeHostPath(worktree.repoPath));
-				const worktreePaths = entry.worktrees.map(worktree => normalizeWorktreeHostPath(worktree.worktreePath));
-				const configuredIndexes = repoNames.map(repo => configuredRepos.indexOf(repo));
 				usable = expectsMultiRepo
-					&& entry.worktrees.length > 0
-					&& new Set(repoNames).size === repoNames.length
-					&& repoPaths.every((repoPath, index) => !!repoPath && repoPaths.indexOf(repoPath) === index)
-					&& worktreePaths.every((worktreePath, index) => !!worktreePath && worktreePaths.indexOf(worktreePath) === index)
-					&& configuredIndexes.every((index, position) => index >= 0 && (position === 0 || index > configuredIndexes[position - 1]!));
+					&& repoNames.length === expectedEligibleRepos.length
+					&& repoNames.every((repo, index) => repo === expectedEligibleRepos[index]);
+
+				const repoIdentities = new Set<string>();
+				const worktreeIdentities = new Set<string>();
 				for (const worktree of entry.worktrees) {
+					if (!usable) break;
 					const expectedRepoPath = path.join(this.repoPath, worktree.repo === "." ? "" : worktree.repo);
 					const expectedWorktreePath = path.join(entry.worktreePath, worktree.repo === "." ? "" : worktree.repo);
-					const normalizedContainer = normalizeWorktreeHostPath(entry.worktreePath);
-					const normalizedExpectedWorktree = normalizeWorktreeHostPath(expectedWorktreePath);
-					const liesWithinContainer = !!normalizedContainer && !!normalizedExpectedWorktree
+					const [repoIdentity, expectedRepoIdentity, worktreeIdentity, expectedWorktreeIdentity] = await Promise.all([
+						canonicalIdentity(worktree.repoPath),
+						canonicalIdentity(expectedRepoPath),
+						canonicalIdentity(worktree.worktreePath),
+						canonicalIdentity(expectedWorktreePath),
+					]);
+					const liesWithinContainer = !!entryIdentity && !!expectedWorktreeIdentity
 						&& (worktree.repo === "."
-							? normalizedExpectedWorktree === normalizedContainer
-							: normalizedExpectedWorktree.startsWith(`${normalizedContainer}/`));
-					usable = usable
+							? expectedWorktreeIdentity === entryIdentity
+							: expectedWorktreeIdentity.startsWith(`${entryIdentity}/`));
+					usable = !!repoIdentity
+						&& !!expectedRepoIdentity
+						&& !!worktreeIdentity
+						&& !!expectedWorktreeIdentity
 						&& liesWithinContainer
-						&& normalizeWorktreeHostPath(worktree.repoPath) === normalizeWorktreeHostPath(expectedRepoPath)
-						&& normalizeWorktreeHostPath(worktree.worktreePath) === normalizedExpectedWorktree
-						&& !conflictsWithLiveSession(worktree.worktreePath)
-						&& await gitMatches(worktree.repoPath, worktree.worktreePath, entry.branchName);
+						&& repoIdentity === expectedRepoIdentity
+						&& worktreeIdentity === expectedWorktreeIdentity
+						&& !repoIdentities.has(repoIdentity)
+						&& !worktreeIdentities.has(worktreeIdentity)
+						&& !conflictsWithLiveSession(worktreeIdentity)
+						&& await gitMatches(worktree.repoPath, worktreeIdentity, entry.branchName);
+					if (usable && repoIdentity && worktreeIdentity) {
+						repoIdentities.add(repoIdentity);
+						worktreeIdentities.add(worktreeIdentity);
+					}
 				}
-			} else if (usable) {
-				usable = !expectsMultiRepo && await gitMatches(this.repoPath, entry.worktreePath, entry.branchName);
+			} else if (usable && entryIdentity) {
+				usable = !expectsMultiRepo && await gitMatches(this.repoPath, entryIdentity, entry.branchName);
 			}
-			const normalizedEntryPath = normalizeWorktreeHostPath(entry.worktreePath);
-			if (!usable || !normalizedEntryPath || adoptedPaths.has(normalizedEntryPath) || adoptedBranches.has(entry.branchName)) {
+			if (!usable || !entryIdentity || adoptedPaths.has(entryIdentity) || adoptedBranches.has(entry.branchName)) {
 				rejected++;
 				continue;
 			}
-			adoptedPaths.add(normalizedEntryPath);
+			adoptedPaths.add(entryIdentity);
 			adoptedBranches.add(entry.branchName);
 			adopted.push({
 				branchName: entry.branchName,
 				worktreePath: entry.worktreePath,
 				...(entry.worktrees ? { worktrees: entry.worktrees.map(worktree => ({ ...worktree })) } : {}),
 				createdAt: entry.createdAt,
+				durable: true,
 			});
 		}
 
@@ -1179,7 +1252,7 @@ export class WorktreePool {
 		if (this.stopped || !isPoolBranch(branchName)) return;
 		// Avoid duplicates
 		if (this.pool.some(e => e.worktreePath === worktreePath)) return;
-		this.pool.push({ branchName, worktreePath, createdAt: Date.now() });
+		this.pool.push({ branchName, worktreePath, createdAt: Date.now(), durable: false });
 		if (cpuDiagnosticsEnabled()) {
 			getCpuDiagnostics().recordTimer("worktree-pool:registerExternalEntry", 0, { registered: 1, ready: this.pool.length, target: this.targetSize });
 		}

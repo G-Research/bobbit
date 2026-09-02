@@ -17,7 +17,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { WorktreePool, isPoolBranch } from "../../../src/server/agent/worktree-pool.ts";
-import { WorktreePoolRecordStore } from "../../../src/server/agent/worktree-pool-record.ts";
+import { MemoryPoolRecordStore, WorktreePoolRecordStore } from "../../../src/server/agent/worktree-pool-record.ts";
 import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../../../src/server/agent/project-config-store.ts";
 import { realFs, type CommandRunner, type ExecFileResult } from "../../../src/server/gateway-deps.ts";
@@ -668,6 +668,26 @@ describe("Restart round-trip: exact durable pool ownership", () => {
 		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
 		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("a real fill publication never promotes an external in-memory entry", async () => {
+		const repo = await makeRepo();
+		const projectId = "external-fill-project";
+		const recordStore = new MemoryPoolRecordStore();
+		const externalPath = path.join(path.dirname(repo), "external-pool-entry");
+		const pool = new WorktreePool({ repoPath: repo, targetSize: 2, recordStore, projectId });
+		pool.registerExternalEntry("pool/_pool-external", externalPath);
+		try {
+			await pool.initialize();
+			for (let i = 0; i < 100 && pool.size < 2; i++) await new Promise(r => setTimeout(r, 100));
+			assert.equal(pool.size, 2, "the real fill should replenish alongside the compatible external entry");
+			const recorded = recordStore.read(projectId).entries;
+			assert.equal(recorded.length, 1, "only the fill-created entry is durable");
+			assert.notEqual(recorded[0]?.worktreePath, externalPath);
+		} finally {
+			await pool.stop();
+			await rmRepo(repo);
+		}
 	});
 
 	it("reuses the exact worktrees retained by graceful stop and flush", async () => {
