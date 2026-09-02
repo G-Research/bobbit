@@ -382,15 +382,27 @@ async function main() {
 		import("node:child_process").then(({ exec }) => exec(`${cmd} ${effectiveStartupUrls.openUrl}`));
 	}
 
-	// Graceful shutdown
-	const shutdown = async () => {
-		console.log("\nShutting down...");
-		await gateway.shutdown();
-		process.exit(0);
+	// Graceful shutdown. A repeated signal is an explicit escape hatch; it must
+	// never start a competing teardown against the same Git and sandbox state.
+	let shutdownRequested = false;
+	const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+		if (shutdownRequested) {
+			console.warn("\nShutdown interrupted; exiting immediately (worktrees may be left behind).");
+			process.exit(signal === "SIGINT" ? 130 : 143);
+		}
+		shutdownRequested = true;
+		console.log(`\nShutting down (${signal})... Press Ctrl+C again to exit immediately.`);
+		try {
+			await gateway.shutdown();
+			process.exit(0);
+		} catch (error) {
+			console.error("[gateway] Shutdown failed:", error);
+			process.exit(1);
+		}
 	};
 
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
+	process.on("SIGINT", () => void shutdown("SIGINT"));
+	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 // Global error handlers — prevent silent zombification from stray rejections
