@@ -16,6 +16,11 @@
     "tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts",
     "tests/browser/journeys/goal-team-gates-reset.journey.spec.ts",
     "tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts",
+    "tests/browser/journeys/goal-editing.journey.spec.ts",
+    "tests/browser/journeys/goal-metadata.journey.spec.ts",
+    "tests/browser/journeys/project-settings.journey.spec.ts",
+    "tests/browser/journeys/team-operations.journey.spec.ts",
+    "tests/browser/journeys/session-lifecycle.journey.spec.ts",
     "tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts",
     "tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts",
     "tests/browser/fixtures/jump-to-last-prompt.fixture.spec.ts",
@@ -105,6 +110,51 @@
       "requiredTitleRegexes": [
         "goal-dashboard cost popover.*cacheHitRate.*survives reload",
         "session stats-bar cost popover.*server-derived cacheHitRate"
+      ]
+    },
+    {
+      "file": "tests/browser/journeys/goal-editing.journey.spec.ts",
+      "metric": "unit-browser",
+      "minNonSkippedTests": 3,
+      "requiredTitleRegexes": [
+        "archive action persists.*reloads.*read-only state",
+        "empty workflow response disables goal creation",
+        "Children-tab policy toggle.*persists"
+      ]
+    },
+    {
+      "file": "tests/browser/journeys/goal-metadata.journey.spec.ts",
+      "metric": "unit-browser",
+      "minNonSkippedTests": 1,
+      "requiredTitleRegexes": [
+        "proposal controls create a metadata-bearing goal.*survives reload"
+      ]
+    },
+    {
+      "file": "tests/browser/journeys/project-settings.journey.spec.ts",
+      "metric": "unit-browser",
+      "minNonSkippedTests": 2,
+      "requiredTitleRegexes": [
+        "project sound override.*across reload.*Bell stays global",
+        "Add Project routes.*provisional assistant"
+      ]
+    },
+    {
+      "file": "tests/browser/journeys/team-operations.journey.spec.ts",
+      "metric": "unit-browser",
+      "minNonSkippedTests": 2,
+      "requiredTitleRegexes": [
+        "terminate confirmation.*delegate children",
+        "persisted gate signal reloads.*exact dashboard badge"
+      ]
+    },
+    {
+      "file": "tests/browser/journeys/session-lifecycle.journey.spec.ts",
+      "metric": "unit-browser",
+      "minNonSkippedTests": 2,
+      "requiredTitleRegexes": [
+        "WebSocket turn.*durable page reload",
+        "standard session role stays General.*reload.*picker surfaces"
       ]
     },
     {

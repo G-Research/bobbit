@@ -285,6 +285,33 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(page.getByText("Palette").first()).toBeVisible();
 	});
 
+	test("retired spawned-gateway settings controls stay wired in the deterministic fixture", async ({ page }) => {
+		await renderSettings(page, "#/settings/system/models");
+		const fallback = page.getByTestId("allow-session-model-fallback-toggle");
+		await expect(fallback).not.toBeChecked();
+		await fallback.click();
+		await expect.poll(async () => (await prefs(page)).allowSessionModelFallback).toBe(true);
+
+		await renderSettings(page, "#/settings/system/general");
+		const subgoals = page.getByTestId("general-subgoals-enabled");
+		const maxDepth = page.getByTestId("general-max-nesting-depth");
+		await expect(subgoals).not.toBeChecked();
+		await expect(maxDepth).toBeDisabled();
+		await subgoals.click();
+		await expect(maxDepth).toBeEnabled();
+		await expect(page.getByTestId("general-customise-system-prompt")).toBeVisible();
+		await expect(page.getByRole("button", { name: /Restart Server|Restart Requested|Requesting/i })).toHaveCount(0);
+
+		await renderSettings(page, "#/settings/system/maintenance");
+		const agentDir = page.getByTestId("agent-dir-settings");
+		await expect(agentDir).toBeVisible();
+		await agentDir.getByTestId("agent-dir-path-input").fill("/fixture/agent-dir");
+		await expect(agentDir.getByTestId("agent-dir-validate")).toBeEnabled();
+
+		await loadRoles(page);
+		await expect(page.getByRole("button", { name: /New Role/i }).first()).toBeVisible();
+	});
+
 	test("general preferences persist across reload and reset clears the skills budget", async ({ page }) => {
 		await renderSettings(page, "#/settings/system/general");
 		const timestamps = page.locator("label").filter({ hasText: "Show message timestamps" }).locator("input");
