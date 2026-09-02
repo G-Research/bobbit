@@ -128,8 +128,8 @@ describe("native CI qualification workflows", () => {
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
 		assert.deepEqual(
 			unitGates[0]?.env,
-			{ VITEST_MAX_WORKERS: "2" },
-			"every native runner must use the conservative two-worker Vitest count",
+			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '1' || '3' }}" },
+			"Windows must serialize filesystem-heavy tests while other native runners retain the fixed cap",
 		);
 	});
 

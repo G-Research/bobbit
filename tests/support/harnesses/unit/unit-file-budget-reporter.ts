@@ -3,9 +3,7 @@ import type { Reporter } from "vitest/reporters";
 
 type TestModule = Parameters<NonNullable<Reporter["onTestModuleStart"]>>[0];
 
-// Two-worker hosted Windows qualification retains a narrow 4% scheduler-jitter
-// allowance while the suite-wide wall time remains the authoritative latency gate.
-export const UNIT_FILE_WALL_BUDGET_MS = 26_000;
+export const UNIT_FILE_WALL_BUDGET_MS = 25_000;
 export const UNIT_CONCURRENT_PROOF_ENV = "BOBBIT_UNIT_CONCURRENT_PROOF";
 export const UNIT_CONCURRENT_PROOF_BANNER =
 	"[unit-file-budget] CONCURRENT PROOF MODE — wall-budget overruns are report-only and do not qualify as solo unit-stage evidence.";
