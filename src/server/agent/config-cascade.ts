@@ -20,6 +20,7 @@ import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 import { builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { headquartersDir } from "../bobbit-dir.js";
 
 /**
  * `user` corresponds to the global-user scope. It is additive: global-user is
@@ -99,6 +100,8 @@ export interface ServerStores {
 	getRoles(): Role[];
 	getTools(): ToolInfo[];
 	getToolGroupPolicies(): Record<string, GrantPolicy>;
+	/** Absolute server tools/ directory, used to retain the physical winner source. */
+	getToolsDir?(): string;
 }
 
 /**
@@ -305,7 +308,7 @@ export class ConfigCascade {
 	/** Raw resolved tool entries (with origin pack + shadows) — for conflicts. */
 	resolveToolsEntries(projectId?: string): ResolvedEntity<ToolInfo>[] {
 		const normalizedProjectId = normalizeConfigProjectId(projectId);
-		return this.resolveEntities<ToolInfo>(
+		const resolved = this.resolveEntities<ToolInfo>(
 			"tools",
 			[new ToolLoader()],
 			this.builtins.getTools(),
@@ -314,6 +317,14 @@ export class ConfigCascade {
 			this.serverStores.getTools(),
 			ctx => ctx.toolManager.getLocalTools(),
 		);
+		// A lazily-created project context must immediately consume the same live
+		// winner provider. This also keeps contexts created before server-level
+		// composition aligned after their first catalogue resolution.
+		if (normalizedProjectId) {
+			this.projectContextManager.getOrCreate(normalizedProjectId)?.toolManager
+				.setResolvedToolEntriesProvider?.(() => this.resolveToolsEntries(normalizedProjectId));
+		}
+		return resolved;
 	}
 
 	// ── Tool Group Policies ──────────────────────────────────────
@@ -407,16 +418,22 @@ export class ConfigCascade {
 		serverItems: T[],
 		getProjectItems: (ctx: import("./project-context.js").ProjectContext) => T[],
 	): ResolvedEntity<T>[] {
-		const wrap = (items: T[]): LoadedEntity<unknown>[] =>
-			items.map(item => ({ name: keyFn(item), item }));
-		const layer = (id: string, scope: PackScope, items: T[]): PackEntry => ({
+		const wrap = (items: T[], rootPath: string): LoadedEntity<unknown>[] =>
+			items.map(item => ({
+				name: keyFn(item),
+				item,
+				...(type === "tools" && rootPath
+					? { source: { baseDir: path.join(rootPath, "tools") } }
+					: {}),
+			}));
+		const layer = (id: string, scope: PackScope, items: T[], rootPath: string): PackEntry => ({
 			id,
 			kind: scope === "builtin" ? "builtin" : "user",
 			scope,
-			path: "",
+			path: rootPath,
 			readOnly: scope === "builtin",
 			layout: "defaults-tree",
-			preloaded: { [type]: wrap(items) },
+			preloaded: { [type]: wrap(items, rootPath) },
 		});
 		// Dedup market entries by absolute path: when two scopes resolve to the
 		// same `market-packs` dir (a self-managed project whose rootPath equals
@@ -424,30 +441,41 @@ export class ConfigCascade {
 		// the FIRST (lowest) scope and skip the duplicate, so it never appears
 		// to "conflict with itself".
 		const seenMarketPaths = new Set<string>();
+		const marketPathKey = (value: string): string => {
+			const resolved = path.resolve(value).replace(/\\/g, "/");
+			return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+		};
 		const pushMarket = (scope: "server" | "global-user" | "project"): void => {
 			const list = this.marketPackProvider ? this.marketPackProvider.marketEntries(scope, projectId) : [];
 			for (const e of list) {
-				const key = path.resolve(e.path);
+				const key = marketPathKey(e.path);
 				if (seenMarketPaths.has(key)) continue;
 				seenMarketPaths.add(key);
 				entries.push(e);
 			}
 		};
 
-		const entries: PackEntry[] = [layer("builtin", "builtin", builtinItems)];
+		const builtinRoot = typeof this.builtins.getBuiltinsDir === "function"
+			? this.builtins.getBuiltinsDir()
+			: "";
+		const serverToolsDir = this.serverStores.getToolsDir?.();
+		const serverRoot = serverToolsDir
+			? path.dirname(serverToolsDir)
+			: scopePaths("server", headquartersDir()).userPackRoot;
+		const entries: PackEntry[] = [layer("builtin", "builtin", builtinItems, builtinRoot)];
 		// Built-in first-party packs (resolve-in-place band, design §5.3): above
 		// the monolithic builtin defaults, below every user scope band. Deduped by
 		// path like market entries. Activation filtering (below) treats them as
 		// normal server-scope market packs.
 		for (const e of builtinFirstPartyPackEntries(this.builtinPacksDir)) {
-			const key = path.resolve(e.path);
+			const key = marketPathKey(e.path);
 			if (seenMarketPaths.has(key)) continue;
 			seenMarketPaths.add(key);
 			entries.push(e);
 		}
 		// Server segment: market packs below the server user pack.
 		pushMarket("server");
-		entries.push(layer("user:server", "server", serverItems));
+		entries.push(layer("user:server", "server", serverItems, serverRoot));
 		// Global-user segment: market packs, then the global-user user pack
 		// (`~/.bobbit/config/roles|tools`). The user pack is a real on-disk
 		// `defaults-tree` entry scanned by the same loaders (design §3.1/§5.2);
@@ -467,7 +495,9 @@ export class ConfigCascade {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
 			if (projectCtx) {
 				pushMarket("project");
-				entries.push(layer("user:project", "project", getProjectItems(projectCtx)));
+				const projectToolsDir = type === "tools" ? projectCtx.toolManager.getToolsDir() : undefined;
+				const projectRoot = projectToolsDir ? path.dirname(projectToolsDir) : projectCtx.configDir;
+				entries.push(layer("user:project", "project", getProjectItems(projectCtx), projectRoot));
 			}
 		}
 
@@ -485,7 +515,8 @@ export class ConfigCascade {
 				// until explicitly enabled — drop every entity (design option (a)).
 				if (!isPackEffectivelyEnabled(entry.manifest, disabled)) return false;
 				const list = disabled[t];
-				return !list || !list.includes(name);
+				const identity = name.toLowerCase();
+				return !list || !list.some((disabledName) => disabledName.toLowerCase() === identity);
 			}
 			: undefined;
 		return new PackResolver(entries, loaders, filter).resolve<T>(type);

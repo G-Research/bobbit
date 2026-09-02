@@ -18,6 +18,7 @@ import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
+import type { LoadedEntity } from "./pack-types.js";
 import { parseContributions, computeRendererKind } from "./tool-contributions.js";
 import { isIgnoredToolGroupDir } from "./tool-extension-preflight.js";
 
@@ -104,13 +105,14 @@ function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePat
  *   2. flat files `tools/*.yaml` (group = data.group || "Other")
  * First-seen name wins within the dir.
  */
-export function parseToolsDir(toolsDir: string): ToolInfo[] {
-	const tools: ToolInfo[] = [];
+export function parseToolEntitiesDir(toolsDir: string): LoadedEntity<ToolInfo>[] {
+	const tools: LoadedEntity<ToolInfo>[] = [];
 	const seen = new Set<string>();
 
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+		entries = fs.readdirSync(toolsDir, { withFileTypes: true })
+			.sort((a, b) => a.name.localeCompare(b.name));
 	} catch {
 		return tools;
 	}
@@ -120,14 +122,20 @@ export function parseToolsDir(toolsDir: string): ToolInfo[] {
 		if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 		const groupPath = path.join(toolsDir, entry.name);
 		try {
-			const files = fs.readdirSync(groupPath, { withFileTypes: true });
+			const files = fs.readdirSync(groupPath, { withFileTypes: true })
+				.sort((a, b) => a.name.localeCompare(b.name));
 			for (const file of files) {
 				if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
 				try {
-					const data = parse(fs.readFileSync(path.join(groupPath, file.name), "utf-8"));
-					if (!data?.name || seen.has(data.name)) continue;
-					seen.add(data.name);
-					tools.push(toolInfoFrom(data, entry.name, toolsDir, path.join(groupPath, file.name)));
+					const filePath = path.join(groupPath, file.name);
+					const data = parse(fs.readFileSync(filePath, "utf-8"));
+					if (typeof data?.name !== "string" || seen.has(data.name.toLowerCase())) continue;
+					seen.add(data.name.toLowerCase());
+					tools.push({
+						name: data.name,
+						item: toolInfoFrom(data, entry.name, toolsDir, filePath),
+						source: { baseDir: toolsDir, filePath },
+					});
 				} catch (err) {
 					console.error(`[builtin-config] Failed to parse tool ${file.name}:`, err);
 				}
@@ -139,16 +147,26 @@ export function parseToolsDir(toolsDir: string): ToolInfo[] {
 	for (const entry of entries) {
 		if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
 		try {
-			const data = parse(fs.readFileSync(path.join(toolsDir, entry.name), "utf-8"));
-			if (!data?.name || seen.has(data.name)) continue;
-			seen.add(data.name);
-			tools.push(toolInfoFrom(data, "Other", toolsDir, path.join(toolsDir, entry.name)));
+			const filePath = path.join(toolsDir, entry.name);
+			const data = parse(fs.readFileSync(filePath, "utf-8"));
+			if (typeof data?.name !== "string" || seen.has(data.name.toLowerCase())) continue;
+			seen.add(data.name.toLowerCase());
+			tools.push({
+				name: data.name,
+				item: toolInfoFrom(data, "Other", toolsDir, filePath),
+				source: { baseDir: toolsDir, filePath },
+			});
 		} catch (err) {
 			console.error(`[builtin-config] Failed to parse tool ${entry.name}:`, err);
 		}
 	}
 
 	return tools;
+}
+
+/** Read all tools while omitting loader-only physical source metadata. */
+export function parseToolsDir(toolsDir: string): ToolInfo[] {
+	return parseToolEntitiesDir(toolsDir).map((entry) => entry.item);
 }
 
 export class BuiltinConfigProvider {
