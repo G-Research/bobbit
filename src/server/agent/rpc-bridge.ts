@@ -31,6 +31,36 @@ export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 export const SERVER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-server";
 export const GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-global-user";
 export const PROJECT_MARKET_PACKS_CONTAINER_DIR = "/market-packs-project";
+/** Stable mounts for ordinary user-authored tool definitions and provider modules. */
+export const GLOBAL_USER_TOOLS_CONTAINER_DIR = "/tools-global-user";
+export const PROJECT_USER_TOOLS_CONTAINER_DIR = "/tools-project";
+
+export interface UserToolSandboxMount {
+	scope: "server" | "global-user" | "project";
+	hostPath: string;
+	containerPath: string;
+}
+
+/**
+ * Authoritative ordinary user-tool mount contract. Docker creation, path
+ * translation, and stale-container checks all consume this exact declaration.
+ * The project root is explicit because a sandbox runtime cwd is normally a
+ * container-only `/workspace[-wt]` path.
+ */
+export function resolveUserToolSandboxMounts(projectUserToolsRoot?: string): UserToolSandboxMount[] {
+	const mounts: UserToolSandboxMount[] = [
+		{ scope: "server", hostPath: TOOLS_DIR, containerPath: "/tools" },
+		{
+			scope: "global-user",
+			hostPath: path.join(scopePaths("global-user", os.homedir()).userPackRoot, "tools"),
+			containerPath: GLOBAL_USER_TOOLS_CONTAINER_DIR,
+		},
+	];
+	if (projectUserToolsRoot) {
+		mounts.push({ scope: "project", hostPath: projectUserToolsRoot, containerPath: PROJECT_USER_TOOLS_CONTAINER_DIR });
+	}
+	return mounts;
+}
 
 /**
  * Redact sensitive env vars from Docker arg arrays for logging.
@@ -128,6 +158,8 @@ export interface RpcBridgeOptions {
 	containerId?: string;
 	/** Host project marketplace pack root mounted as /market-packs-project in named-volume sandbox mode. */
 	projectMarketPacksRoot?: string;
+	/** Host project user-tools root; independent of the container runtime cwd. */
+	projectUserToolsRoot?: string;
 	/** Enabled Marketplace pi extensions passed as --extension; used for sandbox remap and runtime diagnostics. */
 	piExtensions?: RuntimePiExtensionInfo[];
 	/** Receives runtime/remap diagnostics observed after extension handoff. */
@@ -1105,6 +1137,7 @@ export class RpcBridge {
 			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
 			projectBase: this.options.cwd,
 			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+			projectUserToolsRoot: this.options.projectUserToolsRoot,
 			sessionId: this.options.sessionId,
 			sessionStateDir: this.options.sessionStateDir,
 		};
@@ -1164,21 +1197,13 @@ export class RpcBridge {
 	}
 
 	private recordPiExtensionLoadFailureFromStderr(line: string): void {
-		const extension = matchPiExtensionRuntimeFailure(line, this.options.piExtensions ?? [], {
-			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
-			projectBase: this.options.cwd,
-			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
-		});
+		const extension = matchPiExtensionRuntimeFailure(line, this.options.piExtensions ?? [], this.containerRemapOptions());
 		if (!extension) return;
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${line}`);
 	}
 
 	private recordPiExtensionLoadFailureFromEvent(event: any): void {
-		const extension = matchPiExtensionStructuredRuntimeFailure(event, this.options.piExtensions ?? [], {
-			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
-			projectBase: this.options.cwd,
-			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
-		});
+		const extension = matchPiExtensionStructuredRuntimeFailure(event, this.options.piExtensions ?? [], this.containerRemapOptions());
 		if (!extension) return;
 		const rawMessage = typeof event?.message === "string" ? event.message : typeof event?.error === "string" ? event.error : JSON.stringify(event);
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${rawMessage}`);
@@ -1314,6 +1339,8 @@ export interface HostPathToContainerOptions {
 	builtinToolsDir?: string;
 	projectBase?: string;
 	projectMarketPacksRoot?: string;
+	/** Explicit host root mounted at /tools-project; never infer it from a container cwd. */
+	projectUserToolsRoot?: string;
 	sessionId?: string;
 	sessionStateDir?: string;
 }
@@ -1334,6 +1361,11 @@ function joinContainerPath(containerPrefix: string, relative: string): string {
 	return clean ? `${containerPrefix}/${clean}` : containerPrefix;
 }
 
+function projectBaseIsContainerPath(projectBase: string | undefined): boolean {
+	return projectBase === "/workspace" || projectBase?.startsWith("/workspace/") === true
+		|| projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/") === true;
+}
+
 function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: string): MountMapping[] {
 	const mappings: MountMapping[] = [
 		{
@@ -1345,8 +1377,7 @@ function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: 
 			hostPath: scopePaths("global-user", os.homedir()).marketPacksRoot,
 		},
 	];
-	const projectBaseIsContainerPath = projectBase === "/workspace" || projectBase?.startsWith("/workspace/") || projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/");
-	const projectHostRoot = projectMarketPacksRoot ?? (projectBase && !projectBaseIsContainerPath ? scopePaths("project", projectBase).marketPacksRoot : undefined);
+	const projectHostRoot = projectMarketPacksRoot ?? (projectBase && !projectBaseIsContainerPath(projectBase) ? scopePaths("project", projectBase).marketPacksRoot : undefined);
 	if (projectHostRoot) {
 		mappings.push({
 			containerPrefix: PROJECT_MARKET_PACKS_CONTAINER_DIR,
@@ -1373,12 +1404,25 @@ function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
  *
  * Accepts optional builtinToolsDir to handle cascade-resolved builtin paths.
  */
+function projectUserToolsRootFromOptions(opts: MountTableOptions): string | undefined {
+	if (opts.projectUserToolsRoot) return opts.projectUserToolsRoot;
+	// SessionManager already preserves the registered project's market-pack host
+	// root before replacing cwd with /workspace-wt. Both roots are siblings in
+	// the same narrow config directory, so this remains independent of cwd.
+	if (opts.projectMarketPacksRoot) return path.join(path.dirname(opts.projectMarketPacksRoot), "tools");
+	if (opts.projectBase && !projectBaseIsContainerPath(opts.projectBase)) {
+		return path.join(scopePaths("project", opts.projectBase).userPackRoot, "tools");
+	}
+	return undefined;
+}
+
 function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
 	const agentSessionsDir = opts.sessionId ? sessionTranscriptRoot(opts.sessionId) : activeAgentSessionsDir();
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
 	const builtinPacksDir = resolveBuiltinPacksDir();
+	const userToolMounts = resolveUserToolSandboxMounts(projectUserToolsRootFromOptions(opts));
 
 	// Order matters: most specific prefixes first so /home/node/.bobbit/agent/sessions
 	// matches before a hypothetical /home/node/.bobbit/agent would.
@@ -1401,13 +1445,20 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
 		{ containerPrefix: "/bobbit-state/aigw-dns-guard", hostPath: path.join(stateDir, "aigw-dns-guard") },
 		{ containerPrefix: `/bobbit-state/${TOOL_EXTENSION_ADAPTER_STATE_DIR}`, hostPath: path.join(stateDir, TOOL_EXTENSION_ADAPTER_STATE_DIR) },
-		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
+		...userToolMounts.map((mount) => ({
+			containerPrefix: mount.containerPath,
+			hostPath: mount.hostPath,
+		})),
 	];
 
-	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
+	// Add builtin tools dir mapping (for cascade-resolved builtin paths). User
+	// mount declaration order stays server → global-user → project so identical
+	// physical roots retain established lower-scope attribution.
 	if (opts.builtinToolsDir) {
-		// Insert before /tools so /tools-builtin matches first
-		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: opts.builtinToolsDir });
+		table.splice(table.length - userToolMounts.length, 0, {
+			containerPrefix: "/tools-builtin",
+			hostPath: opts.builtinToolsDir,
+		});
 	}
 
 	return table;

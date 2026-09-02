@@ -16,10 +16,11 @@ import {
 	getPackLocalDataMountStaleness,
 	getSessionPreviewMountStaleness,
 	getStateDirMountStaleness,
+	getUserToolMountStaleness,
 } from "../../../src/server/agent/project-sandbox.js";
 import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../../src/server/agent/docker-args.js";
 import { bobbitStateDir } from "../../../src/server/bobbit-dir.js";
-import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
+import { resolveUserToolSandboxMounts, toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
 import { SandboxManager } from "../../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
@@ -333,6 +334,44 @@ describe("SandboxManager pack local-data refresh", () => {
 
 		(manager as any).sandboxes.get("beta").refreshPackLocalDataMounts = async () => { throw new Error("remount failed"); };
 		await assert.rejects(manager.refreshPackLocalDataMounts(), /beta/);
+	});
+});
+
+describe("ProjectSandbox ordinary user-tool mount staleness", () => {
+	const projectUserToolsRoot = path.resolve("/project/.bobbit/config/tools");
+	const expected = { projectUserToolsRoot };
+	const currentMounts = () => resolveUserToolSandboxMounts(projectUserToolsRoot).map((entry) =>
+		mount(entry.hostPath, entry.containerPath, false, "ro"));
+
+	it("accepts the exact read-only server, global-user, and project roots", () => {
+		const result = getUserToolMountStaleness(currentMounts(), expected);
+		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks missing, duplicate, writable, and wrong-source user-tool roots stale", () => {
+		const plans = resolveUserToolSandboxMounts(projectUserToolsRoot);
+		const projectPlan = plans.find((entry) => entry.scope === "project")!;
+		const globalPlan = plans.find((entry) => entry.scope === "global-user")!;
+		const base = currentMounts();
+		const withoutProject = base.filter((entry) => entry.Destination !== projectPlan.containerPath);
+		const duplicateGlobal = [...base, mount(globalPlan.hostPath, globalPlan.containerPath, false, "ro")];
+		const writableProject = base.map((entry) => entry.Destination === projectPlan.containerPath
+			? mount(projectPlan.hostPath, projectPlan.containerPath, true, "rw")
+			: entry);
+		const wrongProject = base.map((entry) => entry.Destination === projectPlan.containerPath
+			? mount(path.resolve("/other/.bobbit/config/tools"), projectPlan.containerPath, false, "ro")
+			: entry);
+
+		for (const [label, mounts] of [
+			["missing", withoutProject],
+			["duplicate", duplicateGlobal],
+			["writable", writableProject],
+			["wrong-source", wrongProject],
+		] as const) {
+			const result = getUserToolMountStaleness(mounts, expected);
+			assert.equal(result.stale, true, `${label}: ${result.reason ?? "unexpected valid result"}`);
+			assert.match(result.reason ?? "", new RegExp(label === "wrong-source" ? "wrong host source" : label));
+		}
 	});
 });
 

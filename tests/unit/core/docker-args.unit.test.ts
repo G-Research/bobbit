@@ -30,7 +30,11 @@ import {
 	sessionStateSessionsRoot,
 	sessionTranscriptRoot,
 } from "../../../src/server/agent/agent-session-path.js";
-import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
+import {
+	GLOBAL_USER_TOOLS_CONTAINER_DIR,
+	PROJECT_USER_TOOLS_CONTAINER_DIR,
+	toDockerPath,
+} from "../../../src/server/agent/rpc-bridge.js";
 import {
 	initializeAgentDirState,
 	resetAgentDirStateForTests,
@@ -192,6 +196,10 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_PROJECT_LABEL}=${projectId}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_SESSION_LABEL}=${sessionId}`));
 		const runtimeStateDir = path.join(projectDir, ".bobbit", "state");
+		const projectUserToolsRoot = path.join(projectDir, ".bobbit", "config", "tools");
+		assert.ok(runArgs.includes(`${toDockerPath(projectUserToolsRoot)}:${PROJECT_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.ok(runArgs.some((arg) => arg.endsWith(`:${GLOBAL_USER_TOOLS_CONTAINER_DIR}:ro`)));
+		assert.equal(fs.statSync(projectUserToolsRoot).isDirectory(), true, "runtime creation must materialize the stable project tools root");
 		assert.ok(runArgs.includes(`${toDockerPath(path.join(runtimeStateDir, "preview", sessionId))}:/bobbit/preview`));
 		assert.ok(runArgs.includes(`${toDockerPath(sessionStateSessionsRoot(runtimeStateDir, sessionId))}:/bobbit-state/sessions`));
 		assert.ok(runArgs.includes(`${toDockerPath(sessionTranscriptRoot(sessionId, activeAgentSessionsDir()))}:/home/node/.bobbit/agent/sessions`));
@@ -580,6 +588,23 @@ describe("buildDockerRunArgs", () => {
 		const staleness = getStateDirMountStaleness(mounts, { stateDir });
 		assert.equal(staleness.stale, true);
 		assert.match(staleness.reason ?? "", new RegExp(TOOL_EXTENSION_ADAPTER_STATE_DIR));
+	});
+
+	it("creates stable read-only global and project user-tool mounts", () => {
+		const projectUserToolsRoot = path.join(fixtureDir("user-tool-roots"), ".bobbit", "config", "tools");
+		assert.equal(fs.existsSync(projectUserToolsRoot), false);
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: "",
+			projectId: "user-tool-roots",
+			projectUserToolsRoot,
+		}, NOOP_COMMAND_RUNNER);
+		const mounts = args.filter((_a, i) => args[i - 1] === "-v");
+
+		assert.ok(mounts.some((entry) => entry.endsWith(`:${GLOBAL_USER_TOOLS_CONTAINER_DIR}:ro`)));
+		assert.ok(mounts.includes(`${toDockerPath(projectUserToolsRoot)}:${PROJECT_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.equal(fs.statSync(projectUserToolsRoot).isDirectory(), true);
+		assert.equal(mounts.some((entry) => entry.includes("/.bobbit/config:/")), false);
 	});
 
 	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {

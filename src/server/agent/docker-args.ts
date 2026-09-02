@@ -32,11 +32,17 @@ import {
 } from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
-import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
+import {
+	BUILTIN_PACKS_CONTAINER_DIR,
+	GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,
+	PROJECT_MARKET_PACKS_CONTAINER_DIR,
+	SERVER_MARKET_PACKS_CONTAINER_DIR,
+	resolveUserToolSandboxMounts,
+	toDockerPath,
+} from "./rpc-bridge.js";
 import { scopePaths } from "./pack-types.js";
-import { TOOLS_DIR } from "./tool-manager.js";
 import type { PreferencesStore } from "./preferences-store.js";
-import type { ToolManager } from "./tool-manager.js";
+import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { TOOL_EXTENSION_ADAPTER_STATE_DIR } from "./tool-extension-activation.js";
 
@@ -187,6 +193,8 @@ export interface DockerRunConfig {
 	projectId?: string;
 	/** Host project marketplace pack root to mount in named-volume sandbox mode. */
 	projectMarketPacksRoot?: string;
+	/** Host project user-tools root to mount independently of /workspace. */
+	projectUserToolsRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
 	/**
@@ -257,7 +265,6 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		extraReadonlyMounts,
 	} = config;
 
-	const toolsDir = TOOLS_DIR;
 	const builtinToolsDir = config.toolManager?.getBuiltinToolsDir();
 	const builtinPacksDir = resolveBuiltinPacksDir();
 
@@ -317,10 +324,17 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 
 	// pi-coding-agent is baked into the Docker image (avoids 20x slower
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
-	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
+	// Create and mount every ordinary user-tools scope up front: bind sets are
+	// immutable, while later customizations must become visible immediately.
+	const projectUserToolsRoot = config.projectUserToolsRoot
+		?? (workspaceDir ? path.join(scopePaths("project", workspaceDir).userPackRoot, "tools") : undefined);
+	for (const mount of resolveUserToolSandboxMounts(projectUserToolsRoot)) {
+		fs.mkdirSync(mount.hostPath, { recursive: true });
+		args.push("-v", `${toDockerPath(mount.hostPath)}:${mount.containerPath}:ro`);
+	}
 
 	// Mount builtin tools directory for cascade-resolved builtin extensions
-	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
+	if (builtinToolsDir && builtinToolsDir !== TOOLS_DIR) {
 		args.push("-v", `${toDockerPath(builtinToolsDir)}:/tools-builtin:ro`);
 	}
 
