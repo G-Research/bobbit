@@ -71,6 +71,7 @@ import { isWorktreePathReferencedByLiveSessionForCleanup, type WorktreeReference
 import { installSessionActivityAttribution, recordSessionEventActivity } from "./session-activity.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
@@ -223,22 +224,27 @@ export function resolveMarketplacePiExtensionActivation(
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
-/** Resolve goal tools extension path from the winning task_create definition. */
-function resolveGoalToolsExtPath(ctx: PipelineContext): string {
-	if (ctx.toolManager) {
-		return ctx.toolManager.resolveToolExtensionPath?.("task_create", "extension.ts")
-			?? ctx.toolManager.getExtensionPath("tasks", "extension.ts");
-	}
-	// Fallback: use deprecated TOOLS_DIR for backward compat
+/** Resolve named extensions only when their winning provider requires one. */
+function resolveGoalToolsExtPath(ctx: PipelineContext): string | undefined {
+	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
+		? ctx.toolManager.resolveToolExtensionPath("task_create", "extension.ts")
+		: undefined;
+	// Fixed compatibility path only when no manager exists.
 	return path.join(TOOLS_DIR, "tasks", "extension.ts");
 }
 
+function resolveTeamToolsExtPath(ctx: PipelineContext): string | undefined {
+	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
+		? ctx.toolManager.resolveToolExtensionPath("team_spawn", "extension.ts")
+		: undefined;
+	return path.join(TOOLS_DIR, "team", "extension.ts");
+}
+
 /** Resolve proposal tools extension path from the winning propose_goal definition. */
-function resolveProposalToolsExtPath(ctx: PipelineContext): string {
-	if (ctx.toolManager) {
-		return ctx.toolManager.resolveToolExtensionPath?.("propose_goal", "extension.ts")
-			?? ctx.toolManager.getExtensionPath("proposals", "extension.ts");
-	}
+function resolveProposalToolsExtPath(ctx: PipelineContext): string | undefined {
+	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
+		? ctx.toolManager.resolveToolExtensionPath("propose_goal", "extension.ts")
+		: undefined;
 	return path.join(TOOLS_DIR, "proposals", "extension.ts");
 }
 
@@ -378,6 +384,8 @@ export interface SessionSetupPlan {
 	effectiveAllowedTools?: EffectiveTool[];
 	/** One discovery snapshot reused for policy/guard generation and Pi argv. */
 	piExtensionActivation?: MarketplacePiExtensionActivation;
+	/** Prompt docs captured from the same immutable tool generation as the guard. */
+	resolvedToolDocs?: string;
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
 
@@ -759,8 +767,14 @@ function _resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): v
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
 		// Add goal tools extension (task + gate management) if not already present.
 		const goalExtPath = resolveGoalToolsExtPath(ctx);
-		if (!plan.bridgeOptions.args.includes(goalExtPath)) {
+		if (goalExtPath && !plan.bridgeOptions.args.includes(goalExtPath)) {
 			plan.bridgeOptions.args.push("--extension", goalExtPath);
+		}
+		if (plan.roleName === "team-lead") {
+			const teamExtPath = resolveTeamToolsExtPath(ctx);
+			if (teamExtPath && !plan.bridgeOptions.args.includes(teamExtPath)) {
+				plan.bridgeOptions.args.push("--extension", teamExtPath);
+			}
 		}
 		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
 	}
@@ -769,7 +783,7 @@ function _resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): v
 	if (plan.assistantType) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
 		const proposalExtPath = resolveProposalToolsExtPath(ctx);
-		if (!plan.bridgeOptions.args.includes(proposalExtPath)) {
+		if (proposalExtPath && !plan.bridgeOptions.args.includes(proposalExtPath)) {
 			plan.bridgeOptions.args.push("--extension", proposalExtPath);
 		}
 	}
@@ -893,6 +907,17 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 	}
 }
 
+function resolvePromptToolDocs(plan: SessionSetupPlan, ctx: PipelineContext): string | undefined {
+	if (plan.resolvedToolDocs !== undefined) return plan.resolvedToolDocs;
+	if (!ctx.toolManager || typeof ctx.toolManager.getToolDocsForPrompt !== "function") return undefined;
+	plan.resolvedToolDocs = ctx.toolManager.getToolDocsForPrompt(
+		plan.effectiveAllowedTools?.map((tool) => tool.name),
+		bobbitStateDir(),
+		scopedToolContext(plan.projectId, plan.cwd),
+	);
+	return plan.resolvedToolDocs;
+}
+
 /** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
 export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	return profile("resolvePrompt", () => _resolvePrompt(plan, ctx));
@@ -984,6 +1009,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			rolePrompt: assistantRolePrompt,
 			roleName: resolvedRoleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
+			toolDocs: resolvePromptToolDocs(plan, ctx),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
 		});
@@ -1013,6 +1039,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			rolePrompt: plan.rolePrompt,
 			roleName: plan.roleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
+			toolDocs: resolvePromptToolDocs(plan, ctx),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
 		});
@@ -1068,6 +1095,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			taskSpec,
 			taskDependsOn,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
+			toolDocs: resolvePromptToolDocs(plan, ctx),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			nestingContext,
@@ -1305,6 +1333,17 @@ function resolveToolConfiguration(plan: SessionSetupPlan, ctx: PipelineContext):
 	else resolve();
 }
 
+async function withSessionToolGeneration(
+	ctx: PipelineContext,
+	operation: () => Promise<void>,
+): Promise<void> {
+	if (ctx.toolManager && typeof ctx.toolManager.withToolReadGeneration === "function") {
+		await ctx.toolManager.withToolReadGeneration(operation);
+	} else {
+		await operation();
+	}
+}
+
 // ── Executors ──────────────────────────────────────────────────────────────
 
 /**
@@ -1319,42 +1358,44 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		plan.bridgeOptions.env,
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
-	resolveGoalExtensions(plan, ctx);
 	resolvePiExtensions(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
-	resolveToolConfiguration(plan, ctx);
-	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
+	await withSessionToolGeneration(ctx, async () => {
+		resolveGoalExtensions(plan, ctx);
+		resolveToolConfiguration(plan, ctx);
+		recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
-	// Step 6: sandbox wiring (needs final CWD)
-	if (plan.sandboxed) {
-		// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
-		if (ctx.sandboxManager && plan.projectId) {
-			await ctx.sandboxManager.ensureForProject(plan.projectId);
-		}
-		const preSandboxCwd = plan.bridgeOptions.cwd;
-		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
-				projectId: plan.projectId,
-				// Effective goal (own goal else team/parent goal) so sandbox token
-				// scoping and the container-worktree goalProvisioned dispatch resolve
-				// the SAME inherited metadata for members/delegates as for the lead.
-				goalId: effectiveGoalId(plan),
-				sandboxBranch: plan.sandboxBranch,
-				sandboxBaseBranch: plan.sandboxBaseBranch,
-				sandboxCwdOffset: plan.sandboxCwdOffset,
-			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
-		).then(applied => {
-			if (!applied) throw new Error("Sandbox is not configured as docker");
-		});
+		// Step 6: sandbox wiring (needs final CWD)
+		if (plan.sandboxed) {
+			// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
+			if (ctx.sandboxManager && plan.projectId) {
+				await ctx.sandboxManager.ensureForProject(plan.projectId);
+			}
+			const preSandboxCwd = plan.bridgeOptions.cwd;
+			await withRetry(
+				() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
+					projectId: plan.projectId,
+					// Effective goal (own goal else team/parent goal) so sandbox token
+					// scoping and the container-worktree goalProvisioned dispatch resolve
+					// the SAME inherited metadata for members/delegates as for the lead.
+					goalId: effectiveGoalId(plan),
+					sandboxBranch: plan.sandboxBranch,
+					sandboxBaseBranch: plan.sandboxBaseBranch,
+					sandboxCwdOffset: plan.sandboxCwdOffset,
+				}),
+				{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
+			).then(applied => {
+				if (!applied) throw new Error("Sandbox is not configured as docker");
+			});
 
-		// Sandbox wiring may remap CWD to a container-internal path (e.g. /workspace-wt/<branch>).
-		// Re-assemble the prompt so the Working Directory section matches the actual --cwd.
-		if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
-			plan.cwd = plan.bridgeOptions.cwd;
-			resolvePrompt(plan, ctx);
+			// Sandbox wiring may remap CWD to a container-internal path (e.g. /workspace-wt/<branch>).
+			// Re-assemble the prompt so the Working Directory section matches the actual --cwd.
+			if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
+				plan.cwd = plan.bridgeOptions.cwd;
+				resolvePrompt(plan, ctx);
+			}
 		}
-	}
+	});
 
 	// Resolve raw last-wins Pi flags only after extensions and sandbox remaps have
 	// assembled the final argv. Invalid/cross-provider tuples fail before the
@@ -1570,45 +1611,47 @@ export async function executeWorktreeAsync(
 		plan.bridgeOptions.env,
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
-	resolveGoalExtensions(plan, ctx);
 	resolvePiExtensions(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
-	resolveToolConfiguration(plan, ctx);
+	await withSessionToolGeneration(ctx, async () => {
+		resolveGoalExtensions(plan, ctx);
+		resolveToolConfiguration(plan, ctx);
 
-	// Sandbox wiring (now with final CWD from worktree)
-	if (plan.sandboxed) {
-		// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
-		if (ctx.sandboxManager && plan.projectId) {
-			await ctx.sandboxManager.ensureForProject(plan.projectId);
-		}
-		const preSandboxCwd = plan.bridgeOptions.cwd;
-		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
-				projectId: plan.projectId,
-				// Effective goal (own goal else team/parent goal) so sandbox token
-				// scoping and the container-worktree goalProvisioned dispatch resolve
-				// the SAME inherited metadata for members/delegates as for the lead.
-				goalId: effectiveGoalId(plan),
-				sandboxBranch: plan.sandboxBranch,
-				sandboxBaseBranch: plan.sandboxBaseBranch,
-				sandboxCwdOffset: plan.sandboxCwdOffset,
-			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
-		).then(applied => {
-			if (!applied) throw new Error("Sandbox is not configured as docker");
-		});
+		// Sandbox wiring (now with final CWD from worktree)
+		if (plan.sandboxed) {
+			// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
+			if (ctx.sandboxManager && plan.projectId) {
+				await ctx.sandboxManager.ensureForProject(plan.projectId);
+			}
+			const preSandboxCwd = plan.bridgeOptions.cwd;
+			await withRetry(
+				() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
+					projectId: plan.projectId,
+					// Effective goal (own goal else team/parent goal) so sandbox token
+					// scoping and the container-worktree goalProvisioned dispatch resolve
+					// the SAME inherited metadata for members/delegates as for the lead.
+					goalId: effectiveGoalId(plan),
+					sandboxBranch: plan.sandboxBranch,
+					sandboxBaseBranch: plan.sandboxBaseBranch,
+					sandboxCwdOffset: plan.sandboxCwdOffset,
+				}),
+				{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
+			).then(applied => {
+				if (!applied) throw new Error("Sandbox is not configured as docker");
+			});
 
-		// Sandbox wiring may remap CWD to a container-internal path.
-		// Update session.cwd so git-status and other host-side operations use the
-		// container-internal path (via docker exec -w <cwd>), and re-assemble the
-		// prompt so the Working Directory section matches the actual --cwd.
-		if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
-			plan.cwd = plan.bridgeOptions.cwd;
-			session.cwd = plan.bridgeOptions.cwd;
-			ctx.store.update(session.id, { cwd: session.cwd });
-			resolvePrompt(plan, ctx);
+			// Sandbox wiring may remap CWD to a container-internal path.
+			// Update session.cwd so git-status and other host-side operations use the
+			// container-internal path (via docker exec -w <cwd>), and re-assemble the
+			// prompt so the Working Directory section matches the actual --cwd.
+			if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
+				plan.cwd = plan.bridgeOptions.cwd;
+				session.cwd = plan.bridgeOptions.cwd;
+				ctx.store.update(session.id, { cwd: session.cwd });
+				resolvePrompt(plan, ctx);
+			}
 		}
-	}
+	});
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
 	// For team-spawned sandboxed sessions, plan.sandboxBranch differs from plan.branch

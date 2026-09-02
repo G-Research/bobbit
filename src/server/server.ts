@@ -10325,8 +10325,9 @@ async function handleApiRoute(
 				diagnostics.push(row);
 			}
 		};
-		add(toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>>);
-		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>> | undefined);
+		add(toolManager.getToolDiagnostics("server") as unknown as Array<Record<string, unknown>>);
+		add(configCascade.getToolDiagnostics(projectId) as unknown as Array<Record<string, unknown>>);
+		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics("project") as unknown as Array<Record<string, unknown>> | undefined);
 		return diagnostics;
 	};
 	const attachToolDiagnostics = (tools: Array<Record<string, unknown>>, diagnostics: Array<Record<string, unknown>>): void => {

@@ -5781,33 +5781,26 @@ export class SessionManager {
 		}
 	}
 
-	/** Resolve goal tools extension from the session project's winning task_create definition. */
-	private getGoalToolsExtensionPath(projectId?: string): string {
+	private extensionArgs(...paths: Array<string | undefined>): string[] {
+		return paths.flatMap((extensionPath) => extensionPath ? ["--extension", extensionPath] : []);
+	}
+
+	/** Resolve named extensions only when the winning provider requires one. */
+	private getGoalToolsExtensionPath(projectId?: string): string | undefined {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) {
-			return toolManager.resolveToolExtensionPath?.("task_create", "extension.ts")
-				?? toolManager.getExtensionPath("tasks", "extension.ts");
-		}
+		if (toolManager) return toolManager.resolveToolExtensionPath("task_create", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts");
 	}
 
-	/** Resolve team lead extension from the session project's winning team_spawn definition. */
-	private getTeamLeadExtensionPath(projectId?: string): string {
+	private getTeamLeadExtensionPath(projectId?: string): string | undefined {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) {
-			return toolManager.resolveToolExtensionPath?.("team_spawn", "extension.ts")
-				?? toolManager.getExtensionPath("team", "extension.ts");
-		}
+		if (toolManager) return toolManager.resolveToolExtensionPath("team_spawn", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "team", "extension.ts");
 	}
 
-	/** Resolve proposal tools extension from the session project's winning propose_goal definition. */
-	private getProposalToolsExtensionPath(projectId?: string): string {
+	private getProposalToolsExtensionPath(projectId?: string): string | undefined {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) {
-			return toolManager.resolveToolExtensionPath?.("propose_goal", "extension.ts")
-				?? toolManager.getExtensionPath("proposals", "extension.ts");
-		}
+		if (toolManager) return toolManager.resolveToolExtensionPath("propose_goal", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts");
 	}
 
@@ -13523,10 +13516,10 @@ export class SessionManager {
 		if (ps.goalId && !ps.assistantType) {
 			const isTeamLead = ps.role === "team-lead";
 			if (isTeamLead) {
-				// Team leads need both: team tools + goal tools (tasks/gates)
-				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(ps.projectId), "--extension", this.getGoalToolsExtensionPath(ps.projectId)];
+				// Team leads need both when both winning providers are extensions.
+				bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(ps.projectId), this.getGoalToolsExtensionPath(ps.projectId));
 			} else {
-				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(ps.projectId)];
+				bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(ps.projectId));
 			}
 		}
 
@@ -13534,7 +13527,7 @@ export class SessionManager {
 		if (ps.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
 			const proposalExtPath = this.getProposalToolsExtensionPath(ps.projectId);
-			if (!bridgeOptions.args.includes(proposalExtPath)) {
+			if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
 				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
 		}
@@ -17176,9 +17169,9 @@ export class SessionManager {
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
 			const isTeamLead = replacementSession.role === "team-lead";
 			if (isTeamLead) {
-				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(replacementSession.projectId), "--extension", this.getGoalToolsExtensionPath(replacementSession.projectId)];
+				bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(replacementSession.projectId), this.getGoalToolsExtensionPath(replacementSession.projectId));
 			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(replacementSession.projectId)];
+				bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(replacementSession.projectId));
 			}
 		}
 
@@ -17186,7 +17179,7 @@ export class SessionManager {
 		if (session.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
 			const proposalExtPath = this.getProposalToolsExtensionPath(replacementSession.projectId);
-			if (!bridgeOptions.args.includes(proposalExtPath)) {
+			if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
 				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
 		}
@@ -20135,9 +20128,9 @@ export class SessionManager {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
 				if (isTeamLead) {
-					bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(session.projectId), "--extension", this.getGoalToolsExtensionPath(session.projectId)];
+					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(session.projectId), this.getGoalToolsExtensionPath(session.projectId));
 				} else {
-					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(session.projectId)];
+					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(session.projectId));
 				}
 			}
 
@@ -20145,7 +20138,7 @@ export class SessionManager {
 			if (session.assistantType) {
 				bridgeOptions.args = bridgeOptions.args || [];
 				const proposalExtPath = this.getProposalToolsExtensionPath(session.projectId);
-				if (!bridgeOptions.args.includes(proposalExtPath)) {
+				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
 					bridgeOptions.args.push("--extension", proposalExtPath);
 				}
 			}

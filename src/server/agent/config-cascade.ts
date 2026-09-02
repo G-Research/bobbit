@@ -11,7 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import type { Role, GrantPolicy } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
-import type { ToolInfo } from "./tool-manager.js";
+import { loadValidatedUserTools, type ToolInfo } from "./tool-manager.js";
+import type { ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 import type { BuiltinConfigProvider } from "./builtin-config.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { GroupPolicyProvider } from "./tool-activation.js";
@@ -122,6 +123,7 @@ export class ConfigCascade {
 	 * real home dir (design §3.1/§5.2).
 	 */
 	private globalUserBase: string;
+	private globalUserToolDiagnostics: ToolExtensionDiagnostic[] = [];
 
 	/**
 	 * The first-party pack band root (`resolveBuiltinPacksDir()`). Shipped
@@ -304,6 +306,12 @@ export class ConfigCascade {
 
 	resolveTools(projectId?: string): ResolvedItem<ToolInfo>[] {
 		return this.resolveToolsEntries(projectId).map(r => toResolvedItem(r));
+	}
+
+	/** Diagnostics from the shared mutable global-user pre-merge validation. */
+	getToolDiagnostics(projectId?: string): ToolExtensionDiagnostic[] {
+		this.resolveToolsEntries(projectId);
+		return this.globalUserToolDiagnostics.slice();
 	}
 
 	/** Raw resolved tool entries (with origin pack + shadows) — for conflicts. */
@@ -491,14 +499,21 @@ export class ConfigCascade {
 		// it sits above global-user market packs (§3.2) and below the project
 		// segment. Empty today ⇒ byte-identical to the legacy 3-layer merge.
 		pushMarket("global-user");
-		entries.push({
-			id: "user:global-user",
-			kind: "user",
-			scope: "global-user",
-			path: scopePaths("global-user", this.globalUserBase).userPackRoot,
-			readOnly: false,
-			layout: "defaults-tree",
-		});
+		const globalUserRoot = scopePaths("global-user", this.globalUserBase).userPackRoot;
+		if (type === "tools") {
+			const validated = loadValidatedUserTools(path.join(globalUserRoot, "tools"), "global-user");
+			this.globalUserToolDiagnostics = validated.diagnostics;
+			entries.push(layer("user:global-user", "global-user", validated.tools as T[], globalUserRoot));
+		} else {
+			entries.push({
+				id: "user:global-user",
+				kind: "user",
+				scope: "global-user",
+				path: globalUserRoot,
+				readOnly: false,
+				layout: "defaults-tree",
+			});
+		}
 		// Project segment (only when a projectId is specified — system scope omits it).
 		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
