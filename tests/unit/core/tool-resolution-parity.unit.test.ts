@@ -298,51 +298,52 @@ function layerTool(layer: string, policy: ToolDefinition["policy"] = "ask"): Too
 }
 
 describe("tool resolution parity", () => {
-	it("scans each normalized winner source root once per fresh snapshot", () => {
+	it("hydrates authoritative winners without rereading their source root", () => {
 		const fixture = createFixture({ builtinSibling: true });
 		const toolsBase = path.resolve(fixture.builtinConfigDir, "tools");
 		const entries = fixture.cascade.resolveToolsEntries("normal-project");
 		assert.equal(entries.length, 2, "fixture must expose two winners from one source root");
-
-		const aliasedEntries = entries.map((entry, index) => index === 0 ? entry : {
-			...entry,
-			source: {
-				...entry.source,
-				baseDir: `${toolsBase}${path.sep}agent${path.sep}..`,
-			},
-		});
-		fixture.projectManager.setResolvedToolEntriesProvider(() => aliasedEntries);
+		fixture.projectManager.setResolvedToolEntriesProvider(() => entries);
 		__resetToolScanCache();
 
 		const originalReaddirSync = fs.readdirSync.bind(fs);
+		const originalReadFileSync = fs.readFileSync.bind(fs);
 		let sourceRootReads = 0;
+		let sourceYamlReads = 0;
 		const readdirSpy = vi.spyOn(fs, "readdirSync").mockImplementation(((...args: unknown[]) => {
-			if (path.resolve(String(args[0])) === toolsBase) sourceRootReads++;
+			if (path.resolve(String(args[0])).startsWith(toolsBase)) sourceRootReads++;
 			return (originalReaddirSync as (...callArgs: unknown[]) => unknown)(...args);
 		}) as typeof fs.readdirSync);
+		const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((...args: unknown[]) => {
+			const file = path.resolve(String(args[0]));
+			if (file.startsWith(toolsBase) && file.endsWith(".yaml")) sourceYamlReads++;
+			return (originalReadFileSync as (...callArgs: unknown[]) => unknown)(...args);
+		}) as typeof fs.readFileSync);
 		try {
 			assert.deepEqual(
 				fixture.projectManager.getAvailableTools().map((tool) => tool.name).sort(),
 				["session_prompt", "session_status"],
 			);
-			assert.equal(
-				sourceRootReads,
-				2,
-				"one snapshot should fingerprint and scan a shared normalized source root only once",
-			);
+			assert.equal(sourceRootReads, 0, "authoritative hydration must not rescan a winner root");
+			assert.equal(sourceYamlReads, 0, "authoritative hydration must not reread winner or unrelated root YAMLs");
 		} finally {
+			readSpy.mockRestore();
 			readdirSpy.mockRestore();
 		}
 	});
 
 	it("reuses one authoritative snapshot only inside a nest-safe synchronous read generation", () => {
 		const fixture = createFixture({ server: layerTool("server") });
-		const entries = fixture.cascade.resolveToolsEntries("normal-project");
 		let providerCalls = 0;
-		fixture.projectManager.setResolvedToolEntriesProvider(() => {
+		const provider = (): ResolvedEntity<ToolInfo>[] => {
 			providerCalls++;
-			return entries;
-		});
+			const resolved = fixture.cascade.resolveToolsEntries("normal-project");
+			// ConfigCascade binds its normal live provider after resolving. Restore
+			// this counting wrapper so the fixture can assert generation boundaries.
+			fixture.projectManager.setResolvedToolEntriesProvider(provider);
+			return resolved;
+		};
+		fixture.projectManager.setResolvedToolEntriesProvider(provider);
 		__resetToolScanCache();
 
 		fixture.projectManager.withToolReadGenerationSync(() => {
