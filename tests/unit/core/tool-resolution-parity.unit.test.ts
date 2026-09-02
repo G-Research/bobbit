@@ -7,12 +7,16 @@ import path from "node:path";
 import { BuiltinConfigProvider } from "../../../src/server/agent/builtin-config.js";
 import { ConfigCascade } from "../../../src/server/agent/config-cascade.js";
 import type { PackEntry, PackScope, ResolvedEntity } from "../../../src/server/agent/pack-types.js";
+import type { DisabledRefs } from "../../../src/server/agent/project-config-store.js";
 import {
 	computeEffectiveAllowedTools,
 	computeToolActivationArgs,
+	computeToolPolicies,
 	resolveGrantPolicy,
 } from "../../../src/server/agent/tool-activation.js";
+import { generateToolGuardExtension } from "../../../src/server/agent/tool-guard-extension.js";
 import { ToolManager, __resetToolScanCache, type ToolInfo } from "../../../src/server/agent/tool-manager.js";
+import { resolvePackIdentityForTool } from "../../../src/server/extension-host/pack-identity.js";
 
 const cleanupRoots: string[] = [];
 
@@ -30,6 +34,9 @@ interface MarketDefinition {
 	scope: "server" | "global-user" | "project";
 	packName: string;
 	tool: ToolDefinition;
+	defaultDisabled?: boolean;
+	/** Definitions with the same key intentionally occupy one physical pack root. */
+	physicalRootKey?: string;
 }
 
 interface FixtureOptions {
@@ -37,9 +44,10 @@ interface FixtureOptions {
 	server?: ToolDefinition;
 	globalUser?: ToolDefinition;
 	project?: ToolDefinition;
-	builtinPacks?: Array<{ packName: string; tool: ToolDefinition }>;
+	builtinPacks?: Array<{ packName: string; tool: ToolDefinition; defaultDisabled?: boolean }>;
 	market?: MarketDefinition[];
 	disabled?: Record<string, string[]>;
+	activation?: Record<string, DisabledRefs>;
 	builtinSibling?: boolean;
 }
 
@@ -51,6 +59,7 @@ interface Fixture {
 	globalUserBase: string;
 	builtinPacksDir: string;
 	cascade: ConfigCascade;
+	serverManager: ToolManager;
 	projectManager: ToolManager;
 	marketEntries: PackEntry[];
 }
@@ -95,11 +104,12 @@ function writeTool(packRoot: string, definition: ToolDefinition, fileStem = "ses
 	writeFile(path.join(toolDir, "actions.mjs"), "export const actions = { send: () => undefined };\n");
 }
 
-function writePackManifest(packRoot: string, packName: string): void {
+function writePackManifest(packRoot: string, packName: string, defaultDisabled = false): void {
 	writeFile(path.join(packRoot, "pack.yaml"), [
 		`name: ${packName}`,
 		"description: Tool resolution parity fixture",
 		"version: 1.0.0",
+		...(defaultDisabled ? ["defaultDisabled: true"] : []),
 		"contents:",
 		"  roles: []",
 		"  tools: [agent]",
@@ -161,16 +171,24 @@ function createFixture(options: FixtureOptions = {}): Fixture {
 
 	for (const definition of options.builtinPacks ?? []) {
 		const packRoot = path.join(builtinPacksDir, definition.packName);
-		writePackManifest(packRoot, definition.packName);
+		writePackManifest(packRoot, definition.packName, definition.defaultDisabled);
 		writeTool(packRoot, definition.tool);
 	}
 
 	const marketEntries: PackEntry[] = [];
+	const physicalRoots = new Map<string, string>();
 	for (const definition of options.market ?? []) {
-		const packRoot = path.join(root, "installed", definition.scope, "market-packs", definition.packName);
-		writePackManifest(packRoot, definition.packName);
-		writeTool(packRoot, definition.tool);
-		marketEntries.push(marketEntry(packRoot, definition.scope, definition.packName));
+		const physicalKey = definition.physicalRootKey ?? `${definition.scope}:${definition.packName}`;
+		let packRoot = physicalRoots.get(physicalKey);
+		if (!packRoot) {
+			packRoot = path.join(root, "installed", definition.scope, "market-packs", definition.packName);
+			physicalRoots.set(physicalKey, packRoot);
+			writePackManifest(packRoot, definition.packName, definition.defaultDisabled);
+			writeTool(packRoot, definition.tool);
+		}
+		const entry = marketEntry(packRoot, definition.scope, definition.packName);
+		if (definition.defaultDisabled) entry.manifest!.defaultDisabled = true;
+		marketEntries.push(entry);
 	}
 
 	const builtinToolsDir = path.join(builtinConfigDir, "tools");
@@ -207,17 +225,22 @@ function createFixture(options: FixtureOptions = {}): Fixture {
 	);
 	cascade.setPackActivationProvider({
 		disabled(scope, _projectId, packName) {
-			return { tools: options.disabled?.[`${scope}:${packName}`] ?? [] };
+			const key = `${scope}:${packName}`;
+			return options.activation?.[key] ?? { tools: options.disabled?.[key] ?? [] };
 		},
 	});
 
 	// The method is introduced by the authoritative-catalogue implementation.
 	// Keeping this guarded makes the reproducer fail on semantic disagreement,
 	// rather than failing early because the pre-fix branch lacks the new seam.
-	const setProvider = (projectManager as ToolManager & {
+	const projectSetProvider = (projectManager as ToolManager & {
 		setResolvedToolEntriesProvider?: (provider: () => ResolvedEntity<ToolInfo>[]) => void;
 	}).setResolvedToolEntriesProvider;
-	if (setProvider) setProvider.call(projectManager, () => cascade.resolveToolsEntries("normal-project"));
+	if (projectSetProvider) projectSetProvider.call(projectManager, () => cascade.resolveToolsEntries("normal-project"));
+	const serverSetProvider = (serverManager as ToolManager & {
+		setResolvedToolEntriesProvider?: (provider: () => ResolvedEntity<ToolInfo>[]) => void;
+	}).setResolvedToolEntriesProvider;
+	if (serverSetProvider) serverSetProvider.call(serverManager, () => cascade.resolveToolsEntries("headquarters"));
 
 	return {
 		root,
@@ -227,13 +250,18 @@ function createFixture(options: FixtureOptions = {}): Fixture {
 		globalUserBase,
 		builtinPacksDir,
 		cascade,
+		serverManager,
 		projectManager,
 		marketEntries,
 	};
 }
 
-function catalogueEntry(fixture: Fixture, name = "session_prompt"): ResolvedEntity<ToolInfo> {
-	const matches = fixture.cascade.resolveToolsEntries("normal-project")
+function catalogueEntry(
+	fixture: Fixture,
+	name = "session_prompt",
+	projectId = "normal-project",
+): ResolvedEntity<ToolInfo> {
+	const matches = fixture.cascade.resolveToolsEntries(projectId)
 		.filter((entry) => entry.name.toLowerCase() === name.toLowerCase());
 	assert.equal(matches.length, 1, `catalogue must contain one case-insensitive ${name} winner`);
 	return matches[0];
@@ -244,17 +272,30 @@ function expectedToolsBase(entry: ResolvedEntity<ToolInfo>): string {
 	return path.join(entry.origin.path, "tools");
 }
 
+interface RuntimeWinnerOptions {
+	projectId?: string;
+	manager?: ToolManager;
+	expectedSummary?: string;
+}
+
 function assertRuntimeWinner(
 	fixture: Fixture,
 	lookupName: string,
 	message: string,
+	options: RuntimeWinnerOptions = {},
 ): void {
-	const catalogue = catalogueEntry(fixture, lookupName);
-	const runtime = fixture.projectManager.getToolByName(lookupName);
-	const location = fixture.projectManager.resolveToolLocation(lookupName);
-	const provider = fixture.projectManager.getToolProvider(lookupName);
+	const projectId = options.projectId ?? "normal-project";
+	const manager = options.manager ?? fixture.projectManager;
+	const catalogue = catalogueEntry(fixture, lookupName, projectId);
+	const runtime = manager.getToolByName(lookupName);
+	const runtimeEntry = manager.getResolvedToolEntry(lookupName);
+	const location = manager.resolveToolLocation(lookupName);
+	const provider = manager.getToolProvider(lookupName);
+	const providerRow = [...manager.getToolProviders().entries()]
+		.find(([name]) => name.toLowerCase() === lookupName.toLowerCase());
 
 	assert.ok(runtime, `${message}: runtime must resolve the catalogue winner`);
+	assert.ok(runtimeEntry, `${message}: runtime must retain winner provenance`);
 	assert.ok(location, `${message}: runtime must resolve the winner's location`);
 	assert.deepEqual(
 		{
@@ -266,9 +307,17 @@ function assertRuntimeWinner(
 			detailDocs: runtime.detail_docs,
 			params: runtime.params,
 			provider,
+			providerRow: providerRow && {
+				name: providerRow[0],
+				type: providerRow[1].type,
+				extension: providerRow[1].extension,
+				baseDir: path.resolve(providerRow[1].baseDir),
+				groupDir: providerRow[1].groupDir,
+			},
 			baseDir: path.resolve(location.baseDir),
 			groupDir: location.groupDir,
 			rendererFile: location.rendererFile,
+			rendererKind: location.rendererKind,
 			actionsModule: location.actionsModule,
 			actionNames: location.actionNames,
 		},
@@ -281,14 +330,112 @@ function assertRuntimeWinner(
 			detailDocs: catalogue.item.detail_docs,
 			params: catalogue.item.params,
 			provider: { type: "bobbit-extension", extension: `${catalogue.item.name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}-extension.ts` },
+			providerRow: {
+				name: catalogue.item.name,
+				type: "bobbit-extension",
+				extension: `${catalogue.item.name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}-extension.ts`,
+				baseDir: path.resolve(expectedToolsBase(catalogue)),
+				groupDir: "agent",
+			},
 			baseDir: path.resolve(expectedToolsBase(catalogue)),
 			groupDir: "agent",
 			rendererFile: "SessionPromptRenderer.js",
+			rendererKind: catalogue.origin.kind === "market" ? "pack" : "builtin",
 			actionsModule: "actions.mjs",
 			actionNames: ["send"],
 		},
 		message,
 	);
+
+	assert.deepEqual(
+		{
+			origin: {
+				id: runtimeEntry.origin.id,
+				scope: runtimeEntry.origin.scope,
+				kind: runtimeEntry.origin.kind,
+				path: path.resolve(runtimeEntry.origin.path),
+				pack: runtimeEntry.origin.manifest?.name,
+			},
+			source: runtimeEntry.source && {
+				baseDir: path.resolve(runtimeEntry.source.baseDir),
+				filePath: runtimeEntry.source.filePath && path.resolve(runtimeEntry.source.filePath),
+			},
+		},
+		{
+			origin: {
+				id: catalogue.origin.id,
+				scope: catalogue.origin.scope,
+				kind: catalogue.origin.kind,
+				path: path.resolve(catalogue.origin.path),
+				pack: catalogue.origin.manifest?.name,
+			},
+			source: catalogue.source && {
+				baseDir: path.resolve(catalogue.source.baseDir),
+				filePath: catalogue.source.filePath && path.resolve(catalogue.source.filePath),
+			},
+		},
+		`${message}: catalogue and runtime provenance must be identical`,
+	);
+	assert.equal(path.resolve(catalogue.source!.baseDir), path.resolve(expectedToolsBase(catalogue)));
+	assert.equal(
+		path.resolve(catalogue.source!.filePath!),
+		path.resolve(expectedToolsBase(catalogue), "agent", "session_prompt.yaml"),
+		`${message}: provenance must identify the exact winning YAML file`,
+	);
+
+	const promptDocs = manager.getToolDocsForPrompt([lookupName]);
+	assert.match(promptDocs, new RegExp(`\\b${catalogue.item.name}\\b`, "i"));
+	if (options.expectedSummary) assert.ok(promptDocs.includes(options.expectedSummary), `${message}: prompt docs must use the winner summary`);
+
+	const activation = computeToolActivationArgs([{ kind: "yaml", name: lookupName }], manager);
+	const extensionPath = path.resolve(expectedToolsBase(catalogue), "agent", `${catalogue.item.name.toLowerCase()}-extension.ts`);
+	assert.ok(
+		activation.args.some((arg) => path.resolve(arg) === extensionPath),
+		`${message}: activation must load the winner extension`,
+	);
+
+	assert.deepEqual(
+		resolvePackIdentityForTool(manager, catalogue.item.name),
+		{
+			packId: catalogue.origin.kind === "market" ? path.basename(catalogue.origin.path) : "",
+			contributionId: `agent/${catalogue.item.name}`,
+			isPack: catalogue.origin.kind === "market",
+		},
+		`${message}: surface identity must follow the winner location`,
+	);
+}
+
+function generatedGuardMaps(
+	manager: ToolManager,
+	role?: { toolPolicies?: Record<string, "allow" | "ask" | "never"> },
+): { policies: ReturnType<typeof computeToolPolicies>; ask: Record<string, unknown>; never: Record<string, unknown> } {
+	const policies = computeToolPolicies(manager, undefined, role);
+	const source = generateToolGuardExtension("parity-session", policies, []);
+	const readMap = (name: "ask" | "never"): Record<string, unknown> => {
+		const match = source.match(new RegExp(`const ${name}Policies = (.*);`));
+		assert.ok(match, `generated guard must serialize ${name}Policies`);
+		return JSON.parse(match[1]) as Record<string, unknown>;
+	};
+	return { policies, ask: readMap("ask"), never: readMap("never") };
+}
+
+function assertPolicySurfaces(
+	manager: ToolManager,
+	name: string,
+	expected: "allow" | "ask" | "never",
+	role?: { toolPolicies?: Record<string, "allow" | "ask" | "never"> },
+): void {
+	const tool = manager.getToolByName(name);
+	assert.ok(tool);
+	assert.equal(resolveGrantPolicy(name, tool.group, role, manager), expected);
+	const allowed = computeEffectiveAllowedTools(manager, role)
+		.some((entry) => entry.name.toLowerCase() === name.toLowerCase());
+	assert.equal(allowed, expected !== "never", `${name} effective allowlist must follow ${expected}`);
+	const guard = generatedGuardMaps(manager, role);
+	const declaredName = tool.name;
+	assert.equal(guard.policies[declaredName]?.policy, expected);
+	assert.equal(Object.prototype.hasOwnProperty.call(guard.ask, declaredName), expected === "ask");
+	assert.equal(Object.prototype.hasOwnProperty.call(guard.never, declaredName), expected === "never");
 }
 
 function layerTool(layer: string, policy: ToolDefinition["policy"] = "ask"): ToolDefinition {
@@ -301,7 +448,85 @@ function layerTool(layer: string, policy: ToolDefinition["policy"] = "ask"): Too
 	};
 }
 
+interface PrecedenceLayer {
+	label: string;
+	id: string;
+	scope: PackScope;
+	kind: PackEntry["kind"];
+	policy: ToolDefinition["policy"];
+	pack?: string;
+}
+
+const precedenceLayers: readonly PrecedenceLayer[] = [
+	{ label: "monolithic builtin", id: "builtin", scope: "builtin", kind: "builtin", policy: "never" },
+	{ label: "first-party", id: "builtin-pack:first-party", scope: "server", kind: "market", policy: "allow", pack: "first-party" },
+	{ label: "server-market", id: "market:server:server-pack", scope: "server", kind: "market", policy: "ask", pack: "server-pack" },
+	{ label: "server-user", id: "user:server", scope: "server", kind: "user", policy: "allow" },
+	{ label: "global-market", id: "market:global-user:global-pack", scope: "global-user", kind: "market", policy: "ask", pack: "global-pack" },
+	{ label: "global-user", id: "user:global-user", scope: "global-user", kind: "user", policy: "allow" },
+	{ label: "project-market", id: "market:project:project-pack", scope: "project", kind: "market", policy: "ask", pack: "project-pack" },
+	{ label: "project-user", id: "user:project", scope: "project", kind: "user", policy: "allow" },
+] as const;
+
+function fixtureThroughPrecedenceLayer(winnerIndex: number): FixtureOptions {
+	const included = (index: number): boolean => winnerIndex >= index;
+	return {
+		builtin: layerTool(precedenceLayers[0].label, precedenceLayers[0].policy),
+		builtinPacks: included(1)
+			? [{ packName: "first-party", tool: layerTool(precedenceLayers[1].label, precedenceLayers[1].policy) }]
+			: [],
+		market: [
+			...(included(2) ? [{ scope: "server" as const, packName: "server-pack", tool: layerTool(precedenceLayers[2].label, precedenceLayers[2].policy) }] : []),
+			...(included(4) ? [{ scope: "global-user" as const, packName: "global-pack", tool: layerTool(precedenceLayers[4].label, precedenceLayers[4].policy) }] : []),
+			...(included(6) ? [{ scope: "project" as const, packName: "project-pack", tool: layerTool(precedenceLayers[6].label, precedenceLayers[6].policy) }] : []),
+		],
+		server: included(3) ? layerTool(precedenceLayers[3].label, precedenceLayers[3].policy) : undefined,
+		globalUser: included(5) ? layerTool(precedenceLayers[5].label, precedenceLayers[5].policy) : undefined,
+		project: included(7) ? layerTool(precedenceLayers[7].label, precedenceLayers[7].policy) : undefined,
+	};
+}
+
 describe("tool resolution parity", () => {
+	for (const [winnerIndex, winner] of precedenceLayers.entries()) {
+		it(`uses the ${winner.label} definition as the same catalogue and runtime winner`, () => {
+			const fixture = createFixture(fixtureThroughPrecedenceLayer(winnerIndex));
+			const catalogue = catalogueEntry(fixture, "SESSION_PROMPT");
+
+			assert.deepEqual(
+				{
+					name: catalogue.name,
+					description: catalogue.item.description,
+					policy: catalogue.item.grantPolicy,
+					group: catalogue.item.group,
+					originId: catalogue.origin.id,
+					scope: catalogue.origin.scope,
+					kind: catalogue.origin.kind,
+					pack: catalogue.origin.manifest?.name,
+				},
+				{
+					name: "session_prompt",
+					description: `${winner.label} session prompt`,
+					policy: winner.policy,
+					group: `${winner.label} Agent`,
+					originId: winner.id,
+					scope: winner.scope,
+					kind: winner.kind,
+					pack: winner.pack,
+				},
+				`${winner.label} must become the actual authoritative winner`,
+			);
+			assert.deepEqual(
+				catalogue.shadows.map((entry) => entry.id),
+				precedenceLayers.slice(0, winnerIndex).map((entry) => entry.id),
+				`${winner.label} must retain every exact lower-layer provenance record`,
+			);
+			assertRuntimeWinner(fixture, "SeSsIoN_PrOmPt", `${winner.label} full projection parity`, {
+				expectedSummary: `${winner.label} winning summary`,
+			});
+			assertPolicySurfaces(fixture.projectManager, "SESSION_PROMPT", winner.policy);
+		});
+	}
+
 	it("hydrates authoritative winners without rereading their source root", () => {
 		const fixture = createFixture({ builtinSibling: true });
 		const toolsBase = path.resolve(fixture.builtinConfigDir, "tools");
@@ -410,6 +635,69 @@ describe("tool resolution parity", () => {
 		);
 		assertRuntimeWinner(fixture, "session_prompt", "server policy/provider/docs/location must come from one winner");
 		assert.match(fixture.projectManager.getToolDocsForPrompt(["session_prompt"]), /server winning summary/);
+	});
+
+	it("normalizes projectId=headquarters to the server catalogue and runtime winner", () => {
+		const fixture = createFixture({
+			server: layerTool("headquarters-server", "ask"),
+			project: layerTool("headquarters-project-loser", "allow"),
+			market: [{
+				scope: "project",
+				packName: "headquarters-project-pack",
+				tool: layerTool("headquarters-project-market-loser", "allow"),
+			}],
+		});
+		const catalogue = catalogueEntry(fixture, "SESSION_PROMPT", "headquarters");
+
+		assert.equal(catalogue.origin.id, "user:server");
+		assert.equal(catalogue.origin.scope, "server");
+		assert.equal(catalogue.item.description, "headquarters-server session prompt");
+		assert.deepEqual(catalogue.shadows.map((entry) => entry.id), ["builtin"]);
+		assert.ok(
+			!catalogue.shadows.some((entry) => entry.scope === "project"),
+			"Headquarters normalization must omit the project scope rather than shadowing it",
+		);
+		assertRuntimeWinner(fixture, "SeSsIoN_PrOmPt", "Headquarters normalized projection parity", {
+			projectId: "headquarters",
+			manager: fixture.serverManager,
+			expectedSummary: "headquarters-server winning summary",
+		});
+		assertPolicySurfaces(fixture.serverManager, "SESSION_PROMPT", "ask");
+	});
+
+	it("attributes an overlapping physical market root once to the lower server scope", () => {
+		const fixture = createFixture({
+			market: [
+				{
+					scope: "server",
+					packName: "shared-server-pack",
+					physicalRootKey: "self-managed-overlap",
+					tool: layerTool("server-overlap", "ask"),
+				},
+				{
+					scope: "project",
+					packName: "shared-project-alias",
+					physicalRootKey: "self-managed-overlap",
+					tool: layerTool("project-overlap-loser", "allow"),
+				},
+			],
+		});
+		const winners = fixture.cascade.resolveToolsEntries("normal-project")
+			.filter((entry) => entry.name.toLowerCase() === "session_prompt");
+
+		assert.equal(winners.length, 1, "one physical pack root must produce one logical winner");
+		assert.equal(winners[0].origin.id, "market:server:shared-server-pack");
+		assert.equal(winners[0].origin.scope, "server");
+		assert.equal(winners[0].origin.manifest?.name, "shared-server-pack");
+		assert.deepEqual(winners[0].shadows.map((entry) => entry.id), ["builtin"]);
+		assert.ok(
+			!winners[0].shadows.some((entry) => entry.id === "market:project:shared-project-alias"),
+			"the duplicate project attribution must not conflict with itself",
+		);
+		assertRuntimeWinner(fixture, "SESSION_PROMPT", "overlapping self-managed root projection parity", {
+			expectedSummary: "server-overlap winning summary",
+		});
+		assertPolicySurfaces(fixture.projectManager, "session_prompt", "ask");
 	});
 
 	it("uses one mixed-case YAML winner across external fallback, policy, providers, and activation", () => {
@@ -549,23 +837,79 @@ describe("tool resolution parity", () => {
 		);
 	});
 
-	it("reveals the same lower market winner when the higher market definition is disabled", () => {
+	it("reveals the lower winner through every consumer when the higher named market tool is disabled", () => {
 		const fixture = createFixture({
 			market: [
-				{ scope: "server", packName: "low-pack", tool: layerTool("low-market") },
+				{ scope: "server", packName: "low-pack", tool: layerTool("low-market", "ask") },
 				{ scope: "project", packName: "high-pack", tool: layerTool("high-market", "allow") },
 			],
-			disabled: { "project:high-pack": ["session_prompt"] },
+			disabled: { "project:high-pack": ["SeSsIoN_PrOmPt"] },
 		});
 		const catalogue = catalogueEntry(fixture);
+		const highRoot = fixture.marketEntries.find((entry) => entry.id === "market:project:high-pack")!.path;
 
 		assert.equal(catalogue.origin.id, "market:server:low-pack");
 		assert.equal(catalogue.origin.scope, "server");
 		assert.equal(catalogue.origin.kind, "market");
 		assert.equal(catalogue.origin.manifest?.name, "low-pack");
 		assert.deepEqual(catalogue.shadows.map((entry) => entry.id), ["builtin"]);
-		assertRuntimeWinner(fixture, "SESSION_PROMPT", "disabled high market tool must reveal the same lower winner");
+		assertRuntimeWinner(fixture, "SESSION_PROMPT", "disabled high named tool fallback", {
+			expectedSummary: "low-market winning summary",
+		});
 		assert.equal(fixture.projectManager.getToolByName("session_prompt")?.description, "low-market session prompt");
+		assertPolicySurfaces(fixture.projectManager, "SESSION_PROMPT", "ask");
+		assertPolicySurfaces(
+			fixture.projectManager,
+			"session_prompt",
+			"never",
+			{ toolPolicies: { SESSION_PROMPT: "never" } },
+		);
+		const activation = computeToolActivationArgs(
+			[{ kind: "yaml", name: "SESSION_PROMPT" }],
+			fixture.projectManager,
+		);
+		assert.equal(
+			activation.args.some((arg) => path.resolve(arg).startsWith(path.resolve(highRoot))),
+			false,
+			"disabled higher extension must not leak into provider activation",
+		);
+	});
+
+	it("reveals the lower winner through every consumer when a whole first-party pack ships default-disabled", () => {
+		const fixture = createFixture({
+			builtin: layerTool("default-low", "ask"),
+			builtinPacks: [{
+				packName: "default-off-high-pack",
+				tool: layerTool("default-off-high", "allow"),
+				defaultDisabled: true,
+			}],
+		});
+		const catalogue = catalogueEntry(fixture, "SESSION_PROMPT");
+		const highRoot = path.join(fixture.builtinPacksDir, "default-off-high-pack");
+
+		assert.equal(catalogue.origin.id, "builtin");
+		assert.equal(catalogue.origin.scope, "builtin");
+		assert.equal(catalogue.origin.manifest?.name, undefined);
+		assert.deepEqual(catalogue.shadows.map((entry) => entry.id), []);
+		assertRuntimeWinner(fixture, "session_prompt", "default-disabled whole-pack fallback", {
+			expectedSummary: "default-low winning summary",
+		});
+		assertPolicySurfaces(fixture.projectManager, "SESSION_PROMPT", "ask");
+		assertPolicySurfaces(
+			fixture.projectManager,
+			"session_prompt",
+			"never",
+			{ toolPolicies: { session_prompt: "never" } },
+		);
+		const activation = computeToolActivationArgs(
+			[{ kind: "yaml", name: "session_prompt" }],
+			fixture.projectManager,
+		);
+		assert.equal(
+			activation.args.some((arg) => path.resolve(arg).startsWith(path.resolve(highRoot))),
+			false,
+			"default-disabled pack provider must not leak into activation",
+		);
 	});
 
 	it("orders every feasible built-in, market, user, global-user, and project layer once", () => {
