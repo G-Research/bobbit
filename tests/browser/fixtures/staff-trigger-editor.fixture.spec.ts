@@ -1,12 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
-import fs from "node:fs";
 import path from "node:path";
+import { createRunArtifactDirectory } from "../../support/harnesses/shared/run-isolation.js";
 import { buildBundle } from "../../support/helpers/browser/fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const ENTRY = path.resolve("tests/ui-fixtures/staff-trigger-editor-entry.ts");
-const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
-const BUNDLE = path.join(BUNDLE_DIR, "staff-trigger-editor-bundle.js");
+const BUNDLE_DIR = createRunArtifactDirectory("staff-trigger-editor-fixture");
+const BUNDLE = path.join(BUNDLE_DIR, "bundle.js");
 
 async function loadFixture(page: Page): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
@@ -15,7 +15,6 @@ async function loadFixture(page: Page): Promise<void> {
 }
 
 test.beforeAll(() => {
-	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
