@@ -34,7 +34,7 @@ import type { McpToolDef } from "../mcp/mcp-types.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
 	materializeToolExtensionAdapter,
-	toolExtensionTargetIdentity,
+	planToolExtensionTarget,
 	TOOL_EXTENSION_TARGETS_ENV,
 	type ToolExtensionTargetPlan,
 } from "./tool-extension-activation.js";
@@ -1425,17 +1425,7 @@ function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], t
 			return;
 		}
 		try {
-			const identity = toolExtensionTargetIdentity(targetPath);
-			let plan = extensionPlans.get(identity);
-			if (!plan) {
-				plan = { targetPath, targetAliases: [targetPath], allowedToolNames: [] };
-				extensionPlans.set(identity, plan);
-			} else if (!plan.targetAliases?.some((alias) => path.resolve(alias) === path.resolve(targetPath))) {
-				plan.targetAliases = [...(plan.targetAliases ?? []), targetPath];
-			}
-			if (!plan.allowedToolNames.some((name) => name.toLowerCase() === canonicalName.toLowerCase())) {
-				plan.allowedToolNames.push(canonicalName);
-			}
+			planToolExtensionTarget(extensionPlans, targetPath, canonicalName);
 		} catch (error) {
 			activationDiagnostic(targetPath, error);
 		}
