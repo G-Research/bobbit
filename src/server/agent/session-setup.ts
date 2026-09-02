@@ -1295,6 +1295,16 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 	});
 }
 
+function resolveToolConfiguration(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	const resolve = (): void => {
+		resolveTools(plan, ctx);
+		resolvePrompt(plan, ctx);
+		resolveToolActivation(plan, ctx);
+	};
+	if (ctx.toolManager) ctx.toolManager.withToolReadGenerationSync(resolve);
+	else resolve();
+}
+
 // ── Executors ──────────────────────────────────────────────────────────────
 
 /**
@@ -1311,10 +1321,8 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	);
 	resolveGoalExtensions(plan, ctx);
 	resolvePiExtensions(plan, ctx);
-	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
-	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	resolveToolConfiguration(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1564,10 +1572,8 @@ export async function executeWorktreeAsync(
 	);
 	resolveGoalExtensions(plan, ctx);
 	resolvePiExtensions(plan, ctx);
-	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
-	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	resolveToolConfiguration(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
