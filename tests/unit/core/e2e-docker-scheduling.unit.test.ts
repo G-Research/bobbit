@@ -38,15 +38,16 @@ describe("E2E Docker capability and scheduling", () => {
 		}
 	});
 
-	it("runs Group D only after A, B, and C without changing retries or workers", () => {
+	it("runs A → B → cache fan-out → C → D serially without changing retries or workers", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
 		expect(defaultSchedule).toBeDefined();
 
 		const steps = [
 			"await runGroupA(A, coordinatorEnv)",
-			"await runGroupB(B, coordinatorEnv)",
-			"await runGroupC(C, coordinatorEnv)",
+			"await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries)",
+			"fanOutSerialTransformCache(paths.cacheRoot, groupCWorkers, paths.root)",
+			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries)",
 			"await runGroupD(D, { coordinatorEnv })",
 		];
 		let previous = -1;
@@ -55,6 +56,7 @@ describe("E2E Docker capability and scheduling", () => {
 			expect(position, step).toBeGreaterThan(previous);
 			previous = position;
 		}
+		expect(defaultSchedule).toContain("createSerialPlaywrightEnvironment(coordinatorEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
 		expect(defaultSchedule).not.toContain("Promise.all");
 		expect(resolveE2ERetryCount({})).toBe(3);

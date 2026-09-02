@@ -36,23 +36,30 @@
  *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { createCpuSampler } from "./assert-budget.mjs";
-import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
+import {
+	coordinatorTempDirectory,
+	createE2ERunPaths,
+	createIsolatedE2EEnvironment,
+	createPlaywrightE2EInvocation,
+} from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
+import { seedTransformCache } from "./pwtest-cache.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
+const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstrap.cjs");
 
 /**
  * Give the top-level E2E coordinator its own environment before it starts any
- * group. Group B's legacy wrapper receives this environment and allocates a
- * nested root; Groups A/C/D share only this coordinator-owned root.
+ * group. Full runs keep B/C in this root for serial cache reuse; focused B/C
+ * runs retain their legacy nested-wrapper isolation.
  */
 export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
 	const env = createIsolatedE2EEnvironment(paths, inheritedEnv, platform);
@@ -85,6 +92,16 @@ function cleanup(root) {
 /** Copy a fully prepared environment without resurrecting ambient host values. */
 export function composeE2EChildEnvironment(environment, additions = {}, platform = process.platform) {
 	return copyEnvironment(environment, additions, platform);
+}
+
+/** Prepare the trusted run-local environment shared by serial Groups B and C. */
+export function createSerialPlaywrightEnvironment(coordinatorEnv, platform = process.platform) {
+	const nodeOptions = [`--require=${CACHE_BOOTSTRAP}`, coordinatorEnv.NODE_OPTIONS].filter(Boolean).join(" ");
+	return composeE2EChildEnvironment(coordinatorEnv, {
+		BOBBIT_V2_E2E_SERIAL_CACHE: "1",
+		NODE_ENV: "test",
+		NODE_OPTIONS: nodeOptions,
+	}, platform);
 }
 
 /** Remove coordinator cache settings before invoking the nested legacy runner. */
@@ -172,6 +189,26 @@ export function createGroupAInvocation(specs, {
 	execPath,
 } = {}) {
 	return localNodeInvocation(tsxCli, ["--test", `--test-concurrency=${nodeConcurrency}`, ...specs], "tsx CLI", { exists, execPath });
+}
+
+/** Build one shared-root Playwright phase invocation for the serial full suite. */
+export function createSerialPlaywrightPhaseInvocation(specs, {
+	project,
+	workers = 2,
+	retries = 3,
+	outputDir,
+	playwrightCli,
+	exists,
+	execPath,
+} = {}) {
+	const args = [
+		...specs,
+		...(project ? [`--project=${project}`] : []),
+		`--workers=${workers}`,
+		`--retries=${retries}`,
+		`--output=${outputDir}`,
+	];
+	return createPlaywrightE2EInvocation(args, { playwrightCli, exists, execPath });
 }
 
 /** Build Group B's shell-free invocation of the cache-isolating Playwright wrapper. */
@@ -290,6 +327,58 @@ function isRetryFreeQualification(env = process.env) {
 	return resolveE2ERetryCount(env) === 0;
 }
 
+function isStrictChild(root, candidate) {
+	const rel = relative(resolve(root), resolve(candidate));
+	return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith("../") && !rel.startsWith("..\\");
+}
+
+/**
+ * Snapshot B's content-addressed worker caches, then seed their union into
+ * every stable C worker slot. Cache failures are diagnostic-only and degrade
+ * to a cold C transform rather than changing test execution.
+ */
+export function fanOutSerialTransformCache(cacheRoot, targetWorkerCount, runRoot) {
+	const startedAt = performance.now();
+	const result = {
+		enabled: true,
+		sourceSlots: 0,
+		targetSlots: Math.max(0, targetWorkerCount),
+		seedAttempts: 0,
+		seeded: 0,
+		wallMs: 0,
+	};
+	try {
+		if (!isStrictChild(runRoot, cacheRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
+		const sourceNames = readdirSync(cacheRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && /^worker-(?:0|[1-9][0-9]*)$/.test(entry.name))
+			.map((entry) => entry.name)
+			.sort((a, b) => a.localeCompare(b, "en"));
+		result.sourceSlots = sourceNames.length;
+		if (sourceNames.length === 0 || result.targetSlots === 0) return { ...result, wallMs: Math.round(performance.now() - startedAt) };
+
+		const snapshotRoot = join(runRoot, "pwtest-transform-cache-phase-b-snapshot");
+		if (!isStrictChild(runRoot, snapshotRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
+		rmSync(snapshotRoot, { recursive: true, force: true });
+		mkdirSync(snapshotRoot, { recursive: true });
+		const snapshots = [];
+		for (const sourceName of sourceNames) {
+			const snapshot = join(snapshotRoot, sourceName);
+			if (seedTransformCache(join(cacheRoot, sourceName), snapshot)) snapshots.push(snapshot);
+		}
+		for (let index = 0; index < result.targetSlots; index++) {
+			const target = join(cacheRoot, `worker-${index}`);
+			mkdirSync(target, { recursive: true });
+			for (const snapshot of snapshots) {
+				result.seedAttempts++;
+				if (seedTransformCache(snapshot, target)) result.seeded++;
+			}
+		}
+	} catch (error) {
+		console.log(`[e2e-v2] serial transform-cache fan-out skipped (cold C start): ${error?.message ?? error}`);
+	}
+	return { ...result, wallMs: Math.round(performance.now() - startedAt) };
+}
+
 async function runGroupB(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
 	// The legacy wrapper must allocate its own nested Playwright cache rather
@@ -307,9 +396,26 @@ async function runGroupB(specs, coordinatorEnv) {
 	});
 }
 
+async function runSerialGroupB(specs, sharedEnv, paths, workers, retries) {
+	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
+	const invocation = createSerialPlaywrightPhaseInvocation(specs, {
+		workers,
+		retries,
+		outputDir: join(paths.root, "playwright-e2e-results-b"),
+	});
+	return run(invocation.command, invocation.args, {
+		env: composeE2EChildEnvironment(sharedEnv, EXTERNAL_FREE_ENV),
+		label: "B/e2e-relocate",
+	});
+}
+
+function validateGroupC(specs) {
+	return specs.every((spec) => spec.startsWith("tests/e2e/browser/"));
+}
+
 async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	if (!specs.every((spec) => spec.startsWith("tests/e2e/browser/"))) {
+	if (!validateGroupC(specs)) {
 		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
 	}
 
@@ -322,6 +428,25 @@ async function runGroupC(specs, coordinatorEnv) {
 	});
 	const canonical = await run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+		label: "C/canonical-browser",
+	});
+	if (canonical.code !== 0) return canonical;
+	return { label: "C/browser-fidelity", code: 0, wallMs: canonical.wallMs };
+}
+
+async function runSerialGroupC(specs, sharedEnv, paths, workers, retries) {
+	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
+	if (!validateGroupC(specs)) {
+		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
+	}
+	const invocation = createSerialPlaywrightPhaseInvocation(specs, {
+		project: "browser-canonical",
+		workers,
+		retries,
+		outputDir: join(paths.root, "playwright-e2e-results-c"),
+	});
+	const canonical = await run(invocation.command, invocation.args, {
+		env: composeE2EChildEnvironment(sharedEnv, EXTERNAL_FREE_ENV),
 		label: "C/canonical-browser",
 	});
 	if (canonical.code !== 0) return canonical;
@@ -380,6 +505,7 @@ async function main() {
 
 	const only = args.group;
 	const results = [];
+	let serialTransformCache = null;
 	if (only) {
 		// Focused group runs retain their existing single-group behavior.
 		if (only === "A") results.push(await runGroupA(A, coordinatorEnv));
@@ -390,10 +516,15 @@ async function main() {
 		// Hosted runners cannot reliably absorb a second process-heavy coordinator
 		// alongside the gateway/worktree/browser phases. Preserve each group's own
 		// retries and worker controls, but do not overlap their process trees.
-		console.log("[e2e-v2] schedule: A → B → C → D (serialized)");
+		console.log("[e2e-v2] schedule: A → B → C → D (serialized; B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
-		results.push(await runGroupB(B, coordinatorEnv));
-		results.push(await runGroupC(C, coordinatorEnv));
+		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
+		const retries = resolveE2ERetryCount(coordinatorEnv);
+		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
+		const groupCWorkers = resolveE2ePlaywrightWorkers();
+		results.push(await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries));
+		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, groupCWorkers, paths.root);
+		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries));
 		results.push(await runGroupD(D, { coordinatorEnv }));
 	}
 
@@ -411,6 +542,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		dockerCapability,
+		serialTransformCache,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
 		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
 		excluded,
