@@ -6,19 +6,20 @@ import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { PackResolver, ToolLoader } from "./pack-resolver.js";
 import type { EntityType, LoadedEntity, PackEntry, ResolvedEntity } from "./pack-types.js";
-import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { computeRendererKind } from "./tool-contributions.js";
+import {
+	attachToolRuntimeDefinition,
+	getToolRuntimeDefinition,
+	toolRuntimeDefinitionFromData,
+	type ToolProvider,
+	type ToolRuntimeDefinition,
+	type ToolWithRuntimeDefinition,
+} from "./tool-definition.js";
 import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+export type { ToolProvider } from "./tool-definition.js";
 
-export interface ToolProvider {
-	type: 'builtin' | 'bobbit-extension' | 'mcp' | 'pi-extension';
-	tool?: string;       // for builtin
-	extension?: string;  // for bobbit-extension
-	server?: string;     // for mcp
-	mcpTool?: string;    // for mcp
-	providerKey?: string; // for pi-extension
-}
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface ScopedToolContext {
 	projectId?: string;
@@ -75,31 +76,10 @@ export interface InactiveToolContribution {
 	groupDir: string;
 }
 
-/** Base tool definition loaded from YAML */
-interface BaseToolInfo {
-	name: string;
-	description: string;
-	summary?: string;
-	group: string;
-	renderer?: string;
-	docs?: string;
-	detail_docs?: string;
-	provider?: ToolProvider;
-	/** Grant policy loaded from YAML; undefined means "not configured" */
-	grantPolicy?: GrantPolicy;
-	/** Optional positional parameter names (trailing `?` marks optional). Drives compact `(args)` rendering. */
-	params?: string[];
-	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
-	groupDir: string;
-	/** Absolute path to the YAML file on disk. */
-	filePath: string;
-	/** Absolute path to the tools/ parent directory where this tool was found. */
-	baseDir: string;
-	/** Extension-host contribution points parsed from the tool YAML (design §2). */
-	contributions: ToolContributions;
-}
+/** Base tool definition loaded from YAML. */
+type BaseToolInfo = ToolRuntimeDefinition;
 
-export interface ToolInfo {
+export interface ToolInfo extends ToolWithRuntimeDefinition {
 	name: string;
 	description: string;
 	group: string;
@@ -157,15 +137,6 @@ function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" |
 	};
 }
 
-function parseParamsField(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const out: string[] = [];
-	for (const v of value) {
-		if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
-	}
-	return out.length > 0 ? out : undefined;
-}
-
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
@@ -217,22 +188,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 						const data = parse(raw);
 						if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
 							seen.add(data.name.toLowerCase());
-							tools.push({
-								name: data.name,
-								description: data.description || "",
-								summary: data.summary,
-								group: data.group || groupDir,
-								renderer: data.renderer,
-								docs: data.docs,
-								detail_docs: data.detail_docs,
-								provider: data.provider,
-								grantPolicy: data.grantPolicy,
-								params: parseParamsField(data.params),
-								groupDir,
-								filePath,
-								baseDir,
-								contributions: parseContributions(data, filePath),
-							});
+							tools.push(toolRuntimeDefinitionFromData(data, groupDir, groupDir, baseDir, filePath));
 						}
 					} catch (err) {
 						console.error(`[tool-manager] Failed to load tool ${filePath}:`, err);
@@ -252,22 +208,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 				const data = parse(raw);
 				if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
 					seen.add(data.name.toLowerCase());
-					tools.push({
-						name: data.name,
-						description: data.description || "",
-						summary: data.summary,
-						group: data.group || "Other",
-						renderer: data.renderer,
-						docs: data.docs,
-						detail_docs: data.detail_docs,
-						provider: data.provider,
-						grantPolicy: data.grantPolicy,
-						params: parseParamsField(data.params),
-						groupDir: "",
-						filePath,
-						baseDir,
-						contributions: parseContributions(data, filePath),
-					});
+					tools.push(toolRuntimeDefinitionFromData(data, "Other", "", baseDir, filePath));
 				}
 			} catch (err) {
 				console.error(`[tool-manager] Failed to load tool ${entry.name}:`, err);
@@ -623,20 +564,36 @@ export class ToolManager {
 	private hydrateResolvedEntry(
 		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>,
 		sourceBaseDir: string | undefined,
-		candidates: BaseToolInfo[] | undefined,
 	): BaseToolInfo {
-		const identity = entry.name.toLowerCase();
-		if (sourceBaseDir && candidates) {
-			const exactFile = entry.source?.filePath;
-			const hydrated = candidates.find((candidate) =>
-				exactFile ? path.resolve(candidate.filePath) === path.resolve(exactFile) : candidate.name === entry.name,
-			) ?? candidates.find((candidate) => candidate.name.toLowerCase() === identity);
-			if (hydrated) return hydrated;
+		// Production loaders attach the full parsed definition to the exact item
+		// before PackResolver selects its winner. Runtime projections consume that
+		// same parse rather than fingerprinting and parsing the winner's whole root.
+		const embedded = getToolRuntimeDefinition(entry.item);
+		if (embedded) return embedded;
+
+		// Standalone ToolManager adapters already resolve full BaseToolInfo items.
+		const direct = entry.item as Partial<BaseToolInfo>;
+		if (typeof direct.baseDir === "string" && typeof direct.filePath === "string" && direct.contributions) {
+			return direct as BaseToolInfo;
 		}
 
-		// Preloaded adapters used by a few embedders may not have a physical root.
-		// Preserve the authoritative item's catalogue fields without selecting a
-		// different layer; runtime-only provider/contribution data is unavailable.
+		// Compatibility for embedders that provide a source-aware ToolInfo without
+		// symbol metadata: hydrate only the authoritative file, never its root and
+		// never a same-name candidate from another layer.
+		const exactFile = entry.source?.filePath;
+		if (sourceBaseDir && exactFile) {
+			try {
+				const data = parse(fs.readFileSync(exactFile, "utf-8"));
+				if (data && typeof data === "object" && typeof data.name === "string") {
+					const relativeDir = path.relative(sourceBaseDir, path.dirname(exactFile));
+					const groupDir = relativeDir === "" ? "" : relativeDir;
+					return toolRuntimeDefinitionFromData(data, groupDir || "Other", groupDir, sourceBaseDir, exactFile);
+				}
+			} catch { /* preserve the authoritative catalogue item below */ }
+		}
+
+		// Preloaded adapters without a physical file retain catalogue fields. No
+		// alternate file or precedence layer is consulted.
 		const item = entry.item as ToolInfo;
 		return {
 			name: item.name,
@@ -648,7 +605,7 @@ export class ToolManager {
 			grantPolicy: item.grantPolicy,
 			params: item.params,
 			groupDir: "",
-			filePath: entry.source?.filePath ?? "",
+			filePath: exactFile ?? "",
 			baseDir: sourceBaseDir ?? "",
 			contributions: { renderer: item.rendererFile, reserved: {} },
 		};
@@ -679,27 +636,13 @@ export class ToolManager {
 		if (this.toolReadGenerationDepth > 0 && cached?.generation === _toolResolutionGeneration) return cached.value;
 
 		const entries = this.resolvedEntries();
-		const scans = new Map<string, { baseDir: string; tools: BaseToolInfo[] }>();
-		const sources = entries.map((entry) => {
+		const value = entries.map((entry) => {
 			const configuredBaseDir = entry.source?.baseDir
 				|| (entry.origin.path ? path.join(entry.origin.path, "tools") : undefined);
-			if (!configuredBaseDir) return undefined;
-
-			const baseDir = path.resolve(configuredBaseDir);
-			const key = process.platform === "win32" ? baseDir.toLowerCase() : baseDir;
-			let scan = scans.get(key);
-			if (!scan) {
-				scan = { baseDir, tools: scanToolsDirCached(baseDir, baseDir) };
-				scans.set(key, scan);
-			}
-			return scan;
-		});
-
-		const value = entries.map((entry, index) => {
-			const source = sources[index];
+			const sourceBaseDir = configuredBaseDir ? path.resolve(configuredBaseDir) : undefined;
 			return {
 				entry,
-				tool: this.hydrateResolvedEntry(entry, source?.baseDir, source?.tools),
+				tool: this.hydrateResolvedEntry(entry, sourceBaseDir),
 			};
 		});
 		if (this.toolReadGenerationDepth > 0) {
@@ -734,7 +677,7 @@ export class ToolManager {
 	}
 
 	private toolInfoFromBase(tool: BaseToolInfo): ToolInfo {
-		return {
+		return attachToolRuntimeDefinition({
 			name: tool.name,
 			description: tool.description,
 			group: tool.group,
@@ -745,7 +688,7 @@ export class ToolManager {
 			...contributionFields(tool),
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
-		};
+		}, tool);
 	}
 
 	private configGroupHasInvalidExtension(groupDir: string): boolean {
@@ -1046,7 +989,7 @@ export class ToolManager {
 			invalidGroupExtensions.add(diagnostic.groupDir);
 		}
 		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
-		return tools.map((tool) => ({
+		return tools.map((tool) => attachToolRuntimeDefinition({
 			name: tool.name,
 			description: tool.description,
 			group: tool.group,
@@ -1057,7 +1000,7 @@ export class ToolManager {
 			...contributionFields(tool),
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
-		}));
+		}, tool));
 	}
 
 	/** Invalid active config-level tool override diagnostics for this manager's config dir. */

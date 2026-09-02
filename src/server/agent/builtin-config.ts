@@ -19,7 +19,8 @@ import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import type { LoadedEntity } from "./pack-types.js";
-import { parseContributions, computeRendererKind } from "./tool-contributions.js";
+import { computeRendererKind } from "./tool-contributions.js";
+import { attachToolRuntimeDefinition, toolRuntimeDefinitionFromData } from "./tool-definition.js";
 import { isIgnoredToolGroupDir } from "./tool-extension-preflight.js";
 
 // ── Shared parse helpers (single source of truth) ───────────────
@@ -75,28 +76,26 @@ export function parseRolesDir(rolesDir: string): Role[] {
 	return roles;
 }
 
-function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePath: string): ToolInfo {
-	const contributions = parseContributions(data, filePath);
-	return {
-		name: data.name,
-		description: data.description || "",
-		group: data.group || fallbackGroup,
-		docs: data.docs,
-		detail_docs: data.detail_docs,
-		hasRenderer: !!data.renderer,
-		rendererFile: data.renderer,
-		rendererKind: computeRendererKind(baseDir, data.renderer),
-		hasActions: !!contributions.actions,
-		actionNames: contributions.actions?.names,
+function toolInfoFrom(data: any, fallbackGroup: string, groupDir: string, baseDir: string, filePath: string): ToolInfo {
+	const definition = toolRuntimeDefinitionFromData(data, fallbackGroup, groupDir, baseDir, filePath);
+	return attachToolRuntimeDefinition({
+		name: definition.name,
+		description: definition.description,
+		group: definition.group,
+		docs: definition.docs,
+		detail_docs: definition.detail_docs,
+		hasRenderer: !!definition.renderer,
+		rendererFile: definition.renderer,
+		rendererKind: computeRendererKind(baseDir, definition.contributions.renderer),
+		hasActions: !!definition.contributions.actions,
+		actionNames: definition.contributions.actions?.names,
 		// pack-schema-v1 §6.1: a tool YAML carries ONLY the tool-scoped contributions
 		// (renderer + actions). Pack-scoped declarations (panels/entrypoints/routes/
 		// stores) moved off tools to their own pack-level sites and reach the client
 		// through /api/ext/contributions, NOT /api/tools — so nothing else is emitted here.
-		grantPolicy: data.grantPolicy,
-		params: Array.isArray(data.params)
-			? data.params.filter((p: unknown): p is string => typeof p === "string")
-			: undefined,
-	};
+		grantPolicy: definition.grantPolicy,
+		params: definition.params,
+	}, definition);
 }
 
 /**
@@ -133,7 +132,7 @@ export function parseToolEntitiesDir(toolsDir: string): LoadedEntity<ToolInfo>[]
 					seen.add(data.name.toLowerCase());
 					tools.push({
 						name: data.name,
-						item: toolInfoFrom(data, entry.name, toolsDir, filePath),
+						item: toolInfoFrom(data, entry.name, entry.name, toolsDir, filePath),
 						source: { baseDir: toolsDir, filePath },
 					});
 				} catch (err) {
@@ -153,7 +152,7 @@ export function parseToolEntitiesDir(toolsDir: string): LoadedEntity<ToolInfo>[]
 			seen.add(data.name.toLowerCase());
 			tools.push({
 				name: data.name,
-				item: toolInfoFrom(data, "Other", toolsDir, filePath),
+				item: toolInfoFrom(data, "Other", "", toolsDir, filePath),
 				source: { baseDir: toolsDir, filePath },
 			});
 		} catch (err) {

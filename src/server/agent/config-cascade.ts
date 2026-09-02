@@ -18,6 +18,7 @@ import type { GroupPolicyProvider } from "./tool-activation.js";
 import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
+import { getToolRuntimeDefinition } from "./tool-definition.js";
 import { builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { headquartersDir } from "../bobbit-dir.js";
@@ -419,13 +420,21 @@ export class ConfigCascade {
 		getProjectItems: (ctx: import("./project-context.js").ProjectContext) => T[],
 	): ResolvedEntity<T>[] {
 		const wrap = (items: T[], rootPath: string): LoadedEntity<unknown>[] =>
-			items.map(item => ({
-				name: keyFn(item),
-				item,
-				...(type === "tools" && rootPath
-					? { source: { baseDir: path.join(rootPath, "tools") } }
-					: {}),
-			}));
+			items.map(item => {
+				const definition = type === "tools" ? getToolRuntimeDefinition(item) : undefined;
+				return {
+					name: keyFn(item),
+					item,
+					...(type === "tools" && rootPath
+						? {
+							source: {
+								baseDir: definition?.baseDir ?? path.join(rootPath, "tools"),
+								...(definition?.filePath ? { filePath: definition.filePath } : {}),
+							},
+						}
+						: {}),
+				};
+			});
 		const layer = (id: string, scope: PackScope, items: T[], rootPath: string): PackEntry => ({
 			id,
 			kind: scope === "builtin" ? "builtin" : "user",
