@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
-import { withDistServerImportWarmup } from "../../e2e/test-utils/dist-import-lock.js";
+import { withDistServerImportWarmup } from "../../support/harnesses/browser/dist-import-warmup.js";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const HARNESSES = [

@@ -29,7 +29,7 @@ import type { AddressInfo } from "node:net";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
-import { withDistServerImportWarmup } from "./test-utils/dist-import-lock.js";
+import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();

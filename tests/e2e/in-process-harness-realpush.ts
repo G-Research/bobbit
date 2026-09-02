@@ -32,7 +32,7 @@
 import { test as base } from "@playwright/test";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
-import { withDistServerImportWarmup } from "./test-utils/dist-import-lock.js";
+import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { join, resolve } from "node:path";
 import { createRunChild, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 

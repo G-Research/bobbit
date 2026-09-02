@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
+const PROJECT_ROOT = resolve(__dirname, "..", "..", "..", "..");
 const READY_CONTENT = "dist-server-imports-ready-v1\n";
 const LOCK_STALE_MS = 45_000;
 const LOCK_WAIT_MS = 25;
