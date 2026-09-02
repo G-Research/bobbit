@@ -335,6 +335,49 @@ describe("tool resolution parity", () => {
 		}
 	});
 
+	it("reuses one authoritative snapshot only inside a nest-safe synchronous read generation", () => {
+		const fixture = createFixture({ server: layerTool("server") });
+		const entries = fixture.cascade.resolveToolsEntries("normal-project");
+		let providerCalls = 0;
+		fixture.projectManager.setResolvedToolEntriesProvider(() => {
+			providerCalls++;
+			return entries;
+		});
+		__resetToolScanCache();
+
+		fixture.projectManager.withToolReadGenerationSync(() => {
+			assert.equal(fixture.projectManager.getToolByName("SESSION_PROMPT")?.grantPolicy, "ask");
+			fixture.projectManager.withToolReadGenerationSync(() => {
+				assert.equal(fixture.projectManager.getToolProvider("session_prompt")?.type, "bobbit-extension");
+				assert.equal(fixture.projectManager.resolveToolLocation("session_prompt")?.groupDir, "agent");
+			});
+			assert.equal(fixture.projectManager.getResolvedToolEntry("session_prompt")?.origin.id, "user:server");
+			assert.match(fixture.projectManager.getToolDocsForPrompt(["session_prompt"]), /server winning summary/);
+			assert.equal(fixture.projectManager.getAvailableTools().length, 1);
+		});
+		assert.equal(providerCalls, 1, "nested synchronous projections must resolve authoritative entries once");
+
+		const yamlPath = path.join(fixture.serverConfigDir, "tools", "agent", "session_prompt.yaml");
+		const originalTimes = fs.statSync(yamlPath);
+		writeTool(fixture.serverConfigDir, layerTool("server-updated", "allow"));
+		fs.utimesSync(yamlPath, originalTimes.atime, originalTimes.mtime);
+		fixture.projectManager.withToolReadGenerationSync(() => {
+			assert.equal(fixture.projectManager.getToolByName("session_prompt")?.grantPolicy, "allow");
+		});
+		assert.equal(
+			providerCalls,
+			2,
+			"the next lease must observe changed YAML even when its mtime is restored",
+		);
+
+		assert.throws(() => fixture.projectManager.withToolReadGenerationSync(() => {
+			fixture.projectManager.getAvailableTools();
+			throw new Error("fixture failure");
+		}), /fixture failure/);
+		fixture.projectManager.withToolReadGenerationSync(() => fixture.projectManager.getAvailableTools());
+		assert.equal(providerCalls, 4, "a throwing lease must release its snapshot in finally");
+	});
+
 	it("uses an ordinary server user override as the project catalogue and runtime winner", () => {
 		const fixture = createFixture({ server: layerTool("server") });
 		const builtin = new ToolManager(path.join(fixture.root, "empty"), path.join(fixture.builtinConfigDir, "tools"))

@@ -290,6 +290,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 // of a false miss is one full scan; the cost of a false hit would be a
 // stale tool list, so we err on the side of re-scanning.
 const _scanCache = new Map<string, { fingerprint: string; tools: BaseToolInfo[] }>();
+let _toolResolutionGeneration = 0;
 
 function directoryFingerprint(dir: string): string | undefined {
 	try {
@@ -334,6 +335,7 @@ function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 /** Test/maintenance hook: drop the scan cache. */
 export function __resetToolScanCache(): void {
 	_scanCache.clear();
+	_toolResolutionGeneration++;
 	__resetToolExtensionPreflightDiagnostics();
 }
 
@@ -589,6 +591,14 @@ export class ToolManager {
 	 */
 	private marketRootsProvider?: () => Array<string | MarketToolRoot>;
 	private resolvedToolEntriesProvider?: () => ResolvedEntity<ToolInfo>[];
+	private toolReadGenerationDepth = 0;
+	private hydratedSnapshot?: {
+		generation: number;
+		value: Array<{
+			entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
+			tool: BaseToolInfo;
+		}>;
+	};
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
@@ -602,6 +612,7 @@ export class ToolManager {
 	 */
 	setResolvedToolEntriesProvider(provider: () => ResolvedEntity<ToolInfo>[]): void {
 		this.resolvedToolEntriesProvider = provider;
+		this.hydratedSnapshot = undefined;
 	}
 
 	private resolvedEntries(): Array<ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>> {
@@ -643,11 +654,30 @@ export class ToolManager {
 		};
 	}
 
+	/**
+	 * Reuse one authoritative generation across a bounded synchronous operation.
+	 * Nesting is safe; the outermost caller always drops the lease in `finally`.
+	 * No snapshot survives the operation, so the next read observes live YAML,
+	 * customization, marketplace, and activation state without a TTL.
+	 */
+	withToolReadGenerationSync<T>(operation: () => T): T {
+		this.toolReadGenerationDepth++;
+		try {
+			return operation();
+		} finally {
+			this.toolReadGenerationDepth--;
+			if (this.toolReadGenerationDepth === 0) this.hydratedSnapshot = undefined;
+		}
+	}
+
 	/** One read-consistent, source-aware YAML snapshot. */
 	private resolveHydratedSnapshot(): Array<{
 		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
 		tool: BaseToolInfo;
 	}> {
+		const cached = this.hydratedSnapshot;
+		if (this.toolReadGenerationDepth > 0 && cached?.generation === _toolResolutionGeneration) return cached.value;
+
 		const entries = this.resolvedEntries();
 		const scans = new Map<string, { baseDir: string; tools: BaseToolInfo[] }>();
 		const sources = entries.map((entry) => {
@@ -665,13 +695,17 @@ export class ToolManager {
 			return scan;
 		});
 
-		return entries.map((entry, index) => {
+		const value = entries.map((entry, index) => {
 			const source = sources[index];
 			return {
 				entry,
 				tool: this.hydrateResolvedEntry(entry, source?.baseDir, source?.tools),
 			};
 		});
+		if (this.toolReadGenerationDepth > 0) {
+			this.hydratedSnapshot = { generation: _toolResolutionGeneration, value };
+		}
+		return value;
 	}
 
 	private resolveYamlSnapshot(): BaseToolInfo[] {
@@ -740,6 +774,7 @@ export class ToolManager {
 	 */
 	setMarketToolRootsProvider(provider: () => Array<string | MarketToolRoot>): void {
 		this.marketRootsProvider = provider;
+		this.hydratedSnapshot = undefined;
 	}
 
 	/** Resolve the current ordered market-pack `tools/` roots (low→high), normalized. */
@@ -856,9 +891,11 @@ export class ToolManager {
 		try {
 			if (fs.statSync(configGroup).isDirectory()) {
 				fs.rmSync(configGroup, { recursive: true, force: true });
-				// Invalidate the scan cache (PR #388) so the next read sees the
-				// reverted state on Windows where mtime resolution is coarse.
+				// Invalidate every manager's current work-unit snapshot: a server-level
+				// revert can change the winner of every project manager.
 				_scanCache.delete(this.toolsDir);
+				_toolResolutionGeneration++;
+				this.hydratedSnapshot = undefined;
 				return true;
 			}
 		} catch { /* not found */ }
@@ -1362,11 +1399,12 @@ export class ToolManager {
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(filePath, doc.toString(), "utf-8");
-			// Invalidate the mtime-keyed scan cache. Without this, a PUT followed
-			// by an immediate GET can return stale data on Windows where mtime
-			// resolution is coarse (1–2s) and the directory fingerprint matches
-			// the pre-write state. PR #388 introduced the cache; PUT must drop it.
+			// Invalidate every manager's current work-unit snapshot: a server-level
+			// customization can change the winner of every project manager. The scan
+			// cache is also dropped so same-length writes remain immediately visible.
 			_scanCache.delete(this.toolsDir);
+			_toolResolutionGeneration++;
+			this.hydratedSnapshot = undefined;
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);

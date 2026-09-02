@@ -255,6 +255,11 @@ describe("marketplace pi extension activation args", () => {
 			memoryFs.writeFileSync(extensionPath, "export default function extension() {}\n");
 			const serverManager = realToolManager(`initial-${policy}-server`);
 			const projectManager = realToolManager(`initial-${policy}-project`);
+			let authoritativeProviderCalls = 0;
+			projectManager.setResolvedToolEntriesProvider(() => {
+				authoritativeProviderCalls++;
+				return [];
+			});
 			const scope = scopedToolContext("project-security", cwd);
 			const resolverCalls: Array<{ projectId?: string; cwd?: string; manager?: ToolManager }> = [];
 			const resolver: MarketplacePiExtensionResolver = (receivedScope, selectedManager) => {
@@ -289,6 +294,11 @@ describe("marketplace pi extension activation args", () => {
 
 			await executePlan(plan, initialPipelineContext(projectManager, role, resolver));
 
+			assert.equal(
+				authoritativeProviderCalls,
+				1,
+				"executePlan must share one authoritative YAML generation across allowlist, activation, and guard projections",
+			);
 			assert.deepEqual(resolverCalls, [{ projectId: "project-security", cwd, manager: projectManager }]);
 			assert.ok(bridgeOptions.args.includes(extensionPath), "the discovered Pi extension must reach the initial callable argv");
 			assert.ok(projectManager.getToolByName("pi_dangerous_tool", scope));
