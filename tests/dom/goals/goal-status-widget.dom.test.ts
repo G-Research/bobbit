@@ -331,6 +331,9 @@ describe("GoalStatusWidget fixture", () => {
 			goalState: "complete",
 		});
 
+		const pill = el.querySelector('[data-testid="goal-status-widget-pill"]') as HTMLElement;
+		expect(pill).toBeTruthy();
+		expect(pill.getAttribute("data-awaiting-signoffs")).toBe("false");
 		await openDropdown(el);
 		const dd = dropdown()!;
 		expect(dd.querySelector('[data-testid="goal-widget-completed"]')?.textContent).toContain("Completed");

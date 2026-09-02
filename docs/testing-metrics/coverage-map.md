@@ -12,6 +12,7 @@ Update this map whenever spawned-gateway browser coverage moves to a cheaper lay
 | Add Project and directory selection | `directory-picker.dom.test.ts`, `add-project-flow.fixture.spec.ts`, project preflight gateway tests, and the canonical `project-onboarding-*` journeys. | Canonical onboarding journeys retain routing, assistant creation and persistence boundaries; duplicate `add-project-*` matrices were retired. | Renderer/browser aggregate |
 | Marketplace MCP | `marketplace-mcp-ui.dom.test.ts` owns source and operation UI states; marketplace MCP API/unit tests own backend behavior. | `marketplace-mcp.journey.spec.ts` retains one real browse/install/reload/disable/uninstall lifecycle. | Renderer/browser aggregate |
 | Staff, workflows and subgoals | Staff trigger/sidebar fixtures and unit/gateway tests own editor matrices and eligibility rules. Workflow fixtures, store/validator tests and gateway tests own field mappings. | Small journeys remain where real routing, persistence, worktree setup or reload is the contract. | Browser aggregate |
+| Goal, team, project and session CRUD | Goal metadata conversion and proposal state: `proposal-helpers.unit.test.ts`, `goal-tabs-wiring.fixture.spec.ts`, and goal gateway tests. Dashboard mutations/status/plan: DOM tests plus `goal-team-gates-plan.journey.spec.ts`. Session actions/forking: `session-menu.dom.test.ts`, `session-actions.fixture.spec.ts`, `fork-session-history.fixture.spec.ts`, and `session-lifecycle-api.gateway.test.ts`. Settings matrices: `settings-admin-fixture.fixture.spec.ts`, project-audio DOM tests, and project-config gateway tests. | Ten spawned-gateway tests remain across the five CRUD files: archive/reload, empty-workflow submit guard, browser-authorized goal policy, seeded metadata editing/reload, project sound routing/reload, provisional project assistant routing, delegate-name confirmation, gate badge reload, WebSocket transcript reload, and standard-role picker persistence. | `baseline-unit-browser.json` |
 
 ## September 2026 browser-lane reduction
 
@@ -19,6 +20,7 @@ The canonical-layout cutover temporarily brought the legacy spawned-gateway matr
 
 This reduction:
 
+- reduces the final five spawned-gateway CRUD matrices from 84 discovered tests (83 runnable, one skipped) to 10 focused full-stack smokes; the removed deterministic assertions are mapped to existing cheaper tests, with targeted DOM/fixture assertions added for delegate rendering and registry wiring, no-signoff widget state, and settings controls;
 - deletes legacy journeys only where an exact fixture, DOM, unit, gateway/API, E2E, or consolidated journey replacement exists;
 - moves directory-picker, dashboard mutation, session-loader, marketplace MCP UI, staff-trigger, sidebar action, debug-policy, and subgoal eligibility matrices to cheaper deterministic tests;
 - shrinks broad journeys to a single irreducible full-stack boundary;

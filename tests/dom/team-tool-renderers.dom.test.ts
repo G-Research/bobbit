@@ -6,9 +6,12 @@ __syncBeforeAll(() => __syncCE());
 // (replacing the esbuild file:// bundle) and asserts the same rendered text.
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "lit";
+import { getToolRenderer } from "../../src/ui/tools/index.js";
 import { TeamDismissRenderer } from "../../src/ui/tools/renderers/TeamToolRenderers.js";
+import { DelegateRenderer } from "../../src/ui/tools/renderers/DelegateRenderer.js";
 
 const renderer = new TeamDismissRenderer();
+const delegateRenderer = new DelegateRenderer();
 
 function makeResult(text: string, details?: any, isError = false) {
 	return {
@@ -88,4 +91,53 @@ describe("TeamDismissRenderer", () => {
 			expect(text()).toContain(scenario.retryable ? "Retry may help." : "Do not retry.");
 		});
 	}
+});
+
+describe("DelegateRenderer", () => {
+	it("resolves team_delegate through the production lazy registry mapping", async () => {
+		expect(getToolRenderer("team_delegate")).toBeTruthy();
+		await expect.poll(() => getToolRenderer("team_delegate")?.constructor.name).toBe("DelegateRenderer");
+	});
+
+	it("renders exact single and parallel completion summaries from structured details", () => {
+		container = document.createElement("div");
+		document.body.appendChild(container);
+
+		const single = delegateRenderer.render(
+			{ instructions: "inspect the project" },
+			{
+				role: "toolResult",
+				toolCallId: "delegate-single",
+				toolName: "team_delegate",
+				isError: false,
+				content: [{ type: "text", text: "done" }],
+				details: { delegates: [{ id: "child-a", sessionId: "session-a", instructions: "inspect", status: "completed", durationMs: 1_000 }] },
+				timestamp: 0,
+			} as any,
+			false,
+		);
+		render(single.content, container);
+		expect(text()).toContain("Delegated");
+		expect(text()).toContain("inspect the project");
+
+		const parallel = delegateRenderer.render(
+			{ parallel: [{ instructions: "first" }, { instructions: "second" }], instructions: "" },
+			{
+				role: "toolResult",
+				toolCallId: "delegate-parallel",
+				toolName: "team_delegate",
+				isError: false,
+				content: [{ type: "text", text: "both done" }],
+				details: { delegates: [
+					{ id: "child-a", sessionId: "session-a", instructions: "first", status: "completed", durationMs: 1_000 },
+					{ id: "child-b", sessionId: "session-b", instructions: "second", status: "completed", durationMs: 2_000 },
+				] },
+				timestamp: 0,
+			} as any,
+			false,
+		);
+		render(parallel.content, container);
+		expect(text()).toContain("Delegated to 2 agents");
+		expect(text()).toContain("all completed");
+	});
 });

@@ -32,7 +32,7 @@
 import { test as base } from "@playwright/test";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
-import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
+import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { join, resolve } from "node:path";
 import { createRunChild, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
@@ -130,13 +130,16 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// with scaffolding and produces spurious ENOENT.
 		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
+		// Playwright workers share one transform cache. Let the first worker finish
+		// ordered dist/server imports before siblings begin; after readiness, every
+		// sibling imports concurrently rather than joining an all-worker lock queue.
 		const {
 			setProjectRoot,
 			scaffoldBobbitDir,
 			loadOrCreateToken,
 			createGateway,
 			registerRpcBridgeFactory,
-		} = await withDistServerImportLock(async () => {
+		} = await withDistServerImportWarmup(async () => {
 			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
