@@ -7078,6 +7078,20 @@ export class SessionManager {
 		return { toolManager, groupPolicyStore, toolScope, piExtensionActivation };
 	}
 
+	/**
+	 * Keep every YAML-backed projection in one lifecycle operation on the same
+	 * authoritative catalogue generation. Pi discovery happens before this helper;
+	 * async-local ownership releases the generation on both success and failure.
+	 */
+	private withPreparedToolGeneration<T>(
+		runtime: PreparedScopedToolRuntime,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		return runtime.toolManager
+			? runtime.toolManager.withToolReadGeneration(operation)
+			: operation();
+	}
+
 	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
 		const keys = [
 			`path:${path.resolve(extension.entryPath)}`,
@@ -13512,173 +13526,176 @@ export class SessionManager {
 			}
 		}
 
-		// Restore extension args for goal/team sessions
-		if (ps.goalId && !ps.assistantType) {
-			const isTeamLead = ps.role === "team-lead";
-			if (isTeamLead) {
-				// Team leads need both when both winning providers are extensions.
-				bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(ps.projectId), this.getGoalToolsExtensionPath(ps.projectId));
-			} else {
-				bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(ps.projectId));
-			}
-		}
-
-		// Restore proposal tools extension for assistant sessions
-		if (ps.assistantType) {
-			bridgeOptions.args = bridgeOptions.args || [];
-			const proposalExtPath = this.getProposalToolsExtensionPath(ps.projectId);
-			if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-				bridgeOptions.args.push("--extension", proposalExtPath);
-			}
-		}
-
-		// Restore tool activation. Roleless normal sessions still use the general
-		// role so Bobbit extension tools and group policies are restored.
-		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
-		const overrideGrantedTools: string[] | undefined = (ps as any)._overrideGrantedTools;
-		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
-		// from absent (`undefined` = fall back to role defaults). Only a missing /
-		// non-array value falls back; `[]` must survive restore so a restricted
-		// session (e.g. allowlist emptied by bobbit.disabledTools) does not silently
-		// re-acquire role-default tools on restart.
-		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
-		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
-		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
-		// Cold restore must discover project Pi tools before tagging persisted names,
-		// computing role policy, or assembling prompt documentation.
+		// Cold restore must discover project Pi tools before capturing the immutable
+		// YAML generation shared by extension, policy, guard, provider, and prompt reads.
 		const restoredToolRuntime = this.prepareScopedToolRuntime(ps.projectId, ps.cwd);
 		if (restoredToolRuntime.toolManager) bridgeOptions.toolManager = restoredToolRuntime.toolManager;
-		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
-			? tagAllowedTools(overrideAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
-			: persistedAllowedTools
-				? tagAllowedTools(persistedAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
-				: this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd, restoredToolRuntime);
-		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
-		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
-		// consistent with what buildToolActivationArgs actually activates.
-		const restoreEffectiveGoalId = ps.goalId ?? ps.teamGoalId;
-		const restoreDisabled = this.disabledToolsForGoal(restoreEffectiveGoalId, ps.projectId);
-		// Per-goal prompt section ordering (bobbit.promptSectionOrder) for the
-		// session's EFFECTIVE goal — mirrors session-setup's initial-setup path so
-		// a restored session keeps its goal's custom order instead of reverting to
-		// the default after a gateway restart. Undefined ⇒ byte-identical default.
-		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
-		const restoredFiltered = restoreDisabled
-			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
-			: effectiveAllowed;
-		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
-		// distinction. A genuinely unrestricted session (role-less / no
-		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
-		// to `[]` and must map to `undefined` (all tools). But when there WAS an
-		// explicit allowlist source — a persisted/override `[]`, or an allowlist
-		// `bobbit.disabledTools` removed entirely — `restoredFiltered` is `[]` and
-		// must stay `[]` (NO tools); never collapse it to `undefined`, which would
-		// re-grant every tool on restart.
-		const restoredAllowedTools: EffectiveTool[] | undefined =
-			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
-		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime);
-		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
-
-		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
-		if (assistantDef) {
-			// Mirror the spawn path (session-setup.ts): the backing role's template
-			// is rendered as its OWN dedicated "Role" section via rolePrompt/roleName
-			// below — NOT folded into the Goal section — so restored assistant
-			// sessions keep the same Role/Goal split as freshly-spawned ones.
-			const assistantRoleName = assistantRoleForType(ps.assistantType);
-			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleName, ps.projectId);
-			const assistantRolePrompt = assistantTemplate
-				? assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`)
-				: undefined;
-			let assistantGoalSpec = assistantDef.prompt;
-			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
-				// Inject re-attempt context if this is a re-attempt session
-				if (ps.reattemptGoalId) {
-					const origGoal = this.resolveGoal(ps.reattemptGoalId);
-					if (origGoal) {
-						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
-					}
+		const restoredAllowedNames = await this.withPreparedToolGeneration(restoredToolRuntime, async () => {
+			// Restore extension args for goal/team sessions
+			if (ps.goalId && !ps.assistantType) {
+				const isTeamLead = ps.role === "team-lead";
+				if (isTeamLead) {
+					// Team leads need both when both winning providers are extensions.
+					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(ps.projectId), this.getGoalToolsExtensionPath(ps.projectId));
+				} else {
+					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(ps.projectId));
 				}
 			}
-			if (ps.assistantType === "support") {
-				assistantGoalSpec = assistantGoalSpec
-					.replaceAll("{{BOBBIT_DOCS_DIR}}", resolveBundledDocsDir())
-					.replaceAll("{{BOBBIT_SRC_DIR}}", resolveBundledSrcDir());
+
+			// Restore proposal tools extension for assistant sessions
+			if (ps.assistantType) {
+				bridgeOptions.args = bridgeOptions.args || [];
+				const proposalExtPath = this.getProposalToolsExtensionPath(ps.projectId);
+				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
+					bridgeOptions.args.push("--extension", proposalExtPath);
+				}
 			}
-			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 
-			const promptPath = this.assemblePrompt(ps.id, {
-				// Restore/respawn path: keep the global base prompt so it reaches
-				// restored assistant sessions.
-				baseSystemPromptPath: this.systemPromptPath,
-				cwd: ps.cwd,
-				goalSpec: assistantGoalSpec,
-				goalTitle: assistantDef.promptTitle,
-				goalState: "active",
-				rolePrompt: assistantRolePrompt,
-				roleName: assistantRoleName,
-				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
-				sectionOrder: restoreSectionOrder,
-			}, ps.projectId);
-			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		} else if (ps.delegateOf && !ps.goalId) {
-			// Delegate restore: rebuild the system prompt from durable instructions +
-			// context — the delegate's equivalent of a worker task spec. Use the Task
-			// fields so restored delegates and prompt-section reconstruction agree.
-			const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
-				cwd: ps.cwd,
-				// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
-				// delegates whose cwd is container-internal.
-				projectRoot: ps.repoPath,
-				instructions: ps.instructions || "",
-				context: ps.context,
-				allowedTools: restoredAllowedNames,
-				sectionOrder: restoreSectionOrder,
-				// Re-attach a role-carrying delegate's prompt on restart (rolePrompt is
-				// not persisted). Role-less delegates leave it undefined — unchanged.
-				role: ps.role,
-				projectId: ps.projectId,
-				goalId: ps.teamGoalId,
-				sessionId: ps.id,
-			}), ps.projectId);
-			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		} else {
-			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
+			// Restore tool activation. Roleless normal sessions still use the general
+			// role so Bobbit extension tools and group policies are restored.
+			const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
+			const overrideGrantedTools: string[] | undefined = (ps as any)._overrideGrantedTools;
+			// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
+			// from absent (`undefined` = fall back to role defaults). Only a missing /
+			// non-array value falls back; `[]` must survive restore so a restricted
+			// session (e.g. allowlist emptied by bobbit.disabledTools) does not silently
+			// re-acquire role-default tools on restart.
+			const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
+			const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
+			const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
+			const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
+				? tagAllowedTools(overrideAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
+				: persistedAllowedTools
+					? tagAllowedTools(persistedAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
+					: this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd, restoredToolRuntime);
+			// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
+			// restored allowlist so the prompt tool-docs + persisted allowedTools stay
+			// consistent with what buildToolActivationArgs actually activates.
+			const restoreEffectiveGoalId = ps.goalId ?? ps.teamGoalId;
+			const restoreDisabled = this.disabledToolsForGoal(restoreEffectiveGoalId, ps.projectId);
+			// Per-goal prompt section ordering (bobbit.promptSectionOrder) for the
+			// session's EFFECTIVE goal — mirrors session-setup's initial-setup path so
+			// a restored session keeps its goal's custom order instead of reverting to
+			// the default after a gateway restart. Undefined ⇒ byte-identical default.
+			const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
+			const restoredFiltered = restoreDisabled
+				? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
+				: effectiveAllowed;
+			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+			// distinction. A genuinely unrestricted session (role-less / no
+			// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
+			// to `[]` and must map to `undefined` (all tools). But when there WAS an
+			// explicit allowlist source — a persisted/override `[]`, or an allowlist
+			// `bobbit.disabledTools` removed entirely — `restoredFiltered` is `[]` and
+			// must stay `[]` (NO tools); never collapse it to `undefined`, which would
+			// re-grant every tool on restart.
+			const restoredAllowedTools: EffectiveTool[] | undefined =
+				(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
+			const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
+			await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
+			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime);
+			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
-			// Re-attach role/staff prompt (lost on restart since rolePrompt isn't
-			// persisted). Staff sessions rebuild the full role context + systemPrompt
-			// + pinned memory via buildStaffSystemPrompt; team agents resolve the role
-			// template. See buildRestoreRolePrompt.
-			const goalSpec = goal?.spec;
-			const { rolePrompt, roleName } = buildRestoreRolePrompt(ps, {
-				goalBranch: goal?.branch,
-				roleManager: this.roleManager,
-				getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
-				resolveTemplate: (rn, pid) => this.resolveRolePromptTemplate(rn, pid),
-				subGoalsEnabled: this.isSubgoalsEnabled,
-			});
+			// Re-assemble system prompt (global + AGENTS.md + goal spec)
+			if (assistantDef) {
+				// Mirror the spawn path (session-setup.ts): the backing role's template
+				// is rendered as its OWN dedicated "Role" section via rolePrompt/roleName
+				// below — NOT folded into the Goal section — so restored assistant
+				// sessions keep the same Role/Goal split as freshly-spawned ones.
+				const assistantRoleName = assistantRoleForType(ps.assistantType);
+				const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleName, ps.projectId);
+				const assistantRolePrompt = assistantTemplate
+					? assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`)
+					: undefined;
+				let assistantGoalSpec = assistantDef.prompt;
+				if (ps.assistantType === "goal") {
+					assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
+					// Inject re-attempt context if this is a re-attempt session
+					if (ps.reattemptGoalId) {
+						const origGoal = this.resolveGoal(ps.reattemptGoalId);
+						if (origGoal) {
+							assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
+						}
+					}
+				}
+				if (ps.assistantType === "support") {
+					assistantGoalSpec = assistantGoalSpec
+						.replaceAll("{{BOBBIT_DOCS_DIR}}", resolveBundledDocsDir())
+						.replaceAll("{{BOBBIT_SRC_DIR}}", resolveBundledSrcDir());
+				}
+				assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 
-			const promptPath = this.assemblePrompt(ps.id, {
-				baseSystemPromptPath: this.systemPromptPath,
-				cwd: ps.cwd,
-				goalTitle: goal?.title,
-				goalState: goal?.state,
-				goalSpec,
-				rolePrompt,
-				roleName,
-				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
-				sectionOrder: restoreSectionOrder,
-			}, ps.projectId);
-			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		}
+				const promptPath = this.assemblePrompt(ps.id, {
+					// Restore/respawn path: keep the global base prompt so it reaches
+					// restored assistant sessions.
+					baseSystemPromptPath: this.systemPromptPath,
+					cwd: ps.cwd,
+					goalSpec: assistantGoalSpec,
+					goalTitle: assistantDef.promptTitle,
+					goalState: "active",
+					rolePrompt: assistantRolePrompt,
+					roleName: assistantRoleName,
+					allowedTools: restoredAllowedNames,
+					projectConfigStore: this.projectConfigStore,
+					sectionOrder: restoreSectionOrder,
+				}, ps.projectId);
+				if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+			} else if (ps.delegateOf && !ps.goalId) {
+				// Delegate restore: rebuild the system prompt from durable instructions +
+				// context — the delegate's equivalent of a worker task spec. Use the Task
+				// fields so restored delegates and prompt-section reconstruction agree.
+				const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
+					cwd: ps.cwd,
+					// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
+					// delegates whose cwd is container-internal.
+					projectRoot: ps.repoPath,
+					instructions: ps.instructions || "",
+					context: ps.context,
+					allowedTools: restoredAllowedNames,
+					sectionOrder: restoreSectionOrder,
+					// Re-attach a role-carrying delegate's prompt on restart (rolePrompt is
+					// not persisted). Role-less delegates leave it undefined — unchanged.
+					role: ps.role,
+					projectId: ps.projectId,
+					goalId: ps.teamGoalId,
+					sessionId: ps.id,
+				}), ps.projectId);
+				if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+			} else {
+				const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
+
+				// Re-attach role/staff prompt (lost on restart since rolePrompt isn't
+				// persisted). Staff sessions rebuild the full role context + systemPrompt
+				// + pinned memory via buildStaffSystemPrompt; team agents resolve the role
+				// template. See buildRestoreRolePrompt.
+				const goalSpec = goal?.spec;
+				const { rolePrompt, roleName } = buildRestoreRolePrompt(ps, {
+					goalBranch: goal?.branch,
+					roleManager: this.roleManager,
+					getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
+					resolveTemplate: (rn, pid) => this.resolveRolePromptTemplate(rn, pid),
+					subGoalsEnabled: this.isSubgoalsEnabled,
+				});
+
+				const promptPath = this.assemblePrompt(ps.id, {
+					baseSystemPromptPath: this.systemPromptPath,
+					cwd: ps.cwd,
+					goalTitle: goal?.title,
+					goalState: goal?.state,
+					goalSpec,
+					rolePrompt,
+					roleName,
+					allowedTools: restoredAllowedNames,
+					projectConfigStore: this.projectConfigStore,
+					sectionOrder: restoreSectionOrder,
+				}, ps.projectId);
+				if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+			}
+			return restoredAllowedNames;
+		});
 
 		// Pin model + thinking level at spawn so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default. A durable
@@ -17115,83 +17132,87 @@ export class SessionManager {
 		// Cold role replacement must discover project Pi tools before policy and
 		// prompt docs. The same snapshot is reused when activation argv is built.
 		const replacementToolRuntime = this.prepareScopedToolRuntime(replacementSession.projectId, replacementSession.cwd);
-		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
-		// session's effective goal so the reassembled prompt, the activation args,
-		// and the persisted allowedTools all agree after a role reassignment.
-		const respawnEffectiveGoalId = replacementSession.goalId ?? replacementSession.teamGoalId;
-		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, replacementSession.projectId);
-		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole, replacementSession.projectId, replacementSession.cwd, replacementToolRuntime);
-		const effectiveAllowed = respawnDisabled
-			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
-			: effectiveAllowedRaw;
-		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
-		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
-		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
-		// role HAD an allowlist that `bobbit.disabledTools` removed entirely,
-		// `effectiveAllowed` is `[]` and must stay `[]` (NO tools) — never
-		// collapse it to `undefined`, which would re-grant every tool on respawn.
-		const respawnAllowed: EffectiveTool[] | undefined =
-			effectiveAllowedRaw.length > 0 ? effectiveAllowed : undefined;
-		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
+		let effectiveAllowedNames: string[] = [];
+		let bridgeOptions!: RpcBridgeOptions;
+		await this.withPreparedToolGeneration(replacementToolRuntime, async () => {
+			// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
+			// session's effective goal so the reassembled prompt, the activation args,
+			// and the persisted allowedTools all agree after a role reassignment.
+			const respawnEffectiveGoalId = replacementSession.goalId ?? replacementSession.teamGoalId;
+			const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, replacementSession.projectId);
+			const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole, replacementSession.projectId, replacementSession.cwd, replacementToolRuntime);
+			const effectiveAllowed = respawnDisabled
+				? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
+				: effectiveAllowedRaw;
+			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+			// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
+			// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
+			// role HAD an allowlist that `bobbit.disabledTools` removed entirely,
+			// `effectiveAllowed` is `[]` and must stay `[]` (NO tools) — never
+			// collapse it to `undefined`, which would re-grant every tool on respawn.
+			const respawnAllowed: EffectiveTool[] | undefined =
+				effectiveAllowedRaw.length > 0 ? effectiveAllowed : undefined;
+			effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
-		// Resolve the role prompt through the shared helper so placeholder
-		// substitution ({{GOAL_BRANCH}}/{{AGENT_ID}}/{{AVAILABLE_ROLES}}) matches
-		// the other regular-session sites (previously passed raw — latent bug).
-		const rolePrompt = resolveRolePrompt(fullRole ?? role, {
-			branch: goal?.branch,
-			agentId: `${role.name}-${(replacementSession.goalId || replacementSession.id).slice(0, 8)}`,
-			roleManager: this.roleManager,
-		});
+			// Resolve the role prompt through the shared helper so placeholder
+			// substitution ({{GOAL_BRANCH}}/{{AGENT_ID}}/{{AVAILABLE_ROLES}}) matches
+			// the other regular-session sites (previously passed raw — latent bug).
+			const rolePrompt = resolveRolePrompt(fullRole ?? role, {
+				branch: goal?.branch,
+				agentId: `${role.name}-${(replacementSession.goalId || replacementSession.id).slice(0, 8)}`,
+				roleManager: this.roleManager,
+			});
 
-		const promptPath = this.assemblePrompt(id, {
-			baseSystemPromptPath: this.systemPromptPath,
-			cwd: replacementSession.cwd,
-			goalTitle: goal?.title,
-			goalState: goal?.state,
-			goalSpec,
-			rolePrompt,
-			roleName: role.name,
-			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
-			projectConfigStore: this.projectConfigStore,
-		});
+			const promptPath = this.assemblePrompt(id, {
+				baseSystemPromptPath: this.systemPromptPath,
+				cwd: replacementSession.cwd,
+				goalTitle: goal?.title,
+				goalState: goal?.state,
+				goalSpec,
+				rolePrompt,
+				roleName: role.name,
+				allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
+				projectConfigStore: this.projectConfigStore,
+			});
 
-		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd, sessionId: id };
-		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
-		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		if (replacementToolRuntime.toolManager) bridgeOptions.toolManager = replacementToolRuntime.toolManager;
-		bridgeOptions.env = {
-			BOBBIT_SESSION_ID: id,
-			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
-		};
-		if (replacementSession.goalId) {
-			bridgeOptions.env.BOBBIT_GOAL_ID = replacementSession.goalId;
-			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
-			const isTeamLead = replacementSession.role === "team-lead";
-			if (isTeamLead) {
-				bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(replacementSession.projectId), this.getGoalToolsExtensionPath(replacementSession.projectId));
-			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(replacementSession.projectId));
+			// Respawn with new system prompt
+			bridgeOptions = { cwd: replacementSession.cwd, sessionId: id };
+			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
+			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+			if (replacementToolRuntime.toolManager) bridgeOptions.toolManager = replacementToolRuntime.toolManager;
+			bridgeOptions.env = {
+				BOBBIT_SESSION_ID: id,
+				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
+			};
+			if (replacementSession.goalId) {
+				bridgeOptions.env.BOBBIT_GOAL_ID = replacementSession.goalId;
+				// Re-attach extensions: team leads need both team + goal tools, others just goal tools
+				const isTeamLead = replacementSession.role === "team-lead";
+				if (isTeamLead) {
+					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(replacementSession.projectId), this.getGoalToolsExtensionPath(replacementSession.projectId));
+				} else if (!bridgeOptions.args?.includes("--extension")) {
+					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(replacementSession.projectId));
+				}
 			}
-		}
 
-		// Re-attach proposal tools extension for assistant sessions
-		if (session.assistantType) {
-			bridgeOptions.args = bridgeOptions.args || [];
-			const proposalExtPath = this.getProposalToolsExtensionPath(replacementSession.projectId);
-			if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-				bridgeOptions.args.push("--extension", proposalExtPath);
+			// Re-attach proposal tools extension for assistant sessions
+			if (session.assistantType) {
+				bridgeOptions.args = bridgeOptions.args || [];
+				const proposalExtPath = this.getProposalToolsExtensionPath(replacementSession.projectId);
+				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
+					bridgeOptions.args.push("--extension", proposalExtPath);
+				}
 			}
-		}
 
-		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
-		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-		await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime);
-		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+			// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
+			// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
+			// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
+			await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime);
+			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		});
 
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
@@ -20102,77 +20123,79 @@ export class SessionManager {
 				BOBBIT_SESSION_ID: id,
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 			};
+			await this.withPreparedToolGeneration(forceAbortToolRuntime, async () => {
 
-			// Force-abort recovery must preserve the original filesystem realm. A
-			// sandbox transcript uses container coordinates; downgrading the replacement
-			// to a host bridge makes the later existence check miss that transcript and
-			// can drain queued intent against empty history. Fail closed instead, leaving
-			// the durable sandbox flag/path intact for a later recovery attempt.
-			if (session.sandboxed) {
-				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
-					projectId: session.projectId,
-					goalId: session.goalId ?? session.teamGoalId,
-					expectedExistingContainerId: adoptedExpectedContainerId,
-					allowLegacyControlMigration: !abortingCanonicalSource,
-					allowMissingRuntimeReplacement: !abortingCanonicalSource,
-				});
-				if (!sandboxApplied) {
-					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
-				}
-			} else {
-				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
-			}
-
-			// Restore goal extension
-			if (session.goalId) {
-				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-				const isTeamLead = session.role === "team-lead";
-				if (isTeamLead) {
-					bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(session.projectId), this.getGoalToolsExtensionPath(session.projectId));
+				// Force-abort recovery must preserve the original filesystem realm. A
+				// sandbox transcript uses container coordinates; downgrading the replacement
+				// to a host bridge makes the later existence check miss that transcript and
+				// can drain queued intent against empty history. Fail closed instead, leaving
+				// the durable sandbox flag/path intact for a later recovery attempt.
+				if (session.sandboxed) {
+					const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
+						projectId: session.projectId,
+						goalId: session.goalId ?? session.teamGoalId,
+						expectedExistingContainerId: adoptedExpectedContainerId,
+						allowLegacyControlMigration: !abortingCanonicalSource,
+						allowMissingRuntimeReplacement: !abortingCanonicalSource,
+					});
+					if (!sandboxApplied) {
+						throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
+					}
 				} else {
-					bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(session.projectId));
+					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 				}
-			}
 
-			// Restore proposal tools extension for assistant sessions
-			if (session.assistantType) {
-				bridgeOptions.args = bridgeOptions.args || [];
-				const proposalExtPath = this.getProposalToolsExtensionPath(session.projectId);
-				if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
-					bridgeOptions.args.push("--extension", proposalExtPath);
+				// Restore goal extension
+				if (session.goalId) {
+					bridgeOptions.env!.BOBBIT_GOAL_ID = session.goalId;
+					const isTeamLead = session.role === "team-lead";
+					if (isTeamLead) {
+						bridgeOptions.args = this.extensionArgs(this.getTeamLeadExtensionPath(session.projectId), this.getGoalToolsExtensionPath(session.projectId));
+					} else {
+						bridgeOptions.args = this.extensionArgs(this.getGoalToolsExtensionPath(session.projectId));
+					}
 				}
-			}
 
-			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
-			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
-			// Derive the effective allowlist from the session/persisted allowlist when
-			// present — NOT from the role alone. A restricted child/delegate (or any
-			// session whose allowlist was narrowed/removed by bobbit.disabledTools)
-			// persists a constrained allowedTools; recomputing from
-			// `resolveEffectiveAllowedTools(role)` would widen it back to the role
-			// default (minus disabled names) on force-abort respawn. Mirrors the
-			// restore path's persisted-allowlist handling.
-			const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
-			// Terminal bookkeeping above has just revoked one-turn grants from the
-			// canonical live allowlist. Prefer that post-terminal value so a stale
-			// persisted snapshot cannot re-grant a spent capability on replacement.
-			const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
-			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
-				? tagAllowedTools(forceAbortAllowedNames, forceAbortToolRuntime.toolManager, forceAbortToolRuntime.toolScope)
-				: this.resolveEffectiveAllowedTools(role, session.projectId, session.cwd, forceAbortToolRuntime);
-			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
-			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
-			// collapse it to `undefined`, which would re-grant every tool. Only a
-			// genuinely unrestricted resolution (role-less ⇒ resolves to `[]`)
-			// collapses to `undefined` (all tools), preserving today's behaviour.
-			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
-				? effective
-				: (effective.length > 0 ? effective : undefined);
-			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime);
-			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+				// Restore proposal tools extension for assistant sessions
+				if (session.assistantType) {
+					bridgeOptions.args = bridgeOptions.args || [];
+					const proposalExtPath = this.getProposalToolsExtensionPath(session.projectId);
+					if (proposalExtPath && !bridgeOptions.args.includes(proposalExtPath)) {
+						bridgeOptions.args.push("--extension", proposalExtPath);
+					}
+				}
+
+				// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
+				const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
+				// Derive the effective allowlist from the session/persisted allowlist when
+				// present — NOT from the role alone. A restricted child/delegate (or any
+				// session whose allowlist was narrowed/removed by bobbit.disabledTools)
+				// persists a constrained allowedTools; recomputing from
+				// `resolveEffectiveAllowedTools(role)` would widen it back to the role
+				// default (minus disabled names) on force-abort respawn. Mirrors the
+				// restore path's persisted-allowlist handling.
+				const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
+				// Terminal bookkeeping above has just revoked one-turn grants from the
+				// canonical live allowlist. Prefer that post-terminal value so a stale
+				// persisted snapshot cannot re-grant a spent capability on replacement.
+				const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
+				const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
+					? tagAllowedTools(forceAbortAllowedNames, forceAbortToolRuntime.toolManager, forceAbortToolRuntime.toolScope)
+					: this.resolveEffectiveAllowedTools(role, session.projectId, session.cwd, forceAbortToolRuntime);
+				// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
+				// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
+				// collapse it to `undefined`, which would re-grant every tool. Only a
+				// genuinely unrestricted resolution (role-less ⇒ resolves to `[]`)
+				// collapses to `undefined` (all tools), preserving today's behaviour.
+				const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
+					? effective
+					: (effective.length > 0 ? effective : undefined);
+				await this.ensureMcpManagerForContext(session.projectId, session.cwd);
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime);
+				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
+				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			});
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
