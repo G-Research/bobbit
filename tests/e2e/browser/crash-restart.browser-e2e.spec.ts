@@ -4,32 +4,33 @@
  * Consolidated from: sidebar-tree-restart, steer-gateway-restart,
  *   bg-process-persistence, preview-durable-restart, etc.
  *
- * Uses the crash()/restart() fixture from gateway-harness.ts.
+ * Uses the crash()/restart() fixture from gateway-harness.ts. Generic durable
+ * state is bundled around two restarts; live reconnect remains covered by the
+ * stories-resilience and background-process persistence journeys.
  */
 import { test, expect, type GatewayInfo } from "../../../tests/support/harnesses/browser/gateway-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, seedTeamLeadHeader, waitForSessionStatus } from "../../../tests/support/harnesses/browser/e2e-setup.js";
 import { openApp, navigateToHash } from "../../../tests/support/helpers/browser/journeys/journey-fixture.js";
-import type { Page } from "@playwright/test";
 
-async function crashAndRestart(gateway: GatewayInfo, _page: Page): Promise<void> {
+async function crashAndRestart(gateway: GatewayInfo): Promise<void> {
 	await gateway.crash();
 	await expect.poll(
 		async () => {
 			try {
-				const r = await apiFetch("/health");
-				return r.status === 200;
+				const response = await apiFetch("/health");
+				return response.status === 200;
 			} catch {
 				return false;
 			}
 		},
-		{ timeout: 20_000, intervals: [250], message: "gateway should recover after restart" },
-	).toBe(false).catch(() => {/* crash was fast */});
+		{ timeout: 20_000, intervals: [250], message: "gateway should stop before restart" },
+	).toBe(false);
 	await gateway.restart();
 	await expect.poll(
 		async () => {
 			try {
-				const r = await apiFetch("/health");
-				return r.status === 200;
+				const response = await apiFetch("/health");
+				return response.status === 200;
 			} catch {
 				return false;
 			}
@@ -37,65 +38,6 @@ async function crashAndRestart(gateway: GatewayInfo, _page: Page): Promise<void>
 		{ timeout: 20_000, intervals: [250], message: "gateway should be healthy after restart" },
 	).toBe(true);
 }
-
-// ── Basic reachability ─────────────────────────────────────────────────────
-
-test.describe("Journey: Crash + Restart — basic", () => {
-	test("app is reachable before crash", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("gateway crash and restart: app recovers and sidebar is visible", async ({ page, gateway }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		await crashAndRestart(gateway, page);
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
-	});
-
-	test("gateway restart: health endpoint recovers", async ({ gateway }) => {
-		await gateway.crash();
-		await gateway.restart();
-		const r = await apiFetch("/health");
-		expect(r.status).toBe(200);
-	});
-});
-
-// ── Session persistence ────────────────────────────────────────────────────
-
-test.describe("Journey: Crash + Restart — session persistence", () => {
-	test("session created before crash is still accessible via API after restart", async ({ gateway }) => {
-		test.slow();
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		await gateway.crash();
-		await gateway.restart();
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(resp.status).toBe(200);
-		const data = await resp.json() as { id: string };
-		expect(data.id).toBe(sessionId);
-		await deleteSession(sessionId).catch(() => {});
-	});
-
-	test("navigating to pre-crash session after restart shows the editor", async ({ page, gateway }) => {
-		test.slow();
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		await openApp(page);
-		await navigateToHash(page, `#/session/${sessionId}`);
-		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-		await crashAndRestart(gateway, page);
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await navigateToHash(page, `#/session/${sessionId}`);
-		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-		const hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(sessionId);
-		await deleteSession(sessionId).catch(() => {});
-	});
-});
-
-// ── Operator pause durability ──────────────────────────────────────────────
 
 async function readGoal(goalId: string): Promise<any> {
 	const response = await apiFetch(`/api/goals/${goalId}`);
@@ -124,152 +66,187 @@ async function spawnChildWithDependencies(
 	return body;
 }
 
-test.describe("Journey: Crash + Restart — operator pause durability", () => {
-	test("operator-paused child with an unmet dependency remains paused in persisted state and dashboard UI after restart", async ({ page, gateway }) => {
+test.describe("Journey: Crash + Restart", () => {
+	test("API state remains durable across a gateway restart", async ({ gateway }) => {
 		test.setTimeout(120_000);
-		const parent = await createGoal({
-			title: `operator pause restart parent ${Date.now()}`,
-			team: false,
-			worktree: false,
-			autoStartTeam: false,
-			subgoalsAllowed: true,
-		});
-		const parentId = parent.id as string;
+		const cleanup = { sessionIds: [] as string[] };
+		let sessionId = "";
 
 		try {
-			// Create the actual dependency through the nested-goal route, then a
-			// dependent sibling. The latter must be scheduler-blocked before the
-			// operator acts; no client-side state is seeded for this regression.
-			await spawnChildWithDependencies(gateway, parentId, "unresolved-dependency");
-			const child = await spawnChildWithDependencies(gateway, parentId, "operator-paused-dependent", ["unresolved-dependency"]);
-			const childId = child.id as string;
-			expect(childId).toBeTruthy();
+			await test.step("create a session and preview mount before crash", async () => {
+				sessionId = await createSession();
+				cleanup.sessionIds.push(sessionId);
+				await waitForSessionStatus(sessionId, "idle");
 
-			await expect.poll(async () => {
-				const goal = await readGoal(childId);
-				return { state: goal.state, paused: goal.paused, dependsOnPlanIds: goal.dependsOnPlanIds };
-			}, { timeout: 20_000, message: "dependent child must be blocked while its sibling dependency is unresolved" }).toEqual({
-				state: "blocked",
-				paused: undefined,
-				dependsOnPlanIds: ["unresolved-dependency"],
+				const patchResponse = await apiFetch(`/api/sessions/${sessionId}`, {
+					method: "PATCH",
+					body: JSON.stringify({ preview: true }),
+				});
+				expect(patchResponse.status).toBe(200);
+				const mountResponse = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+					method: "POST",
+					body: JSON.stringify({ html: "<!DOCTYPE html><body>crash-test</body>", entry: "crash-test.html" }),
+				});
+				expect(mountResponse.status).toBe(200);
+				const mountBody = await mountResponse.json() as { entry: string };
+				expect(mountBody.entry).toBe("crash-test.html");
 			});
 
-			await openApp(page);
-			await navigateToHash(page, `#/goal/${childId}`);
-			const pauseButton = page.getByTestId("goal-pause-btn");
-			await expect(pauseButton).toBeVisible({ timeout: 20_000 });
-			await pauseButton.click();
-			const resumeButton = page.getByTestId("goal-resume-btn");
-			await expect(resumeButton, "the dashboard should immediately render the operator-paused state").toBeVisible({ timeout: 20_000 });
-
-			await expect.poll(async () => {
-				const goal = await readGoal(childId);
-				return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
-			}, { timeout: 20_000, message: "the UI pause must persist operator provenance before restart" }).toEqual({
-				state: "blocked",
-				paused: true,
-				pauseSource: "operator",
-				dependsOnPlanIds: ["unresolved-dependency"],
+			await test.step("crash and restart the gateway in strict order", async () => {
+				await crashAndRestart(gateway);
+				const healthResponse = await apiFetch("/health");
+				expect(healthResponse.status).toBe(200);
 			});
 
-			await crashAndRestart(gateway, page);
-			await page.reload({ waitUntil: "domcontentloaded" });
-			await navigateToHash(page, `#/goal/${childId}`);
-
-			await expect.poll(async () => {
-				const goal = await readGoal(childId);
-				return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
-			}, { timeout: 20_000, message: "restart must retain the operator pause despite its unresolved dependency" }).toEqual({
-				state: "blocked",
-				paused: true,
-				pauseSource: "operator",
-				dependsOnPlanIds: ["unresolved-dependency"],
+			await test.step("session identity remains accessible through the API", async () => {
+				const response = await apiFetch(`/api/sessions/${sessionId}`);
+				expect(response.status).toBe(200);
+				const data = await response.json() as { id: string };
+				expect(data.id).toBe(sessionId);
 			});
-			await expect(page.getByTestId("goal-resume-btn"), "the reloaded dashboard must continue to show the goal as paused").toBeVisible({ timeout: 20_000 });
-			await expect(page.getByTestId("goal-pause-btn")).toHaveCount(0);
+
+			await test.step("preview entry and content hash remain accessible through the API", async () => {
+				const response = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`);
+				expect(response.status).toBe(200);
+				const body = await response.json() as { entry?: string; contentHash?: string };
+				expect(body.entry).toBe("crash-test.html");
+				expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+			});
 		} finally {
-			await deleteGoal(parentId, true);
+			for (const id of cleanup.sessionIds.reverse()) {
+				await deleteSession(id).catch(() => {});
+			}
 		}
 	});
-});
 
-// ── WS reconnect ───────────────────────────────────────────────────────────
+	test("browser and operator-paused state remain durable across a gateway restart", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const cleanup = {
+			sessionIds: [] as string[],
+			goalIds: [] as string[],
+		};
+		const treeStateKey = "bobbit-sidebar-tree-state:v1";
+		let parentId = "";
+		let childId = "";
+		let sessionId = "";
+		let treeStateNodeKey = "";
+		let treeStateBefore: string | null = null;
 
-test.describe("Journey: Crash + Restart — WS reconnect", () => {
-	test("client connectionStatus not broken after crash+restart (app stays usable)", async ({ page, gateway }) => {
-		test.slow();
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		// Verify app is in a working state before crash
-		const statusBefore = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
-		// connectionStatus might be "connected", "reconnecting", or similar — just confirm it's a string
-		expect(typeof statusBefore).toBe("string");
-		await gateway.crash();
-		// Best-effort wait for disconnect (may be instant)
-		await page.waitForFunction(
-			() => { const s = (window as any).bobbitState; return !!s && s.connectionStatus !== "connected"; },
-			undefined,
-			{ timeout: 5_000, polling: 250 },
-		).catch(() => {});
-		await gateway.restart();
-		// After restart, reload so the page cleanly reconnects
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
-		// App should be functional (sidebar visible confirms connection)
-		const statusAfter = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
-		expect(["connected", "reconnecting", "disconnected"]).toContain(statusAfter);
-	});
-});
+		try {
+			await test.step("create a blocked child and persist an operator pause before crash", async () => {
+				const parent = await createGoal({
+					title: `operator pause restart parent ${Date.now()}`,
+					team: false,
+					worktree: false,
+					autoStartTeam: false,
+					subgoalsAllowed: true,
+				});
+				parentId = parent.id as string;
+				cleanup.goalIds.push(parentId);
 
-// ── Preview mount durability ───────────────────────────────────────────────
+				await spawnChildWithDependencies(gateway, parentId, "unresolved-dependency");
+				const child = await spawnChildWithDependencies(gateway, parentId, "operator-paused-dependent", ["unresolved-dependency"]);
+				childId = child.id as string;
+				expect(childId).toBeTruthy();
+				treeStateNodeKey = `sidebar-tree/v1/goal/${childId}`;
 
-test.describe("Journey: Crash + Restart — preview durability", () => {
-	test("preview mount entry is still accessible via API after restart", async ({ gateway }) => {
-		test.slow();
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		const patchResp = await apiFetch(`/api/sessions/${sessionId}`, {
-			method: "PATCH",
-			body: JSON.stringify({ preview: true }),
-		});
-		expect(patchResp.status).toBe(200);
-		const mountResp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
-			method: "POST",
-			body: JSON.stringify({ html: "<!DOCTYPE html><body>crash-test</body>", entry: "crash-test.html" }),
-		});
-		expect(mountResp.status).toBe(200);
-		const mountBody = await mountResp.json() as { entry: string };
-		expect(mountBody.entry).toBe("crash-test.html");
-		await gateway.crash();
-		await gateway.restart();
-		const afterResp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`);
-		expect(afterResp.status).toBe(200);
-		const afterBody = await afterResp.json() as { entry?: string; contentHash?: string };
-		expect(afterBody.entry).toBe("crash-test.html");
-		expect(afterBody.contentHash).toMatch(/^[a-f0-9]{64}$/);
-		await deleteSession(sessionId).catch(() => {});
-	});
-});
+				await expect.poll(async () => {
+					const goal = await readGoal(childId);
+					return { state: goal.state, paused: goal.paused, dependsOnPlanIds: goal.dependsOnPlanIds };
+				}, { timeout: 20_000, message: "dependent child must be blocked while its sibling dependency is unresolved" }).toEqual({
+					state: "blocked",
+					paused: undefined,
+					dependsOnPlanIds: ["unresolved-dependency"],
+				});
 
-// ── Sidebar tree localStorage durability ──────────────────────────────────
+				await openApp(page);
+				await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+				await navigateToHash(page, `#/goal/${childId}`);
+				const pauseButton = page.getByTestId("goal-pause-btn");
+				await expect(pauseButton).toBeVisible({ timeout: 20_000 });
+				await pauseButton.click();
+				await expect(page.getByTestId("goal-resume-btn"), "the dashboard should immediately render the operator-paused state").toBeVisible({ timeout: 20_000 });
 
-test.describe("Journey: Crash + Restart — sidebar tree state", () => {
-	test("sidebar tree localStorage key survives crash+restart+reload", async ({ page, gateway }) => {
-		test.slow();
-		const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		await page.evaluate((key) => {
-			localStorage.setItem(key, JSON.stringify({ expansion: { "test-key": "expanded" } }));
-		}, TREE_STATE_KEY);
-		const before = await page.evaluate((key) => localStorage.getItem(key), TREE_STATE_KEY);
-		expect(before).toBeTruthy();
-		await crashAndRestart(gateway, page);
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
-		const after = await page.evaluate((key) => localStorage.getItem(key), TREE_STATE_KEY);
-		expect(after).toBe(before);
-		const parsed = JSON.parse(after!);
-		expect(parsed.expansion?.["test-key"]).toBe("expanded");
+				await expect.poll(async () => {
+					const goal = await readGoal(childId);
+					return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
+				}, { timeout: 20_000, message: "the UI pause must persist operator provenance before restart" }).toEqual({
+					state: "blocked",
+					paused: true,
+					pauseSource: "operator",
+					dependsOnPlanIds: ["unresolved-dependency"],
+				});
+			});
+
+			await test.step("create a session and prove the pre-crash editor and browser state", async () => {
+				sessionId = await createSession();
+				cleanup.sessionIds.push(sessionId);
+				await waitForSessionStatus(sessionId, "idle");
+				await navigateToHash(page, `#/session/${sessionId}`);
+				await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+				const connectionStatus = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
+				expect(typeof connectionStatus).toBe("string");
+				await page.waitForLoadState("networkidle");
+				await page.evaluate(({ storageKey, nodeKey }) => {
+					const stored = JSON.parse(localStorage.getItem(storageKey) ?? "{\"version\":1,\"expansion\":{}}") as {
+						version: number;
+						expansion: Record<string, "expanded" | "collapsed">;
+						explicitRevealDepthByProject?: Record<string, number>;
+					};
+					stored.version = 1;
+					stored.expansion ??= {};
+					stored.expansion[nodeKey] = "expanded";
+					stored.expansion = Object.fromEntries(Object.entries(stored.expansion).sort(([a], [b]) => a.localeCompare(b)));
+					localStorage.setItem(storageKey, JSON.stringify(stored));
+				}, { storageKey: treeStateKey, nodeKey: treeStateNodeKey });
+				treeStateBefore = await page.evaluate((key) => localStorage.getItem(key), treeStateKey);
+				expect(treeStateBefore).toBeTruthy();
+			});
+
+			await test.step("crash and restart the gateway before reloading the browser", async () => {
+				await crashAndRestart(gateway);
+				await page.reload({ waitUntil: "domcontentloaded" });
+			});
+
+			await test.step("the shell and pre-crash session editor recover after reload", async () => {
+				await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
+				await navigateToHash(page, `#/session/${sessionId}`);
+				await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+				const hash = await page.evaluate(() => window.location.hash);
+				expect(hash).toContain(sessionId);
+				const connectionStatus = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
+				expect(["connected", "reconnecting", "disconnected"]).toContain(connectionStatus);
+			});
+
+			await test.step("the blocked child retains operator pause provenance and Resume UI", async () => {
+				await expect.poll(async () => {
+					const goal = await readGoal(childId);
+					return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
+				}, { timeout: 20_000, message: "restart must retain the operator pause despite its unresolved dependency" }).toEqual({
+					state: "blocked",
+					paused: true,
+					pauseSource: "operator",
+					dependsOnPlanIds: ["unresolved-dependency"],
+				});
+				await navigateToHash(page, `#/goal/${childId}`);
+				await expect(page.getByTestId("goal-resume-btn"), "the reloaded dashboard must continue to show the goal as paused").toBeVisible({ timeout: 20_000 });
+				await expect(page.getByTestId("goal-pause-btn")).toHaveCount(0);
+			});
+
+			await test.step("sidebar tree localStorage state survives restart and reload", async () => {
+				const treeStateAfter = await page.evaluate((key) => localStorage.getItem(key), treeStateKey);
+				expect(treeStateAfter).toBe(treeStateBefore);
+				const parsed = JSON.parse(treeStateAfter!);
+				expect(parsed.expansion?.[treeStateNodeKey]).toBe("expanded");
+			});
+		} finally {
+			for (const id of cleanup.sessionIds.reverse()) {
+				await deleteSession(id).catch(() => {});
+			}
+			for (const id of cleanup.goalIds.reverse()) {
+				await deleteGoal(id, true).catch(() => {});
+			}
+		}
 	});
 });
