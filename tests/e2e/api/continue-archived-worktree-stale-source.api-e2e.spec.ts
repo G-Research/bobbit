@@ -11,8 +11,6 @@ import { dirname, join } from "node:path";
 import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
-test.use({ enableWorktreePool: false });
-
 async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	const ws = await connectWs(id);
 	try {

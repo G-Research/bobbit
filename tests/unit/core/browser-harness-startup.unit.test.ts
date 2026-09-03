@@ -23,6 +23,9 @@ const HARNESSES = [
 ] as const;
 const temporaryRoots: string[] = [];
 const originalBundleSetting = process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE;
+const originalHookProfileDir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+const originalProfileOutput = process.env.BOBBIT_V2_E2E_PROFILE_OUTPUT;
+const originalProfileGroup = process.env.BOBBIT_V2_E2E_PROFILE_GROUP;
 const IN_PROCESS_B = [
 	"api-goal-workflow-edit", "api-goals-spawn-child-route", "archive-dormant-cascade", "base-ref-pin",
 	"continue-archived-multi-repo", "continue-archived-worktree-pool",
@@ -128,6 +131,21 @@ function classifyHarness(file: string): "in-process" | "gateway" | "realpush" | 
 	return "custom";
 }
 
+function workerOption(file: string, option: string): boolean | undefined {
+	const source = readFileSync(resolve(PROJECT_ROOT, file), "utf8");
+	const match = source.match(new RegExp(`\\b${option}\\s*:\\s*(true|false)\\b`));
+	return match ? match[1] === "true" : undefined;
+}
+
+function readJsonLines(file: string): any[] {
+	return readFileSync(file, "utf8").trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+}
+
 async function freshDistRuntime() {
 	vi.resetModules();
 	return import("../../support/harnesses/e2e/dist-server-runtime.js");
@@ -137,8 +155,10 @@ afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) {
 		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
 	}
-	if (originalBundleSetting === undefined) delete process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE;
-	else process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = originalBundleSetting;
+	restoreEnvironment("BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE", originalBundleSetting);
+	restoreEnvironment("BOBBIT_V2_HOOK_PROFILE_DIR", originalHookProfileDir);
+	restoreEnvironment("BOBBIT_V2_E2E_PROFILE_OUTPUT", originalProfileOutput);
+	restoreEnvironment("BOBBIT_V2_E2E_PROFILE_GROUP", originalProfileGroup);
 	vi.resetModules();
 });
 
@@ -269,6 +289,43 @@ describe("browser harness startup", () => {
 		assert.equal(importSpecifiers("tests/e2e/in-process-harness-realpush.ts").some(value => value.includes("dist-server-runtime")), false);
 	});
 
+	it("normalizes the exact Windows Group B worker-mode inventory without false overrides", () => {
+		const groupB = [...discoverTests().e2eGroups.B];
+		const inProcess = groupB.filter(file => classifyHarness(file) === "in-process");
+		const gateway = groupB.filter(file => classifyHarness(file) === "gateway");
+		const custom = groupB.filter(file => classifyHarness(file) === "custom");
+		assert.deepEqual(
+			groupB.filter(file => workerOption(file, "enableWorktreePool") === false),
+			[],
+			"the false fixture default must not create a replacement Windows worker mode",
+		);
+		const modes = {
+			"custom-direct": custom.filter(file => !file.endsWith("/qa-seed.api-e2e.spec.ts")).sort(),
+			"gateway-default": gateway.filter(file => workerOption(file, "enableMcp") !== true).sort(),
+			"gateway-mcp": gateway.filter(file => workerOption(file, "enableMcp") === true).sort(),
+			"in-process-default": inProcess.filter(file => workerOption(file, "enableWorktreePool") !== true).sort(),
+			"in-process-pool": inProcess.filter(file => workerOption(file, "enableWorktreePool") === true).sort(),
+			"qa-seed": custom.filter(file => file.endsWith("/qa-seed.api-e2e.spec.ts")).sort(),
+			realpush: groupB.filter(file => classifyHarness(file) === "realpush").sort(),
+		};
+		assert.deepEqual(Object.keys(modes), [
+			"custom-direct", "gateway-default", "gateway-mcp", "in-process-default", "in-process-pool", "qa-seed", "realpush",
+		]);
+		assert.deepEqual(
+			Object.fromEntries(Object.entries(modes).map(([mode, files]) => [mode, files.length])),
+			{
+				"custom-direct": 4,
+				"gateway-default": 7,
+				"gateway-mcp": 2,
+				"in-process-default": 25,
+				"in-process-pool": 7,
+				"qa-seed": 1,
+				realpush: 1,
+			},
+		);
+		assert.deepEqual(Object.values(modes).flat().sort(), groupB.sort());
+	});
+
 	it("sets isolated roots before eligible loads while focused, realpush, and Group C remain raw", () => {
 		for (const file of ["tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts"]) {
 			const source = readFileSync(resolve(PROJECT_ROOT, file), "utf8");
@@ -304,14 +361,48 @@ describe("browser harness startup", () => {
 		assert.equal(runtime.e2eDistServerRuntimeMode(), "raw");
 	});
 
+	it("profiles only the first bundled runtime evaluation in its PID-owned hook stream", async () => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-e2e-dist-profile-"));
+		temporaryRoots.push(root);
+		const bundle = join(root, "bundle.mjs");
+		const hookDir = join(root, "hooks");
+		writeFileSync(bundle, "export const mode = 'bundle';\n");
+		process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle;
+		process.env.BOBBIT_V2_HOOK_PROFILE_DIR = hookDir;
+		const runtime = await freshDistRuntime();
+
+		const first = await runtime.loadE2EDistServerRuntime(async () => ({ mode: "raw" }));
+		const second = await runtime.loadE2EDistServerRuntime(async () => ({ mode: "raw" }));
+		assert.equal(first, second);
+		const records = readJsonLines(join(hookDir, `gateway-api-${process.pid}.jsonl`));
+		assert.equal(records.length, 1, "memoized reuse must not emit another runtime interval");
+		assert.deepEqual(records[0], {
+			type: "e2e_runtime_load",
+			id: `${process.pid}:e2e-runtime-load`,
+			ownerPid: process.pid,
+			workerStartedAt: records[0].workerStartedAt,
+			bundleIdentity: bundle,
+			mode: "bundle",
+			startedAt: records[0].startedAt,
+			endedAt: records[0].endedAt,
+			durationMs: records[0].durationMs,
+			outcome: "success",
+		});
+		assert.ok(records[0].workerStartedAt <= records[0].startedAt);
+		assert.ok(records[0].endedAt >= records[0].startedAt);
+		assert.ok(records[0].durationMs >= 0);
+	});
+
 	it("rejects missing or failed selected bundles without invoking the raw callback", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bobbit-e2e-dist-loader-"));
 		temporaryRoots.push(root);
 		let rawCalls = 0;
+		process.env.BOBBIT_V2_HOOK_PROFILE_DIR = join(root, "hooks");
 		process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = join(root, "missing.mjs");
 		let runtime = await freshDistRuntime();
 		await assert.rejects(runtime.loadE2EDistServerRuntime(async () => { rawCalls++; return {}; }), /configured prebundle does not exist/);
 		assert.equal(rawCalls, 0, "missing pre-spawn selection must fail rather than mix modes");
+		assert.equal(existsSync(join(root, "hooks", `gateway-api-${process.pid}.jsonl`)), false, "selection errors happen before evaluation");
 
 		const broken = join(root, "broken.mjs");
 		writeFileSync(broken, 'throw new Error("selected bundle evaluation failed");\n');
@@ -320,6 +411,10 @@ describe("browser harness startup", () => {
 		await assert.rejects(runtime.loadE2EDistServerRuntime(async () => { rawCalls++; return {}; }), /selected bundle evaluation failed/);
 		await assert.rejects(runtime.loadE2EDistServerRuntime(async () => { rawCalls++; return {}; }), /selected bundle evaluation failed/);
 		assert.equal(rawCalls, 0, "post-selection evaluation failures must remain fatal and memoized");
+		const records = readJsonLines(join(root, "hooks", `gateway-api-${process.pid}.jsonl`));
+		assert.equal(records.length, 1, "the memoized fatal evaluation must emit one interval");
+		assert.equal(records[0].outcome, "error");
+		assert.equal(records[0].errorName, "Error");
 	});
 
 	it("rejects synthetic mixed-mode workers before loading their second graph", async () => {

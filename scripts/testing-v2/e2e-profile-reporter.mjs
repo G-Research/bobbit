@@ -261,6 +261,63 @@ function childActivity(root) {
 	};
 }
 
+function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts) {
+	const intervals = [];
+	let malformed = 0;
+	const ownerCounts = new Map();
+	for (const record of rawRecords) {
+		const ownerPid = Number(record.ownerPid);
+		const workerStartedAt = Number(record.workerStartedAt);
+		const startedAt = Number(record.startedAt);
+		const endedAt = Number(record.endedAt);
+		const durationMs = Number(record.durationMs);
+		const valid = Number.isInteger(ownerPid) && ownerPid > 0
+			&& Number.isFinite(workerStartedAt) && workerStartedAt > 0 && workerStartedAt <= startedAt
+			&& Number.isFinite(startedAt) && startedAt > 0
+			&& Number.isFinite(endedAt) && endedAt >= startedAt
+			&& Number.isFinite(durationMs) && durationMs >= 0
+			&& record.mode === "bundle"
+			&& typeof record.bundleIdentity === "string" && record.bundleIdentity.length > 0
+			&& (record.outcome === "success" || record.outcome === "error")
+			&& completedOwnerArtifacts.has(record.__artifact);
+		if (!valid) { malformed += 1; continue; }
+		ownerCounts.set(ownerPid, (ownerCounts.get(ownerPid) ?? 0) + 1);
+		const firstGateway = gatewayCalls
+			.filter((call) => call.ownerPid === ownerPid)
+			.sort((a, b) => a.startedAt - b.startedAt)[0] ?? null;
+		intervals.push({
+			id: String(record.id ?? `${ownerPid}:e2e-runtime-load`),
+			ownerPid,
+			workerStartedAt,
+			bundleIdentity: record.bundleIdentity,
+			mode: record.mode,
+			startedAt,
+			endedAt,
+			durationMs,
+			outcome: record.outcome,
+			...(record.errorName ? { errorName: String(record.errorName) } : {}),
+			startupToLoadMs: Math.max(0, startedAt - workerStartedAt),
+			firstGateway: firstGateway ? {
+				startedAt: firstGateway.startedAt,
+				method: firstGateway.method,
+				path: firstGateway.path,
+				startupToGatewayMs: Math.max(0, firstGateway.startedAt - workerStartedAt),
+				loadEndToGatewayMs: firstGateway.startedAt - endedAt,
+			} : null,
+		});
+	}
+	const duplicateOwners = [...ownerCounts.values()].filter((count) => count !== 1).length;
+	return {
+		intervals: intervals.sort((a, b) => a.startedAt - b.startedAt),
+		records: intervals.length,
+		successes: intervals.filter((record) => record.outcome === "success").length,
+		errors: intervals.filter((record) => record.outcome === "error").length,
+		cumulativeMs: intervals.reduce((sum, record) => sum + record.durationMs, 0),
+		unjoinedGatewayRecords: intervals.filter((record) => !record.firstGateway).length,
+		incomplete: malformed + duplicateOwners,
+	};
+}
+
 function gatewayActivity(root) {
 	const artifacts = listArtifactFiles(root, [".json", ".jsonl"]);
 	const jsonLines = readJsonLines(root);
@@ -280,15 +337,30 @@ function gatewayActivity(root) {
 		const startedAt = finite(record.startedAt) || endedAt - durationMs;
 		if (endedAt <= 0 || startedAt <= 0 || endedAt < startedAt) continue;
 		const key = record.id || [record.ownerPid, record.method, record.path, record.status, startedAt, endedAt, durationMs].join("|");
-		unique.set(key, { startedAt, endedAt, durationMs });
+		unique.set(key, {
+			ownerPid: Number(record.ownerPid) || null,
+			method: String(record.method ?? ""),
+			path: String(record.path ?? ""),
+			status: Number(record.status) || 0,
+			startedAt,
+			endedAt,
+			durationMs,
+		});
 	}
+	const intervals = [...unique.values()];
+	const runtimeLoads = runtimeLoadActivity(
+		jsonLines.records.filter((record) => record.type === "e2e_runtime_load"),
+		intervals,
+		completedOwnerArtifacts,
+	);
 	return {
-		intervals: [...unique.values()],
+		intervals,
 		records: unique.size,
 		artifacts: artifacts.length,
 		ownerArtifacts: ownerArtifacts.size,
 		incompleteOwners: Math.max(0, ownerArtifacts.size - completedOwnerArtifacts.size),
-		parseErrors: jsonLines.parseErrors,
+		parseErrors: jsonLines.parseErrors + runtimeLoads.incomplete,
+		runtimeLoads,
 	};
 }
 
@@ -395,6 +467,7 @@ export function buildE2EProfileManifest({
 			ownerArtifacts: hooks.ownerArtifacts,
 			incompleteOwners: hooks.incompleteOwners,
 			parseErrors: hooks.parseErrors,
+			runtimeLoads: hooks.runtimeLoads,
 		},
 		accounting: {
 			authority: "diagnostic",
