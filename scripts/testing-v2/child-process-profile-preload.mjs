@@ -178,7 +178,11 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 		const loopbackRequest = (input) => {
 			try {
 				const url = new URL(typeof input === "string" || input instanceof URL ? input : input?.url);
-				return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) ? url : null;
+				if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) || !/^\/api(?:\/|$)/.test(url.pathname)) return null;
+				const configuredPort = process.env.E2E_PORT || (() => {
+					try { return new URL(process.env.BOBBIT_GATEWAY_URL).port; } catch { return ""; }
+				})();
+				return configuredPort && url.port !== configuredPort ? null : url;
 			} catch { return null; }
 		};
 		globalThis.fetch = async function profiledFetch(input, init) {
