@@ -287,6 +287,7 @@ describe("unit run isolation", () => {
         BOBBIT_GATEWAY_URL: "https://host.invalid",
         BOBBIT_SESSION_ID: "host-session",
         BOBBIT_GH_COMMAND: "/host/gh",
+        BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: "/host/stale-bundle.mjs",
         BOBBIT_TEST_NO_EXTERNAL: "1",
         BOBBIT_V2_RETRY_FREE: "1",
       };
@@ -313,6 +314,7 @@ describe("unit run isolation", () => {
         expect(isOwnedRunChild(paths.root, environment.HOME!)).toBe(true);
         expect(isOwnedRunChild(paths.root, environment.TMPDIR!)).toBe(true);
       }
+      expect(e2e.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE).toBeUndefined();
       expect(isE2EAmbientRuntimeEnvKey("BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER")).toBe(true);
       expect(isE2EAmbientRuntimeEnvKey("BOBBIT_TEST_NO_EXTERNAL")).toBe(false);
       expect(createBrowserRunPaths(temp).root).not.toBe(paths.root);
@@ -380,6 +382,7 @@ describe("unit run isolation", () => {
         pwtest_cache_dir: "stale-pwtest-cache-dir",
         BoBbIt_E2e_PwTeSt_CaChE_Dir: "stale-cache-dir",
         bObBiT_E2E_v8CaChE_rOoT: "stale-v8-cache-root",
+        bObBiT_v2_E2E_DiSt_SeRvEr_PrEbUnDlE: "stale-bundle",
       };
       const isolated = createIsolatedE2EEnvironment(
         paths,
@@ -406,6 +409,7 @@ describe("unit run isolation", () => {
         expect(environment.bObBiT_tEsT_fIxTuRe_Token).toBe("preserve-test-token");
         expect(environment.BoBbIt_V2_Command_Override).toBe("preserve-v2-command");
       }
+      expect(Object.keys(e2e).map((key) => key.toUpperCase())).not.toContain("BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
       for (const environment of [browser, e2e]) {
         for (const [name, value] of [
           ["BOBBIT_V2_RUN_ROOT", paths.root],
