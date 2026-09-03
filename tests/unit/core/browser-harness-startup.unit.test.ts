@@ -6,6 +6,7 @@ import {
 	readFileSync,
 	rmSync,
 	utimesSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -60,6 +61,13 @@ describe("browser harness startup", () => {
 		const warmupStarted = deferred();
 		const finishWarmup = deferred();
 		const finishFollowers = deferred();
+		const containmentRoot = resolve(stateDir, "..", "..");
+		const ownerCache = join(containmentRoot, "cache", "process-owner");
+		const followerCaches = [
+			join(containmentRoot, "cache", "process-follower-1"),
+			join(containmentRoot, "cache", "process-follower-2"),
+		] as const;
+		for (const cacheDir of [ownerCache, ...followerCaches]) mkdirSync(cacheDir, { recursive: true });
 		let followerStarts = 0;
 		let activeFollowers = 0;
 		let maxActiveFollowers = 0;
@@ -67,20 +75,22 @@ describe("browser harness startup", () => {
 		const first = withDistServerImportWarmup(async () => {
 			warmupStarted.resolve();
 			await finishWarmup.promise;
+			writeFileSync(join(ownerCache, "dist-server.js"), "compiled");
 			return "first";
-		}, { stateDir, waitMs: 1 });
+		}, { stateDir, cacheDir: ownerCache, containmentRoot, waitMs: 1 });
 		await warmupStarted.promise;
 
-		const follower = (value: string) => withDistServerImportWarmup(async () => {
+		const follower = (value: string, cacheDir: string) => withDistServerImportWarmup(async () => {
+			assert.equal(readFileSync(join(cacheDir, "dist-server.js"), "utf8"), "compiled");
 			followerStarts++;
 			activeFollowers++;
 			maxActiveFollowers = Math.max(maxActiveFollowers, activeFollowers);
 			await finishFollowers.promise;
 			activeFollowers--;
 			return value;
-		}, { stateDir, waitMs: 1 });
-		const second = follower("second");
-		const third = follower("third");
+		}, { stateDir, cacheDir, containmentRoot, waitMs: 1 });
+		const second = follower("second", followerCaches[0]);
+		const third = follower("third", followerCaches[1]);
 
 		await new Promise(resolveDelay => setTimeout(resolveDelay, 15));
 		assert.equal(followerStarts, 0, "followers must not import against a partially populated cache");
@@ -92,6 +102,44 @@ describe("browser harness startup", () => {
 		assert.deepEqual(await Promise.all([first, second, third]), ["first", "second", "third"]);
 		assert.equal(existsSync(`${stateDir}.ready`), true);
 		assert.equal(existsSync(`${stateDir}.lock`), false);
+	});
+
+	it("publishes the first importer's cache and seeds independent followers before import", async () => {
+		const stateDir = temporaryStateDir();
+		const containmentRoot = resolve(stateDir, "..", "..");
+		const ownerCache = join(containmentRoot, "cache", "process-owner");
+		const followerACache = join(containmentRoot, "cache", "process-follower-a");
+		const followerBCache = join(containmentRoot, "cache", "process-follower-b");
+		for (const directory of [ownerCache, followerACache, followerBCache]) {
+			mkdirSync(join(directory, "dist"), { recursive: true });
+		}
+
+		let ownerImports = 0;
+		const owner = await withDistServerImportWarmup(async () => {
+			ownerImports++;
+			writeFileSync(join(ownerCache, "dist", "server.js"), "compiled-owner");
+			return "owner";
+		}, { stateDir, cacheDir: ownerCache, containmentRoot, waitMs: 1 });
+		assert.equal(owner, "owner");
+		assert.equal(ownerImports, 1);
+
+		// A follower may already have transformed an unrelated/colliding entry;
+		// seeding must retain the follower's process-local result.
+		writeFileSync(join(followerBCache, "dist", "server.js"), "compiled-follower");
+		const follower = (cacheDir: string, expected: string) => withDistServerImportWarmup(async () => {
+			assert.equal(readFileSync(join(cacheDir, "dist", "server.js"), "utf8"), expected);
+			return cacheDir;
+		}, { stateDir, cacheDir, containmentRoot, waitMs: 1 });
+
+		assert.deepEqual(await Promise.all([
+			follower(followerACache, "compiled-owner"),
+			follower(followerBCache, "compiled-follower"),
+		]), [followerACache, followerBCache]);
+		assert.notEqual(followerACache, followerBCache);
+		assert.equal(
+			readFileSync(`${stateDir}.pwtest-cache-snapshot/dist/server.js`, "utf8"),
+			"compiled-owner",
+		);
 	});
 
 	it("lets another worker become the warmer after the first worker fails", async () => {

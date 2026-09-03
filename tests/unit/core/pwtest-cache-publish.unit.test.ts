@@ -6,10 +6,12 @@
  *     existing run-dir files, tolerates a missing `latest`, and fails open;
  *   - publish atomically replaces `latest` from a non-empty run dir, skips
  *     empty/missing run dirs, and a concurrent-publish loser cleans its tmp;
+ *   - contained dist-import snapshots reject path/symlink escapes and seed each
+ *     follower's distinct writable cache without clobbering existing entries;
  *   - the env-gated wrapper honours OWNED gating, the v2 namespace guard,
  *     and KEEP=1 not suppressing publish (KEEP only affects deletion).
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
@@ -22,14 +24,16 @@ let restoreFs: () => void;
 let LATEST_SEGMENT: CacheModule["LATEST_SEGMENT"];
 let V2_TRANSFORM_CACHE_SEGMENT: CacheModule["V2_TRANSFORM_CACHE_SEGMENT"];
 let latestTransformCacheDir: CacheModule["latestTransformCacheDir"];
+let publishContainedTransformCacheSnapshot: CacheModule["publishContainedTransformCacheSnapshot"];
 let publishTransformCache: CacheModule["publishTransformCache"];
 let publishTransformCacheFromEnv: CacheModule["publishTransformCacheFromEnv"];
+let seedContainedTransformCacheSnapshot: CacheModule["seedContainedTransformCacheSnapshot"];
 let seedTransformCache: CacheModule["seedTransformCache"];
 let seedTransformCacheForRunDir: CacheModule["seedTransformCacheForRunDir"];
 
 beforeAll(async () => {
 	const scoped = installScopedMemFs([
-		"cpSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync", "renameSync", "rmSync", "writeFileSync",
+		"cpSync", "existsSync", "lstatSync", "mkdirSync", "readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync", "symlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
 	scoped.fs.mkdirSync(ROOT, { recursive: true });
@@ -37,8 +41,10 @@ beforeAll(async () => {
 		LATEST_SEGMENT,
 		V2_TRANSFORM_CACHE_SEGMENT,
 		latestTransformCacheDir,
+		publishContainedTransformCacheSnapshot,
 		publishTransformCache,
 		publishTransformCacheFromEnv,
+		seedContainedTransformCacheSnapshot,
 		seedTransformCache,
 		seedTransformCacheForRunDir,
 	} = await import("../../../scripts/testing-v2/pwtest-cache.js"));
@@ -120,6 +126,69 @@ describe("seedTransformCache", () => {
 
 		// Never seed `latest` from itself.
 		expect(seedTransformCacheForRunDir(latest)).toBe(false);
+	});
+});
+
+describe("contained transform-cache snapshots", () => {
+	it("publishes once and non-clobber seeds independent follower caches", () => {
+		const root = makeRoot("contained");
+		const owner = join(root, "process-owner");
+		const snapshot = join(root, "dist-import-snapshot");
+		const followerA = join(root, "process-follower-a");
+		const followerB = join(root, "process-follower-b");
+		for (const directory of [owner, followerA, followerB]) mkdirSync(directory, { recursive: true });
+		mkdirSync(join(owner, "graph"), { recursive: true });
+		writeFileSync(join(owner, "graph", "server.js"), "owner");
+		mkdirSync(join(followerB, "graph"), { recursive: true });
+		writeFileSync(join(followerB, "graph", "server.js"), "newer");
+
+		expect(publishContainedTransformCacheSnapshot(owner, snapshot, root, "owner")).toBe(true);
+		expect(seedContainedTransformCacheSnapshot(snapshot, followerA, root)).toBe(true);
+		expect(seedContainedTransformCacheSnapshot(snapshot, followerB, root)).toBe(true);
+		expect(readFileSync(join(followerA, "graph", "server.js"), "utf8")).toBe("owner");
+		expect(readFileSync(join(followerB, "graph", "server.js"), "utf8")).toBe("newer");
+		expect(readFileSync(join(snapshot, "graph", "server.js"), "utf8")).toBe("owner");
+		expect(followerA).not.toBe(followerB);
+		expect(readdirSync(root).filter(name => name.includes("-tmp"))).toEqual([]);
+	});
+
+	it("fails open for missing/partial snapshots and paths outside the owned root", () => {
+		const root = makeRoot("contained-missing");
+		const owner = join(root, "owner");
+		const follower = join(root, "follower");
+		const missing = join(root, "missing");
+		const outside = makeRoot("outside");
+		mkdirSync(owner, { recursive: true });
+		mkdirSync(follower, { recursive: true });
+		writeFileSync(join(owner, "entry.js"), "entry");
+
+		expect(seedContainedTransformCacheSnapshot(missing, follower, root)).toBe(false);
+		expect(publishContainedTransformCacheSnapshot(owner, join(outside, "snapshot"), root)).toBe(false);
+		expect(publishContainedTransformCacheSnapshot(outside, join(root, "snapshot"), root)).toBe(false);
+		expect(readdirSync(follower)).toEqual([]);
+
+		const partial = join(root, "partial");
+		mkdirSync(partial, { recursive: true });
+		writeFileSync(join(partial, "available.js"), "available");
+		expect(seedContainedTransformCacheSnapshot(partial, follower, root)).toBe(true);
+		expect(readFileSync(join(follower, "available.js"), "utf8")).toBe("available");
+		expect(existsSync(join(follower, "not-published.js"))).toBe(false);
+	});
+
+	it("rejects source and destination symlink escapes", () => {
+		const root = makeRoot("contained-links");
+		const outside = makeRoot("outside-links");
+		const ownerLink = join(root, "owner-link");
+		const snapshotLink = join(root, "snapshot-link");
+		const follower = join(root, "follower");
+		mkdirSync(follower, { recursive: true });
+		writeFileSync(join(outside, "entry.js"), "outside");
+		symlinkSync(outside, ownerLink, "dir");
+		symlinkSync(outside, snapshotLink, "dir");
+
+		expect(publishContainedTransformCacheSnapshot(ownerLink, join(root, "snapshot"), root)).toBe(false);
+		expect(seedContainedTransformCacheSnapshot(snapshotLink, follower, root)).toBe(false);
+		expect(readdirSync(follower)).toEqual([]);
 	});
 });
 
