@@ -283,7 +283,7 @@ export function formatElapsed(sinceMs: number): string {
 	return `${h}h ${m}m`;
 }
 
-// Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
+// Team lead extension path is resolved lazily from the winning team_spawn definition.
 import { TaskManager } from "./task-manager.js";
 import type { DismissResult, OrchestrationCore } from "./orchestration-core.js";
 
@@ -2691,24 +2691,20 @@ export class TeamManager {
 			}
 			: undefined;
 
-		// Resolve the initial team extension from the goal-owning project cascade.
-		// The explicit extension arg is assembled before createSession can apply its
-		// scoped activation, so using the server manager here would leak a second,
-		// conflicting provider path into every project team lead.
-		let teamLeadExtPath: string;
+		// The normal session pipeline selects the winning team extension inside its
+		// immutable post-discovery tool generation. Keep only the no-manager legacy
+		// path here; resolving a live manager before createSession can split winners.
+		let initialTeamArgs: string[] = [];
 		const projectToolManager = this.config.projectContextManager
 			?.getContextForGoal(goalId)?.toolManager;
-		const extensionToolManager = projectToolManager ?? this.config.toolManager;
-		if (extensionToolManager) {
-			teamLeadExtPath = extensionToolManager.getExtensionPath("team", "extension.ts");
-		} else {
+		if (!(projectToolManager ?? this.config.toolManager)) {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
-			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
+			initialTeamArgs = ["--extension", path.join(TOOLS_DIR, "team", "extension.ts")];
 		}
 		const teamLeadAccessory = storedRole.accessory ?? "crown";
 		const session = await this.sessionManager.createSession(
 			cwd,
-			["--extension", teamLeadExtPath],
+			initialTeamArgs,
 			goalId,
 			undefined,
 			{

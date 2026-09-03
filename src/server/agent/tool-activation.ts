@@ -5,8 +5,8 @@
  * 1. **Builtin tools** (pi-coding-agent built-in): read, bash, edit, write, grep, find, ls
  *    → Controlled via `--tools` flag
  * 2. **Bobbit extensions** (.bobbit/config/tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
- *    → Resolved from .bobbit/config/tools/<groupDir>/extension.ts, controlled via `--extension` flag
- *    → Goal/team extensions are also added separately by session-manager (duplicates are harmless)
+ *    → Resolved beside each winning tool definition, controlled via `--extension` flag
+ *    → Lifecycle-required tools join the same filtered activation plan
  *
  * Provider info is read from .bobbit/config/tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
@@ -32,6 +32,12 @@ import {
 import type { McpToolDef } from "../mcp/mcp-types.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import {
+	materializeToolExtensionAdapter,
+	planToolExtensionTarget,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionTargetPlan,
+} from "./tool-extension-activation.js";
 
 /** Interface for the group policy store to avoid circular dependency on the class. */
 export interface GroupPolicyProvider {
@@ -80,6 +86,7 @@ function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy
 const allowedToolsCache = new Map<string, EffectiveTool[]>();
 const missingProviderWarningKeys = new Set<string>();
 const inactiveProviderDebugKeys = new Set<string>();
+const ambiguousRolePolicyWarningKeys = new Set<string>();
 
 interface InactiveToolContributionLike {
 	reason: string;
@@ -221,6 +228,25 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
  *
  * Normalizes old policy values internally: `always-allow`→allow, `ask-once`/`always-ask`→ask, `never-ask`→never.
  */
+function caseInsensitiveRoleToolPolicy(
+	toolName: string,
+	policies: Record<string, GrantPolicy> | undefined,
+): GrantPolicy | undefined {
+	if (!policies) return undefined;
+	if (Object.prototype.hasOwnProperty.call(policies, toolName)) return policies[toolName];
+	const identity = toolName.toLowerCase();
+	const matches = Object.entries(policies).filter(([key]) => key.toLowerCase() === identity);
+	if (matches.length === 0) return undefined;
+	if (matches.length > 1) {
+		const warningKey = `${identity}\0${matches.map(([key]) => key).join("\0")}`;
+		if (!ambiguousRolePolicyWarningKeys.has(warningKey)) {
+			ambiguousRolePolicyWarningKeys.add(warningKey);
+			console.warn(`[tool-activation] Ambiguous case-only role policies for "${toolName}"; using stable first match "${matches[0][0]}"`);
+		}
+	}
+	return matches[0][1];
+}
+
 export function resolveGrantPolicy(
 	toolName: string,
 	toolGroup: string | undefined,
@@ -240,8 +266,15 @@ export function resolveGrantPolicy(
 
 	const mcpKeys = mcpPolicyKeys(toolName);
 
-	// 1. Role-level tool-specific override (exact tool name match)
-	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
+	// 1. Role-level tool-specific override. Preserve exact declared spelling as
+	// authoritative, then case-fold ordinary YAML tool identity. MCP hierarchy
+	// remains exact and is handled below.
+	const exactRolePolicy = role?.toolPolicies?.[toolName];
+	if (exactRolePolicy) return normalizePolicy(exactRolePolicy);
+	if (!mcpKeys) {
+		const canonicalRolePolicy = caseInsensitiveRoleToolPolicy(toolName, role?.toolPolicies);
+		if (canonicalRolePolicy) return normalizePolicy(canonicalRolePolicy);
+	}
 
 	// 2. Role-level MCP hierarchy: exact/operation/package/server/wildcard.
 	// Role policy is the most authoritative grant-policy source for tools that
@@ -429,6 +462,19 @@ export type EffectiveTool =
 	| { kind: "mcp"; name: string }
 	| { kind: "pi-extension"; name: string };
 
+/** Exact capabilities retained for Bobbit-owned session lifecycle surfaces. */
+export function requiredLifecycleToolNames(session: {
+	goalId?: string;
+	assistantType?: string;
+	roleName?: string;
+}): string[] {
+	if (session.assistantType) return ["propose_goal"];
+	if (!session.goalId) return [];
+	return session.roleName === "team-lead"
+		? ["team_spawn", "task_create"]
+		: ["task_create"];
+}
+
 /**
  * Tag a flat tool name into an `EffectiveTool` at the boundary where a
  * caller has only a `string[]` (e.g. session restoration, where
@@ -443,11 +489,25 @@ export type EffectiveTool =
  *   3. Otherwise → `yaml` (so unknown-tool typos still surface through the
  *      provider-lookup `"has no provider"` warn in `computeToolActivationArgs`).
  */
+function caseInsensitiveMapEntry<T>(map: ReadonlyMap<string, T> | undefined, name: string): readonly [string, T] | undefined {
+	const exact = map?.get(name);
+	if (exact !== undefined) return [name, exact];
+	const identity = name.toLowerCase();
+	for (const [key, value] of map ?? []) {
+		if (key.toLowerCase() === identity) return [key, value];
+	}
+	return undefined;
+}
+
+function caseInsensitiveMapValue<T>(map: ReadonlyMap<string, T> | undefined, name: string): T | undefined {
+	return caseInsensitiveMapEntry(map, name)?.[1];
+}
+
 function tagAllowedToolFromProviders(
 	name: string,
 	providers?: ReadonlyMap<string, { type?: string }>,
 ): EffectiveTool {
-	const provider = providers?.get(name);
+	const provider = caseInsensitiveMapValue(providers, name);
 	if (provider?.type === "pi-extension") return { kind: "pi-extension", name };
 	if (provider) return { kind: "yaml", name };
 	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
@@ -591,12 +651,20 @@ export interface ToolActivationResult {
 /** Pi file-tool builtins re-registered via defaults/tools/_builtins/extension.ts. */
 const FILE_TOOL_BUILTIN_NAMES = new Set(["read", "edit", "write", "grep", "find", "ls"]);
 
-/**
- * Resolve the absolute path for a bobbit-extension provider.
- * Uses the provider's baseDir (resolved from the cascade) instead of a hardcoded TOOLS_DIR.
- */
+/** Resolve the physical extension target beside its winning YAML provider. */
 function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseDir: string }): string {
-	return path.join(provider.baseDir, provider.groupDir, provider.extension!);
+	return path.resolve(provider.baseDir, provider.groupDir, provider.extension!);
+}
+
+interface ToolReadGenerationProvider {
+	withToolReadGenerationSync?<T>(operation: () => T): T;
+}
+
+function activationDiagnostic(targetPath: string, error: unknown): void {
+	const message = error instanceof Error ? error.message : String(error);
+	console.warn(
+		`[tool-activation] Failed to materialize filtered extension adapter; target omitted (target=${targetPath}; error=${message.slice(0, 400)})`,
+	);
 }
 
 /** Convert a JSON Schema object to a TypeBox code string. */
@@ -1315,7 +1383,26 @@ export function writeMcpProxyExtensions(
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
-export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext, requiredToolNames?: readonly string[]): ToolActivationResult {
+	if ((requiredToolNames?.length ?? 0) > 16) {
+		throw new Error("Tool activation accepts at most 16 required tool names");
+	}
+	const generationOwner = toolManager as (ToolManager & ToolReadGenerationProvider) | undefined;
+	if (typeof generationOwner?.withToolReadGenerationSync === "function") {
+		return generationOwner.withToolReadGenerationSync(() => computeToolActivationArgsInGeneration(
+			allowedTools,
+			toolManager,
+			_cwd,
+			mcpExtensionPaths,
+			disabledTools,
+			scopedContext,
+			requiredToolNames,
+		));
+	}
+	return computeToolActivationArgsInGeneration(allowedTools, toolManager, _cwd, mcpExtensionPaths, disabledTools, scopedContext, requiredToolNames);
+}
+
+function computeToolActivationArgsInGeneration(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[], disabledTools?: ReadonlySet<string>, scopedContext?: ScopedToolContext, requiredToolNames?: readonly string[]): ToolActivationResult {
 	// pi 0.70+ unified `--tools <list>` into an allowlist over BOTH builtins and
 	// extension-registered tools, which broke our old "--tools <only-builtins>
 	// + --extension shell" pattern (every extension tool got stripped). We now
@@ -1327,6 +1414,22 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	const builtinsToRegister = new Set<string>();
 	const extensionPaths = new Set<string>();
+	const extensionPlans = new Map<string, ToolExtensionTargetPlan>();
+
+	const assignExtensionWinner = (targetPath: string, canonicalName: string): void => {
+		// Structural mocks used by pure activation tests have no immutable manager
+		// generation and retain the legacy raw-path projection. Production managers
+		// always take the content-addressed adapter path above.
+		if (typeof (toolManager as ToolReadGenerationProvider | undefined)?.withToolReadGenerationSync !== "function") {
+			extensionPaths.add(targetPath);
+			return;
+		}
+		try {
+			planToolExtensionTarget(extensionPlans, targetPath, canonicalName);
+		} catch (error) {
+			activationDiagnostic(targetPath, error);
+		}
+	};
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
@@ -1365,15 +1468,19 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
 	// every session spawn. The `"has no provider"` branch below fires only for
 	// genuinely unknown YAML tool names (typos in role allowedTools, etc.).
-	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>) => {
+	const collect = (
+		entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>,
+		honourDisabledTools = true,
+	) => {
 		for (const entry of entries) {
 			if (entry.kind === "mcp" || entry.kind === "pi-extension") continue;
-			// Goal-metadata disabled tool: drop in BOTH the allowlist branch and the
-			// unrestricted/all-tools branch (both flow through here), so a disabled
-			// tool is never registered even for a role-less / all-tools session.
-			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
-			const provider = providers.get(entry.name);
-			if (!provider) {
+			// Ordinary allowlist activation honours goal metadata. Lifecycle-required
+			// capabilities intentionally retain their established availability and are
+			// still governed by the generated policy guard.
+			if (honourDisabledTools && disabledTools?.has(entry.name.toLowerCase())) continue;
+			const providerEntry = caseInsensitiveMapEntry(providers, entry.name);
+			const provider = providerEntry?.[1];
+			if (!provider || !providerEntry) {
 				const inactive = inactiveToolContribution(toolManager, entry.name, scopedContext);
 				if (inactive) {
 					debugInactiveProviderSkipOnce(entry.name, inactive, scopedContext);
@@ -1387,8 +1494,12 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			}
 			if (provider.type === "builtin" && provider.tool) {
 				if (provider.tool === "bash") {
-					// bash comes from shell/extension.ts, not from the file-builtins set.
-					extensionPaths.add(toolManager.getExtensionPath("shell", "extension.ts"));
+					// bash comes from the extension beside the winning bash definition,
+					// not from the file-builtins set.
+					const bashExtension = typeof toolManager.resolveToolExtensionPath === "function"
+						? toolManager.resolveToolExtensionPath("bash", "extension.ts")
+						: toolManager.getExtensionPath("shell", "extension.ts");
+					if (bashExtension) assignExtensionWinner(bashExtension, providerEntry[0]);
 					continue;
 				}
 				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {
@@ -1397,7 +1508,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 					console.warn(`[tool-activation] Tool "${entry.name}" has provider.type: builtin with tool: "${provider.tool}" but no handler — extension not loaded; this is likely a misconfigured YAML`);
 				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider));
+				assignExtensionWinner(resolveExtensionPath(provider), providerEntry[0]);
 			}
 		}
 	};
@@ -1412,8 +1523,26 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 		// through to the unrestricted branch when empty.
 		collect(allowedTools);
 	}
+	if (requiredToolNames?.length) {
+		collect(requiredToolNames.map((name) => ({ kind: "yaml" as const, name })), false);
+	}
 
 	env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");
+	if (extensionPlans.size > 0) {
+		const targetUrls: Record<string, string> = {};
+		for (const plan of extensionPlans.values()) {
+			try {
+				const adapter = materializeToolExtensionAdapter(plan);
+				extensionPaths.add(adapter.adapterPath);
+				targetUrls[adapter.adapterId] = adapter.targetUrl;
+			} catch (error) {
+				// Fail closed: the unfiltered target is never emitted when adapter
+				// publication or validation fails.
+				activationDiagnostic(plan.targetPath, error);
+			}
+		}
+		if (Object.keys(targetUrls).length > 0) env[TOOL_EXTENSION_TARGETS_ENV] = JSON.stringify(targetUrls);
+	}
 	for (const extPath of extensionPaths) args.push("--extension", extPath);
 	if (mcpExtensionPaths) {
 		for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);

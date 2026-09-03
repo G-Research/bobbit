@@ -11,8 +11,9 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
-import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, packLocalDataContainerDirectory, projectSandboxVolumeNames } from "../../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, packLocalDataContainerDirectory, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, sandboxStateMountHostPath } from "../../../src/server/agent/docker-args.js";
 import {
+	getStateDirMountStaleness,
 	ProjectSandbox,
 	SESSION_RUNTIME_CPU_LIMIT,
 	SESSION_RUNTIME_MEMORY_LIMIT,
@@ -29,13 +30,18 @@ import {
 	sessionStateSessionsRoot,
 	sessionTranscriptRoot,
 } from "../../../src/server/agent/agent-session-path.js";
-import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
+import {
+	GLOBAL_USER_TOOLS_CONTAINER_DIR,
+	PROJECT_USER_TOOLS_CONTAINER_DIR,
+	toDockerPath,
+} from "../../../src/server/agent/rpc-bridge.js";
 import {
 	initializeAgentDirState,
 	resetAgentDirStateForTests,
 	setProjectRoot,
 } from "../../../src/server/bobbit-dir.ts";
 import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
+import { TOOL_EXTENSION_ADAPTER_STATE_DIR } from "../../../src/server/agent/tool-extension-activation.js";
 
 const FIXTURE_ROOT = path.resolve("/memfs/docker-args");
 let fixtureSequence = 0;
@@ -190,6 +196,10 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_PROJECT_LABEL}=${projectId}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_SESSION_LABEL}=${sessionId}`));
 		const runtimeStateDir = path.join(projectDir, ".bobbit", "state");
+		const projectUserToolsRoot = path.join(projectDir, ".bobbit", "config", "tools");
+		assert.ok(runArgs.includes(`${toDockerPath(projectUserToolsRoot)}:${PROJECT_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.ok(runArgs.some((arg) => arg.endsWith(`:${GLOBAL_USER_TOOLS_CONTAINER_DIR}:ro`)));
+		assert.equal(fs.statSync(projectUserToolsRoot).isDirectory(), true, "runtime creation must materialize the stable project tools root");
 		assert.ok(runArgs.includes(`${toDockerPath(path.join(runtimeStateDir, "preview", sessionId))}:/bobbit/preview`));
 		assert.ok(runArgs.includes(`${toDockerPath(sessionStateSessionsRoot(runtimeStateDir, sessionId))}:/bobbit-state/sessions`));
 		assert.ok(runArgs.includes(`${toDockerPath(sessionTranscriptRoot(sessionId, activeAgentSessionsDir()))}:/home/node/.bobbit/agent/sessions`));
@@ -532,15 +542,23 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard"]) {
+			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard", TOOL_EXTENSION_ADAPTER_STATE_DIR]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
 					mount!.endsWith(`:/bobbit-state/${sub}:ro`),
 					`${sub} mount must be read-only (:ro), got: ${mount}`,
 				);
-				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
+				const descriptor = SANDBOX_STATE_MOUNTS.find((candidate) => candidate.sub === sub)!;
+				assert.ok(fs.existsSync(sandboxStateMountHostPath(descriptor, stateDir)), `${sub} subdir should be created before mounting`);
 			}
+			const adapterMount = mounts.find((m) => m.includes(`:/bobbit-state/${TOOL_EXTENSION_ADAPTER_STATE_DIR}`));
+			const adapterDescriptor = SANDBOX_STATE_MOUNTS.find((candidate) => candidate.sub === TOOL_EXTENSION_ADAPTER_STATE_DIR)!;
+			assert.equal(
+				adapterMount,
+				`${toDockerPath(sandboxStateMountHostPath(adapterDescriptor, stateDir))}:/bobbit-state/${TOOL_EXTENSION_ADAPTER_STATE_DIR}:ro`,
+				"filtered adapters must mount from the Headquarters state where they are materialized",
+			);
 			// The writable state subdirs must NOT have picked up :ro.
 			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));
@@ -553,6 +571,40 @@ describe("buildDockerRunArgs", () => {
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
+	});
+
+	it("marks a pre-adapter sandbox mount contract stale so it is recreated", () => {
+		const stateDir = fixtureDir("stale-adapter-mount");
+		const mounts = SANDBOX_STATE_MOUNTS
+			.filter(({ sub }) => sub !== TOOL_EXTENSION_ADAPTER_STATE_DIR)
+			.map(({ sub, readOnly }) => ({
+				Type: "bind",
+				Source: path.join(stateDir, sub),
+				Destination: `/bobbit-state/${sub}`,
+				RW: !readOnly,
+				Mode: readOnly ? "ro" : "rw",
+			}));
+
+		const staleness = getStateDirMountStaleness(mounts, { stateDir });
+		assert.equal(staleness.stale, true);
+		assert.match(staleness.reason ?? "", new RegExp(TOOL_EXTENSION_ADAPTER_STATE_DIR));
+	});
+
+	it("creates stable read-only global and project user-tool mounts", () => {
+		const projectUserToolsRoot = path.join(fixtureDir("user-tool-roots"), ".bobbit", "config", "tools");
+		assert.equal(fs.existsSync(projectUserToolsRoot), false);
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: "",
+			projectId: "user-tool-roots",
+			projectUserToolsRoot,
+		}, NOOP_COMMAND_RUNNER);
+		const mounts = args.filter((_a, i) => args[i - 1] === "-v");
+
+		assert.ok(mounts.some((entry) => entry.endsWith(`:${GLOBAL_USER_TOOLS_CONTAINER_DIR}:ro`)));
+		assert.ok(mounts.includes(`${toDockerPath(projectUserToolsRoot)}:${PROJECT_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.equal(fs.statSync(projectUserToolsRoot).isDirectory(), true);
+		assert.equal(mounts.some((entry) => entry.includes("/.bobbit/config:/")), false);
 	});
 
 	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {

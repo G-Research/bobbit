@@ -21,7 +21,7 @@ import type {
 	PackEntry,
 	ResolvedEntity,
 } from "./pack-types.js";
-import { parseRolesDir, parseToolsDir } from "./builtin-config.js";
+import { parseRolesDir, parseToolEntitiesDir } from "./builtin-config.js";
 import type { Role } from "./role-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import { scanSkillDir, scanCommandsDir, type SlashSkill } from "../skills/slash-skills.js";
@@ -48,15 +48,20 @@ export class PackResolver {
 			if (entry.onlyTypes && !entry.onlyTypes.includes(type)) continue;
 			for (const loader of this.loaders) {
 				if (loader.type !== type || !loader.supports(entry)) continue;
-				for (const { name, item } of loader.load(entry)) {
+				for (const { name, item, source } of loader.load(entry)) {
 					// Activation filtering BEFORE merge — a disabled entity is dropped here
 					// so a lower-priority same-name entity can win (§7).
 					if (this.activationFilter && !this.activationFilter(entry, type, name)) continue;
-					const prev = byName.get(name);
-					byName.set(name, {
+					// Tool identity is case-insensitive at the authoritative merge boundary.
+					// Preserve the winner's declared spelling while ensuring a case-only higher
+					// definition shadows rather than creating a second catalogue row.
+					const identity = type === "tools" ? name.toLowerCase() : name;
+					const prev = byName.get(identity);
+					byName.set(identity, {
 						name,
 						item: item as T,
 						origin: entry,
+						source,
 						shadows: prev ? [...prev.shadows, prev.origin] : [],
 					});
 				}
@@ -102,7 +107,7 @@ export class ToolLoader implements EntityLoader<ToolInfo> {
 	load(entry: PackEntry): LoadedEntity<ToolInfo>[] {
 		const pre = preloaded<ToolInfo>(entry, "tools");
 		if (pre) return pre;
-		return parseToolsDir(path.join(entry.path, "tools")).map((t) => ({ name: t.name, item: t }));
+		return parseToolEntitiesDir(path.join(entry.path, "tools"));
 	}
 }
 

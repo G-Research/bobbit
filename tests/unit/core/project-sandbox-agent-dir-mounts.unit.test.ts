@@ -16,9 +16,11 @@ import {
 	getPackLocalDataMountStaleness,
 	getSessionPreviewMountStaleness,
 	getStateDirMountStaleness,
+	getUserToolMountStaleness,
 } from "../../../src/server/agent/project-sandbox.js";
 import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../../src/server/agent/docker-args.js";
-import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
+import { bobbitStateDir } from "../../../src/server/bobbit-dir.js";
+import { resolveUserToolSandboxMounts, toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
 import { SandboxManager } from "../../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
@@ -45,6 +47,7 @@ function requiredStateMounts(stateDir: string) {
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
 		mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge", false, "ro"),
 		mount(path.join(stateDir, "aigw-dns-guard"), "/bobbit-state/aigw-dns-guard", false, "ro"),
+		mount(path.join(bobbitStateDir(), "tool-extension-activation"), "/bobbit-state/tool-extension-activation", false, "ro"),
 	];
 }
 
@@ -334,13 +337,76 @@ describe("SandboxManager pack local-data refresh", () => {
 	});
 });
 
-describe("ProjectSandbox state mount staleness", () => {
-	it("accepts the current required state mounts including read-only generated extension dirs", () => {
-		const stateDir = path.resolve("/project/.bobbit/state");
+describe("ProjectSandbox ordinary user-tool mount staleness", () => {
+	const projectUserToolsRoot = path.resolve("/project/.bobbit/config/tools");
+	const expected = { projectUserToolsRoot };
+	const currentMounts = () => resolveUserToolSandboxMounts(projectUserToolsRoot).map((entry) =>
+		mount(entry.hostPath, entry.containerPath, false, "ro"));
 
-		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
-
+	it("accepts the exact read-only server, global-user, and project roots", () => {
+		const result = getUserToolMountStaleness(currentMounts(), expected);
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks missing, duplicate, writable, and wrong-source user-tool roots stale", () => {
+		const plans = resolveUserToolSandboxMounts(projectUserToolsRoot);
+		const projectPlan = plans.find((entry) => entry.scope === "project")!;
+		const globalPlan = plans.find((entry) => entry.scope === "global-user")!;
+		const base = currentMounts();
+		const withoutProject = base.filter((entry) => entry.Destination !== projectPlan.containerPath);
+		const duplicateGlobal = [...base, mount(globalPlan.hostPath, globalPlan.containerPath, false, "ro")];
+		const writableProject = base.map((entry) => entry.Destination === projectPlan.containerPath
+			? mount(projectPlan.hostPath, projectPlan.containerPath, true, "rw")
+			: entry);
+		const wrongProject = base.map((entry) => entry.Destination === projectPlan.containerPath
+			? mount(path.resolve("/other/.bobbit/config/tools"), projectPlan.containerPath, false, "ro")
+			: entry);
+
+		for (const [label, mounts] of [
+			["missing", withoutProject],
+			["duplicate", duplicateGlobal],
+			["writable", writableProject],
+			["wrong-source", wrongProject],
+		] as const) {
+			const result = getUserToolMountStaleness(mounts, expected);
+			assert.equal(result.stale, true, `${label}: ${result.reason ?? "unexpected valid result"}`);
+			assert.match(result.reason ?? "", new RegExp(label === "wrong-source" ? "wrong host source" : label));
+		}
+	});
+});
+
+describe("ProjectSandbox state mount staleness", () => {
+	it("accepts the current required state mounts including the Headquarters-backed adapter dir", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir);
+		const adapterMount = mounts.find((entry) => entry.Destination === "/bobbit-state/tool-extension-activation");
+
+		assert.equal(adapterMount?.Source, path.join(bobbitStateDir(), "tool-extension-activation"));
+		assert.notEqual(adapterMount?.Source, path.join(stateDir, "tool-extension-activation"));
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks pre-upgrade containers stale when the Headquarters-backed adapter mount is missing", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/tool-extension-activation");
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-extension-activation/);
+	});
+
+	it("rejects a project-local source for the Headquarters-backed adapter mount", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/tool-extension-activation"
+			? mount(path.join(stateDir, "tool-extension-activation"), entry.Destination, false, "ro")
+			: entry);
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-extension-activation/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {

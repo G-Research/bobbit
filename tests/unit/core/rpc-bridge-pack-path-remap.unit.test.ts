@@ -8,25 +8,34 @@ guardProcessEnv();
 
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { getProjectRoot, headquartersDir, setProjectRoot } from "../../../src/server/bobbit-dir.ts";
 import { buildDockerRunArgs } from "../../../src/server/agent/docker-args.ts";
 import {
 	BUILTIN_PACKS_CONTAINER_DIR,
 	GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,
+	GLOBAL_USER_TOOLS_CONTAINER_DIR,
 	PROJECT_MARKET_PACKS_CONTAINER_DIR,
+	PROJECT_USER_TOOLS_CONTAINER_DIR,
 	RpcBridge,
 	SERVER_MARKET_PACKS_CONTAINER_DIR,
 	containerPathToHost,
 	hostPathToContainer,
+	remapToolExtensionTargetsForContainer,
 	tryHostPathToContainer,
 	toDockerPath,
 } from "../../../src/server/agent/rpc-bridge.ts";
 import { scopePaths } from "../../../src/server/agent/pack-types.ts";
 import { TOOLS_DIR } from "../../../src/server/agent/tool-manager.ts";
+import {
+	TOOL_EXTENSION_ADAPTER_STATE_DIR,
+	TOOL_EXTENSION_TARGETS_ENV,
+} from "../../../src/server/agent/tool-extension-activation.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-rpc-pack-remap-"));
 const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
@@ -39,6 +48,8 @@ const builtinToolsDir = path.join(root, "defaults", "tools");
 const builtinPacksDir = path.join(root, "builtin-packs", "market-packs");
 const serverMarketPacksRoot = scopePaths("server", serverRoot).marketPacksRoot;
 const projectMarketPacksRoot = scopePaths("project", projectRoot).marketPacksRoot;
+const globalUserToolsRoot = path.join(scopePaths("global-user", os.homedir()).userPackRoot, "tools");
+const projectUserToolsRoot = path.join(scopePaths("project", projectRoot).userPackRoot, "tools");
 
 beforeAll(() => {
 	fs.mkdirSync(path.join(builtinToolsDir, "_builtins"), { recursive: true });
@@ -47,6 +58,7 @@ beforeAll(() => {
 	fs.mkdirSync(path.join(serverMarketPacksRoot, "server-pack", "pi-extensions", "demo"), { recursive: true });
 	fs.mkdirSync(path.join(serverMarketPacksRoot, "server-pack", "tools", "demo"), { recursive: true });
 	fs.mkdirSync(path.join(projectMarketPacksRoot, "project-pack", "pi-extensions", "demo"), { recursive: true });
+	fs.mkdirSync(path.join(projectUserToolsRoot, "project-demo"), { recursive: true });
 	process.env.BOBBIT_BUILTIN_PACKS_DIR = builtinPacksDir;
 	process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
 	process.env.BOBBIT_DIR = path.join(serverRoot, ".bobbit");
@@ -99,6 +111,107 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		const containerPath = "/bobbit-state/tool-result-error-bridge/abc123/bridge.ts";
 		assert.equal(hostPathToContainer(hostPath), containerPath);
 		assert.equal(containerPathToHost(containerPath), hostPath);
+	});
+
+	it("translates filtered adapter paths through their dedicated state mount", () => {
+		const hostPath = path.join(serverRoot, ".bobbit", "state", TOOL_EXTENSION_ADAPTER_STATE_DIR, "abc123", "extension.ts");
+		const containerPath = `/bobbit-state/${TOOL_EXTENSION_ADAPTER_STATE_DIR}/abc123/extension.ts`;
+		assert.equal(hostPathToContainer(hostPath), containerPath);
+		assert.equal(containerPathToHost(containerPath), hostPath);
+	});
+
+	it("remaps every filtered adapter target URL through mounted config, builtin, and pack roots", () => {
+		const configTarget = path.join(TOOLS_DIR, "shell", "extension.ts");
+		const builtinTarget = path.join(builtinToolsDir, "shell", "extension.ts");
+		const serverTarget = path.join(serverMarketPacksRoot, "server-pack", "tools", "demo", "extension.ts");
+		const projectTarget = path.join(projectMarketPacksRoot, "project-pack", "pi-extensions", "demo", "index.mjs");
+		const remapped = JSON.parse(remapToolExtensionTargetsForContainer(JSON.stringify({
+			config: pathToFileURL(configTarget).href,
+			builtin: pathToFileURL(builtinTarget).href,
+			server: pathToFileURL(serverTarget).href,
+			project: pathToFileURL(projectTarget).href,
+		}), { builtinToolsDir, projectBase: projectRoot })) as Record<string, string>;
+
+		assert.deepEqual(remapped, {
+			config: "file:///tools/shell/extension.ts",
+			builtin: "file:///tools-builtin/shell/extension.ts",
+			server: `file://${SERVER_MARKET_PACKS_CONTAINER_DIR}/server-pack/tools/demo/extension.ts`,
+			project: `file://${PROJECT_MARKET_PACKS_CONTAINER_DIR}/project-pack/pi-extensions/demo/index.mjs`,
+		});
+		assert.ok(Object.values(remapped).every((target) => !target.includes(serverRoot.replace(/\\/g, "/"))));
+	});
+
+	it("remaps global-user and project user-tool adapter targets through their narrow mounts", () => {
+		const globalTarget = path.join(globalUserToolsRoot, "global-demo", "extension.ts");
+		const projectTarget = path.join(projectUserToolsRoot, "project-demo", "extension.ts");
+		const remapped = JSON.parse(remapToolExtensionTargetsForContainer(JSON.stringify({
+			global: pathToFileURL(globalTarget).href,
+			project: pathToFileURL(projectTarget).href,
+		}), { projectUserToolsRoot })) as Record<string, string>;
+
+		assert.deepEqual(remapped, {
+			global: `file://${GLOBAL_USER_TOOLS_CONTAINER_DIR}/global-demo/extension.ts`,
+			project: `file://${PROJECT_USER_TOOLS_CONTAINER_DIR}/project-demo/extension.ts`,
+		});
+		assert.equal(hostPathToContainer(globalTarget), `${GLOBAL_USER_TOOLS_CONTAINER_DIR}/global-demo/extension.ts`);
+		assert.equal(hostPathToContainer(projectTarget, { projectUserToolsRoot }), `${PROJECT_USER_TOOLS_CONTAINER_DIR}/project-demo/extension.ts`);
+		assert.equal(containerPathToHost(`${PROJECT_USER_TOOLS_CONTAINER_DIR}/project-demo/extension.ts`, { projectUserToolsRoot }), projectTarget);
+
+		const overlappingTarget = path.join(TOOLS_DIR, "overlap", "extension.ts");
+		assert.equal(
+			hostPathToContainer(overlappingTarget, { projectUserToolsRoot: TOOLS_DIR }),
+			"/tools/overlap/extension.ts",
+			"an identical self-managed project/server root retains established server mount attribution",
+		);
+	});
+
+	it("preserves the project host user-tools root when the runtime cwd is container-only", () => {
+		const target = path.join(projectUserToolsRoot, "project-demo", "extension.ts");
+		const bridge = new RpcBridge({
+			containerId: "container-123",
+			cwd: "/workspace-wt/session/source",
+			// Sandbox wiring preserves this host-scoped sibling before cwd is remapped.
+			projectMarketPacksRoot,
+		});
+
+		assert.deepEqual((bridge as any).remapArgsForContainer(["--extension", target]), [
+			"--extension", `${PROJECT_USER_TOOLS_CONTAINER_DIR}/project-demo/extension.ts`,
+		]);
+	});
+
+	it("remaps Windows drive/case/separator aliases and POSIX file URLs deterministically", () => {
+		const windows = JSON.parse(remapToolExtensionTargetsForContainer(JSON.stringify({
+			url: "file:///Z:/PACKS/Example%20Pack/extension.ts",
+			path: "z:\\packs\\other\\extension.ts",
+		}), { projectMarketPacksRoot: "z:\\packs" })) as Record<string, string>;
+		assert.deepEqual(windows, {
+			url: "file:///market-packs-project/Example%20Pack/extension.ts",
+			path: "file:///market-packs-project/other/extension.ts",
+		});
+
+		const posix = JSON.parse(remapToolExtensionTargetsForContainer(JSON.stringify({
+			target: "file:///srv/bobbit-packs/example%20pack/extension.ts",
+		}), { projectMarketPacksRoot: "/srv/bobbit-packs" })) as Record<string, string>;
+		assert.equal(posix.target, "file:///market-packs-project/example%20pack/extension.ts");
+
+		const userTools = JSON.parse(remapToolExtensionTargetsForContainer(JSON.stringify({
+			target: "file:///Z:/PROJECT/.BOBBIT/CONFIG/TOOLS/Demo/extension.ts",
+		}), { projectUserToolsRoot: "z:\\project\\.bobbit\\config\\tools" })) as Record<string, string>;
+		assert.equal(userTools.target, `file://${PROJECT_USER_TOOLS_CONTAINER_DIR}/Demo/extension.ts`);
+	});
+
+	it("fails closed with a bounded diagnostic when an adapter target is not mounted", () => {
+		const unknown = `file:///private/${"x".repeat(500)}/extension.ts`;
+		assert.throws(
+			() => remapToolExtensionTargetsForContainer(JSON.stringify({ adapter: unknown }), { builtinToolsDir }),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.match(error.message, /outside mounted tool roots/);
+				assert.match(error.message, /winning tool provider path/);
+				assert.ok(error.message.length < 600, `diagnostic must stay bounded, got ${error.message.length} chars`);
+				return true;
+			},
+		);
 	});
 
 	it("remaps installed server/global/project market pack pi-extension paths", () => {
@@ -178,6 +291,93 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		assert.equal(diagnostics.length, 1);
 		assert.equal(diagnostics[0].diagnostic.status, "remap-failed");
 		assert.equal(diagnostics[0].extension.listName, "demo");
+	});
+
+	it("uses a filtered authoritative bash adapter with a manager and retains raw builtin compatibility without one", async () => {
+		const bashTarget = path.join(serverMarketPacksRoot, "server-pack", "tools", "demo", "extension.ts");
+		const builtinsTarget = path.join(builtinToolsDir, "_builtins", "extension.ts");
+		fs.writeFileSync(bashTarget, "export default function () {}\n", "utf-8");
+		fs.writeFileSync(builtinsTarget, "export default function () {}\n", "utf-8");
+
+		const captureStart = async (toolManager?: any, env?: Record<string, string>): Promise<{ args: string[]; env: Record<string, string> }> => {
+			let capturedArgs: string[] = [];
+			const bridge = new RpcBridge({
+				containerId: "container-123",
+				toolManager,
+				env,
+				clock: {
+					setTimeout(callback: () => void) { callback(); return {} as any; },
+					clearTimeout() {},
+				} as any,
+			});
+			(bridge as any)._spawnProcess = (_cliPath: string, args: string[]) => {
+				capturedArgs = [...args];
+				const child = new EventEmitter() as any;
+				child.kill = () => true;
+				(bridge as any).process = child;
+			};
+			(bridge as any)._attachProcessHandlers = () => {};
+			await bridge.start();
+			return { args: capturedArgs, env: (bridge as any).options.env ?? {} };
+		};
+
+		const existingTarget = pathToFileURL(path.join(TOOLS_DIR, "existing", "extension.ts")).href;
+		const managed = await captureStart({
+			resolveToolExtensionPath: (name: string) => name === "bash" ? bashTarget : undefined,
+			getExtensionPath: () => builtinsTarget,
+			getBuiltinToolsDir: () => builtinToolsDir,
+		}, { [TOOL_EXTENSION_TARGETS_ENV]: JSON.stringify({ existing: existingTarget }) });
+		const managedExtensions = managed.args.flatMap((arg, index) => arg === "--extension" ? [managed.args[index + 1]] : []);
+		assert.equal(managedExtensions.includes(bashTarget), false, "manager-backed fallback must never load the raw winning extension");
+		const adapterPath = managedExtensions.find((candidate) => candidate.includes(TOOL_EXTENSION_ADAPTER_STATE_DIR));
+		assert.ok(adapterPath, `expected a filtered adapter, got ${JSON.stringify(managedExtensions)}`);
+		const targets = JSON.parse(managed.env[TOOL_EXTENSION_TARGETS_ENV]) as Record<string, string>;
+		assert.equal(Object.keys(targets).length, 2);
+		assert.equal(targets.existing, existingTarget, "fallback target map must merge with activation targets");
+		assert.ok(Object.values(targets).includes(pathToFileURL(fs.realpathSync.native(bashTarget)).href));
+
+		const unmanaged = await captureStart();
+		assert.ok(unmanaged.args.includes(path.join(TOOLS_DIR, "shell", "extension.ts")));
+		assert.equal(unmanaged.env[TOOL_EXTENSION_TARGETS_ENV], undefined);
+	});
+
+	it("preserves --no-extensions without materializing the manager-backed fallback", async () => {
+		let resolved = false;
+		let capturedArgs: string[] = [];
+		const bridge = new RpcBridge({
+			containerId: "container-123",
+			args: ["--no-extensions"],
+			toolManager: {
+				resolveToolExtensionPath: () => { resolved = true; return undefined; },
+				getBuiltinToolsDir: () => builtinToolsDir,
+			} as any,
+			clock: { setTimeout(callback: () => void) { callback(); return {} as any; }, clearTimeout() {} } as any,
+		});
+		(bridge as any)._spawnProcess = (_cliPath: string, args: string[]) => {
+			capturedArgs = [...args];
+			const child = new EventEmitter() as any;
+			child.kill = () => true;
+			(bridge as any).process = child;
+		};
+		(bridge as any)._attachProcessHandlers = () => {};
+		await bridge.start();
+		assert.equal(resolved, false);
+		assert.deepEqual(capturedArgs.filter((arg) => arg === "--extension"), []);
+	});
+
+	it("mounts ordinary global-user and project user-tool roots read-only", () => {
+		const args = buildDockerRunArgs({
+			image: "bobbit-test:latest",
+			workspaceDir: "",
+			projectId: "proj-user-tools",
+			projectUserToolsRoot,
+			stateDir: path.join(root, "state-user-tools"),
+		});
+
+		assert.ok(args.includes(`${toDockerPath(globalUserToolsRoot)}:${GLOBAL_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.ok(args.includes(`${toDockerPath(projectUserToolsRoot)}:${PROJECT_USER_TOOLS_CONTAINER_DIR}:ro`));
+		assert.equal(fs.statSync(projectUserToolsRoot).isDirectory(), true);
+		assert.equal(args.some((arg) => arg.includes("/.bobbit/config:/")), false, "must never mount a broad config tree");
 	});
 
 	it("mounts installed market pack roots read-only for Docker sandboxes", () => {
