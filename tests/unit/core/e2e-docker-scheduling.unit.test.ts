@@ -46,8 +46,8 @@ describe("E2E Docker capability and scheduling", () => {
 		const steps = [
 			"await runGroupA(A, coordinatorEnv)",
 			"await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries)",
-			"fanOutSerialTransformCache(paths.cacheRoot, groupCWorkers, paths.root)",
-			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries)",
+			"fanOutSerialTransformCache(paths.cacheRoot, paths.root)",
+			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath)",
 			"await runGroupD(D, { coordinatorEnv })",
 		];
 		let previous = -1;

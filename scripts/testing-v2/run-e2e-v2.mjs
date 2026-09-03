@@ -333,48 +333,42 @@ function isStrictChild(root, candidate) {
 }
 
 /**
- * Snapshot B's content-addressed worker caches, then seed their union into
- * every stable C worker slot. Cache failures are diagnostic-only and degrade
- * to a cold C transform rather than changing test execution.
+ * Snapshot the union of B's completed PID-isolated transform caches. C receives
+ * this contained immutable snapshot and each of its preloaded processes copies
+ * it into a fresh PID slot. Cache failures are diagnostic-only and degrade to
+ * a cold C transform rather than changing test execution.
  */
-export function fanOutSerialTransformCache(cacheRoot, targetWorkerCount, runRoot) {
+export function fanOutSerialTransformCache(cacheRoot, runRoot) {
 	const startedAt = performance.now();
 	const result = {
 		enabled: true,
 		sourceSlots: 0,
-		targetSlots: Math.max(0, targetWorkerCount),
 		seedAttempts: 0,
 		seeded: 0,
+		snapshotPath: null,
 		wallMs: 0,
 	};
 	try {
 		if (!isStrictChild(runRoot, cacheRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
 		const sourceNames = readdirSync(cacheRoot, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && /^worker-(?:0|[1-9][0-9]*)$/.test(entry.name))
+			.filter((entry) => entry.isDirectory() && /^process-(?:0|[1-9][0-9]*)$/.test(entry.name))
 			.map((entry) => entry.name)
+			.filter((name) => readdirSync(join(cacheRoot, name)).length > 0)
 			.sort((a, b) => a.localeCompare(b, "en"));
 		result.sourceSlots = sourceNames.length;
-		if (sourceNames.length === 0 || result.targetSlots === 0) return { ...result, wallMs: Math.round(performance.now() - startedAt) };
+		if (sourceNames.length === 0) return { ...result, wallMs: Math.round(performance.now() - startedAt) };
 
 		const snapshotRoot = join(runRoot, "pwtest-transform-cache-phase-b-snapshot");
 		if (!isStrictChild(runRoot, snapshotRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
 		rmSync(snapshotRoot, { recursive: true, force: true });
 		mkdirSync(snapshotRoot, { recursive: true });
-		const snapshots = [];
 		for (const sourceName of sourceNames) {
-			const snapshot = join(snapshotRoot, sourceName);
-			if (seedTransformCache(join(cacheRoot, sourceName), snapshot)) snapshots.push(snapshot);
+			result.seedAttempts++;
+			if (seedTransformCache(join(cacheRoot, sourceName), snapshotRoot)) result.seeded++;
 		}
-		for (let index = 0; index < result.targetSlots; index++) {
-			const target = join(cacheRoot, `worker-${index}`);
-			mkdirSync(target, { recursive: true });
-			for (const snapshot of snapshots) {
-				result.seedAttempts++;
-				if (seedTransformCache(snapshot, target)) result.seeded++;
-			}
-		}
+		if (result.seeded > 0) result.snapshotPath = snapshotRoot;
 	} catch (error) {
-		console.log(`[e2e-v2] serial transform-cache fan-out skipped (cold C start): ${error?.message ?? error}`);
+		console.log(`[e2e-v2] serial transform-cache handoff skipped (cold C start): ${error?.message ?? error}`);
 	}
 	return { ...result, wallMs: Math.round(performance.now() - startedAt) };
 }
@@ -434,7 +428,7 @@ async function runGroupC(specs, coordinatorEnv) {
 	return { label: "C/browser-fidelity", code: 0, wallMs: canonical.wallMs };
 }
 
-async function runSerialGroupC(specs, sharedEnv, paths, workers, retries) {
+async function runSerialGroupC(specs, sharedEnv, paths, workers, retries, cacheSnapshotPath) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
 	if (!validateGroupC(specs)) {
 		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
@@ -445,8 +439,9 @@ async function runSerialGroupC(specs, sharedEnv, paths, workers, retries) {
 		retries,
 		outputDir: join(paths.root, "playwright-e2e-results-c"),
 	});
+	const cacheSeedEnv = cacheSnapshotPath ? { BOBBIT_V2_E2E_SERIAL_CACHE_SEED: cacheSnapshotPath } : {};
 	const canonical = await run(invocation.command, invocation.args, {
-		env: composeE2EChildEnvironment(sharedEnv, EXTERNAL_FREE_ENV),
+		env: composeE2EChildEnvironment(sharedEnv, { ...EXTERNAL_FREE_ENV, ...cacheSeedEnv }),
 		label: "C/canonical-browser",
 	});
 	if (canonical.code !== 0) return canonical;
@@ -523,8 +518,8 @@ async function main() {
 		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
 		results.push(await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries));
-		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, groupCWorkers, paths.root);
-		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries));
+		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
+		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
 		results.push(await runGroupD(D, { coordinatorEnv }));
 	}
 

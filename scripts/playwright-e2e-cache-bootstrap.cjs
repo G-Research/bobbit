@@ -43,14 +43,9 @@ function requestedRunCacheRoot(env, pid) {
   return path.join(path.resolve(baseRoot), "pwtest-transform-cache", runId);
 }
 
-function isWorkerProcess(env) {
-  return env.TEST_WORKER_INDEX !== undefined
-    || env.PW_TEST_WORKER_INDEX !== undefined
-    || env.TEST_PARALLEL_INDEX !== undefined;
-}
-
-function validParallelIndex(value) {
-  return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/.test(value);
+function serialCacheRequested(env) {
+  return env.BOBBIT_V2_E2E_SERIAL_CACHE === "1"
+    && env.BOBBIT_E2E_PWTEST_CACHE_OWNED === "1";
 }
 
 /** Resolve a cache slot without mutating the supplied environment. */
@@ -58,22 +53,17 @@ function resolveCacheSlot(env = process.env, pid = process.pid) {
   let root = requestedRunCacheRoot(env, pid);
   if (!root) return null;
 
-  const serialRequested = env.BOBBIT_V2_E2E_SERIAL_CACHE === "1"
-    && env.BOBBIT_E2E_PWTEST_CACHE_OWNED === "1";
-  if (serialRequested) {
+  if (serialCacheRequested(env)) {
     const runRoot = env.BOBBIT_V2_RUN_ROOT?.trim();
-    // The stable-slot mode is internal and run-local. An inherited or hostile
-    // cache root outside the owned coordinator root must never become shared.
+    // Playwright assigns TEST_WORKER_INDEX/TEST_PARALLEL_INDEX inside WorkerMain,
+    // after this Node preload has run and after its transform cache has loaded.
+    // A PID slot therefore isolates every concurrently writable process while
+    // still leaving completed phase-B slots available for the serial handoff.
     if (runRoot && !isStrictChild(runRoot, root)) {
       root = path.join(path.resolve(runRoot), "pwtest-transform-cache");
     }
     if (runRoot && isStrictChild(runRoot, root)) {
-      if (!isWorkerProcess(env)) return { root, cacheDir: path.join(root, "runner") };
-      if (validParallelIndex(env.TEST_PARALLEL_INDEX)) {
-        return { root, cacheDir: path.join(root, `worker-${env.TEST_PARALLEL_INDEX}`) };
-      }
-      // A worker without Playwright's canonical parallel index cannot safely
-      // share a stable slot. Retain the legacy PID-isolated fallback.
+      return { root, cacheDir: path.join(root, `process-${sanitizeSegment(pid)}`) };
     }
   }
 
@@ -83,7 +73,34 @@ function resolveCacheSlot(env = process.env, pid = process.pid) {
   return { root, cacheDir: path.join(root, `${role}-${pid}`) };
 }
 
-function configureTransformCache(env = process.env, pid = process.pid) {
+function isPlaywrightTransformProcess(argv) {
+  const entry = path.resolve(String(argv?.[1] || ""));
+  return entry.endsWith(path.join("playwright", "cli.js"))
+    || entry.endsWith(path.join("playwright", "lib", "worker", "workerProcessEntry.js"))
+    || entry.endsWith(path.join("playwright", "lib", "loader", "loaderProcessEntry.js"));
+}
+
+function seedSerialCache(env, cacheDir, argv) {
+  if (!serialCacheRequested(env) || !isPlaywrightTransformProcess(argv)) return false;
+  const runRoot = env.BOBBIT_V2_RUN_ROOT?.trim();
+  const requestedSeed = env.BOBBIT_V2_E2E_SERIAL_CACHE_SEED?.trim();
+  if (!runRoot || !requestedSeed) return false;
+  try {
+    const seed = fs.realpathSync(requestedSeed);
+    const ownedRoot = fs.realpathSync(runRoot);
+    if (!isStrictChild(ownedRoot, seed) || path.resolve(seed) === path.resolve(cacheDir)) return false;
+    // The snapshot is immutable after B exits. Each C process copies it into
+    // its own PID slot, and existing content-addressed entries always win.
+    fs.cpSync(seed, cacheDir, { recursive: true, force: false, errorOnExist: false });
+    return true;
+  } catch {
+    // Cache reuse is optional; containment, lookup, or copy failure is a cold
+    // unique cache, never a test failure or a reason to share a writable slot.
+    return false;
+  }
+}
+
+function configureTransformCache(env = process.env, pid = process.pid, argv = process.argv) {
   env.NODE_DISABLE_COMPILE_CACHE = "1";
   delete env.NODE_COMPILE_CACHE;
 
@@ -99,6 +116,10 @@ function configureTransformCache(env = process.env, pid = process.pid) {
   env.PWTEST_CACHE_DIR = slot.cacheDir;
   env.BOBBIT_E2E_PWTEST_CACHE_DIR = slot.root;
   try { fs.mkdirSync(slot.cacheDir, { recursive: true }); } catch {}
+  const seeded = seedSerialCache(env, slot.cacheDir, argv);
+  if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
+    console.error(`[e2e-cache] pid=${pid} cache=${slot.cacheDir} seed=${seeded ? "warm" : "cold"}`);
+  }
   return slot;
 }
 
