@@ -86,6 +86,12 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 
 	const processWriter = createWriter(outDir, `process-${process.pid}.jsonl`);
 	const hookWriter = createWriter(hookOutDir, `gateway-api-${process.pid}.jsonl`);
+	const activeChildren = new Map();
+	const pidAlive = (pid) => {
+		if (!Number.isInteger(pid) || pid <= 0) return false;
+		try { process.kill(pid, 0); return true; }
+		catch (error) { return error?.code === "EPERM"; }
+	};
 	const flushAll = () => { for (const writer of writers) writer.flush(); };
 	const flushTimer = setInterval(flushAll, 250);
 	flushTimer.unref?.();
@@ -93,6 +99,24 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 	process.once("exit", () => {
 		clearInterval(flushTimer);
 		const endedAt = Date.now();
+		// A forced Playwright worker exit can happen after an MCP transport has
+		// closed but before Node delivers the ChildProcess `exit` event. Preserve
+		// the exact still-unsettled child identity and its last owner-side liveness
+		// observation. The post-phase reporter performs the final liveness check;
+		// owner termination alone is never treated as child completion.
+		for (const { base, child } of activeChildren.values()) {
+			processWriter?.write({
+				type: "owner_child_liveness",
+				id: base.id,
+				ownerPid: process.pid,
+				childPid: base.childPid,
+				creationIdentity: base.creationIdentity,
+				checkedAt: endedAt,
+				alive: pidAlive(base.childPid),
+				exitCode: child?.exitCode ?? undefined,
+				signal: child?.signalCode ?? undefined,
+			});
+		}
 		processWriter?.write({ type: "owner_end", ownerPid: process.pid, endedAt });
 		hookWriter?.write({ type: "owner_end", ownerPid: process.pid, endedAt });
 		flushAll();
@@ -100,6 +124,7 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 
 	if (processWriter) {
 		let sequence = 0;
+		const childTerminalFile = join(outDir, `child-terminal-${process.pid}.jsonl`);
 		const executableName = (command) => {
 			const text = String(command ?? "<unknown>").replace(/^['"]|['"]$/g, "");
 			return basename(text).toLowerCase() || "<unknown>";
@@ -111,17 +136,67 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 			const executable = api === "exec" || api === "execSync"
 				? executableName(process.env.ComSpec || (process.platform === "win32" ? "cmd.exe" : "/bin/sh"))
 				: executableName(command);
-			const base = { id, api, executable, ownerPid: process.pid, parentPid: process.ppid, startedAt };
+			const base = {
+				id,
+				api,
+				executable,
+				ownerPid: process.pid,
+				parentPid: process.ppid,
+				startedAt,
+				creationIdentity: `${id}:${startedAt}`,
+			};
+			let settled = false;
 			processWriter.write({ type: "start", ...base });
-			return (result = {}) => processWriter.write({
-				type: "end",
-				...base,
-				endedAt: Date.now(),
-				durationMs: Math.max(0, performance.now() - startPerf),
-				...result,
-			});
+			return {
+				base,
+				track(child) {
+					if (!Number.isInteger(child?.pid) || child.pid <= 0) return;
+					base.childPid = child.pid;
+					// This token is created before spawn and bound to this exact
+					// ChildProcess object. A cooperating fixture receives the same token,
+					// so its terminal record cannot be joined to another start even if the
+					// operating system later reuses the PID.
+					activeChildren.set(id, { base, child });
+					processWriter.write({
+						type: "child_identity",
+						id,
+						ownerPid: process.pid,
+						childPid: child.pid,
+						creationIdentity: base.creationIdentity,
+					});
+				},
+				finish(result = {}) {
+					if (settled) return;
+					settled = true;
+					activeChildren.delete(id);
+					processWriter.write({
+						type: "end",
+						...base,
+						endedAt: Date.now(),
+						durationMs: Math.max(0, performance.now() - startPerf),
+						...result,
+					});
+				},
+			};
 		};
 
+		const withMockMcpTerminalEvidence = (args, lifecycle) => {
+			const commandText = [args[0], ...(Array.isArray(args[1]) ? args[1] : [])].map(String).join(" ");
+			if (!/mock-mcp-server\.mjs(?:[\s"']|$)/i.test(commandText)) return args;
+			const optionsIndex = Array.isArray(args[1]) ? 2 : 1;
+			const options = args[optionsIndex] && typeof args[optionsIndex] === "object" ? args[optionsIndex] : {};
+			const cloned = [...args];
+			cloned[optionsIndex] = {
+				...options,
+				env: {
+					...(options.env ?? process.env),
+					BOBBIT_V2_CHILD_TERMINAL_FILE: childTerminalFile,
+					BOBBIT_V2_CHILD_TERMINAL_ID: lifecycle.base.id,
+					BOBBIT_V2_CHILD_CREATION_IDENTITY: lifecycle.base.creationIdentity,
+				},
+			};
+			return cloned;
+		};
 		const configuredTimeout = (args) => {
 			for (const value of args.slice(1)) {
 				if (value && typeof value === "object" && !Array.isArray(value) && Number(value.timeout) > 0) return Number(value.timeout);
@@ -132,12 +207,14 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 			const original = childProcess[name];
 			if (typeof original !== "function") return;
 			const profiledAsync = function (...args) {
-				const finish = begin(name, args[commandIndex]);
+				const lifecycle = begin(name, args[commandIndex]);
 				const timeoutMs = configuredTimeout(args);
 				let child;
-				try { child = original.apply(this, args); }
-				catch (error) { finish({ outcome: "throw", errorCode: error?.code ? String(error.code) : undefined }); throw error; }
-				observeChildProfileLifecycle(child, finish, timeoutMs);
+				const spawnArgs = name === "spawn" ? withMockMcpTerminalEvidence(args, lifecycle) : args;
+				try { child = original.apply(this, spawnArgs); }
+				catch (error) { lifecycle.finish({ outcome: "throw", errorCode: error?.code ? String(error.code) : undefined }); throw error; }
+				lifecycle.track(child);
+				observeChildProfileLifecycle(child, lifecycle.finish, timeoutMs);
 				return child;
 			};
 			// Profiling must preserve Node's success and rejected-error output shape.
@@ -148,15 +225,15 @@ if ((outDir || hookOutDir) && profileDepth < 3) {
 			const original = childProcess[name];
 			if (typeof original !== "function") return;
 			childProcess[name] = function profiledSync(...args) {
-				const finish = begin(name, args[commandIndex]);
+				const lifecycle = begin(name, args[commandIndex]);
 				try {
 					const result = original.apply(this, args);
 					const status = result && typeof result === "object" && "status" in result ? result.status : 0;
 					const timedOut = result?.error?.code === "ETIMEDOUT";
-					finish({ outcome: timedOut ? "timeout" : status === 0 || status == null ? "ok" : "failed", exitCode: status ?? undefined, signal: result?.signal ?? undefined });
+					lifecycle.finish({ outcome: timedOut ? "timeout" : status === 0 || status == null ? "ok" : "failed", exitCode: status ?? undefined, signal: result?.signal ?? undefined });
 					return result;
 				} catch (error) {
-					finish({ outcome: error?.code === "ETIMEDOUT" ? "timeout" : "throw", exitCode: error?.status, signal: error?.signal, errorCode: error?.code ? String(error.code) : undefined });
+					lifecycle.finish({ outcome: error?.code === "ETIMEDOUT" ? "timeout" : "throw", exitCode: error?.status, signal: error?.signal, errorCode: error?.code ? String(error.code) : undefined });
 					throw error;
 				}
 			};
