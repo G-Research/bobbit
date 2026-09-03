@@ -213,6 +213,31 @@ describe("setup-prepared git template", () => {
 		expect(readFileSync(join(copies[2], ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
 	});
 
+	it("selects an independent branch with identical committed content and exact cleanup", async () => {
+		const source = await prepareGitTemplate(inheritedDescriptor());
+		const copy = copyGitTemplate(join(root, "develop-copy"), { branch: "feature/develop" });
+		const sourceHead = readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8");
+
+		expect(readFileSync(join(copy, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/feature/develop");
+		expect(readFileSync(join(copy, ".git", "refs", "heads", "feature", "develop"), "utf8")).toBe(sourceHead);
+		expect(existsSync(join(copy, ".git", "refs", "heads", "master"))).toBe(false);
+		expect(readFileSync(join(copy, "README.md"), "utf8")).toBe(readFileSync(join(source.path, "README.md"), "utf8"));
+		expect(readFileSync(join(source.path, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
+
+		rmSync(copy, { recursive: true, force: true });
+		expect(existsSync(copy)).toBe(false);
+		expect(readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8")).toBe(sourceHead);
+	});
+
+	it("rejects unsafe branch names before creating a destination", async () => {
+		await prepareGitTemplate(inheritedDescriptor());
+		for (const branch of ["../escape", "refs/heads/main.lock", "bad name", "bad@{name", "-option"]) {
+			const destination = join(root, `unsafe-${branch.length}-${branch.charCodeAt(0)}`);
+			expect(() => copyGitTemplate(destination, { branch })).toThrow(/safe ordinary Git branch name/);
+			expect(existsSync(destination)).toBe(false);
+		}
+	});
+
 	it("rejects arbitrary template mutations rather than filtering hash changes", async () => {
 		const source = await prepareGitTemplate(inheritedDescriptor());
 		const unexpected = join(source.path, ".git", "objects", "unexpected-template-state");
