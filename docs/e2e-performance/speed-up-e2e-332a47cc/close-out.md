@@ -51,10 +51,10 @@ These samples were collected at `4afa8d3ef3b318d8f6c5b56a88162037850befa2`. Late
 
 | State | Exact wall / CPU / peak | A / B / C / D wall | Prewarm wall / CPU | Active-meter total wall / CPU | Result |
 |---|---|---|---|---|---|
-| Cold | 584.3s / 18.791 CPU-min / 36 | 30.8 / 228.7 / 255.0 / 56.5s | 65.4s / 1.238 CPU-min | 649.7s / 20.029 CPU-min | 507 passed, 19 capability/platform skips, 0 failures, 0 retries |
-| Warm | 576.5s / 18.192 CPU-min / 30 | 30.2 / 224.8 / 254.5 / 53.0s | 43.0s / 0.730 CPU-min | 619.5s / 18.922 CPU-min | 507 passed, 19 capability/platform skips, 0 failures, 0 retries |
+| Cold preparation | 584.3s / 18.791 CPU-min / 36 | 30.8 / 228.7 / 255.0 / 56.5s | 65.4s / 1.238 CPU-min | 649.7s / 20.029 CPU-min | 507 passed, 19 capability/platform skips, 0 failures, 0 retries |
+| Warm preparation | 576.5s / 18.192 CPU-min / 30 | 30.2 / 224.8 / 254.5 / 53.0s | 43.0s / 0.730 CPU-min | 619.5s / 18.922 CPU-min | 507 passed, 19 capability/platform skips, 0 failures, 0 retries |
 
-Cold preparation removed `dist`, prior results, and the ensure-dist lock. The separately metered prewarm then performed the cold build in 21.9s, so the following exact command observed an ensure-dist cache hit. Consequently, 584.3s is the cold-state exact-command component, while 649.7s is the active-meter boundary that includes prewarm/build plus the exact command. This diagnostic follows the goal's combined accounting but does not satisfy the profiling guide's stricter qualification form in which the exact command itself must observe the cold build.
+Cold preparation removed `dist`, prior results, and the ensure-dist lock before the prewarm meter. The separately metered prewarm then performed the cold build in 21.9s, so the following exact command observed an ensure-dist cache hit. Consequently, 584.3s is the post-prewarm exact-command component of the cold-preparation sample, not a command-only cold-build measurement; 649.7s is the combined active-meter boundary that includes prewarm/build plus the exact command. The current lifecycle cannot produce a command-only cold-build sample without omitting or changing the required prewarm, so none is claimed.
 
 The full start-to-end spans, including orchestration gaps between the two authoritative meters, were 661.0s cold and 634.4s warm. Both B and C profiles contained all required lifecycle and activity categories, complete child/hook termination records, and no retries or failures. Docker client `29.3.1` was installed but the daemon was unavailable, so the guarded Docker path self-skipped while non-Docker coverage ran.
 
