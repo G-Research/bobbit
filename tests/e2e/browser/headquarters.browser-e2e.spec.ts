@@ -4,6 +4,14 @@
  * These tests pin the user-facing UX contract from docs/design/headquarters-ux.md.
  * They are intentionally expected to fail on pre-Headquarters builds where the
  * harness "default" project is still the only startup workspace.
+ *
+ * Coverage mapping (all boundaries remain real-browser + real-gateway E2E):
+ * - same-root startup/scope selection + same-root hide/restart → same-root journey
+ * - server-root preflight + fresh Quick Session + New Staff → Headquarters-only journey
+ * - settings/config scope + hide/reload/restart + hidden fallback → Headquarters-only journey
+ * - no-worktree goal UI → Headquarters-only journey
+ * - added normal-project identity/picker ordering → Headquarters-only journey
+ * No assertion moved to a cheaper tier; compatible states only share one page lifecycle.
  */
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
 import type { Locator, Page } from "@playwright/test";
@@ -197,19 +205,6 @@ async function createNormalProject(name: string): Promise<ProjectRecord> {
 	return project;
 }
 
-async function createSameRootProject(gateway: GatewayInfo, name = `Same Root UI ${Date.now()}`): Promise<ProjectRecord> {
-	const resp = await apiFetch("/api/projects", {
-		method: "POST",
-		body: JSON.stringify({ name, rootPath: gateway.serverRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
-	});
-	expect(resp.ok, `same-root project registration failed: ${resp.status} ${await resp.clone().text().catch(() => "")}`).toBe(true);
-	const project = await parseJsonResponse<ProjectRecord>(resp);
-	expect(project.id).not.toBe(HEADQUARTERS_PROJECT_ID);
-	expectSamePath(project.rootPath, gateway.serverRoot, "same-root normal project rootPath");
-	createdProjects.add(project.id);
-	return project;
-}
-
 async function startupSameRootProject(gateway: GatewayInfo): Promise<ProjectRecord> {
 	await setHeadquartersVisible(true);
 	for (const project of await listVisibleProjects()) {
@@ -296,283 +291,261 @@ test.describe("Headquarters browser UX", () => {
 		await cleanupCreatedArtifacts();
 	});
 
-	test("same-root startup shows Headquarters and the original normal project distinctly; Quick Session uses the selected scope", async ({ page, gateway }) => {
-		const sameRootProject = await startupSameRootProject(gateway);
-		expect(sameRootProject.id).toBe(STARTUP_SAME_ROOT_PROJECT_ID);
-		expect(sameRootProject.name).toBe(STARTUP_SAME_ROOT_PROJECT_NAME);
-		expectSamePath(sameRootProject.rootPath, gateway.serverRoot, "startup same-root normal project rootPath");
-		const hq = await getHeadquartersProject();
-		expectSamePath(hq.rootPath, gateway.bobbitDir, "BOBBIT_DIR Headquarters rootPath");
+	test("same-root project stays distinct through scope selection, visibility changes, and restart", async ({ page, gateway }) => {
+		let sameRootProject: ProjectRecord;
 
-		await openApp(page);
-		const hqHeader = projectHeader(page, HEADQUARTERS_PROJECT_ID);
-		const sameRootHeader = projectHeader(page, sameRootProject.id);
-		await expect(hqHeader).toBeVisible({ timeout: 15_000 });
-		await expect(sameRootHeader).toBeVisible({ timeout: 15_000 });
-		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
-			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
-		);
-		// Headquarters is a normal reorderable project (no longer anchored first),
-		// so a project that was registered before it — here the same-root startup
-		// project seeded ahead of Headquarters — sorts ahead of it by default.
-		expect(new Set(headerIds.slice(0, 2)), "both Headquarters and the same-root project appear at the top").toEqual(new Set([HEADQUARTERS_PROJECT_ID, sameRootProject.id]));
-		expect(headerIds.indexOf(sameRootProject.id), "same-root project registered before Headquarters sorts ahead of it").toBeLessThan(headerIds.indexOf(HEADQUARTERS_PROJECT_ID));
-		await expect(headquartersIcon(hqHeader), "Headquarters row should use TowerControl").toBeVisible({ timeout: 10_000 });
-		await expect(normalProjectIcon(sameRootHeader), "same-root normal project should keep folder identity").toBeVisible({ timeout: 10_000 });
-		await expect(headquartersIcon(sameRootHeader), "same-root normal project must not use TowerControl").toHaveCount(0);
+		await test.step("startup renders distinct Headquarters and same-root project identities", async () => {
+			sameRootProject = await startupSameRootProject(gateway);
+			expect(sameRootProject.id).toBe(STARTUP_SAME_ROOT_PROJECT_ID);
+			expect(sameRootProject.name).toBe(STARTUP_SAME_ROOT_PROJECT_NAME);
+			expectSamePath(sameRootProject.rootPath, gateway.serverRoot, "startup same-root normal project rootPath");
+			const hq = await getHeadquartersProject();
+			expectSamePath(hq.rootPath, gateway.bobbitDir, "BOBBIT_DIR Headquarters rootPath");
 
-		const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
-		await expect(splash).toBeVisible({ timeout: 10_000 });
-		await splash.click();
-		const picker = page.locator('[data-testid="splash-project-picker"]').first();
-		await expect(picker).toBeVisible({ timeout: 10_000 });
-		const rows = picker.locator('[data-testid="splash-project-picker-item"]');
-		const hqRow = rows.filter({ hasText: HEADQUARTERS_NAME }).first();
-		const sameRootRow = rows.filter({ hasText: sameRootProject.name }).first();
-		await expect(hqRow, "picker should list Headquarters").toBeVisible({ timeout: 10_000 });
-		await expect(headquartersIcon(hqRow), "picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
-		await expect(sameRootRow, "picker should list the same-root normal project").toBeVisible({ timeout: 10_000 });
-		await expect(normalProjectIcon(sameRootRow), "picker should use folder identity for same-root normal project").toBeVisible({ timeout: 10_000 });
-		await page.keyboard.press("Escape");
-
-		const hqSession = await createSessionViaSplashPicker(page, HEADQUARTERS_NAME);
-		expect(hqSession.requestBody.projectId).toBe(HEADQUARTERS_PROJECT_ID);
-		let sessionResp = await apiFetch(`/api/sessions/${hqSession.id}`);
-		expect(sessionResp.ok).toBe(true);
-		let session = await parseJsonResponse<any>(sessionResp);
-		expect(session.projectId).toBe(HEADQUARTERS_PROJECT_ID);
-		expectSamePath(session.cwd, gateway.bobbitDir, "Headquarters Quick Session cwd");
-		await deleteSession(hqSession.id).catch(() => {});
-		createdSessions.delete(hqSession.id);
-
-		await openApp(page);
-		const normalSession = await createSessionViaSplashPicker(page, sameRootProject.name);
-		expect(normalSession.requestBody.projectId).toBe(sameRootProject.id);
-		sessionResp = await apiFetch(`/api/sessions/${normalSession.id}`);
-		expect(sessionResp.ok).toBe(true);
-		session = await parseJsonResponse<any>(sessionResp);
-		expect(session.projectId).toBe(sameRootProject.id);
-		expectSamePath(session.cwd, gateway.serverRoot, "same-root normal Quick Session cwd");
-	});
-
-	test("same-root hide/show and restart keep the normal project visible while Headquarters is hidden", async ({ page, gateway }) => {
-		await prepareOnlyHeadquarters();
-		const sameRootProject = await createSameRootProject(gateway, `Same Root Hide ${Date.now()}`);
-		await openApp(page);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
-		await expect(projectHeader(page, sameRootProject.id)).toBeVisible({ timeout: 15_000 });
-
-		await setHeadquartersCheckbox(page, false);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toHaveCount(0);
-		await expect(projectHeader(page, sameRootProject.id), "hiding Headquarters must not hide the same-root normal project").toBeVisible({ timeout: 15_000 });
-
-		await crashAndRestart(gateway, page);
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across restart").toHaveCount(0);
-		await expect(projectHeader(page, sameRootProject.id), "same-root normal project should persist across restart").toBeVisible({ timeout: 15_000 });
-		const projects = await listVisibleProjects();
-		expect(projects.map((project) => project.id)).toContain(sameRootProject.id);
-		expect(projects.map((project) => project.id)).not.toContain(HEADQUARTERS_PROJECT_ID);
-
-		await setHeadquartersCheckbox(page, true);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
-		await expect(projectHeader(page, sameRootProject.id)).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("Add Project preflight for the server run directory warns without offering to archive Headquarters", async ({ page, gateway }, testInfo) => {
-		await prepareOnlyHeadquarters();
-		await openAddProjectDialog(page);
-		const input = page.locator('input[placeholder="/path/to/project"]').first();
-		await input.fill(gateway.serverRoot);
-		let panel: Locator;
-		try {
-			panel = await waitForPreflight(page);
-		} catch (err) {
-			testInfo.skip(true, `preflight panel unavailable: ${err instanceof Error ? err.message : String(err)}`);
-			return;
-		}
-		await expect(panel).toHaveAttribute("data-has-fail", "0");
-		await expect(panel).toContainText(/Headquarters|server run directory/i);
-		await expect(page.locator('[data-testid="preflight-archive-cta"]'), "same-root Add Project must not offer to archive/delete Headquarters state").toHaveCount(0);
-		const continueButton = page.locator("button").filter({ hasText: "Continue" }).first();
-		await expect(continueButton, "server run directory should be addable as an explicit normal project").toBeEnabled();
-	});
-
-	test("fresh server shows Headquarters with TowerControl and Quick Session creates a Headquarters session", async ({ page, gateway }) => {
-		await prepareOnlyHeadquarters();
-		await openApp(page);
-
-		const hqHeader = projectHeader(page, HEADQUARTERS_PROJECT_ID);
-		await expect(hqHeader).toBeVisible({ timeout: 15_000 });
-		await expect(hqHeader).toContainText(HEADQUARTERS_NAME);
-		await expect(headquartersIcon(hqHeader), "Headquarters sidebar header should use Lucide TowerControl").toBeVisible({ timeout: 10_000 });
-		await expect(page.getByText("No projects configured")).toHaveCount(0);
-		await expect(page.getByRole("button", { name: /Add Project/i }).first()).toBeVisible();
-
-		const { id } = await createHeadquartersSessionViaSplash(page);
-		const sessionResp = await apiFetch(`/api/sessions/${id}`);
-		expect(sessionResp.ok, "created Headquarters session should be readable").toBe(true);
-		const session = await parseJsonResponse<any>(sessionResp);
-		expect(session.projectId, "created session should persist projectId=headquarters").toBe(HEADQUARTERS_PROJECT_ID);
-		expectSamePath(session.cwd, gateway.bobbitDir, "created Headquarters session cwd");
-	});
-
-	test("New Staff uses Headquarters directly when it is the only visible project", async ({ page }) => {
-		await prepareOnlyHeadquarters();
-		await openApp(page);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
-
-		const sessionCreated = page.waitForResponse((resp) =>
-			resp.url().includes("/api/sessions") && resp.request().method() === "POST",
-			{ timeout: 30_000 },
-		);
-		const newStaffBtn = page.locator("button[title^='New staff agent']").first();
-		await expect(newStaffBtn).toBeVisible({ timeout: 15_000 });
-		await newStaffBtn.click();
-		const resp = await sessionCreated;
-		expect(resp.ok(), `New Staff assistant session should be created: ${resp.status()}`).toBe(true);
-		const requestBody = resp.request().postDataJSON?.() ?? JSON.parse(resp.request().postData() || "{}");
-		expect(requestBody.assistantType).toBe("staff");
-		expect(requestBody.projectId, "staff assistant should target Headquarters without opening Add Project").toBe(HEADQUARTERS_PROJECT_ID);
-		const body = await resp.json();
-		if (body.id) createdSessions.add(body.id);
-
-		await expect(page).toHaveURL(/#\/session\//, { timeout: 20_000 });
-		await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 20_000 });
-		await expect(page.getByText("Sandbox (Docker)").first()).toBeVisible({ timeout: 20_000 });
-	});
-
-	test("Settings hide/show persists across reload and restart without deleting Headquarters work", async ({ page, gateway }) => {
-		const hq = await prepareOnlyHeadquarters();
-		await openApp(page);
-		const { id: sessionId } = await createHeadquartersSessionViaSplash(page);
-
-		await setHeadquartersCheckbox(page, false);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden Headquarters should disappear from normal sidebar project lists").toHaveCount(0);
-
-		await navigateToHash(page, `#/session/${sessionId}`);
-		await expect(page.locator("textarea").first(), "active Headquarters session should remain reachable after hiding Headquarters").toBeVisible({ timeout: 20_000 });
-		let sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(sessionResp.ok, "hiding Headquarters must not delete active Headquarters sessions").toBe(true);
-		expect((await parseJsonResponse<any>(sessionResp)).projectId).toBe(HEADQUARTERS_PROJECT_ID);
-
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across browser reload").toHaveCount(0);
-
-		await crashAndRestart(gateway, page);
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across server restart").toHaveCount(0);
-		sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(sessionResp.ok, "Headquarters session should survive restart while Headquarters is hidden").toBe(true);
-
-		const checkbox = await openHeadquartersGeneralSettings(page);
-		await expect(checkbox, "visibility checkbox should reflect persisted hidden state").not.toBeChecked();
-		await setHeadquartersCheckbox(page, true);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "showing Headquarters should restore the anchored sidebar section").toBeVisible({ timeout: 15_000 });
-
-		// Keep TypeScript from flagging hq as only setup validation; rootPath is part of the persisted session contract.
-		expect(hq.rootPath).toBeTruthy();
-	});
-
-	test("hidden Headquarters with no user projects offers fallback Quick Session, Show Headquarters, and Add Project", async ({ page }) => {
-		await prepareOnlyHeadquarters();
-		await setHeadquartersVisible(false);
-		await expect.poll(async () => (await listVisibleProjects()).map((p) => p.id), {
-			timeout: 10_000,
-			message: "Headquarters hide preference should remove it only from normal project lists",
-		}).toEqual([]);
-
-		await openApp(page);
-		await expect(page.getByText("Headquarters is hidden from project lists.").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.getByRole("button", { name: "Quick Session in Headquarters" }).first()).toBeVisible();
-		await expect(page.getByRole("button", { name: "Show Headquarters" }).first()).toBeVisible();
-		await expect(page.getByRole("button", { name: /Add Project/i }).first()).toBeVisible();
-		await expect(page.getByText("No projects configured")).toHaveCount(0);
-
-		const shown = page.waitForResponse((resp) =>
-			resp.url().includes("/api/preferences") && resp.request().method() === "PUT",
-			{ timeout: 10_000 },
-		);
-		await page.getByRole("button", { name: "Show Headquarters" }).first().click();
-		const resp = await shown;
-		expect(resp.ok(), "Show Headquarters fallback action should persist the preference").toBe(true);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("Settings and config scope UI label server scope as Headquarters without a duplicate System scope", async ({ page }) => {
-		await prepareOnlyHeadquarters();
-		await openApp(page);
-
-		await navigateToHash(page, "#/settings/system/general");
-		await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
-		const settingsHeadquartersScope = page.getByTestId("settings-headquarters-scope");
-		await expect(settingsHeadquartersScope).toBeVisible({ timeout: 10_000 });
-		await expect(settingsHeadquartersScope).toContainText(HEADQUARTERS_NAME);
-		await expect(headquartersIcon(settingsHeadquartersScope), "Settings scope row should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
-		await expect(page.getByRole("button", { name: "System", exact: true }), "Settings should not expose both System and Headquarters scopes").toHaveCount(0);
-
-		await navigateToHash(page, "#/roles");
-		await expect(page.getByRole("heading", { name: "Roles" })).toBeVisible({ timeout: 15_000 });
-		await expect(page.getByRole("button", { name: HEADQUARTERS_NAME }).first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.getByRole("button", { name: "System", exact: true }), "Config pages should relabel the server scope as Headquarters").toHaveCount(0);
-	});
-
-	test("adding a normal project keeps Headquarters first with TowerControl and normal projects with folder identity", async ({ page }) => {
-		await prepareOnlyHeadquarters();
-		const normalProject = await createNormalProject(`HQ Sibling ${Date.now()}`);
-
-		await openApp(page);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
-		await expect(projectHeader(page, normalProject.id)).toBeVisible({ timeout: 15_000 });
-
-		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
-			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
-		);
-		expect(headerIds[0], "Headquarters should be anchored first in the sidebar when normal projects exist").toBe(HEADQUARTERS_PROJECT_ID);
-		await expect(headquartersIcon(projectHeader(page, HEADQUARTERS_PROJECT_ID))).toBeVisible({ timeout: 10_000 });
-		await expect(normalProjectIcon(projectHeader(page, normalProject.id)), "normal projects should keep the usual folder/project identity").toBeVisible({ timeout: 10_000 });
-		await expect(headquartersIcon(projectHeader(page, normalProject.id)), "normal project rows should not use TowerControl").toHaveCount(0);
-
-		const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
-		await expect(splash).toBeVisible({ timeout: 10_000 });
-		await splash.click();
-		const picker = page.locator('[data-testid="splash-project-picker"]').first();
-		await expect(picker).toBeVisible({ timeout: 10_000 });
-		const rows = picker.locator('[data-testid="splash-project-picker-item"]');
-		await expect(rows.first(), "Quick Session picker should list Headquarters first").toContainText(HEADQUARTERS_NAME);
-		await expect(headquartersIcon(rows.first()), "Quick Session picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
-		await expect(rows.nth(1)).toContainText(normalProject.name);
-		await expect(normalProjectIcon(rows.nth(1)), "normal project picker rows should keep folder identity").toBeVisible({ timeout: 10_000 });
-	});
-
-	test("no-git Headquarters goals show approved UI gating instead of branch/merge/PR affordances", async ({ page }) => {
-		const hq = await prepareOnlyHeadquarters();
-		const goalResp = await createNoWorktreeHeadquartersGoal(hq);
-
-		if (goalResp.status === 201) {
-			const goal = await parseJsonResponse<GoalRecord>(goalResp);
-			createdGoals.add(goal.id);
 			await openApp(page);
-			await navigateToHash(page, `#/goal/${goal.id}`);
-			await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.getByText(/This Headquarters goal runs in the Headquarters directory without a git worktree\./i).first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.getByText("Git branch", { exact: false }).first()).toBeVisible();
-			await expect(page.getByRole("button", { name: /create pr|open pr|ready to merge|merge|reset worktree|fork|branch/i })).toHaveCount(0);
-			return;
-		}
+			const hqHeader = projectHeader(page, HEADQUARTERS_PROJECT_ID);
+			const sameRootHeader = projectHeader(page, sameRootProject.id);
+			await expect(hqHeader).toBeVisible({ timeout: 15_000 });
+			await expect(sameRootHeader).toBeVisible({ timeout: 15_000 });
+			const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
+				els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
+			);
+			expect(new Set(headerIds.slice(0, 2)), "both Headquarters and the same-root project appear at the top").toEqual(new Set([HEADQUARTERS_PROJECT_ID, sameRootProject.id]));
+			expect(headerIds.indexOf(sameRootProject.id), "same-root project registered before Headquarters sorts ahead of it").toBeLessThan(headerIds.indexOf(HEADQUARTERS_PROJECT_ID));
+			await expect(headquartersIcon(hqHeader), "Headquarters row should use TowerControl").toBeVisible({ timeout: 10_000 });
+			await expect(normalProjectIcon(sameRootHeader), "same-root normal project should keep folder identity").toBeVisible({ timeout: 10_000 });
+			await expect(headquartersIcon(sameRootHeader), "same-root normal project must not use TowerControl").toHaveCount(0);
+		});
 
-		const failureText = await goalResp.text().catch(() => "");
-		expect(
-			failureText,
-			"If no-worktree Headquarters goals are blocked at creation time, the API/UI copy should be explicit",
-		).toMatch(/Headquarters goals need git\/worktree support|Goal creation for Headquarters is unavailable|not a supported git repository/i);
+		await test.step("Quick Session picker targets each same-path scope explicitly", async () => {
+			const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
+			await expect(splash).toBeVisible({ timeout: 10_000 });
+			await splash.click();
+			const picker = page.locator('[data-testid="splash-project-picker"]').first();
+			await expect(picker).toBeVisible({ timeout: 10_000 });
+			const rows = picker.locator('[data-testid="splash-project-picker-item"]');
+			const hqRow = rows.filter({ hasText: HEADQUARTERS_NAME }).first();
+			const sameRootRow = rows.filter({ hasText: sameRootProject.name }).first();
+			await expect(hqRow, "picker should list Headquarters").toBeVisible({ timeout: 10_000 });
+			await expect(headquartersIcon(hqRow), "picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+			await expect(sameRootRow, "picker should list the same-root normal project").toBeVisible({ timeout: 10_000 });
+			await expect(normalProjectIcon(sameRootRow), "picker should use folder identity for same-root normal project").toBeVisible({ timeout: 10_000 });
+			await page.keyboard.press("Escape");
 
-		await openApp(page);
-		const newGoal = page.locator("button[title^='New goal']").first();
-		await expect(newGoal).toBeVisible({ timeout: 15_000 });
-		await newGoal.click();
-		await expect(page.getByText(/Headquarters goals need git support|Goal creation for Headquarters is unavailable|not a supported git repository/i)).toBeVisible({ timeout: 10_000 });
+			const hqSession = await createSessionViaSplashPicker(page, HEADQUARTERS_NAME);
+			expect(hqSession.requestBody.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			let sessionResp = await apiFetch(`/api/sessions/${hqSession.id}`);
+			expect(sessionResp.ok).toBe(true);
+			let session = await parseJsonResponse<any>(sessionResp);
+			expect(session.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(session.cwd, gateway.bobbitDir, "Headquarters Quick Session cwd");
+			try {
+				await deleteSession(hqSession.id);
+				createdSessions.delete(hqSession.id);
+			} catch { /* afterEach retries tracked cleanup */ }
+
+			await openApp(page);
+			const normalSession = await createSessionViaSplashPicker(page, sameRootProject.name);
+			expect(normalSession.requestBody.projectId).toBe(sameRootProject.id);
+			sessionResp = await apiFetch(`/api/sessions/${normalSession.id}`);
+			expect(sessionResp.ok).toBe(true);
+			session = await parseJsonResponse<any>(sessionResp);
+			expect(session.projectId).toBe(sameRootProject.id);
+			expectSamePath(session.cwd, gateway.serverRoot, "same-root normal Quick Session cwd");
+			try {
+				await deleteSession(normalSession.id);
+				createdSessions.delete(normalSession.id);
+			} catch { /* afterEach retries tracked cleanup */ }
+		});
+
+		await test.step("hiding and restarting Headquarters preserves the same-root normal project", async () => {
+			await setHeadquartersCheckbox(page, false);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toHaveCount(0);
+			await expect(projectHeader(page, sameRootProject.id), "hiding Headquarters must not hide the same-root normal project").toBeVisible({ timeout: 15_000 });
+
+			await crashAndRestart(gateway, page);
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across restart").toHaveCount(0);
+			await expect(projectHeader(page, sameRootProject.id), "same-root normal project should persist across restart").toBeVisible({ timeout: 15_000 });
+			const projects = await listVisibleProjects();
+			expect(projects.map((project) => project.id)).toContain(sameRootProject.id);
+			expect(projects.map((project) => project.id)).not.toContain(HEADQUARTERS_PROJECT_ID);
+
+			await setHeadquartersCheckbox(page, true);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+			await expect(projectHeader(page, sameRootProject.id)).toBeVisible({ timeout: 15_000 });
+		});
+	});
+
+	test("Headquarters-only browser lifecycle preserves every server-workspace affordance", async ({ page, gateway }) => {
+		let hq: ProjectRecord;
+		let sessionId = "";
+
+		await test.step("server-root Add Project preflight cannot archive Headquarters", async () => {
+			hq = await prepareOnlyHeadquarters();
+			await openAddProjectDialog(page);
+			const input = page.locator('input[placeholder="/path/to/project"]').first();
+			await input.fill(gateway.serverRoot);
+			const panel = await waitForPreflight(page);
+			await expect(panel).toHaveAttribute("data-has-fail", "0");
+			await expect(panel).toContainText(/Headquarters|server run directory/i);
+			await expect(page.locator('[data-testid="preflight-archive-cta"]'), "same-root Add Project must not offer to archive/delete Headquarters state").toHaveCount(0);
+			const continueButton = page.locator("button").filter({ hasText: "Continue" }).first();
+			await expect(continueButton, "server run directory should be addable as an explicit normal project").toBeEnabled();
+		});
+
+		await test.step("fresh Headquarters renders its identity and creates a direct Quick Session", async () => {
+			await openApp(page);
+			const hqHeader = projectHeader(page, HEADQUARTERS_PROJECT_ID);
+			await expect(hqHeader).toBeVisible({ timeout: 15_000 });
+			await expect(hqHeader).toContainText(HEADQUARTERS_NAME);
+			await expect(headquartersIcon(hqHeader), "Headquarters sidebar header should use Lucide TowerControl").toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText("No projects configured")).toHaveCount(0);
+			await expect(page.getByRole("button", { name: /Add Project/i }).first()).toBeVisible();
+
+			({ id: sessionId } = await createHeadquartersSessionViaSplash(page));
+			const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessionResp.ok, "created Headquarters session should be readable").toBe(true);
+			const session = await parseJsonResponse<any>(sessionResp);
+			expect(session.projectId, "created session should persist projectId=headquarters").toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(session.cwd, gateway.bobbitDir, "created Headquarters session cwd");
+		});
+
+		await test.step("New Staff targets Headquarters directly", async () => {
+			await openApp(page);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+			const sessionCreated = page.waitForResponse((resp) =>
+				resp.url().includes("/api/sessions") && resp.request().method() === "POST",
+				{ timeout: 30_000 },
+			);
+			const newStaffBtn = page.locator("button[title^='New staff agent']").first();
+			await expect(newStaffBtn).toBeVisible({ timeout: 15_000 });
+			await newStaffBtn.click();
+			const resp = await sessionCreated;
+			expect(resp.ok(), `New Staff assistant session should be created: ${resp.status()}`).toBe(true);
+			const requestBody = resp.request().postDataJSON?.() ?? JSON.parse(resp.request().postData() || "{}");
+			expect(requestBody.assistantType).toBe("staff");
+			expect(requestBody.projectId, "staff assistant should target Headquarters without opening Add Project").toBe(HEADQUARTERS_PROJECT_ID);
+			const body = await resp.json();
+			if (body.id) createdSessions.add(body.id);
+			await expect(page).toHaveURL(/#\/session\//, { timeout: 20_000 });
+			await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 20_000 });
+			await expect(page.getByText("Sandbox (Docker)").first()).toBeVisible({ timeout: 20_000 });
+			if (body.id) {
+				try {
+					await deleteSession(body.id);
+					createdSessions.delete(body.id);
+				} catch { /* afterEach retries tracked cleanup */ }
+			}
+		});
+
+		await test.step("settings and config pages expose one Headquarters server scope", async () => {
+			await navigateToHash(page, "#/settings/system/general");
+			await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
+			const settingsHeadquartersScope = page.getByTestId("settings-headquarters-scope");
+			await expect(settingsHeadquartersScope).toBeVisible({ timeout: 10_000 });
+			await expect(settingsHeadquartersScope).toContainText(HEADQUARTERS_NAME);
+			await expect(headquartersIcon(settingsHeadquartersScope), "Settings scope row should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "System", exact: true }), "Settings should not expose both System and Headquarters scopes").toHaveCount(0);
+
+			await navigateToHash(page, "#/roles");
+			await expect(page.getByRole("heading", { name: "Roles" })).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByRole("button", { name: HEADQUARTERS_NAME }).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "System", exact: true }), "Config pages should relabel the server scope as Headquarters").toHaveCount(0);
+		});
+
+		await test.step("no-worktree Headquarters goal omits git and merge affordances", async () => {
+			const goalResp = await createNoWorktreeHeadquartersGoal(hq);
+			if (goalResp.status === 201) {
+				const goal = await parseJsonResponse<GoalRecord>(goalResp);
+				createdGoals.add(goal.id);
+				await openApp(page);
+				await navigateToHash(page, `#/goal/${goal.id}`);
+				await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
+				await expect(page.getByText(/This Headquarters goal runs in the Headquarters directory without a git worktree\./i).first()).toBeVisible({ timeout: 15_000 });
+				await expect(page.getByText("Git branch", { exact: false }).first()).toBeVisible();
+				await expect(page.getByRole("button", { name: /create pr|open pr|ready to merge|merge|reset worktree|fork|branch/i })).toHaveCount(0);
+				try {
+					await deleteGoal(goal.id);
+					createdGoals.delete(goal.id);
+				} catch { /* afterEach retries tracked cleanup */ }
+			} else {
+				const failureText = await goalResp.text().catch(() => "");
+				expect(failureText, "If no-worktree Headquarters goals are blocked at creation time, the API/UI copy should be explicit")
+					.toMatch(/Headquarters goals need git\/worktree support|Goal creation for Headquarters is unavailable|not a supported git repository/i);
+				await openApp(page);
+				const newGoal = page.locator("button[title^='New goal']").first();
+				await expect(newGoal).toBeVisible({ timeout: 15_000 });
+				await newGoal.click();
+				await expect(page.getByText(/Headquarters goals need git support|Goal creation for Headquarters is unavailable|not a supported git repository/i)).toBeVisible({ timeout: 10_000 });
+			}
+		});
+
+		await test.step("hidden preference and existing work survive browser reload and gateway restart", async () => {
+			await setHeadquartersCheckbox(page, false);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden Headquarters should disappear from normal sidebar project lists").toHaveCount(0);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("textarea").first(), "active Headquarters session should remain reachable after hiding Headquarters").toBeVisible({ timeout: 20_000 });
+			let sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessionResp.ok, "hiding Headquarters must not delete active Headquarters sessions").toBe(true);
+			expect((await parseJsonResponse<any>(sessionResp)).projectId).toBe(HEADQUARTERS_PROJECT_ID);
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across browser reload").toHaveCount(0);
+			await crashAndRestart(gateway, page);
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across server restart").toHaveCount(0);
+			sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessionResp.ok, "Headquarters session should survive restart while Headquarters is hidden").toBe(true);
+			const checkbox = await openHeadquartersGeneralSettings(page);
+			await expect(checkbox, "visibility checkbox should reflect persisted hidden state").not.toBeChecked();
+		});
+
+		await test.step("hidden empty state offers Quick Session, Show Headquarters, and Add Project recovery", async () => {
+			await expect.poll(async () => (await listVisibleProjects()).map((p) => p.id), {
+				timeout: 10_000,
+				message: "Headquarters hide preference should remove it only from normal project lists",
+			}).toEqual([]);
+			await openApp(page);
+			await expect(page.getByText("Headquarters is hidden from project lists.").first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByRole("button", { name: "Quick Session in Headquarters" }).first()).toBeVisible();
+			await expect(page.getByRole("button", { name: "Show Headquarters" }).first()).toBeVisible();
+			await expect(page.getByRole("button", { name: /Add Project/i }).first()).toBeVisible();
+			await expect(page.getByText("No projects configured")).toHaveCount(0);
+
+			const shown = page.waitForResponse((resp) =>
+				resp.url().includes("/api/preferences") && resp.request().method() === "PUT",
+				{ timeout: 10_000 },
+			);
+			await page.getByRole("button", { name: "Show Headquarters" }).first().click();
+			const resp = await shown;
+			expect(resp.ok(), "Show Headquarters fallback action should persist the preference").toBe(true);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+		});
+
+		await test.step("adding a normal project preserves project identities and picker ordering", async () => {
+			const normalProject = await createNormalProject(`HQ Sibling ${Date.now()}`);
+			await openApp(page);
+			await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+			await expect(projectHeader(page, normalProject.id)).toBeVisible({ timeout: 15_000 });
+			const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
+				els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
+			);
+			expect(headerIds[0], "Headquarters should be anchored first in the sidebar when normal projects exist").toBe(HEADQUARTERS_PROJECT_ID);
+			await expect(headquartersIcon(projectHeader(page, HEADQUARTERS_PROJECT_ID))).toBeVisible({ timeout: 10_000 });
+			await expect(normalProjectIcon(projectHeader(page, normalProject.id)), "normal projects should keep the usual folder/project identity").toBeVisible({ timeout: 10_000 });
+			await expect(headquartersIcon(projectHeader(page, normalProject.id)), "normal project rows should not use TowerControl").toHaveCount(0);
+
+			const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
+			await expect(splash).toBeVisible({ timeout: 10_000 });
+			await splash.click();
+			const rows = page.locator('[data-testid="splash-project-picker-item"]');
+			await expect(rows.first(), "Quick Session picker should list Headquarters first").toContainText(HEADQUARTERS_NAME);
+			await expect(headquartersIcon(rows.first()), "Quick Session picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+			await expect(rows.nth(1)).toContainText(normalProject.name);
+			await expect(normalProjectIcon(rows.nth(1)), "normal project picker rows should keep folder identity").toBeVisible({ timeout: 10_000 });
+		});
 	});
 });
