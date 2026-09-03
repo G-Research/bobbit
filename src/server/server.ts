@@ -741,7 +741,7 @@ import { launchSidebarSessionFork, resolveGoalGithubLink, resolveSidebarSessionF
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
-import { BuiltinConfigProvider } from "./agent/builtin-config.js";
+import { BuiltinConfigProvider, invalidateRolesDirParseCache } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
@@ -6088,6 +6088,7 @@ async function handleApiRoute(
 	const invalidateResolverCaches = (): void => {
 		invalidateMarketPackScanCache();
 		invalidateBuiltinPackScanCache();
+		invalidateRolesDirParseCache();
 		invalidateSlashSkillsCache();
 		__resetToolScanCache();
 		const toolManagers = new Set([toolManager, ...Array.from(projectContextManager.all(), context => context.toolManager)]);

@@ -267,7 +267,16 @@ export class MaintenanceGitModel {
 		}
 		if (command === "remote" && rest[0] === "get-url") throw commandError(args, cwd);
 		if (command === "status") return "";
-		if (command === "for-each-ref") return "";
+		if (command === "for-each-ref") {
+			// The worktree inventory lists local branches in one call
+			// (`for-each-ref --format=%(refname) refs/heads/`). Answer from the
+			// modelled branch set; every other pattern (e.g. the pool's
+			// `%(upstream:short)` probe) stays empty as before.
+			const listsHeads = rest.some(arg => arg === "refs/heads" || arg === "refs/heads/");
+			const wantsRefname = rest.includes("--format=%(refname)");
+			if (listsHeads && wantsRefname) return [...repo.branches].sort().map(branch => `refs/heads/${branch}\n`).join("");
+			return "";
+		}
 		if (command === "config") return "";
 		if (command === "add" || command === "commit" || command === "init") return "";
 		if (command === "push") return "";

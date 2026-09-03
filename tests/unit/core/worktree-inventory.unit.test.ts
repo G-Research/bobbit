@@ -135,6 +135,59 @@ describe("worktree inventory classifier", () => {
 		} finally { cleanup(); }
 	});
 
+	it("resolves local-branch existence with one ref listing per repository, not one probe per candidate", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject();
+		try {
+			const count = 12;
+			const candidates = Array.from({ length: count }, (_, i) => ({ path: path.join(root, "repo-wt", `session-${i}`), branch: `session/arch-${i}` }));
+			for (const candidate of candidates) filesystem.mkdirSync(candidate.path, { recursive: true });
+			const archivedSessions = candidates.map((candidate, i) => ({ id: `a${i}`, title: "Archived", projectId: "p1", repoPath: repo, worktreePath: candidate.path, branch: candidate.branch, archived: true }));
+			// Only even-numbered branches still exist locally.
+			const existing = candidates.filter((_, i) => i % 2 === 0).map(candidate => `refs/heads/${candidate.branch}`);
+			const gitCalls: string[][] = [];
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					gitCalls.push([...args]);
+					if (args[0] === "for-each-ref") return { stdout: ["refs/heads/master", ...existing].join("\n") + "\n", stderr: "" };
+					if (args[0] === "show-ref") throw new Error("per-candidate probe must not run when the batch listing succeeded");
+					return { stdout: "", stderr: "" };
+				},
+			};
+			const porcelain = [`worktree ${repo}\nbranch refs/heads/master`, ...candidates.map(candidate => `worktree ${candidate.path}\nbranch refs/heads/${candidate.branch}`)].join("\n\n") + "\n";
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions }), porcelain, new Map(), { commandRunner });
+			const report = await service.scan();
+			assert.equal(gitCalls.filter(args => args[0] === "for-each-ref").length, 1, "exactly one ref listing for the single repository");
+			assert.equal(gitCalls.filter(args => args[0] === "show-ref").length, 0);
+			for (const [i, candidate] of candidates.entries()) {
+				const item = report.items.find(row => row.path === candidate.path)!;
+				assert.equal(item.localBranchExists, i % 2 === 0, `candidate ${i} branch existence`);
+				assert.equal(item.willDeleteBranch, i % 2 === 0, `candidate ${i} branch deletion plan`);
+			}
+		} finally { cleanup(); }
+	});
+
+	it("falls back to per-candidate branch probes when the ref listing fails", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject();
+		try {
+			const wt = path.join(root, "repo-wt", "session-arch");
+			filesystem.mkdirSync(wt, { recursive: true });
+			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: "session/arch", archived: true };
+			const gitCalls: string[][] = [];
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					gitCalls.push([...args]);
+					if (args[0] === "for-each-ref") throw new Error("listing unavailable");
+					return { stdout: "", stderr: "" };
+				},
+			};
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n`, new Map(), { commandRunner });
+			const report = await service.scan();
+			const item = report.items.find(i => i.path === wt)!;
+			assert.equal(item.localBranchExists, true, "fallback probe (exit 0) proves the branch exists");
+			assert.ok(gitCalls.some(args => args[0] === "show-ref" && args[3] === "refs/heads/session/arch"), "per-candidate probe ran for the archived branch");
+		} finally { cleanup(); }
+	});
+
 	it("requires an exact repository, worktree path, and non-empty branch for archived cleanup", async () => {
 		const mismatchCases = [
 			{ name: "repository", change: (record: any, root: string) => { record.repoPath = path.join(root, "other-repo"); } },
@@ -451,7 +504,10 @@ describe("worktree inventory classifier", () => {
 				const mutations: string[] = [];
 				const commandRunner: CommandRunner = {
 					execFile: async (_file, args) => {
-						if (args[0] === "show-ref" && deferShowRef) {
+						// The scan's branch lookup is one `for-each-ref` per repository; the
+						// cleanup path still probes per branch with `show-ref`. Defer on either
+						// so the race window sits inside the scan's async Git phase.
+						if ((args[0] === "for-each-ref" || args[0] === "show-ref") && deferShowRef) {
 							deferShowRef = false;
 							scanPending = true;
 							await scanGate;

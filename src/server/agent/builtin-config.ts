@@ -10,6 +10,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
@@ -55,8 +56,68 @@ export function parseRoleYaml(content: string): Role | null {
 	};
 }
 
-/** Read all role YAML files from `<dir>` (flat) into Role[]. */
+// ── Role-dir parse cache ────────────────────────────────────────
+//
+// `parseRolesDir` is called by `RoleLoader.load` for EVERY on-disk pack on
+// EVERY `ConfigCascade.resolveRoles()` call, and `resolveRoles()` runs on the
+// streaming hot path: `prepareVisibleAgentEvent` → `agentAuthorForSession` →
+// `getRole` → `resolveSessionRole` for every Pi event of every live session.
+// Re-reading + YAML-parsing every role file per streamed token pinned the
+// gateway main thread at 100% (observed live: ~75% of samples under
+// `parseRolesDir` → `yaml.parse`) and produced multi-second event-loop lag.
+//
+// Cache the parsed `Role[]` per directory, keyed by a content fingerprint
+// (names + sizes + bytes of the `*.yaml` entries) so an edited/added/removed
+// role file is still observed on the next call without any explicit reload,
+// and drop the whole cache from `invalidateRolesDirParseCache()`, which the
+// host fans out from `invalidateResolverCaches()`. Cheap stat/read of a few
+// small files replaces the expensive parse; the cached array is treated as
+// immutable by callers (they only read/map it).
+//
+// Pinned by tests/unit/core/roles-dir-parse-cache.unit.test.ts.
+const __rolesDirCache = new Map<string, { fingerprint: string; roles: Role[] }>();
+
+/** Drop the role-dir parse cache. Wired into `invalidateResolverCaches()`. */
+export function invalidateRolesDirParseCache(): void {
+	__rolesDirCache.clear();
+}
+
+/** Content fingerprint of the flat `*.yaml` files in `dir`, or undefined when unreadable. */
+function rolesDirFingerprint(dir: string): string | undefined {
+	try {
+		const hash = createHash("sha256");
+		const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
+			const bytes = fs.readFileSync(path.join(dir, entry.name));
+			hash.update(`${entry.name}\0${bytes.length}\0`).update(bytes);
+		}
+		return hash.digest("hex");
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read all role YAML files from `<dir>` (flat) into Role[].
+ *
+ * Cached by directory content fingerprint — see the cache note above. A
+ * missing/unreadable directory is not cached and returns `[]` every call.
+ */
 export function parseRolesDir(rolesDir: string): Role[] {
+	const fingerprint = rolesDirFingerprint(rolesDir);
+	if (fingerprint === undefined) {
+		__rolesDirCache.delete(rolesDir);
+		return parseRolesDirUncached(rolesDir);
+	}
+	const hit = __rolesDirCache.get(rolesDir);
+	if (hit && hit.fingerprint === fingerprint) return hit.roles;
+	const roles = parseRolesDirUncached(rolesDir);
+	__rolesDirCache.set(rolesDir, { fingerprint, roles });
+	return roles;
+}
+
+function parseRolesDirUncached(rolesDir: string): Role[] {
 	const roles: Role[] = [];
 	let entries: fs.Dirent[];
 	try {
