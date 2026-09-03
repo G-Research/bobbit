@@ -25,7 +25,7 @@ const temporaryRoots: string[] = [];
 const originalBundleSetting = process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE;
 const IN_PROCESS_B = [
 	"api-goal-workflow-edit", "api-goals-spawn-child-route", "archive-dormant-cascade", "base-ref-pin",
-	"continue-archived-multi-repo", "continue-archived-worktree-invalid-base", "continue-archived-worktree-pool",
+	"continue-archived-multi-repo", "continue-archived-worktree-pool",
 	"continue-archived-worktree-stale-source", "continue-archived-worktree", "gate-active-verification-snapshot",
 	"gate-verification-resume", "goal-metadata-hierarchy", "host-agents", "marketplace-conflicts", "marketplace-mcp",
 	"marketplace-pi-extension", "multi-repo-pool", "pack-local-data-runtime", "per-project-worktree-pool",
