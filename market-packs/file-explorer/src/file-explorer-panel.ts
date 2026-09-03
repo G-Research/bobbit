@@ -577,7 +577,10 @@ async function loadDirectory(state: ExplorerState, path: string, includeStatus: 
 	state.directories.set(path, { state: "loading", entries: previous?.entries ?? [], truncated: previous?.truncated ?? false });
 	renderTree(state);
 	try {
-		const value = await callValue(state, "list", rootedBody(state, { path, ...(includeStatus ? { includeStatus: true } : {}) }));
+		const value = await callValue(state, "list", rootedBody(state, {
+			path,
+			...(includeStatus ? { includeStatus: true, snapshotGeneration: generation } : {}),
+		}));
 		if (generation !== state.refreshGeneration) return false;
 		const object = recordOf(value);
 		const rawEntries = arrayOf(object?.entries ?? object?.children ?? value);
@@ -1695,7 +1698,10 @@ async function loadDiff(state: ExplorerState, path: string, generation = ++state
 	state.diffPreview = { state: "loading", path };
 	renderPreview(state);
 	try {
-		const value = recordOf(await callValue(state, "diff", rootedBody(state, { path }))) ?? {};
+		const value = recordOf(await callValue(state, "diff", rootedBody(state, {
+			path,
+			snapshotGeneration: state.refreshGeneration,
+		}))) ?? {};
 		if (generation !== state.selectionGeneration || state.selected !== path) return;
 		state.diffPreview = normalizePreview(value, path, "text");
 	} catch (error) {
