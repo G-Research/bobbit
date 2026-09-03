@@ -38,10 +38,13 @@ import type { Page } from "@playwright/test";
 
 test.describe.configure({ mode: "serial" });
 
-// A finite POSIX loop that prints `<prefix>-N` every 250ms then exits 0. Long
-// enough (≈12.5s) that it is still running when we crash+restart early, so we
-// can observe streaming RESUME after the gateway comes back, then watch it
-// finish with a real exit code.
+// A finite POSIX loop that prints `<prefix>-N` every 250ms then exits 0.
+// Coverage map: the former 50 chunks repeated the same tail/persist/broadcast
+// path after its pre/post-restart boundary probes. Twenty-four chunks (≈6s)
+// retain real intermediate output before restart, live output after restart,
+// and the final chunk + real exit. Deterministic multi-chunk ordering and
+// repeated-content behavior remain pinned in bg-process-persistence.unit.test.ts.
+const STREAM_CHUNK_COUNT = 24;
 function streamingCommand(prefix: string, count: number): string {
 	return `i=1; while [ "$i" -le ${count} ]; do echo "${prefix}-$i"; i=$((i+1)); sleep 0.25; done; exit 0`;
 }
@@ -203,8 +206,8 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 		const sessionId = await activeSessionId(page);
 		expect(sessionId, "active session id resolved from hash").toBeTruthy();
 
-		// Create a long-ish streaming process (≈12.5s) via the production REST path.
-		const bgId = await createBgProcess(sessionId, streamingCommand("tick", 50), "stream-task");
+		// Create a finite streaming process via the production REST path.
+		const bgId = await createBgProcess(sessionId, streamingCommand("tick", STREAM_CHUNK_COUNT), "stream-task");
 
 		// Pill appears for the active session.
 		await expect(pill(page, bgId)).toBeVisible({ timeout: 15_000 });
@@ -241,6 +244,7 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 				return p ? { status: p.status, exitCode: p.exitCode } : null;
 			}, { timeout: 30_000, intervals: [300] })
 			.toEqual({ status: "exited", exitCode: 0 });
+		expect(await latestLine(sessionId, bgId, "tick"), "final streamed chunk persisted in order").toBe(STREAM_CHUNK_COUNT);
 
 		// The pill UI reflects the real exit code.
 		const dropdown = await openPillDropdown(page, bgId);
