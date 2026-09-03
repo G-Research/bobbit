@@ -147,6 +147,23 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 			firstKeptEntryId: "kept-1",
 		});
 
+		// The UI's count probe deliberately requests one compact row. Pin the
+		// complete envelope so its retry test can mock the exact server boundary.
+		const countResponse = await fetch(`${base()}/api/sessions/${id}/transcript/before-compaction?compactionId=${compactionId}&limit=1`, { headers: authHeaders() });
+		expect(countResponse.status).toBe(200);
+		expect(await countResponse.json()).toEqual({
+			total: orphanCount,
+			returned: 1,
+			nextCursor: 1,
+			messages: [{
+				index: 0,
+				role: "user",
+				ts: entries[0].ts,
+				text: "pre-msg-0",
+				author: { kind: "user", id: "user:local", label: "User" },
+			}],
+		});
+
 		// First page \u2014 limit 4 of 6 orphaned.
 		const r1 = await fetch(`${base()}/api/sessions/${id}/transcript/before-compaction?compactionId=${compactionId}&limit=4`, { headers: authHeaders() });
 		expect(r1.status).toBe(200);
