@@ -118,14 +118,17 @@ roots; a fixture must set any exception explicitly and locally. This keeps Git,
 MCP, marketplace, skill, config, credential, and line-ending fixtures independent
 from a developer host.
 
-Browser/E2E coordinators also own Playwright profiles and caches, use a nested root
-for legacy E2E, serialize same-worktree `dist` readers/builders through atomic
-`ensure-dist` publication, and scope worktree/Docker lookup and teardown by the E2E
-run ID. Tests synchronize on an exact observable lifecycle event, never elapsed
-time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout increases,
-blind reloads, or weaker assertions; repair ownership or readiness instead. See
-[cross-OS test authoring](testing-v2/cross-os-test-authoring.md) and the
-[cross-suite runtime design](design/isolate-unit-runtime.md).
+Browser/E2E coordinators also own Playwright profiles and caches. Full E2E runs
+execute B then C serially in the coordinator root, with only a contained cache
+snapshot crossing the phase boundary; focused B/C runs use the nested legacy
+wrapper instead. Same-worktree `dist` readers/builders serialize through atomic
+`ensure-dist` publication, and worktree/Docker lookup and teardown are scoped by
+the E2E run ID. Tests synchronize on an exact observable lifecycle event, never
+elapsed time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout
+increases, blind reloads, or weaker assertions; repair ownership or readiness
+instead. See [cross-OS test authoring](testing-v2/cross-os-test-authoring.md), the
+[cross-suite runtime design](design/isolate-unit-runtime.md), and the
+[safe-gains E2E close-out](e2e-performance/speed-up-e2e-332a47cc/close-out.md).
 
 ## Current State (v2)
 
@@ -867,16 +870,27 @@ E2E command before merge.
 Run the browser and E2E phases through their npm coordinators. Before Playwright
 loads, each coordinator creates a canonical temporary root and assigns its
 profiles, transform/V8 caches, reports, output, and compatibility child beneath
-that root. The v2 E2E coordinator shares its root with Groups A, C, and D;
-Group B clears those cache values and the legacy wrapper creates a nested root.
-This prevents overlapping worktrees from writing a common Playwright cache.
+that root. In a full E2E run, Groups A and D use the coordinator environment
+directly, while B then C run serially through a serial-cache environment in the
+same coordinator-owned root. B processes write distinct PID-scoped transform
+slots. After B exits, the coordinator unions completed slots into a contained
+snapshot; each C process seeds a fresh PID-scoped slot from that snapshot, so no
+writable cache directory is shared. The runner removes B's dist-prebundle setting
+before the snapshot handoff and C start, so C never loads the B bundle.
+
+Focused B or C runs do not use the full-run prebundle or B→C handoff. They clear
+outer cache settings and invoke the legacy wrapper, which allocates a nested root.
+The outer coordinator removes its own successful full-run root and retains it on
+failure. `BOBBIT_KEEP_PWTEST_CACHE=1` affects only a successful legacy-wrapper
+root; it does not retain a successful full-run root.
 
 `BOBBIT_V2_RUN_ROOT`, `BOBBIT_E2E_RUN_ID`, `BOBBIT_E2E_TMP_ROOT`, report paths,
 and Playwright cache paths are generated coordinator outputs. Do not set them as
 caller configuration and do not use a fixed Windows path such as
 `C:\bobbit-e2e`. The only machine-global mutable location is the captured
 concurrency ledger; installed Playwright browser binaries are a read-only host
-dependency.
+dependency. These lifecycle guarantees are separate from performance results;
+see the [safe-gains E2E close-out](e2e-performance/speed-up-e2e-332a47cc/close-out.md).
 
 The supported diagnostic controls are:
 
