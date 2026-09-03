@@ -16,7 +16,7 @@ const VALID_PATHS = [
 	["tests/unit/isolated/env.isolated.test.ts", "unit-isolated", "unit", "vitest"],
 	["tests/dom/panel.dom.test.ts", "dom", "unit", "vitest"],
 	["tests/integration/gateway/api.gateway.test.ts", "gateway-integration", "unit", "vitest"],
-	["tests/browser/fixtures/geometry.fixture.spec.ts", "browser-fixture", "browser", "playwright"],
+	["tests/browser/fixtures/pr-walkthrough-panel-parity.fixture.spec.ts", "browser-fixture", "browser", "playwright"],
 	["tests/browser/journeys/create-goal.journey.spec.ts", "browser-journey", "browser", "playwright"],
 	["tests/e2e/node/worktree.node-e2e.test.ts", "node-e2e", "e2e", "node"],
 	["tests/e2e/vitest/restart.vitest-e2e.test.ts", "vitest-e2e", "e2e", "vitest"],
