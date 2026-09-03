@@ -141,13 +141,6 @@ async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> 
 	await expect.poll(async () => {
 		try { return (await apiFetch("/api/health")).ok; } catch { return false; }
 	}, { timeout: 20_000, intervals: [250], message: "gateway should be healthy after restart" }).toBe(true);
-
-	if (!page.isClosed()) {
-		await page.waitForFunction(() => {
-			const s = (window as any).bobbitState;
-			return !!s && s.connectionStatus === "connected";
-		}, undefined, { timeout: 15_000, polling: 250 }).catch(() => { /* reload below also reconnects */ });
-	}
 }
 
 test.describe("Sidebar tree restart durability", () => {
