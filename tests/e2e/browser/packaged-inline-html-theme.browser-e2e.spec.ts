@@ -38,6 +38,15 @@ const PI_PACKAGES = [
 	"@earendil-works/pi-coding-agent",
 ] as const;
 const INSPECTED_PACKAGES = [...PI_PACKAGES, "brace-expansion", "protobufjs"];
+const DEV_ONLY_BUNDLED_PACKAGES = [
+	"@mariozechner/mini-lit",
+	"@recogito/text-annotator",
+	"@xterm/addon-fit",
+	"@xterm/xterm",
+	"lucide",
+	"qrcode",
+	"sortablejs",
+] as const;
 const REQUIRED_PI_VERSION = "0.84.1";
 
 interface JsonRecord {
@@ -53,6 +62,8 @@ interface DependencyOccurrence {
 interface PackEntry {
 	name?: string;
 	filename?: string;
+	size?: number;
+	unpackedSize?: number;
 	files?: Array<{ path?: string }>;
 }
 
@@ -71,6 +82,12 @@ interface RuntimeReport {
 	commands: CommandResult[];
 	pack?: unknown;
 	packFiles: string[];
+	packageMetrics?: {
+		fileCount: number;
+		packedBytes: number;
+		unpackedBytes: number;
+		installedPackageCount: number;
+	};
 	selectedPiVersion?: string;
 	tree?: unknown;
 	binaries?: unknown;
@@ -421,6 +438,14 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expect(pack.name).toBe(PACKAGE_NAME);
 			expect(typeof pack.filename).toBe("string");
 			report.packFiles = normalizedPackagePaths(pack);
+			report.packageMetrics = {
+				fileCount: report.packFiles.length,
+				packedBytes: Number(pack.size),
+				unpackedBytes: Number(pack.unpackedSize),
+				installedPackageCount: 0,
+			};
+			expect(Number.isSafeInteger(report.packageMetrics.packedBytes)).toBe(true);
+			expect(Number.isSafeInteger(report.packageMetrics.unpackedBytes)).toBe(true);
 			expect(report.packFiles).toContain("dist/server/cli.js");
 			expect(report.packFiles).toContain("dist/ui/index.html");
 			expect(report.packFiles).toContain("src/ui/app.css");
@@ -470,6 +495,22 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				dependencies?: Record<string, string>;
 			};
 			expect(installedManifest.bin?.bobbit).toBe("dist/server/cli.js");
+			for (const name of DEV_ONLY_BUNDLED_PACKAGES) {
+				expect(installedManifest.dependencies?.[name], `${name} must not ship as a production dependency`).toBeUndefined();
+			}
+			const installedLock = JSON.parse(await readFile(join(consumerDir, "package-lock.json"), "utf8")) as {
+				packages?: Record<string, { dependencies?: Record<string, string> }>;
+			};
+			const installedPackagePaths = Object.keys(installedLock.packages ?? {})
+				.filter(path => path !== "" && /(?:^|\/)node_modules\//.test(path));
+			report.packageMetrics!.installedPackageCount = installedPackagePaths.length;
+			for (const name of DEV_ONLY_BUNDLED_PACKAGES) {
+				const suffix = `/node_modules/${name}`;
+				expect(
+					installedPackagePaths.some(path => `/${path.replaceAll("\\", "/")}`.endsWith(suffix)),
+					`${name} must be absent from the installed production graph`,
+				).toBe(false);
+			}
 			const piPins = PI_PACKAGES.map(name => installedManifest.dependencies?.[name]);
 			expect(piPins.every(pin => typeof pin === "string"), "packed Bobbit must declare all three Pi dependencies").toBe(true);
 			expect(new Set(piPins).size, "packed Bobbit must pin all three Pi packages to one version").toBe(1);
