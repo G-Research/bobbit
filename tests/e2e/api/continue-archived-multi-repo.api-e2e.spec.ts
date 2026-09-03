@@ -6,7 +6,7 @@
 import { test, expect } from "../in-process-harness.js";
 import { agentEndPredicate, apiFetch, connectWs, registerProject } from "../e2e-setup.js";
 import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
@@ -44,46 +44,6 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 	} catch {
 		return false;
 	}
-}
-
-async function deleteBranchIfPresent(repoPath: string, branch: string): Promise<void> {
-	try {
-		await runFixtureCommand("git", ["branch", "-D", branch], { cwd: repoPath, attempts: 1 });
-	} catch {
-		// Best-effort cleanup; the stale-state assertions below remain authoritative.
-	}
-}
-
-async function removeWorktreeSetIfPresent(
-	worktreePath: string,
-	components: Array<{ repoPath: string; relativePath: string }>,
-): Promise<void> {
-	for (const component of components) {
-		try {
-			await runFixtureCommand("git", ["worktree", "remove", "--force", join(worktreePath, component.relativePath)], {
-				cwd: component.repoPath,
-				attempts: 1,
-			});
-		} catch {
-			// Archive cleanup may already have removed the component worktree.
-		}
-	}
-	rmSync(worktreePath, { recursive: true, force: true });
-	for (const component of components) {
-		try {
-			await runFixtureCommand("git", ["worktree", "prune"], { cwd: component.repoPath, attempts: 1 });
-		} catch {
-			// Best-effort cleanup.
-		}
-	}
-}
-
-async function liveProjectSessionIds(projectId: string): Promise<string[]> {
-	const response = await apiFetch(`/api/sessions?projectId=${encodeURIComponent(projectId)}`);
-	const text = await response.text();
-	expect(response.status, text).toBe(200);
-	const body = JSON.parse(text);
-	return (body.sessions as Array<{ id: string }>).map((session) => session.id).sort();
 }
 
 function slugifyCwd(cwd: string): string {
@@ -154,7 +114,6 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 		let projectId: string | undefined;
 		let srcId = "";
 		let newId = "";
-		let unexpectedContinuedId = "";
 
 		try {
 			mkdirSync(rootPath, { recursive: true });
@@ -262,75 +221,10 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source cwd").not.toContain(srcRec.cwd);
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source worktree container").not.toContain(srcRec.worktreePath);
 
-			// Reuse the successful destination as the next archived source. This keeps
-			// the real HTTP/auth, transcript adoption, pool-backed success, and cold
-			// worktree failure boundaries in one lifecycle instead of booting a second
-			// gateway/repository solely for the stale-base branch.
-			const archiveContinued = await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" });
-			expect(archiveContinued.ok, await archiveContinued.clone().text()).toBe(true);
-
-			const staleBaseRef = `stale-continue-base-${Date.now()}`;
-			for (const repoPath of [apiRepo, webRepo]) {
-				await runFixtureCommand("git", ["branch", staleBaseRef, "master"], { cwd: repoPath });
-			}
-			const putBaseRef = await apiFetch(`/api/projects/${projectId}/config`, {
-				method: "PUT",
-				body: JSON.stringify({ base_ref: staleBaseRef }),
-			});
-			expect(putBaseRef.status, await putBaseRef.text()).toBe(200);
-
-			await removeWorktreeSetIfPresent(newRec.worktreePath, [
-				{ repoPath: apiRepo, relativePath: "api" },
-				{ repoPath: webRepo, relativePath: "web" },
-			]);
-			for (const repoPath of [apiRepo, webRepo]) {
-				await deleteBranchIfPresent(repoPath, newRec.branch);
-				await deleteBranchIfPresent(repoPath, staleBaseRef);
-			}
-			// A prepared pool entry may have been replenished after the successful
-			// claim. Drain it so this assertion exercises the required cold-create
-			// fallback against the now-stale configured ref.
-			await gateway.sessionManager.getWorktreePool(projectId)?.drain();
-
-			expect(existsSync(newRec.worktreePath), "continued worktree must be stale before the second continue").toBe(false);
-			for (const repoPath of [apiRepo, webRepo]) {
-				expect(await branchExists(repoPath, newRec.branch), "continued branch must be stale before the second continue").toBe(false);
-				expect(await branchExists(repoPath, staleBaseRef), "configured base_ref must be stale before the second continue").toBe(false);
-			}
-
-			const idsBeforeFailedContinue = await liveProjectSessionIds(projectId);
-			const failedContinue = await apiFetch(`/api/sessions/${newId}/continue`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-			const failedBody = await failedContinue.text();
-			try {
-				unexpectedContinuedId = JSON.parse(failedBody)?.id ?? "";
-			} catch {
-				// Non-JSON error bodies are covered by the assertions below.
-			}
-
-			expect(
-				failedContinue.status,
-				`continue unexpectedly returned 201 before fresh worktree/base_ref setup failure was surfaced; body=${failedBody}`,
-			).not.toBe(201);
-			expect(failedBody, "error should identify the stale current project base_ref").toContain(staleBaseRef);
-			expect(failedBody, "error should map the current base_ref/worktree failure").toMatch(/base[_ -]?ref|worktree|ref .*not found|does not exist/i);
-			const unescapedBody = failedBody.replace(/\\\\/g, "\\");
-			expect(unescapedBody, "error must not blame the archived continued worktree").not.toContain(newRec.worktreePath);
-			expect(failedBody, "error must not blame the archived continued branch").not.toContain(newRec.branch);
-			expect(await liveProjectSessionIds(projectId), "failed continue must not leave a live destination session row").toEqual(idsBeforeFailedContinue);
 		} finally {
-			if (unexpectedContinuedId) await apiFetch(`/api/sessions/${unexpectedContinuedId}`, { method: "DELETE" }).catch(() => {});
 			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
 			if (srcId) await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
-			if (projectId) {
-				await apiFetch(`/api/projects/${projectId}/config`, {
-					method: "PUT",
-					body: JSON.stringify({ base_ref: "" }),
-				}).catch(() => {});
-				await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-			}
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 			// Windows can keep git/worktree files open briefly after session and project
 			// deletion. Use bounded retries so cleanup does not replace the real test
 			// failure with a transient EPERM/ENOTEMPTY from the temp directory removal.

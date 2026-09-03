@@ -4,10 +4,10 @@
  */
 import { test, expect } from "../in-process-harness.js";
 import { apiFetch, connectWs, agentEndPredicate, registerProject } from "../e2e-setup.js";
-import { pollUntil } from "../test-utils/cleanup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
@@ -61,6 +61,32 @@ async function removeWorktreeIfPresent(repoPath: string, worktreePath: string): 
 	} catch {
 		// Best-effort cleanup.
 	}
+}
+
+async function liveProjectSessionIds(projectId: string): Promise<string[]> {
+	const response = await apiFetch(`/api/sessions?projectId=${encodeURIComponent(projectId)}`);
+	const text = await response.text();
+	expect(response.status, text).toBe(200);
+	return (JSON.parse(text).sessions as Array<{ id: string }>).map((session) => session.id).sort();
+}
+
+async function gitTopology(repoPath: string): Promise<{ branches: string; worktrees: string }> {
+	const branches = await runFixtureCommand("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], {
+		cwd: repoPath,
+		attempts: 1,
+	});
+	const worktrees = await runFixtureCommand("git", ["worktree", "list", "--porcelain"], {
+		cwd: repoPath,
+		attempts: 1,
+	});
+	return {
+		branches: branches.stdout.replace(/\r\n/g, "\n").trim(),
+		worktrees: worktrees.stdout.replace(/\r\n/g, "\n").trim(),
+	};
+}
+
+function directoryEntries(path: string): string[] {
+	return existsSync(path) ? readdirSync(path).sort() : [];
 }
 
 /** Slugify the way `formatAgentSessionFilePath` does (no collapse, just non-alnum→`-`). */
@@ -135,6 +161,8 @@ test.describe("Continue-Archived stale worktree source", () => {
 		let projectId: string | undefined;
 		let srcId = "";
 		let newId = "";
+		let unexpectedContinuedId = "";
+		let baseRefConfigured = false;
 
 		try {
 			await initRepo(repoPath);
@@ -260,17 +288,93 @@ test.describe("Continue-Archived stale worktree source", () => {
 			const proposalBody = await proposalResp.text();
 			expect(proposalResp.status, proposalBody).toBe(200);
 			expect(proposalBody).toContain(proposalMarker);
+
+			// Reuse the proven destination as the archived source for the distinct
+			// single-repo createWorktree failure boundary. The harness pool is disabled,
+			// so the second Continue must synchronously create and roll back a worktree.
+			const archiveContinued = await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" });
+			expect(archiveContinued.ok, await archiveContinued.clone().text()).toBe(true);
+
+			const staleBaseRef = `stale-continue-base-${Date.now()}`;
+			await runFixtureCommand("git", ["branch", staleBaseRef, "master"], { cwd: repoPath });
+			const putBaseRef = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: staleBaseRef }),
+			});
+			expect(putBaseRef.status, await putBaseRef.text()).toBe(200);
+			baseRefConfigured = true;
+
+			await removeWorktreeIfPresent(repoPath, newRec.worktreePath);
+			await deleteBranchIfPresent(repoPath, newRec.branch);
+			await deleteBranchIfPresent(repoPath, staleBaseRef);
+
+			expect(existsSync(newRec.worktreePath), "continued worktree must be stale before the second continue").toBe(false);
+			expect(await branchExists(repoPath, newRec.branch), "continued branch must be stale before the second continue").toBe(false);
+			expect(await branchExists(repoPath, staleBaseRef), "configured base_ref must be stale before the second continue").toBe(false);
+
+			const liveIdsBeforeFailure = await liveProjectSessionIds(projectId);
+			const topologyBeforeFailure = await gitTopology(repoPath);
+			const worktreeRoot = dirname(newRec.worktreePath);
+			const worktreeEntriesBeforeFailure = directoryEntries(worktreeRoot);
+
+			const failedContinue = await apiFetch(`/api/sessions/${newId}/continue`, {
+				method: "POST",
+				body: JSON.stringify({}),
+			});
+			const failedBody = await failedContinue.text();
+			try {
+				unexpectedContinuedId = JSON.parse(failedBody)?.id ?? "";
+			} catch {
+				// Non-JSON error bodies are covered by the assertions below.
+			}
+
+			expect(
+				failedContinue.status,
+				`continue unexpectedly returned 201 before fresh worktree/base_ref setup failure was surfaced; body=${failedBody}`,
+			).not.toBe(201);
+			expect(failedBody, "error should identify the stale current project base_ref").toContain(staleBaseRef);
+			expect(failedBody, "error should map the current base_ref/worktree failure").toMatch(/base[_ -]?ref|worktree|ref .*not found|does not exist/i);
+			const unescapedBody = failedBody.replace(/\\\\/g, "\\");
+			expect(unescapedBody, "error must not blame the archived continued worktree").not.toContain(newRec.worktreePath);
+			expect(failedBody, "error must not blame the archived continued branch").not.toContain(newRec.branch);
+			expect(await liveProjectSessionIds(projectId), "failed continue must not leave a live destination session").toEqual(liveIdsBeforeFailure);
+			if (unexpectedContinuedId) {
+				expect(gateway.sessionManager.getSession(unexpectedContinuedId), "failed continue response must not identify a live destination").toBeUndefined();
+				expect(gateway.sessionManager.getPersistedSession(unexpectedContinuedId), "failed continue response must not identify a persisted destination").toBeUndefined();
+			}
+			expect(await gitTopology(repoPath), "failed continue must not leak a worktree registration or branch").toEqual(topologyBeforeFailure);
+			expect(directoryEntries(worktreeRoot), "failed continue must not leak a worktree directory").toEqual(worktreeEntriesBeforeFailure);
+			expect(existsSync(newRec.worktreePath), "failed continue must not recreate the archived worktree").toBe(false);
+			expect(await branchExists(repoPath, newRec.branch), "failed continue must not recreate the archived branch").toBe(false);
+			expect(await branchExists(repoPath, staleBaseRef), "failed continue must not recreate the stale base_ref").toBe(false);
+
+			const resetBaseRef = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: "" }),
+			});
+			expect(resetBaseRef.status, await resetBaseRef.text()).toBe(200);
+			baseRefConfigured = false;
 		} finally {
-			if (newId) {
-				await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
+			if (unexpectedContinuedId) await apiFetch(`/api/sessions/${unexpectedContinuedId}`, { method: "DELETE" }).catch(() => {});
+			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
+			if (srcId) await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
+			if (projectId && baseRefConfigured) {
+				await apiFetch(`/api/projects/${projectId}/config`, {
+					method: "PUT",
+					body: JSON.stringify({ base_ref: "" }),
+				}).catch(() => {});
 			}
-			if (srcId) {
-				await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
-			}
-			if (projectId) {
-				await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-			}
-			rmSync(baseDir, { recursive: true, force: true });
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+			// Windows may retain worktree handles briefly after rollback. Keep cleanup
+			// bounded so a transient EPERM cannot replace the assertion failure.
+			await awaitableRm(baseDir, {
+				maxAttempts: 8,
+				backoffMs: 250,
+				onFinalFailure: (err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					console.warn(`[continue-archived-worktree-stale-source] cleanup deferred for ${baseDir}: ${msg}`);
+				},
+			});
 		}
 	});
 });
