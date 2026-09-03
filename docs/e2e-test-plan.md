@@ -14,7 +14,9 @@ The bottleneck remains browser-tier setup, not raw worker count. Browser workers
 
 ## Measurement sources
 
-Measurements came from persisted, uncommitted artifacts under `.bobbit/tmp/e2e-speed-buffer/` in the test worktrees, plus the final verification task for `3ae181cd`.
+The current cross-platform cold/warm profiling and qualification procedure is documented in [`e2e-performance/speed-up-e2e-332a47cc/profiling.md`](e2e-performance/speed-up-e2e-332a47cc/profiling.md). Raw B/C profiles belong under `docs/e2e-performance/speed-up-e2e-332a47cc/profiles/<os>/<cold|warm>/`; final paired samples and the aggregate qualification manifest are linked here once collected.
+
+Measurements from the earlier speed-buffer work came from persisted, uncommitted artifacts under `.bobbit/tmp/e2e-speed-buffer/` in the test worktrees, plus the final verification task for `3ae181cd`.
 
 All exact-command timings below include the build step from `npm run test:e2e`. The Playwright duration is reported separately when available so build/global-setup time is not confused with test execution time.
 
