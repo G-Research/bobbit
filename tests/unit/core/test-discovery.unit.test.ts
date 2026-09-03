@@ -85,6 +85,16 @@ describe("canonical-only discovery", () => {
 		expect(Object.isFrozen(discovery.e2eGroups)).toBe(true);
 	});
 
+	it("keeps no-page source runtime cases in Group A and the browser journey in Group C", () => {
+		const processPath = "tests/e2e/node/source-runtime-process.node-e2e.test.ts";
+		const browserPath = "tests/e2e/browser/source-vite-inline-html-theme.browser-e2e.spec.ts";
+		materialize(processPath, browserPath);
+
+		const { e2eGroups } = discoverTests({ repoRoot: root });
+		expect(e2eGroups.A).toEqual([processPath]);
+		expect(e2eGroups.C).toEqual([browserPath]);
+	});
+
 	it("fails closed for runnable paths without canonical ownership", () => {
 		for (const path of [
 			"tests/unit/core/wrong.test.ts",
