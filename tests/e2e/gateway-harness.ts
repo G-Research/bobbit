@@ -193,8 +193,6 @@ export interface GatewayInfo {
 	 * Throws if the OS assigns a different port (which would orphan the
 	 * browser page's WebSocket reconnect target). */
 	restart(): Promise<void>;
-	/** @internal Restore the worker's default-project baseline after a test. */
-	restoreDefaultProjectAfterTest(): Promise<boolean>;
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -269,89 +267,6 @@ async function restoreHarnessDefaultProject(info: GatewayInfo): Promise<void> {
 	const project = JSON.parse(registerText) as { id?: string };
 	if (!project.id) throw new Error(`[gateway-harness] default project restore returned no id: ${registerText}`);
 	await seedHarnessDefaultWorkflows(info, headers, project.id);
-}
-
-function stableStringify(value: unknown): string {
-	if (value === undefined) return "undefined";
-	if (value === null || typeof value !== "object") return JSON.stringify(value);
-	if (Array.isArray(value)) return `[${value.map(item => stableStringify(item)).join(",")}]`;
-	const record = value as Record<string, unknown>;
-	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
-}
-
-function defaultProjectFingerprint(gateway: any): string {
-	try {
-		const contexts = Array.from(gateway.projectContextManager.visible?.() ?? []) as any[];
-		const context = contexts.find(candidate => {
-			const project = candidate?.project;
-			return project && !project.hidden && project.name === "default";
-		});
-		if (!context) return "missing";
-		const project = context.project ?? {};
-		const config = context.projectConfigStore;
-		// Match the integration harness contract: fingerprint the live stores rather
-		// than reloading YAML or issuing fixture HTTP requests. A gateway generation
-		// change forces a real restore before this value is trusted again.
-		return `ok:${stableStringify({
-			project: {
-				id: project.id,
-				name: project.name,
-				hidden: !!project.hidden,
-				rootPath: project.rootPath,
-			},
-			config: config?.getAll?.() ?? null,
-			components: config?.getComponents?.() ?? null,
-			workflows: config?.getWorkflows?.() ?? null,
-		})}`;
-	} catch (error) {
-		return `unknown:${error instanceof Error ? error.message : String(error)}`;
-	}
-}
-
-interface DefaultProjectFixtureSnapshot {
-	fingerprint: string;
-	gatewayGeneration: number;
-}
-
-function fingerprintUncertain(fingerprint: string): boolean {
-	return fingerprint === "missing" || fingerprint.startsWith("unknown:");
-}
-
-/**
- * Conservative generation/fingerprint fast path shared in semantics with the
- * integration harness. Only a known-good post-restore fingerprint is cached;
- * failed or uncertain restores leave the previous snapshot untouched.
- */
-export class DefaultProjectFixtureCache {
-	private baseline: DefaultProjectFixtureSnapshot | undefined;
-
-	constructor(
-		private readonly fingerprint: () => string,
-		private readonly restore: () => Promise<void>,
-	) {}
-
-	prime(gatewayGeneration: number): void {
-		const fingerprint = this.fingerprint();
-		if (!fingerprintUncertain(fingerprint)) this.baseline = { fingerprint, gatewayGeneration };
-	}
-
-	async restoreIfNeeded(gatewayGeneration: number): Promise<boolean> {
-		const fingerprint = this.fingerprint();
-		if (this.baseline
-			&& this.baseline.gatewayGeneration === gatewayGeneration
-			&& !fingerprintUncertain(fingerprint)
-			&& fingerprint === this.baseline.fingerprint) {
-			return false;
-		}
-
-		await this.restore();
-		const restoredFingerprint = this.fingerprint();
-		if (fingerprintUncertain(restoredFingerprint)) {
-			throw new Error(`[gateway-harness] default project fingerprint unavailable after restore: ${restoredFingerprint}`);
-		}
-		this.baseline = { fingerprint: restoredFingerprint, gatewayGeneration };
-		return true;
-	}
 }
 
 // Server log ring buffer — module-scoped so the gateway worker fixture and
@@ -765,8 +680,6 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			uiBaseURL = staticUi.originURL;
 		}
 
-		let gatewayGeneration = 1;
-		let defaultProjectCache: DefaultProjectFixtureCache;
 		const info: GatewayInfo = {
 			port,
 			basePath,
@@ -831,17 +744,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				);
 				info.sessionManager = gw.sessionManager;
 				info.teamManager = gw.teamManager;
-				gatewayGeneration++;
-			},
-			restoreDefaultProjectAfterTest() {
-				return defaultProjectCache.restoreIfNeeded(gatewayGeneration);
 			},
 		};
-		defaultProjectCache = new DefaultProjectFixtureCache(
-			() => defaultProjectFingerprint(gw),
-			() => restoreHarnessDefaultProject(info),
-		);
-		defaultProjectCache.prime(gatewayGeneration);
 
 		await use(info);
 		bgProcessSpawnErrorArm = undefined;
@@ -884,7 +788,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	restoreDefaultProject: [async ({ gateway }, use) => {
 		await use();
 		try {
-			await gateway.restoreDefaultProjectAfterTest();
+			await restoreHarnessDefaultProject(gateway);
 		} catch (err) {
 			console.warn(`[gateway-harness] default project restore skipped: ${err instanceof Error ? err.message : String(err)}`);
 		}
