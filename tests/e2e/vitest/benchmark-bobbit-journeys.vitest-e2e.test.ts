@@ -335,6 +335,7 @@ describe("Bobbit journey benchmark production boundaries", () => {
 					BOBBIT_SKIP_WORKTREE_POOL: "1",
 					BOBBIT_SKIP_TITLE_GEN: "1",
 					BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+					BOBBIT_SEARCH_STARTUP_DELAY_MS: "0",
 					BOBBIT_SKIP_NPM_CI: "1",
 					BOBBIT_TEST_NO_EXTERNAL: "1",
 					BOBBIT_TEST_NO_REMOTE: "1",

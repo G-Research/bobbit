@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRunChild } from "../../../tests/support/harnesses/shared/run-isolation.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
@@ -66,10 +67,17 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 
-		const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
-		const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-		const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-		const { createGateway } = await import("../../../dist/server/server.js");
+		const runtime = await loadE2EDistServerRuntime(async () => {
+			const bobbitDir = await import("../../../dist/server/bobbit-dir.js");
+			const scaffold = await import("../../../dist/server/scaffold.js");
+			const authToken = await import("../../../dist/server/auth/token.js");
+			const server = await import("../../../dist/server/server.js");
+			return { bobbitDir, scaffold, authToken, server };
+		});
+		const { setProjectRoot } = runtime.bobbitDir;
+		const { scaffoldBobbitDir } = runtime.scaffold;
+		const { loadOrCreateToken } = runtime.authToken;
+		const { createGateway } = runtime.server;
 
 		setProjectRoot(workDir);
 		scaffoldBobbitDir(workDir);

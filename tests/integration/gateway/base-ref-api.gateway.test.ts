@@ -1,11 +1,12 @@
 /**
- * API E2E — representative PUT /api/projects/:id/config validation for `base_ref`.
+ * Authenticated integration contracts for base-ref project routes.
  *
  * Pure grammar/error-shape inventory lives in tests/unit/core/base-ref-validation.unit.test.ts.
- * This file keeps route-level coverage for persistence plus git-backed tag,
- * sandbox, local-branch, multi-repo, and warning paths. Keep related route
- * checks batched: the in-process integration cleanup runs after every test, so
- * splitting pure scenario permutations here materially increases suite time.
+ * This file keeps deterministic POST pinning, GET detection, and PUT validation
+ * coverage; the retained real-Git E2E complements it at the remote boundary.
+ * Keep related route checks batched: the in-process integration cleanup runs
+ * after every test, so splitting pure scenario permutations here materially
+ * increases suite time.
  */
 import { it } from "vitest";
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
@@ -14,18 +15,21 @@ import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/s
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 let token: string;
 let restoreCommandRunner: (() => void) | undefined;
 let nameCounter = 0;
 let gitProjectId = "";
 let multiProjectId = "";
+let nonGitProjectId = "";
 let warningProjectId = "";
 let warningRoot = "";
 let fixtureGateway: any;
 const cleanupRoots: string[] = [];
 const cleanupProjectIds: string[] = [];
 const originDevelopRepos = new Set<string>();
+const detectedDevelopRemotes = new Map<string, string>();
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
@@ -52,9 +56,18 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 	}
 	if (key === "rev-parse --show-toplevel") return cwd;
 	if (key === "rev-parse --is-inside-work-tree") return "true";
+	if (key === "symbolic-ref refs/remotes/origin/HEAD" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return "refs/remotes/origin/develop";
+	}
 	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify develop") return "a".repeat(40);
 	if (key === "rev-parse --verify refs/tags/v1.2.3") return "b".repeat(40);
 	if (key === "rev-parse --verify origin/develop" && originDevelopRepos.has(path.resolve(cwd))) return "a".repeat(40);
+	if (key === "remote get-url origin" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return pathToFileURL(detectedDevelopRemotes.get(path.resolve(cwd))!).href;
+	}
+	if (key === "ls-remote --symref origin HEAD" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return `ref: refs/heads/develop\tHEAD\n${"a".repeat(40)}\tHEAD`;
+	}
 	if (args[0] === "remote" && args[1] === "get-url") throw new Error("no remote");
 	throw new Error(`missing canned git result (${cwd}): ${key}`);
 }
@@ -96,6 +109,14 @@ function fakeOriginRef(repo: string, branch: string): void {
 	if (branch === "develop") originDevelopRepos.add(path.resolve(repo));
 }
 
+function fakeDetectedRemoteHead(repo: string, branch: string): void {
+	if (branch !== "develop") return;
+	const remote = path.join(repo, ".fixture-origin.git");
+	fs.mkdirSync(path.join(remote, "objects"), { recursive: true });
+	fs.writeFileSync(path.join(remote, "HEAD"), "ref: refs/heads/develop\n");
+	detectedDevelopRemotes.set(path.resolve(repo), remote);
+}
+
 function registerProject(gateway: any, name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): string {
 	// Base-ref coverage starts at the config route, not project creation. Author
 	// the three project contexts directly so registration cannot add HTTP,
@@ -120,10 +141,31 @@ async function put(id: string, body: Record<string, unknown>): Promise<{ status:
 	return { status: res.status, json };
 }
 
+async function postProject(
+	name: string,
+	rootPath: string,
+	components: Array<{ name: string; repo: string }>,
+): Promise<{ status: number; json: any }> {
+	const res = await fetch(`${base()}/api/projects`, {
+		method: "POST",
+		headers: headers(),
+		body: JSON.stringify({ name: `${name}-${++nameCounter}`, rootPath, components, acceptCanonical: true }),
+	});
+	let json: any = null;
+	try { json = await res.json(); } catch { /* not JSON */ }
+	if (typeof json?.id === "string") cleanupProjectIds.push(json.id);
+	return { status: res.status, json };
+}
+
 async function get(id: string): Promise<any> {
 	const res = await fetch(`${base()}/api/projects/${id}/config`, { headers: headers() });
 	expect(res.status).toBe(200);
 	return res.json();
+}
+
+async function detect(id: string): Promise<{ status: number; json: any }> {
+	const res = await fetch(`${base()}/api/projects/${id}/base-ref/detect`, { headers: headers() });
+	return { status: res.status, json: await res.json() };
 }
 
 function expectBaseRefUnset(config: any): void {
@@ -136,6 +178,7 @@ test.beforeAll(async ({ gateway }) => {
 	await installCannedGitRunner();
 
 	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
+	fakeDetectedRemoteHead(gitRoot, "develop");
 	gitProjectId = registerProject(gateway, "baseref-git", gitRoot);
 
 	const multiRoot = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-")));
@@ -147,6 +190,7 @@ test.beforeAll(async ({ gateway }) => {
 	copyTemplateRepo(repoB);
 	copyTemplateRepo(repoC);
 	fakeOriginRef(repoA, "develop");
+	fakeDetectedRemoteHead(repoA, "develop");
 	multiProjectId = registerProject(
 		gateway,
 		"baseref-multi",
@@ -157,6 +201,12 @@ test.beforeAll(async ({ gateway }) => {
 			{ name: "shared", repo: "shared" },
 		],
 	);
+
+	const lexicalNonGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nongit-"));
+	fs.writeFileSync(path.join(lexicalNonGitRoot, "README.md"), "not a git repo\n");
+	const nonGitRoot = canonicalPath(lexicalNonGitRoot);
+	cleanupRoots.push(nonGitRoot);
+	nonGitProjectId = registerProject(gateway, "baseref-nongit", nonGitRoot);
 
 	const lexicalWarningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
 	fs.mkdirSync(path.join(lexicalWarningRoot, "docs"), { recursive: true });
@@ -190,6 +240,60 @@ test.afterAll(async () => {
 // Suite-owned project contexts and the canned runner make each declaration
 // deterministic without the compatibility harness's per-test entity sweep.
 test.describe("base_ref API validation", () => {
+	it("pins a detected add-time ref only when every component has it and stays unset without a remote", async () => {
+		const makeProjectRoot = (prefix: string, webHasDevelop: boolean): string => {
+			const root = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`)));
+			cleanupRoots.push(root);
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			copyTemplateRepo(api);
+			copyTemplateRepo(web);
+			fakeOriginRef(api, "develop");
+			fakeDetectedRemoteHead(api, "develop");
+			if (webHasDevelop) fakeOriginRef(web, "develop");
+			return root;
+		};
+		const components = [
+			{ name: "api", repo: "api" },
+			{ name: "web", repo: "web" },
+		];
+
+		const detected = await postProject("baseref-add-detected", makeProjectRoot("add-detected", true), components);
+		expect(detected.status, JSON.stringify(detected.json)).toBe(201);
+		expect((await get(detected.json.id)).base_ref).toBe("origin/develop");
+
+		const mismatch = await postProject("baseref-add-mismatch", makeProjectRoot("add-mismatch", false), components);
+		expect(mismatch.status, JSON.stringify(mismatch.json)).toBe(201);
+		expectBaseRefUnset(await get(mismatch.json.id));
+
+		const noRemote = await postProject(
+			"baseref-add-no-remote",
+			fixtureRepo("add-no-remote"),
+			[{ name: "root", repo: "." }],
+		);
+		expect(noRemote.status, JSON.stringify(noRemote.json)).toBe(201);
+		expectBaseRefUnset(await get(noRemote.json.id));
+	});
+
+	it("returns exact detect responses for known, mismatched, non-git, and unknown projects", async () => {
+		expect(await detect(gitProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "origin/develop", detected: "origin/develop" },
+		});
+		expect(await detect(multiProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "origin/develop", detected: null },
+		});
+		expect(await detect(nonGitProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "", detected: null },
+		});
+		expect(await detect("does-not-exist")).toEqual({
+			status: 404,
+			json: { error: "Project not found" },
+		});
+	});
+
 	it("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
 		const remoteSet = await put(gitProjectId, { base_ref: "origin/develop" });
 		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);

@@ -985,14 +985,33 @@ export class SpecContext {
 			if (!this._gateway) {
 				throw new Error("server_restart: SpecContext was constructed without a gateway fixture");
 			}
+			// Capture the authenticated socket generation before the replacement
+			// gateway starts. A plain connectionStatus check can accept the old
+			// socket before its close event reaches the page; the generation proves
+			// that auth_ok arrived from a new socket after this restart.
+			const connectionBeforeRestart = this._page.isClosed()
+				? null
+				: await this._page.evaluate(() => {
+					const s = (window as any).bobbitState;
+					const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+					if (!routeSessionId || !s?.remoteAgent) return null;
+					return {
+						epoch: Number(s.remoteAgent._connectionEpoch) || 0,
+						sessionId: routeSessionId,
+					};
+				}).catch(() => null);
 			await this._gateway.restart();
 			// Wait for the client to reach the server again. Two-stage:
 			// (a) /api/health responds (server bound and accepting requests)
 			//     — polled from Node via apiFetch so page/context closure
 			//     during rapid crash-restart cycles cannot mask the signal.
 			//     This is the strict half: failure here = real bug.
-			// (b) if a session is active AND the page is still alive, the
-			//     session WebSocket reconnects (connectionStatus==="connected").
+			// (b) if a session is active AND the page is still alive, require a
+			//     newly authenticated session WebSocket. Gateway boot can outlast
+			//     several failed reconnect attempts and leave the visible page
+			//     parked on the 16/30-second backoff. Signal the product's existing
+			//     visible-page recovery path once health is authoritative, then
+			//     require its socket generation to advance within the existing bound.
 			//     Best-effort: if Playwright reports the frame detached or the
 			//     page closed, we don't fail — subsequent UI assertions will
 			//     surface the real problem with a meaningful locator error.
@@ -1002,19 +1021,29 @@ export class SpecContext {
 					return r.ok;
 				} catch { return false; }
 			}, { timeoutMs: 20_000, intervalMs: 250, label: "server_restart /api/health" });
-			if (this._page.isClosed()) return;
+			if (this._page.isClosed() || !connectionBeforeRestart) return;
 			try {
-				await this._page.waitForFunction(() => {
+				await this._page.evaluate(({ epoch, sessionId }) => {
 					const s = (window as any).bobbitState;
-					const hash = window.location.hash || "";
-					const onSession = /^#\/session\//.test(hash);
-					if (onSession) return !!s && s.connectionStatus === "connected";
-					return true;
-				}, undefined, { timeout: 15_000, polling: 250 });
+					if (window.location.hash !== `#/session/${sessionId}`) return;
+					if (s?.connectionStatus !== "connected"
+						|| !s?.remoteAgent?.connected
+						|| (Number(s.remoteAgent._connectionEpoch) || 0) <= epoch) {
+						document.dispatchEvent(new Event("visibilitychange"));
+					}
+				}, connectionBeforeRestart);
+				await this._page.waitForFunction(({ epoch, sessionId }) => {
+					const s = (window as any).bobbitState;
+					return window.location.hash === `#/session/${sessionId}`
+						&& s?.remoteAgent?.gatewaySessionId === sessionId
+						&& s.remoteAgent.connected === true
+						&& s.connectionStatus === "connected"
+						&& (Number(s.remoteAgent._connectionEpoch) || 0) > epoch;
+				}, connectionBeforeRestart, { timeout: 15_000 });
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				if (/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) {
-					// Page closed/detached mid-poll during rapid crash-restart
+					// Page closed/detached mid-wait during rapid crash-restart
 					// cycles. /api/health already confirmed the server is back;
 					// downstream assertions will reopen or fail with a clearer
 					// message if the page truly is unusable.

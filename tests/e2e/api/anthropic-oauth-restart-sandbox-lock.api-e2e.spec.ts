@@ -12,8 +12,20 @@ import { request } from "node:http";
 import { join } from "node:path";
 
 import { test, expect } from "../gateway-harness.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 const ANTHROPIC_SANDBOX_TOKEN = "ANTHROPIC_OAUTH_TOKEN";
+
+function loadAnthropicRuntime() {
+	return loadE2EDistServerRuntime(async () => ({
+		modelRegistry: await import("../../../dist/server/agent/model-registry.js"),
+		modelCompletion: await import("../../../dist/server/agent/model-completion.js"),
+		preferencesStore: await import("../../../dist/server/agent/preferences-store.js"),
+		hostTokens: await import("../../../dist/server/agent/host-tokens.js"),
+		sessionManager: await import("../../../dist/server/agent/session-manager.js"),
+		credentialStore: await import("../../../dist/server/auth/credential-store.js"),
+	}));
+}
 
 // Synthetic provider responses retain the observed model distinctions without
 // making an entitlement claim about a real OAuth credential.
@@ -61,10 +73,9 @@ async function oauthStatus(baseURL: string): Promise<Record<string, unknown>> {
 }
 
 async function assertMockModelUsesStoredCredential(access: string): Promise<void> {
-	const [{ clearOAuthCache }, { completeModelText }] = await Promise.all([
-		import("../../../dist/server/agent/model-registry.js"),
-		import("../../../dist/server/agent/model-completion.js"),
-	]);
+	const runtime = await loadAnthropicRuntime();
+	const { clearOAuthCache } = runtime.modelRegistry;
+	const { completeModelText } = runtime.modelCompletion;
 	clearOAuthCache();
 	let observedApiKey: unknown;
 	const result = await completeModelText({
@@ -98,10 +109,9 @@ async function assertMockModelUsesStoredCredential(access: string): Promise<void
 }
 
 async function assertMockModelProbeClassifications(bobbitDir: string): Promise<void> {
-	const [{ testModelPreference }, { PreferencesStore }] = await Promise.all([
-		import("../../../dist/server/agent/model-completion.js"),
-		import("../../../dist/server/agent/preferences-store.js"),
-	]);
+	const runtime = await loadAnthropicRuntime();
+	const { testModelPreference } = runtime.modelCompletion;
+	const { PreferencesStore } = runtime.preferencesStore;
 	const probeStateDir = join(bobbitDir, "restart-model-probe-state");
 	const prefs = new PreferencesStore(probeStateDir);
 
@@ -173,10 +183,9 @@ test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", (
 		const projectCredential = randomUUID();
 		writeAnthropicCredential(file, hostCredential);
 
-		const [{ buildSandboxAgentAuthJson, hasExplicitSandboxAnthropicCredential, sandboxTokenPolicyAllowsAnthropicAuth }, { resolveSandboxTokens }] = await Promise.all([
-			import("../../../dist/server/agent/host-tokens.js"),
-			import("../../../dist/server/agent/session-manager.js"),
-		]);
+		const runtime = await loadAnthropicRuntime();
+		const { buildSandboxAgentAuthJson, hasExplicitSandboxAnthropicCredential, sandboxTokenPolicyAllowsAnthropicAuth } = runtime.hostTokens;
+		const { resolveSandboxTokens } = runtime.sessionManager;
 		const noSandboxPolicy = { getSandboxTokens: () => [], get: () => undefined } as any;
 		const explicitEmptyPolicy = {
 			getSandboxTokens: () => [{ key: ANTHROPIC_SANDBOX_TOKEN, enabled: true }],
@@ -230,7 +239,8 @@ test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", (
 		utimesSync(lockPath, stale, stale);
 
 		try {
-			const { AtomicCredentialStore } = await import("../../../dist/server/auth/credential-store.js");
+			const runtime = await loadAnthropicRuntime();
+			const { AtomicCredentialStore } = runtime.credentialStore;
 			const store = new AtomicCredentialStore(file);
 			await store.modify("unrelated-provider", async () => ({ type: "api_key", key: unrelatedKey }));
 

@@ -36,26 +36,151 @@
  *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { createCpuSampler } from "./assert-budget.mjs";
-import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
+import { createIdentityCpuSampler } from "./process-tree-sampler.mjs";
+import { PRODUCT_BASELINE_SHA } from "./e2e-qualification-manifest.mjs";
+import { refreshE2EProfileManifest } from "./e2e-profile-reporter.mjs";
+import {
+	coordinatorTempDirectory,
+	createE2ERunPaths,
+	createIsolatedE2EEnvironment,
+	createPlaywrightE2EInvocation,
+} from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
+import { seedTransformCache } from "./pwtest-cache.ts";
+import { ensureE2EDistServerPrebundle } from "./server-prebundle.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
+const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstrap.cjs");
+const CHILD_PROFILE_PRELOAD = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
+
+function currentGitSha() {
+	try {
+		return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {
+		return "unknown";
+	}
+}
+
+/** Resolve opt-in profiling metadata without changing the command's argv. */
+export function resolveE2EProfiling(paths, env = process.env) {
+	const requested = env.BOBBIT_V2_E2E_PROFILE_DIR?.trim();
+	if (!requested) return null;
+	const distState = env.BOBBIT_V2_E2E_DIST_STATE?.trim();
+	if (distState !== "cold" && distState !== "warm")
+		throw new Error("BOBBIT_V2_E2E_DIST_STATE must be cold or warm when profiling is enabled");
+	const instrumentationSha = currentGitSha();
+	const productSha = env.BOBBIT_V2_E2E_PRODUCT_SHA?.trim() || instrumentationSha;
+	if (!/^[0-9a-f]{40}$/i.test(productSha)) throw new Error("BOBBIT_V2_E2E_PRODUCT_SHA must be a full Git SHA");
+	const root = isAbsolute(requested) ? resolve(requested) : resolve(REPO_ROOT, requested);
+	return { root, distState, productSha, instrumentationSha, productBaselineSha: PRODUCT_BASELINE_SHA, runId: paths.runId };
+}
+
+function profileOutputPath(profile, group) {
+	return join(profile.root, `group-${group}.json`);
+}
+
+function profileRawPaths(profile, group) {
+	const root = join(profile.root, `group-${group}-raw`);
+	return { childProfileDir: join(root, "processes"), hookProfileDir: join(root, "hooks") };
+}
+
+/** Add observational reporter/preload sinks to a single Playwright phase. */
+export function createE2EProfilingEnvironment(environment, profile, group, platform = process.platform) {
+	if (!profile || (group !== "B" && group !== "C")) return environment;
+	const { childProfileDir, hookProfileDir } = profileRawPaths(profile, group);
+	const nodeOptions = [`--import=${CHILD_PROFILE_PRELOAD}`, environment.NODE_OPTIONS].filter(Boolean).join(" ");
+	return composeE2EChildEnvironment(environment, {
+		NODE_OPTIONS: nodeOptions,
+		BOBBIT_V2_E2E_PROFILE_OUTPUT: profileOutputPath(profile, group),
+		BOBBIT_V2_E2E_PROFILE_GROUP: group,
+		BOBBIT_V2_E2E_PROFILE_SHA: profile.productSha,
+		BOBBIT_V2_E2E_PROFILE_INSTRUMENTATION_SHA: profile.instrumentationSha,
+		BOBBIT_V2_E2E_PRODUCT_BASELINE_SHA: profile.productBaselineSha,
+		BOBBIT_V2_E2E_DIST_STATE: profile.distState,
+		BOBBIT_V2_CHILD_PROFILE_DIR: childProfileDir,
+		// The Playwright coordinator is equivalent to the Vitest coordinator in
+		// the reusable preload's three-level topology; workers become depth 2 and
+		// observe their direct children without recursively instrumenting them.
+		BOBBIT_V2_CHILD_PROFILE_DEPTH: "1",
+		BOBBIT_V2_HOOK_PROFILE_DIR: hookProfileDir,
+	}, platform);
+}
+
+export function finalizeGroupProfile(profile, group, groupResult, ownedProcess) {
+	if (!profile || (group !== "B" && group !== "C")) return null;
+	const output = profileOutputPath(profile, group);
+	if (!existsSync(output)) return { group, path: output, missing: true };
+	try {
+		// Playwright's reporter runs before its coordinator and worker preloads have
+		// necessarily emitted their exit records. Rebuild overlays only here, after
+		// the phase child's `close`, so success and failure paths use flushed raw
+		// telemetry rather than the reporter's provisional snapshot.
+		let manifest = refreshE2EProfileManifest(
+			JSON.parse(readFileSync(output, "utf8")),
+			profileRawPaths(profile, group),
+		);
+		manifest.instrumentationSha = profile.instrumentationSha;
+		manifest.groupWallMs = groupResult.wallMs;
+		manifest.ownedProcess = {
+			...ownedProcess,
+			accounting: {
+				authority: "diagnostic",
+				boundary: "e2e-runner-group-subtree",
+				method: "pid-creation-subtree",
+			},
+		};
+		const temporary = `${output}.tmp-${process.pid}`;
+		writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`);
+		renameSync(temporary, output);
+		return {
+			group,
+			path: output,
+			missing: false,
+			sha: manifest.sha,
+			distState: manifest.distState,
+			platform: manifest.platform,
+			retries: manifest.counts?.retries ?? null,
+			failures: manifest.counts?.failures ?? null,
+			incompleteProcesses: manifest.processActivity?.incomplete ?? null,
+			incompleteHookOwners: manifest.hookActivity?.incompleteOwners ?? null,
+			hookRecords: manifest.hookActivity?.records ?? null,
+		};
+	} catch (error) {
+		return { group, path: output, missing: true, error: String(error) };
+	}
+}
+
+export function e2eProfileIneligibilityReasons({ profile, only, retryCount, profileRefs, results }) {
+	if (!profile) return [];
+	return [
+		...(only ? ["focused group runs are diagnostic only"] : []),
+		...(retryCount !== 0 ? ["retry-free mode is required"] : []),
+		...(profileRefs.length !== 2 || profileRefs.some((reference) => reference.missing) ? ["a B/C profile is missing"] : []),
+		...(profileRefs.some((reference) => reference.retries !== 0) ? ["a retry was observed"] : []),
+		...(profileRefs.some((reference) => reference.failures !== 0) ? ["a first-attempt failure was observed"] : []),
+		...(profileRefs.some((reference) => reference.incompleteProcesses !== 0) ? ["child-process telemetry did not flush completely"] : []),
+		...(profileRefs.some((reference) => reference.incompleteHookOwners !== 0) ? ["gateway hook telemetry did not flush completely"] : []),
+		...(profileRefs.some((reference) => !Number.isInteger(reference.hookRecords) || reference.hookRecords <= 0) ? ["gateway hook telemetry is missing"] : []),
+		...(results.some((result) => result.code !== 0) ? ["a group failed"] : []),
+	];
+}
 
 /**
  * Give the top-level E2E coordinator its own environment before it starts any
- * group. Group B's legacy wrapper receives this environment and allocates a
- * nested root; Groups A/C/D share only this coordinator-owned root.
+ * group. Full runs keep B/C in this root for serial cache reuse; focused B/C
+ * runs retain their legacy nested-wrapper isolation.
  */
 export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
 	const env = createIsolatedE2EEnvironment(paths, inheritedEnv, platform);
+	deleteEnvironmentValue(env, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE", platform);
 	return copyEnvironment(env, {
 		BOBBIT_V2_RUN_ROOT: paths.root,
 		BOBBIT_V2_RUN_ROOT_OWNER_PID: String(process.pid),
@@ -85,6 +210,16 @@ function cleanup(root) {
 /** Copy a fully prepared environment without resurrecting ambient host values. */
 export function composeE2EChildEnvironment(environment, additions = {}, platform = process.platform) {
 	return copyEnvironment(environment, additions, platform);
+}
+
+/** Prepare the trusted run-local environment shared by serial Groups B and C. */
+export function createSerialPlaywrightEnvironment(coordinatorEnv, platform = process.platform) {
+	const nodeOptions = [`--require=${CACHE_BOOTSTRAP}`, coordinatorEnv.NODE_OPTIONS].filter(Boolean).join(" ");
+	return composeE2EChildEnvironment(coordinatorEnv, {
+		BOBBIT_V2_E2E_SERIAL_CACHE: "1",
+		NODE_ENV: "test",
+		NODE_OPTIONS: nodeOptions,
+	}, platform);
 }
 
 /** Remove coordinator cache settings before invoking the nested legacy runner. */
@@ -172,6 +307,26 @@ export function createGroupAInvocation(specs, {
 	execPath,
 } = {}) {
 	return localNodeInvocation(tsxCli, ["--test", `--test-concurrency=${nodeConcurrency}`, ...specs], "tsx CLI", { exists, execPath });
+}
+
+/** Build one shared-root Playwright phase invocation for the serial full suite. */
+export function createSerialPlaywrightPhaseInvocation(specs, {
+	project,
+	workers = 2,
+	retries = 3,
+	outputDir,
+	playwrightCli,
+	exists,
+	execPath,
+} = {}) {
+	const args = [
+		...specs,
+		...(project ? [`--project=${project}`] : []),
+		`--workers=${workers}`,
+		`--retries=${retries}`,
+		`--output=${outputDir}`,
+	];
+	return createPlaywrightE2EInvocation(args, { playwrightCli, exists, execPath });
 }
 
 /** Build Group B's shell-free invocation of the cache-isolating Playwright wrapper. */
@@ -286,12 +441,84 @@ export function resolveE2ERetryCount(env = process.env) {
 	return env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3;
 }
 
+export async function prepareE2EDistServerPrebundle(paths, ensure = ensureE2EDistServerPrebundle) {
+	const startedAt = performance.now();
+	try {
+		const result = await ensure({ repoRoot: REPO_ROOT, runRoot: paths.root });
+		return {
+			observed: true,
+			status: result.cacheHit ? "reused" : "built",
+			key: result.key,
+			bundlePath: result.bundlePath,
+			buildWallMs: Math.round(performance.now() - startedAt),
+			fallback: false,
+		};
+	} catch (error) {
+		return {
+			observed: true,
+			status: "raw-fallback",
+			key: null,
+			bundlePath: null,
+			buildWallMs: Math.round(performance.now() - startedAt),
+			fallback: true,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
 function isRetryFreeQualification(env = process.env) {
 	return resolveE2ERetryCount(env) === 0;
 }
 
-async function runGroupB(specs, coordinatorEnv) {
+function isStrictChild(root, candidate) {
+	const rel = relative(resolve(root), resolve(candidate));
+	return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith("../") && !rel.startsWith("..\\");
+}
+
+/**
+ * Snapshot the union of B's completed PID-isolated transform caches. C receives
+ * this contained immutable snapshot and each of its preloaded processes copies
+ * it into a fresh PID slot. Cache failures are diagnostic-only and degrade to
+ * a cold C transform rather than changing test execution.
+ */
+export function fanOutSerialTransformCache(cacheRoot, runRoot) {
+	const startedAt = performance.now();
+	const result = {
+		enabled: true,
+		sourceSlots: 0,
+		seedAttempts: 0,
+		seeded: 0,
+		snapshotPath: null,
+		wallMs: 0,
+	};
+	try {
+		if (!isStrictChild(runRoot, cacheRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
+		const sourceNames = readdirSync(cacheRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && /^process-(?:0|[1-9][0-9]*)$/.test(entry.name))
+			.map((entry) => entry.name)
+			.filter((name) => readdirSync(join(cacheRoot, name)).length > 0)
+			.sort((a, b) => a.localeCompare(b, "en"));
+		result.sourceSlots = sourceNames.length;
+		if (sourceNames.length === 0) return { ...result, wallMs: Math.round(performance.now() - startedAt) };
+
+		const snapshotRoot = join(runRoot, "pwtest-transform-cache-phase-b-snapshot");
+		if (!isStrictChild(runRoot, snapshotRoot)) return { ...result, enabled: false, wallMs: Math.round(performance.now() - startedAt) };
+		rmSync(snapshotRoot, { recursive: true, force: true });
+		mkdirSync(snapshotRoot, { recursive: true });
+		for (const sourceName of sourceNames) {
+			result.seedAttempts++;
+			if (seedTransformCache(join(cacheRoot, sourceName), snapshotRoot)) result.seeded++;
+		}
+		if (result.seeded > 0) result.snapshotPath = snapshotRoot;
+	} catch (error) {
+		console.log(`[e2e-v2] serial transform-cache handoff skipped (cold C start): ${error?.message ?? error}`);
+	}
+	return { ...result, wallMs: Math.round(performance.now() - startedAt) };
+}
+
+async function runGroupB(specs, coordinatorEnv, profile = null) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
+	profile ??= resolveE2EProfiling({ runId: coordinatorEnv.BOBBIT_E2E_RUN_ID }, coordinatorEnv);
 	// The legacy wrapper must allocate its own nested Playwright cache rather
 	// than inheriting this coordinator's cache settings. It still inherits the
 	// owned temp directory, so its `createE2ERunPaths()` child is contained here.
@@ -302,14 +529,33 @@ async function runGroupB(specs, coordinatorEnv) {
 	const pwWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
 	const invocation = createGroupBInvocation(specs, { workers: pwWorkers, retries });
 	return run(invocation.command, invocation.args, {
-		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+		env: createE2EProfilingEnvironment(composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV), profile, "B"),
 		label: "B/e2e-relocate",
 	});
 }
 
-async function runGroupC(specs, coordinatorEnv) {
+async function runSerialGroupB(specs, sharedEnv, paths, workers, retries, profile = null) {
+	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
+	profile ??= resolveE2EProfiling(paths, sharedEnv);
+	const invocation = createSerialPlaywrightPhaseInvocation(specs, {
+		workers,
+		retries,
+		outputDir: join(paths.root, "playwright-e2e-results-b"),
+	});
+	return run(invocation.command, invocation.args, {
+		env: createE2EProfilingEnvironment(composeE2EChildEnvironment(sharedEnv, EXTERNAL_FREE_ENV), profile, "B"),
+		label: "B/e2e-relocate",
+	});
+}
+
+function validateGroupC(specs) {
+	return specs.every((spec) => spec.startsWith("tests/e2e/browser/"));
+}
+
+async function runGroupC(specs, coordinatorEnv, profile = null) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	if (!specs.every((spec) => spec.startsWith("tests/e2e/browser/"))) {
+	profile ??= resolveE2EProfiling({ runId: coordinatorEnv.BOBBIT_E2E_RUN_ID }, coordinatorEnv);
+	if (!validateGroupC(specs)) {
 		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
 	}
 
@@ -321,7 +567,28 @@ async function runGroupC(specs, coordinatorEnv) {
 		retryFree: retryArgs.length > 0,
 	});
 	const canonical = await run(invocation.command, invocation.args, {
-		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+		env: createE2EProfilingEnvironment(composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV), profile, "C"),
+		label: "C/canonical-browser",
+	});
+	if (canonical.code !== 0) return canonical;
+	return { label: "C/browser-fidelity", code: 0, wallMs: canonical.wallMs };
+}
+
+async function runSerialGroupC(specs, sharedEnv, paths, workers, retries, cacheSnapshotPath, profile = null) {
+	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
+	profile ??= resolveE2EProfiling(paths, sharedEnv);
+	if (!validateGroupC(specs)) {
+		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
+	}
+	const invocation = createSerialPlaywrightPhaseInvocation(specs, {
+		project: "browser-canonical",
+		workers,
+		retries,
+		outputDir: join(paths.root, "playwright-e2e-results-c"),
+	});
+	const cacheSeedEnv = cacheSnapshotPath ? { BOBBIT_V2_E2E_SERIAL_CACHE_SEED: cacheSnapshotPath } : {};
+	const canonical = await run(invocation.command, invocation.args, {
+		env: createE2EProfilingEnvironment(composeE2EChildEnvironment(sharedEnv, { ...EXTERNAL_FREE_ENV, ...cacheSeedEnv }), profile, "C"),
 		label: "C/canonical-browser",
 	});
 	if (canonical.code !== 0) return canonical;
@@ -375,31 +642,81 @@ async function main() {
 
 	const paths = createE2ERunPaths(coordinatorTempDirectory());
 	const coordinatorEnv = createE2EV2CoordinatorEnvironment(paths);
-	const sampler = createCpuSampler(process.pid, { intervalMs: 1000 });
+	const profile = resolveE2EProfiling(paths, coordinatorEnv);
+	// Profiling replaces (rather than duplicates) the existing sampler so Windows
+	// keeps one CIM query per interval and observational CPU cost stays bounded.
+	const identitySampler = profile ? createIdentityCpuSampler(process.pid, { intervalMs: 1000, subtractRootBaseline: true }) : null;
+	const sampler = identitySampler ?? createCpuSampler(process.pid, { intervalMs: 1000 });
 	const startWall = performance.now();
 
 	const only = args.group;
 	const results = [];
+	const profileRefs = [];
+	let serialTransformCache = null;
+	let bundle = {
+		observed: true,
+		status: only ? "focused-raw" : "pending",
+		key: null,
+		bundlePath: null,
+		buildWallMs: 0,
+		fallback: false,
+	};
+	const captureLatestProfile = (group) => {
+		if (!identitySampler) return;
+		const phase = identitySampler.mark(group);
+		const phaseStart = Date.parse(phase.startedAt);
+		const phaseEnd = Date.parse(phase.endedAt);
+		const processes = identitySampler.snapshot().processes.filter((row) => row.lastSeenAt >= phaseStart && row.firstSeenAt <= phaseEnd);
+		const reference = finalizeGroupProfile(profile, group, results.at(-1), { ...phase, processes });
+		if (reference) profileRefs.push(reference);
+	};
 	if (only) {
 		// Focused group runs retain their existing single-group behavior.
-		if (only === "A") results.push(await runGroupA(A, coordinatorEnv));
-		if (only === "B") results.push(await runGroupB(B, coordinatorEnv));
-		if (only === "C") results.push(await runGroupC(C, coordinatorEnv));
-		if (only === "D") results.push(await runGroupD(D, { coordinatorEnv }));
+		if (only === "A") { results.push(await runGroupA(A, coordinatorEnv)); captureLatestProfile("A"); }
+		if (only === "B") { results.push(await runGroupB(B, coordinatorEnv)); captureLatestProfile("B"); }
+		if (only === "C") { results.push(await runGroupC(C, coordinatorEnv)); captureLatestProfile("C"); }
+		if (only === "D") { results.push(await runGroupD(D, { coordinatorEnv })); captureLatestProfile("D"); }
 	} else {
 		// Hosted runners cannot reliably absorb a second process-heavy coordinator
 		// alongside the gateway/worktree/browser phases. Preserve each group's own
 		// retries and worker controls, but do not overlap their process trees.
-		console.log("[e2e-v2] schedule: A → B → C → D (serialized)");
+		console.log("[e2e-v2] schedule: A → B → C → D (serialized; B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
-		results.push(await runGroupB(B, coordinatorEnv));
-		results.push(await runGroupC(C, coordinatorEnv));
+		captureLatestProfile("A");
+		bundle = await prepareE2EDistServerPrebundle(paths);
+		if (bundle.fallback) {
+			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
+		} else {
+			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
+		}
+		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
+		if (bundle.bundlePath) sharedPlaywrightEnv.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle.bundlePath;
+		const retries = resolveE2ERetryCount(coordinatorEnv);
+		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
+		const groupCWorkers = resolveE2ePlaywrightWorkers();
+		results.push(await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries));
+		captureLatestProfile("B");
+		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
+		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
+		// C receives the same shared cache environment only after the runner removes
+		// Group B's bundle setting. No C worker can observe bundled server mode.
+		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
+		captureLatestProfile("C");
 		results.push(await runGroupD(D, { coordinatorEnv }));
+		captureLatestProfile("D");
 	}
 
 	const sample = sampler.stop();
+	const identitySample = identitySampler ? sample : null;
 	const wallMs = Math.round(performance.now() - startWall);
 
+	const profileEligibilityReasons = e2eProfileIneligibilityReasons({
+		profile,
+		only,
+		retryCount: resolveE2ERetryCount(coordinatorEnv),
+		profileRefs,
+		results,
+	});
 	const samplePath = defaultPerformanceReportPath(paths);
 	mkdirSync(dirname(samplePath), { recursive: true });
 	const report = {
@@ -409,10 +726,36 @@ async function main() {
 		wallMs,
 		wallSec: +(wallMs / 1000).toFixed(1),
 		peakProcesses: sample.peakProcesses,
+		accounting: {
+			authority: "diagnostic",
+			boundary: "e2e-runner-process-subtree",
+			method: profile ? "pid-creation-subtree" : "legacy-pid-subtree",
+			note: "This inner runner sample excludes npm/ensure-dist wrappers and must never be substituted for the authoritative outer measure-subtree sample.",
+		},
 		docker,
 		dockerCapability,
+		bundle,
+		serialTransformCache,
+		profiling: profile ? {
+			enabled: true,
+			qualificationEligible: profileEligibilityReasons.length === 0,
+			ineligibilityReasons: profileEligibilityReasons,
+			productSha: profile.productSha,
+			instrumentationSha: profile.instrumentationSha,
+			productBaselineSha: profile.productBaselineSha,
+			distState: profile.distState,
+			profileRefs,
+			ownedProcess: identitySample,
+		} : { enabled: false },
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
 		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
+		capacity: {
+			A: Number(process.env.E2E_V2_NODE_CONCURRENCY || 2),
+			B: process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers(),
+			C: resolveE2ePlaywrightWorkers(),
+			D: 1,
+		},
+		retryCount: resolveE2ERetryCount(coordinatorEnv),
 		excluded,
 		createdAt: new Date().toISOString(),
 	};

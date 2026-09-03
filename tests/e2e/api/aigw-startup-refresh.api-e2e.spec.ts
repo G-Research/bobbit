@@ -5,11 +5,10 @@
  * (so `aigw.url` is set BEFORE startup), so we can exercise the actual
  * `startupAigwCheck()` code path that runs in `createGateway()`.
  *
- * Scenarios:
- *  1. Reachable configured AIGW publishes an explicitly managed provider.
- *  2. Unreachable discovery leaves pre-existing models.json byte-identical.
- *  3. A reachable gateway cannot overwrite an unmarked user-owned AIGW block.
- *  4. BOBBIT_SKIP_AIGW_DISCOVERY=1 leaves models.json byte-identical.
+ * The retained journey proves that a reachable configured AIGW is discovered
+ * through `createGateway().start()` and published as an explicitly managed
+ * provider. Policy-only failure branches are covered deterministically in the
+ * AIGW unit suites without paying for additional gateway boots.
  */
 import { test as base, expect } from "@playwright/test";
 import http from "node:http";
@@ -17,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 // Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
 // workers cold-import dist/server once per process, so a per-worker cache gives
@@ -40,13 +40,6 @@ const EXPECTED_HEADER_VALUE =
 const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(PROJECT_ROOT, "package.json"), "utf-8")).version;
 const EXPECTED_USER_AGENT = `Bobbit/${PACKAGE_VERSION}`;
 
-interface SeedOpts {
-	aigwUrl?: string;
-	skipDiscovery?: boolean;
-	preWriteModelsJson?: any;
-	preWriteModelsText?: string;
-}
-
 interface StartedGateway {
 	port: number;
 	baseURL: string;
@@ -56,7 +49,7 @@ interface StartedGateway {
 	shutdown: () => Promise<void>;
 }
 
-async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
+async function startSeededGateway(aigwUrl: string): Promise<StartedGateway> {
 	mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 	const bobbitDir = join(
 		E2E_TEMP_ROOT,
@@ -70,21 +63,12 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
 	// Pre-seed preferences with aigw.url so startupAigwCheck picks it up.
-	if (opts.aigwUrl) {
-		writeFileSync(
-			join(bobbitDir, "state", "preferences.json"),
-			JSON.stringify({ "aigw.url": opts.aigwUrl }, null, 2),
-		);
-	}
+	writeFileSync(
+		join(bobbitDir, "state", "preferences.json"),
+		JSON.stringify({ "aigw.url": aigwUrl }, null, 2),
+	);
 
-	// Pre-write models.json (in the isolated agent dir) so we can verify
-	// untouched-vs-rewritten on a per-test basis.
 	const modelsJsonPath = join(agentDir, "models.json");
-	if (opts.preWriteModelsText !== undefined) {
-		writeFileSync(modelsJsonPath, opts.preWriteModelsText);
-	} else if (opts.preWriteModelsJson !== undefined) {
-		writeFileSync(modelsJsonPath, JSON.stringify(opts.preWriteModelsJson, null, 2));
-	}
 
 	process.env.BOBBIT_DIR = bobbitDir;
 	// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
@@ -102,19 +86,23 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	process.env.BOBBIT_NO_OPEN = "1";
 	process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 	process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
-	if (opts.skipDiscovery) {
-		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
-	} else {
-		delete process.env.BOBBIT_SKIP_AIGW_DISCOVERY;
-	}
+	delete process.env.BOBBIT_SKIP_AIGW_DISCOVERY;
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const runtime = await loadE2EDistServerRuntime(async () => {
+		const bobbitDir = await import("../../../dist/server/bobbit-dir.js");
+		const scaffold = await import("../../../dist/server/scaffold.js");
+		const authToken = await import("../../../dist/server/auth/token.js");
+		const server = await import("../../../dist/server/server.js");
+		const rpcBridge = await import("../../../dist/server/agent/rpc-bridge.js");
+		return { bobbitDir, scaffold, authToken, server, rpcBridge };
+	});
+	const { setProjectRoot, resetAgentDirStateForTests } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { registerRpcBridgeFactory } = runtime.rpcBridge;
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((opts: any) => {
 		if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
@@ -232,7 +220,7 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 		]);
 		let gw: StartedGateway | undefined;
 		try {
-			gw = await startSeededGateway({ aigwUrl: mock.url });
+			gw = await startSeededGateway(mock.url);
 
 			expect(existsSync(gw.modelsJsonPath)).toBe(true);
 			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
@@ -254,70 +242,4 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 		}
 	});
 
-	test("startup with unreachable aigw leaves pre-existing models.json byte-identical", async () => {
-		const sentinelAigw = {
-			baseUrl: "http://127.0.0.1:1",
-			apiKey: "none",
-			api: "openai-completions",
-			models: [{ id: "old-cached-model", name: "Old Model" }],
-		};
-		const sentinel = {
-			providers: {
-				anthropic: { apiKey: "sk-test", models: [{ id: "claude-x" }] },
-				aigw: sentinelAigw,
-			},
-		};
-
-		const before = JSON.stringify(sentinel, null, 2);
-		let gw: StartedGateway | undefined;
-		try {
-			gw = await startSeededGateway({
-				aigwUrl: "http://127.0.0.1:1", // reserved port — connection refused
-				preWriteModelsText: before,
-			});
-
-			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
-		} finally {
-			await gw?.shutdown();
-		}
-	});
-
-	test("startup with reachable aigw refuses an unmarked user-owned provider byte-identically", async () => {
-		const mock = await startMockAigw(["openai/gpt-5.2"]);
-		const before = '{\n  // user-owned routing must not be claimed\n  "providers": {\n    "aigw": { "baseUrl": "https://user.invalid", "apiKey": "user-key", "unknown": true, "models": [] }\n  },\n  "unknownRoot": [1, 1],\n}\n';
-		let gw: StartedGateway | undefined;
-		try {
-			gw = await startSeededGateway({ aigwUrl: mock.url, preWriteModelsText: before });
-			expect(mock.hits(), "startup should discover before ownership validation").toBeGreaterThan(0);
-			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
-		} finally {
-			await gw?.shutdown();
-			await mock.close();
-		}
-	});
-
-	test("startup with BOBBIT_SKIP_AIGW_DISCOVERY=1 makes no HTTP request and leaves JSONC byte-identical", async () => {
-		const mock = await startMockAigw(["should-not-be-fetched"]);
-		const before = '{\n  // preserve comments and unknown fields\n  "providers": { "anthropic": { "apiKey": "sk-test", "unknown": true } },\n}\n';
-		let gw: StartedGateway | undefined;
-		try {
-			gw = await startSeededGateway({
-				aigwUrl: mock.url,
-				skipDiscovery: true,
-				preWriteModelsText: before,
-			});
-
-			expect(mock.hits(), "mock gateway must not be hit under skip flag").toBe(0);
-			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
-
-			// Sanity: gateway came up and serves /api/health (un-authenticated).
-			const res = await fetch(`${gw.baseURL}/api/health`);
-			// 200 (no auth required) or 401 (auth required) both prove the gateway
-			// is alive — only a refused connection would be a real failure.
-			expect([200, 401]).toContain(res.status);
-		} finally {
-			await gw?.shutdown();
-			await mock.close();
-		}
-	});
 });

@@ -36,11 +36,11 @@ import {
 	installProviderDemoFixture,
 	type ProviderDemoFixture,
 } from "../test-utils/provider-demo-marketplace.js";
-import {
-	DYNAMIC_CONTEXT_END,
-	DYNAMIC_CONTEXT_START,
-	generateProviderBridgeExtension,
-} from "../../../dist/server/agent/provider-bridge-extension.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
+
+let DYNAMIC_CONTEXT_END: string;
+let DYNAMIC_CONTEXT_START: string;
+let generateProviderBridgeExtension: (sessionId: string) => string;
 
 interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
 interface TraceEntry { ts: number; hook: string; sessionId: string; providers: TraceProviderRow[] }
@@ -139,6 +139,10 @@ test.describe("provider per-turn hooks", () => {
 	}
 
 	test.beforeAll(async () => {
+		const runtime = await loadE2EDistServerRuntime(async () => ({
+			providerBridgeExtension: await import("../../../dist/server/agent/provider-bridge-extension.js"),
+		}));
+		({ DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START, generateProviderBridgeExtension } = runtime.providerBridgeExtension);
 		providerFixture = await installProviderDemoFixture([]);
 	});
 

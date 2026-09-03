@@ -151,10 +151,40 @@ export interface ExplorerDependencies {
 	fsTimeoutMs: number;
 	searchTimeoutMs: number;
 	gitTimeoutMs: number;
+	now: () => number;
+}
+
+type SnapshotStoreReadResult<T> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error" };
+
+interface SnapshotStore {
+	read<T = unknown>(key: string): Promise<SnapshotStoreReadResult<T>>;
+	put<T = unknown>(key: string, value: T): Promise<void>;
+}
+
+const snapshotStoreMutationTails = new WeakMap<SnapshotStore, Promise<void>>();
+
+async function serializeSnapshotStoreMutation(store: SnapshotStore, operation: () => Promise<void>): Promise<void> {
+	const previous = snapshotStoreMutationTails.get(store) ?? Promise.resolve();
+	const result = previous.then(operation);
+	const settled = result.then(() => undefined, () => undefined);
+	snapshotStoreMutationTails.set(store, settled);
+	try {
+		await result;
+	} finally {
+		if (snapshotStoreMutationTails.get(store) === settled) snapshotStoreMutationTails.delete(store);
+	}
 }
 
 interface RouteContext {
 	workingDir?: string;
+	sessionId?: string;
+	host?: {
+		capabilities?: { store?: boolean };
+		store?: SnapshotStore;
+	};
 }
 
 interface RouteRequest {
@@ -209,6 +239,25 @@ const nodeFsAdapter: ExplorerFsAdapter = {
 
 const SAFE_STDERR_LIMIT = 16 * 1024;
 const REV_PARSE_LIMIT = 64 * 1024;
+const GIT_SNAPSHOT_CACHE_KEY = "file-explorer:git-snapshots:v1";
+export const GIT_SNAPSHOT_CACHE_TTL_MS = 15_000;
+export const GIT_SNAPSHOT_CACHE_ENTRY_LIMIT = 4;
+export const GIT_SNAPSHOT_CACHE_BYTE_LIMIT = 3_750_000;
+
+type ReusableGitSnapshot = Exclude<GitSnapshot, { kind: "unavailable" }>;
+
+interface GitSnapshotCacheEntry {
+	sessionId: string;
+	rootPath: string;
+	generation: number;
+	expiresAt: number;
+	snapshot: ReusableGitSnapshot;
+}
+
+interface GitSnapshotCacheRecord {
+	version: 1;
+	entries: GitSnapshotCacheEntry[];
+}
 
 export const nodeGitRunner: ExplorerGitRunner = {
 	run: runBoundedGit,
@@ -829,6 +878,110 @@ function statusForPath(snapshot: Extract<GitSnapshot, { kind: "git" }>, relative
 	return snapshot.files.find((status) => status.path === relativePath);
 }
 
+function snapshotGeneration(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function cacheStore(ctx: RouteContext): SnapshotStore | undefined {
+	return typeof ctx.sessionId === "string" && ctx.sessionId.length > 0
+		&& ctx.host?.capabilities?.store === true
+		&& typeof ctx.host.store?.read === "function"
+		&& typeof ctx.host.store?.put === "function"
+		? ctx.host.store
+		: undefined;
+}
+
+function canonicalCachedPath(value: unknown, options: { allowRoot?: boolean } = {}): value is string {
+	if (typeof value !== "string") return false;
+	try { return normalizeRelativePath(value, options) === value; }
+	catch { return false; }
+}
+
+function reusableSnapshot(value: unknown): value is ReusableGitSnapshot {
+	if (!value || typeof value !== "object") return false;
+	const snapshot = value as Record<string, unknown>;
+	if (snapshot.kind === "none") return true;
+	if (snapshot.kind !== "git" || (snapshot.head !== "present" && snapshot.head !== "unborn") || !Array.isArray(snapshot.files)) return false;
+	if (snapshot.files.length > STATUS_RECORD_LIMIT) return false;
+	return snapshot.files.every((candidate) => {
+		if (!candidate || typeof candidate !== "object") return false;
+		const status = candidate as Record<string, unknown>;
+		return canonicalCachedPath(status.path)
+			&& (status.oldPath === undefined || canonicalCachedPath(status.oldPath));
+	});
+}
+
+function cachedEntries(value: unknown, now: number): GitSnapshotCacheEntry[] {
+	if (!value || typeof value !== "object") return [];
+	const record = value as Record<string, unknown>;
+	if (record.version !== 1 || !Array.isArray(record.entries)) return [];
+	return record.entries.flatMap((candidate): GitSnapshotCacheEntry[] => {
+		if (!candidate || typeof candidate !== "object") return [];
+		const entry = candidate as Record<string, unknown>;
+		if (typeof entry.sessionId !== "string" || !entry.sessionId
+			|| typeof entry.rootPath !== "string" || !path.isAbsolute(entry.rootPath)
+			|| snapshotGeneration(entry.generation) === undefined
+			|| typeof entry.expiresAt !== "number" || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now
+			|| !reusableSnapshot(entry.snapshot)) return [];
+		return [entry as unknown as GitSnapshotCacheEntry];
+	});
+}
+
+async function readCachedSnapshot(
+	ctx: RouteContext,
+	rootPath: string,
+	generation: number | undefined,
+	deps: ExplorerDependencies,
+): Promise<ReusableGitSnapshot | undefined> {
+	const store = generation === undefined ? undefined : cacheStore(ctx);
+	if (!store) return undefined;
+	try {
+		const result = await store.read<GitSnapshotCacheRecord>(GIT_SNAPSHOT_CACHE_KEY);
+		if (result.state !== "present") return undefined;
+		const entries = cachedEntries(result.value, deps.now());
+		return entries.find((entry) => entry.sessionId === ctx.sessionId
+			&& isSameCanonicalPath(entry.rootPath, rootPath)
+			&& entry.generation === generation)?.snapshot;
+	} catch {
+		return undefined;
+	}
+}
+
+async function writeCachedSnapshot(
+	ctx: RouteContext,
+	rootPath: string,
+	generation: number | undefined,
+	snapshot: GitSnapshot,
+	deps: ExplorerDependencies,
+): Promise<void> {
+	if (generation === undefined || snapshot.kind === "unavailable") return;
+	const store = cacheStore(ctx);
+	if (!store) return;
+	try {
+		await serializeSnapshotStoreMutation(store, async () => {
+			const now = deps.now();
+			const result = await store.read<GitSnapshotCacheRecord>(GIT_SNAPSHOT_CACHE_KEY);
+			let entries = result.state === "present" ? cachedEntries(result.value, now) : [];
+			const currentGeneration = entries.reduce<number | undefined>((newest, entry) => entry.sessionId === ctx.sessionId
+				&& (newest === undefined || entry.generation > newest) ? entry.generation : newest, undefined);
+			if (currentGeneration !== undefined && generation < currentGeneration) return;
+			// A root listing is the session's authoritative refresh boundary. Drop every
+			// older root/generation for that session so replaying an old client generation
+			// cannot revive stale status after refresh or root navigation.
+			entries = entries.filter((entry) => entry.sessionId !== ctx.sessionId);
+			entries.push({ sessionId: ctx.sessionId!, rootPath, generation, expiresAt: now + GIT_SNAPSHOT_CACHE_TTL_MS, snapshot });
+			entries = entries.slice(-GIT_SNAPSHOT_CACHE_ENTRY_LIMIT);
+			let record: GitSnapshotCacheRecord = { version: 1, entries };
+			while (record.entries.length > 0 && Buffer.byteLength(JSON.stringify(record)) > GIT_SNAPSHOT_CACHE_BYTE_LIMIT) {
+				record = { version: 1, entries: record.entries.slice(1) };
+			}
+			if (record.entries.length > 0) await store.put(GIT_SNAPSHOT_CACHE_KEY, record);
+		});
+	} catch {
+		// Snapshot reuse is an optimization. Store errors degrade to a fresh Git read.
+	}
+}
+
 function gitRouteFailure<T>(snapshot: Extract<GitSnapshot, { kind: "unavailable" }>): RouteResult<T> {
 	return failure(snapshot.error.code, snapshot.error.message, snapshot.error.retryable);
 }
@@ -850,6 +1003,7 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 		fsTimeoutMs: overrides.fsTimeoutMs ?? FS_TIMEOUT_MS,
 		searchTimeoutMs: overrides.searchTimeoutMs ?? SEARCH_TIMEOUT_MS,
 		gitTimeoutMs: overrides.gitTimeoutMs ?? GIT_TIMEOUT_MS,
+		now: overrides.now ?? Date.now,
 	};
 	return {
 		list: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ListValue>> => {
@@ -859,8 +1013,12 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 				const cwd = routeRoot(ctx, body);
 				const listed = await listDirectory(cwd, relativePath, deps);
 				const includeStatus = body.includeStatus === true && relativePath === "";
+				const generation = snapshotGeneration(body.snapshotGeneration);
 				const status = includeStatus ? await collectGitSnapshot(listed.root.absolutePath, deps.git, deps.gitTimeoutMs) : undefined;
-				if (status) await assertClaimCurrent(listed.root, new FsDeadline(deps.fsTimeoutMs), deps);
+				if (status) {
+					await assertClaimCurrent(listed.root, new FsDeadline(deps.fsTimeoutMs), deps);
+					await writeCachedSnapshot(ctx, listed.root.absolutePath, generation, status, deps);
+				}
 				return { ok: true, value: { path: relativePath, rootPath: listed.root.absolutePath, entries: listed.entries, truncated: listed.truncated, ...(status ? { status } : {}) } };
 			} catch (error) {
 				return fsFailure(error, "list");
@@ -912,7 +1070,9 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 				root = await bindRoot(routeRoot(ctx, body), new FsDeadline(deps.fsTimeoutMs), deps);
 			} catch (error) { return fsFailure(error, "read"); }
 			const cwd = root.absolutePath;
-			const snapshot = await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs);
+			const generation = snapshotGeneration(bodyRecord(req).snapshotGeneration);
+			const snapshot = await readCachedSnapshot(ctx, cwd, generation, deps)
+				?? await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs);
 			try { await assertClaimCurrent(root, new FsDeadline(deps.fsTimeoutMs), deps); }
 			catch (error) { return fsFailure(error, "read"); }
 			if (snapshot.kind === "none") return failure("GIT_FAILED", "A diff is unavailable outside a Git repository.");

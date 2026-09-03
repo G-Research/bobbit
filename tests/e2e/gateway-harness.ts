@@ -30,6 +30,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
+import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
@@ -302,6 +303,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableMcp: boolean;
 	enableWorktreePool: boolean;
 	enableDevHarnessRestart: boolean;
+	/**
+	 * Scheduler-only discriminator for specs that must not inherit durable state
+	 * from other files assigned to the same Playwright worker.
+	 */
+	gatewayStateGroup: string;
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
 	basePath: string;
@@ -347,6 +353,13 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
 	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
 
+	// Worker-scoped scheduler discriminator. Most specs deliberately share the
+	// default fixture pool; a spec that validates durable restart state can choose
+	// a unique value to force Playwright to give it a fresh worker gateway. The
+	// value changes grouping only: the gateway keeps the same coordinator-owned
+	// roots, ports, options, and teardown behavior, and never purges foreign state.
+	gatewayStateGroup: ["shared", { scope: "worker", option: true }],
+
 	// Worker-scoped option for Headquarters split coverage. Default false preserves
 	// legacy harness topology for broad suites; Headquarters-specific specs opt in.
 	splitHeadquartersServerRoot: [false, { scope: "worker", option: true }],
@@ -365,11 +378,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// that falls back to the UI origin fail loudly.
 	separateUiOrigin: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, gatewayStateGroup, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
 		// Depend on browserRenderLease purely for ordering: the global browser-render
 		// slot must be held BEFORE this worker boots a gateway, so a queued worker
-		// holds no gateway while it waits. The value itself is void.
+		// holds no gateway while it waits. The value itself is void. Likewise,
+		// gatewayStateGroup is consumed only to include it in this fixture's worker
+		// pool identity; no runtime path or gateway behavior depends on its label.
 		void browserRenderLease;
+		void gatewayStateGroup;
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Every worker gets an owned child of the coordinator's canonical run root.
 		let bobbitDir = createRunChild(`e2e-browser-${process.pid}-${workerInfo.workerIndex}`);
@@ -504,22 +520,21 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Playwright workers share one transform cache. Let the first worker finish
 		// ordered dist/server imports before siblings begin; after readiness, every
 		// sibling imports concurrently rather than joining an all-worker lock queue.
-		const {
-			setProjectRoot,
-			scaffoldBobbitDir,
-			loadOrCreateToken,
-			createGateway,
-			registerRpcBridgeFactory,
-			defaultBgProcessSpawn,
-		} = await withDistServerImportWarmup(async () => {
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-			const { createGateway } = await import("../../dist/server/server.js");
-			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			const { defaultBgProcessSpawn } = await import("../../dist/server/agent/bg-process-manager.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory, defaultBgProcessSpawn };
-		});
+		const runtime = await withDistServerImportWarmup(() => loadE2EDistServerRuntime(async () => {
+			const bobbitDir = await import("../../dist/server/bobbit-dir.js");
+			const scaffold = await import("../../dist/server/scaffold.js");
+			const authToken = await import("../../dist/server/auth/token.js");
+			const server = await import("../../dist/server/server.js");
+			const rpcBridge = await import("../../dist/server/agent/rpc-bridge.js");
+			const bgProcessManager = await import("../../dist/server/agent/bg-process-manager.js");
+			return { bobbitDir, scaffold, authToken, server, rpcBridge, bgProcessManager };
+		}));
+		const { setProjectRoot } = runtime.bobbitDir;
+		const { scaffoldBobbitDir } = runtime.scaffold;
+		const { loadOrCreateToken } = runtime.authToken;
+		const { createGateway } = runtime.server;
+		const { registerRpcBridgeFactory } = runtime.rpcBridge;
+		const { defaultBgProcessSpawn } = runtime.bgProcessManager;
 		// Register the in-process mock bridge factory before any sessions are
 		// created. See in-process-harness.ts for rationale — same story here.
 		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");

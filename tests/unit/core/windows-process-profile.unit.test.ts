@@ -9,6 +9,7 @@ import {
 	parseArgs,
 	resolveWorkerLimit,
 } from "../../../scripts/testing-v2/profile-windows-unit.mjs";
+import { preserveExecCustomPromisifier } from "../../../scripts/testing-v2/child-process-profile-preload.mjs";
 
 const profilerPath = fileURLToPath(new URL("../../../scripts/testing-v2/profile-windows-unit.mjs", import.meta.url));
 
@@ -33,6 +34,27 @@ describe("Windows unit child-process profiler", () => {
 		assert.equal(report.byExecutable[2].failed, 1);
 		assert.equal(report.byExecutable[3].incomplete, 1);
 		assert.equal(JSON.stringify(report).includes("args"), false, "reports must never retain child arguments");
+	});
+
+	it("preserves stdout and stderr on rejected profiled exec promises", async () => {
+		const customPromisify = Symbol.for("nodejs.util.promisify.custom");
+		const original = Object.assign(() => undefined, { [customPromisify]: () => undefined });
+		const failure = new Error("exit 1") as Error & { stdout?: string; stderr?: string };
+		const profiled = ((callback: (error: Error, stdout: string, stderr: string) => void) => {
+			callback(failure, "diff output", "diff warning");
+		}) as any;
+
+		preserveExecCustomPromisifier(original, profiled);
+
+		await assert.rejects(
+			profiled[customPromisify](),
+			(error: Error & { stdout?: string; stderr?: string }) => {
+				assert.equal(error, failure);
+				assert.equal(error.stdout, "diff output");
+				assert.equal(error.stderr, "diff warning");
+				return true;
+			},
+		);
 	});
 
 	it("invokes Vitest directly with explicit projects and file filters", () => {

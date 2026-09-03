@@ -5,8 +5,9 @@
  * A mock MCP server (tests/fixtures/mock-mcp-server.mjs) provides
  * deterministic tool responses via stdio transport.
  *
- * Trimmed to 3 core tests: discovery+connection, tool execution, tool list.
- * Permission grant flow is covered by mcp-tool-permission.spec.ts.
+ * One serial journey owns discovery, subprocess restart, scoped tool execution,
+ * error handling, and tool-list metadata. Permission grant flow is covered by
+ * mcp-tool-permission.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
 
@@ -74,51 +75,34 @@ test.afterAll(() => {
 	}
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 1. MCP Server Discovery & Connection
-// ═══════════════════════════════════════════════════════════════════════════
-
-test("server discovery, restart, and connected status", async () => {
-	// Restart to ensure the mock server is connected
+test("real MCP subprocess discovery, scoped calls, errors, and tool metadata", async () => {
+	// Restart exactly once so this journey crosses the production child teardown,
+	// spawn, initialize, and tools/list lifecycle before making scoped calls.
 	const restartResp = await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
 	expect(restartResp.status).toBe(200);
 	const restartResult = await restartResp.json();
 	expect(restartResult.status).toBe("connected");
 	expect(restartResult.toolCount).toBe(2);
 
-	// Verify the server list shows it connected with correct metadata
-	const resp = await apiFetch(hqMcpServersPath);
-	expect(resp.status).toBe(200);
-	const servers = await resp.json();
-	const mock = servers.find((s: any) => s.name === "mock");
+	const serversResp = await apiFetch(hqMcpServersPath);
+	expect(serversResp.status).toBe(200);
+	const servers = await serversResp.json();
+	const mock = servers.find((server: any) => server.name === "mock");
 	expect(mock).toBeDefined();
 	expect(mock.config?.command).toBe(process.execPath);
 	expect(mock.status).toBe("connected");
 	expect(mock.toolCount).toBe(2);
+	const discoveredToolNames = mock.tools.map((tool: any) => tool.name);
+	expect(discoveredToolNames).toContain("mcp__mock__echo");
+	expect(discoveredToolNames).toContain("mcp__mock__add");
 
-	// Verify tool names follow the mcp__<server>__<tool> convention
-	if (mock.tools) {
-		const toolNames = mock.tools.map((t: any) => t.name);
-		expect(toolNames).toContain("mcp__mock__echo");
-		expect(toolNames).toContain("mcp__mock__add");
-	}
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 2. MCP Tool Execution via Internal API
-// ═══════════════════════════════════════════════════════════════════════════
-
-test("tool execution via /api/internal/mcp-call", async () => {
-	// Ensure the mock server is connected
-	await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
-
-	// Create a Headquarters-scoped test session for the X-Bobbit-Session-Id header.
-	const sessResp = await apiFetch("/api/sessions", {
+	// A real Headquarters session carries project scope across every internal call.
+	const sessionResp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify({ title: "mcp-test-session", projectId: HEADQUARTERS_PROJECT_ID }),
 	});
-	const testSessionId = (await sessResp.json()).id;
-
+	expect(sessionResp.status).toBe(201);
+	const testSessionId = (await sessionResp.json()).id;
 	const mcpCall = (tool: string, args: Record<string, unknown>) =>
 		apiFetch("/api/internal/mcp-call", {
 			method: "POST",
@@ -126,47 +110,38 @@ test("tool execution via /api/internal/mcp-call", async () => {
 			body: JSON.stringify({ tool, args }),
 		});
 
-	// Echo tool — happy path
-	const echoResp = await mcpCall("mcp__mock__echo", { message: "hello world" });
-	expect(echoResp.status).toBe(200);
-	const echoResult = await echoResp.json();
-	expect(echoResult.content[0].text).toBe("hello world");
-	expect(echoResult.isError).toBeFalsy();
+	try {
+		const echoResp = await mcpCall("mcp__mock__echo", { message: "hello world" });
+		expect(echoResp.status).toBe(200);
+		const echoResult = await echoResp.json();
+		expect(echoResult.content[0].text).toBe("hello world");
+		expect(echoResult.isError).toBeFalsy();
 
-	// Add tool — verifies argument passing
-	const addResp = await mcpCall("mcp__mock__add", { a: 2, b: 3 });
-	expect(addResp.status).toBe(200);
-	const addResult = await addResp.json();
-	expect(addResult.content[0].text).toBe("5");
+		const addResp = await mcpCall("mcp__mock__add", { a: 2, b: 3 });
+		expect(addResp.status).toBe(200);
+		const addResult = await addResp.json();
+		expect(addResult.content[0].text).toBe("5");
 
-	// Unknown tool — error handling
-	const unknownResp = await mcpCall("mcp__mock__nonexistent", {});
-	expect(unknownResp.status).toBe(200);
-	const unknownResult = await unknownResp.json();
-	expect(unknownResult.isError).toBe(true);
+		const unknownResp = await mcpCall("mcp__mock__nonexistent", {});
+		expect(unknownResp.status).toBe(200);
+		const unknownResult = await unknownResp.json();
+		expect(unknownResult.isError).toBe(true);
 
-	// Unknown server — 4xx error
-	const badServerResp = await mcpCall("mcp__nonexistent__sometool", {});
-	expect(badServerResp.status).toBeGreaterThanOrEqual(400);
-});
+		const badServerResp = await mcpCall("mcp__nonexistent__sometool", {});
+		expect(badServerResp.status).toBeGreaterThanOrEqual(400);
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 3. MCP Tools in Tool List
-// ═══════════════════════════════════════════════════════════════════════════
+		const toolsResp = await apiFetch(hqToolsPath);
+		expect(toolsResp.status).toBe(200);
+		const { tools } = await toolsResp.json();
+		const toolNames = tools.map((tool: any) => tool.name);
+		expect(toolNames).toContain("mcp__mock__echo");
+		expect(toolNames).toContain("mcp__mock__add");
 
-test("MCP tools appear in GET /api/tools with correct metadata", async () => {
-	// Ensure the mock server is connected
-	await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
-
-	const resp = await apiFetch(hqToolsPath);
-	expect(resp.status).toBe(200);
-	const { tools } = await resp.json();
-	const toolNames = tools.map((t: any) => t.name);
-
-	expect(toolNames).toContain("mcp__mock__echo");
-	expect(toolNames).toContain("mcp__mock__add");
-
-	const echoTool = tools.find((t: any) => t.name === "mcp__mock__echo");
-	expect(echoTool.description.toLowerCase()).toContain("echo");
-	expect(echoTool.group).toMatch(/MCP/i);
+		const echoTool = tools.find((tool: any) => tool.name === "mcp__mock__echo");
+		expect(echoTool.description.toLowerCase()).toContain("echo");
+		expect(echoTool.group).toMatch(/MCP/i);
+	} finally {
+		const deleteResp = await apiFetch(`/api/sessions/${testSessionId}?purge=true`, { method: "DELETE" });
+		expect([200, 404]).toContain(deleteResp.status);
+	}
 });
