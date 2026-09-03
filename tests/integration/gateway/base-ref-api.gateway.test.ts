@@ -14,6 +14,7 @@ import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/s
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 let token: string;
 let restoreCommandRunner: (() => void) | undefined;
@@ -26,6 +27,7 @@ let fixtureGateway: any;
 const cleanupRoots: string[] = [];
 const cleanupProjectIds: string[] = [];
 const originDevelopRepos = new Set<string>();
+const detectedDevelopRemotes = new Map<string, string>();
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
@@ -55,6 +57,12 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify develop") return "a".repeat(40);
 	if (key === "rev-parse --verify refs/tags/v1.2.3") return "b".repeat(40);
 	if (key === "rev-parse --verify origin/develop" && originDevelopRepos.has(path.resolve(cwd))) return "a".repeat(40);
+	if (key === "remote get-url origin" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return pathToFileURL(detectedDevelopRemotes.get(path.resolve(cwd))!).href;
+	}
+	if (key === "ls-remote --symref origin HEAD" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return `ref: refs/heads/develop\tHEAD\n${"a".repeat(40)}\tHEAD`;
+	}
 	if (args[0] === "remote" && args[1] === "get-url") throw new Error("no remote");
 	throw new Error(`missing canned git result (${cwd}): ${key}`);
 }
@@ -96,6 +104,14 @@ function fakeOriginRef(repo: string, branch: string): void {
 	if (branch === "develop") originDevelopRepos.add(path.resolve(repo));
 }
 
+function fakeDetectedRemoteHead(repo: string, branch: string): void {
+	if (branch !== "develop") return;
+	const remote = path.join(path.dirname(repo), `${path.basename(repo)}-remote.git`);
+	fs.mkdirSync(path.join(remote, "objects"), { recursive: true });
+	fs.writeFileSync(path.join(remote, "HEAD"), "ref: refs/heads/develop\n");
+	detectedDevelopRemotes.set(path.resolve(repo), remote);
+}
+
 function registerProject(gateway: any, name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): string {
 	// Base-ref coverage starts at the config route, not project creation. Author
 	// the three project contexts directly so registration cannot add HTTP,
@@ -117,6 +133,22 @@ async function put(id: string, body: Record<string, unknown>): Promise<{ status:
 	});
 	let json: any = null;
 	try { json = await res.json(); } catch { /* not JSON */ }
+	return { status: res.status, json };
+}
+
+async function postProject(
+	name: string,
+	rootPath: string,
+	components: Array<{ name: string; repo: string }>,
+): Promise<{ status: number; json: any }> {
+	const res = await fetch(`${base()}/api/projects`, {
+		method: "POST",
+		headers: headers(),
+		body: JSON.stringify({ name: `${name}-${++nameCounter}`, rootPath, components, acceptCanonical: true }),
+	});
+	let json: any = null;
+	try { json = await res.json(); } catch { /* not JSON */ }
+	if (typeof json?.id === "string") cleanupProjectIds.push(json.id);
 	return { status: res.status, json };
 }
 
@@ -190,6 +222,33 @@ test.afterAll(async () => {
 // Suite-owned project contexts and the canned runner make each declaration
 // deterministic without the compatibility harness's per-test entity sweep.
 test.describe("base_ref API validation", () => {
+	it("pins a detected add-time ref only when every component has it", async () => {
+		const makeProjectRoot = (prefix: string, webHasDevelop: boolean): string => {
+			const root = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`)));
+			cleanupRoots.push(root);
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			copyTemplateRepo(api);
+			copyTemplateRepo(web);
+			fakeOriginRef(api, "develop");
+			fakeDetectedRemoteHead(api, "develop");
+			if (webHasDevelop) fakeOriginRef(web, "develop");
+			return root;
+		};
+		const components = [
+			{ name: "api", repo: "api" },
+			{ name: "web", repo: "web" },
+		];
+
+		const detected = await postProject("baseref-add-detected", makeProjectRoot("add-detected", true), components);
+		expect(detected.status, JSON.stringify(detected.json)).toBe(201);
+		expect((await get(detected.json.id)).base_ref).toBe("origin/develop");
+
+		const mismatch = await postProject("baseref-add-mismatch", makeProjectRoot("add-mismatch", false), components);
+		expect(mismatch.status, JSON.stringify(mismatch.json)).toBe(201);
+		expectBaseRefUnset(await get(mismatch.json.id));
+	});
+
 	it("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
 		const remoteSet = await put(gitProjectId, { base_ref: "origin/develop" });
 		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);
