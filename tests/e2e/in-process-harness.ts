@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
+import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
@@ -241,20 +242,19 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Playwright workers share one transform cache. Let the first worker finish
 		// ordered dist/server imports before siblings begin; after readiness, every
 		// sibling imports concurrently rather than joining an all-worker lock queue.
-		const {
-			setProjectRoot,
-			scaffoldBobbitDir,
-			loadOrCreateToken,
-			createGateway,
-			registerRpcBridgeFactory,
-		} = await withDistServerImportWarmup(async () => {
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-			const { createGateway } = await import("../../dist/server/server.js");
-			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
-		});
+		const runtime = await withDistServerImportWarmup(() => loadE2EDistServerRuntime(async () => {
+			const bobbitDir = await import("../../dist/server/bobbit-dir.js");
+			const scaffold = await import("../../dist/server/scaffold.js");
+			const authToken = await import("../../dist/server/auth/token.js");
+			const server = await import("../../dist/server/server.js");
+			const rpcBridge = await import("../../dist/server/agent/rpc-bridge.js");
+			return { bobbitDir, scaffold, authToken, server, rpcBridge };
+		}));
+		const { setProjectRoot } = runtime.bobbitDir;
+		const { scaffoldBobbitDir } = runtime.scaffold;
+		const { loadOrCreateToken } = runtime.authToken;
+		const { createGateway } = runtime.server;
+		const { registerRpcBridgeFactory } = runtime.rpcBridge;
 		// Register the in-process mock bridge factory before any sessions are
 		// created. The factory intercepts RpcBridge constructions whose cliPath
 		// points at our mock-agent.mjs and returns a drop-in class that skips

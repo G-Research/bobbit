@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type GatewayInfo } from "../gateway-harness.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -375,7 +376,10 @@ test.describe.serial("message author prefix restart projection", () => {
 			expect(messageText(resumed.data.message)).toBe(systemBaseText);
 			expect(countOccurrences(messageText(resumed.data.message), systemPrefix)).toBe(1);
 
-			const { prepareVisibleAgentEvent } = await import("../../../dist/server/agent/session-manager.js");
+			const runtime = await loadE2EDistServerRuntime(async () => ({
+				sessionManager: await import("../../../dist/server/agent/session-manager.js"),
+			}));
+			const { prepareVisibleAgentEvent } = runtime.sessionManager;
 			const clonedProjectedEvent = JSON.parse(JSON.stringify(systemEntry.event));
 			const projectedAgain = prepareVisibleAgentEvent(targetSession, clonedProjectedEvent) as any;
 			expect(projectedAgain.message.author).toEqual({ kind: "system", id: "system:bobbit", label: "Bobbit" });

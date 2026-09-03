@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
@@ -92,12 +93,20 @@ async function prepareFixture(): Promise<Fixture> {
 	process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 	process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 
-	const bobbitDirModule = await import("../../../dist/server/bobbit-dir.js");
+	const runtime = await loadE2EDistServerRuntime(async () => {
+		const bobbitDir = await import("../../../dist/server/bobbit-dir.js");
+		const scaffold = await import("../../../dist/server/scaffold.js");
+		const authToken = await import("../../../dist/server/auth/token.js");
+		const server = await import("../../../dist/server/server.js");
+		const rpcBridge = await import("../../../dist/server/agent/rpc-bridge.js");
+		return { bobbitDir, scaffold, authToken, server, rpcBridge };
+	});
+	const bobbitDirModule = runtime.bobbitDir;
 	const previousProjectRoot = bobbitDirModule.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { registerRpcBridgeFactory } = runtime.rpcBridge;
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 
 	bobbitDirModule.setProjectRoot(bobbitDir);

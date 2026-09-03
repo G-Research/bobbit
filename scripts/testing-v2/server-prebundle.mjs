@@ -5,11 +5,13 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire, isBuiltin } from "node:module";
 import { dirname, extname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -21,6 +23,31 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const DEFAULT_CACHE_ROOT = join(REPO_ROOT, ".profiles", "testing-v2", "server-prebundle");
 const BUNDLE_SCHEMA = 3;
+const E2E_DIST_BUNDLE_SCHEMA = 1;
+const E2E_DIST_RUNTIME_ENTRY = "tests/support/harnesses/e2e/dist-server-runtime-entry.ts";
+const E2E_DIST_NAMESPACE_SOURCES = Object.freeze({
+	server: "dist/server/server.js",
+	bobbitDir: "dist/server/bobbit-dir.js",
+	scaffold: "dist/server/scaffold.js",
+	authToken: "dist/server/auth/token.js",
+	rpcBridge: "dist/server/agent/rpc-bridge.js",
+	bgProcessManager: "dist/server/agent/bg-process-manager.js",
+	modelRegistry: "dist/server/agent/model-registry.js",
+	modelCompletion: "dist/server/agent/model-completion.js",
+	preferencesStore: "dist/server/agent/preferences-store.js",
+	hostTokens: "dist/server/agent/host-tokens.js",
+	sessionManager: "dist/server/agent/session-manager.js",
+	credentialStore: "dist/server/auth/credential-store.js",
+	serverHostApi: "dist/server/extension-host/server-host-api.js",
+	moduleHostWorker: "dist/server/extension-host/module-host-worker.js",
+	packStore: "dist/server/extension-host/pack-store.js",
+	toolActivation: "dist/server/agent/tool-activation.js",
+	providerBridgeExtension: "dist/server/agent/provider-bridge-extension.js",
+	dockerArgs: "dist/server/agent/docker-args.js",
+	projectSandbox: "dist/server/agent/project-sandbox.js",
+	git: "dist/server/skills/git.js",
+	worktreePaths: "dist/server/skills/worktree-paths.js",
+});
 const LOCK_STALE_MS = 10 * 60_000;
 const LOCK_WAIT_MS = 5 * 60_000;
 
@@ -133,6 +160,26 @@ export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 	return hash.digest("hex").slice(0, 24);
 }
 
+export function computeE2EDistServerPrebundleKey(repoRoot = REPO_ROOT) {
+	const hash = createHash("sha256");
+	const runtimeEntry = join(repoRoot, ...E2E_DIST_RUNTIME_ENTRY.split("/"));
+	const files = [
+		...bundledRepoSourceFiles(repoRoot, [runtimeEntry]),
+		join(repoRoot, "package-lock.json"),
+		fileURLToPath(import.meta.url),
+	];
+	hash.update(`e2e-dist-server-prebundle-schema:${E2E_DIST_BUNDLE_SCHEMA}\0`);
+	hash.update(JSON.stringify(E2E_DIST_NAMESPACE_SOURCES));
+	hash.update("\0");
+	for (const file of files) {
+		hash.update(toPosixPath(relative(repoRoot, file)));
+		hash.update("\0");
+		hash.update(readFileSync(file));
+		hash.update("\0");
+	}
+	return hash.digest("hex").slice(0, 24);
+}
+
 function readManifest(dir) {
 	return JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
 }
@@ -140,19 +187,27 @@ function readManifest(dir) {
 function graphDigest(manifest) {
 	return createHash("sha256").update(JSON.stringify({
 		runtime: manifest.runtime,
+		namespaces: manifest.namespaces,
 		entries: manifest.entries,
 		files: manifest.files,
 	})).digest("hex");
 }
 
-export function validateServerPrebundleManifest(manifest, key, readArtifact) {
+function validatePrebundleManifest(manifest, key, readArtifact, {
+	schema,
+	runtimeEntry,
+	namespaces,
+	minimumEntries = 2,
+}) {
 	try {
-		if (manifest.schema !== BUNDLE_SCHEMA || manifest.key !== key) return false;
+		if (manifest.schema !== schema || manifest.key !== key) return false;
 		if (typeof manifest.runtime !== "string" || !manifest.entries || !manifest.files) return false;
-		if (typeof manifest.entries["tests/support/harnesses/shared/server-runtime-entry.ts"] !== "string") return false;
-		if (manifest.runtime !== manifest.entries["tests/support/harnesses/shared/server-runtime-entry.ts"]) return false;
+		if (typeof manifest.entries[runtimeEntry] !== "string") return false;
+		if (manifest.runtime !== manifest.entries[runtimeEntry]) return false;
+		if (namespaces && JSON.stringify(manifest.namespaces) !== JSON.stringify(namespaces)) return false;
+		if (!namespaces && manifest.namespaces !== undefined) return false;
 		if ((manifest.files[manifest.runtime]?.bytes ?? 0) < 1024) return false;
-		if (manifest.entryCount !== Object.keys(manifest.entries).length || manifest.entryCount < 2) return false;
+		if (manifest.entryCount !== Object.keys(manifest.entries).length || manifest.entryCount < minimumEntries) return false;
 		if (manifest.fileCount !== Object.keys(manifest.files).length || manifest.fileCount < manifest.entryCount * 2) return false;
 		if (manifest.graphSha256 !== graphDigest(manifest)) return false;
 
@@ -174,6 +229,22 @@ export function validateServerPrebundleManifest(manifest, key, readArtifact) {
 	}
 }
 
+export function validateServerPrebundleManifest(manifest, key, readArtifact) {
+	return validatePrebundleManifest(manifest, key, readArtifact, {
+		schema: BUNDLE_SCHEMA,
+		runtimeEntry: "tests/support/harnesses/shared/server-runtime-entry.ts",
+	});
+}
+
+export function validateE2EDistServerPrebundleManifest(manifest, key, readArtifact) {
+	return validatePrebundleManifest(manifest, key, readArtifact, {
+		schema: E2E_DIST_BUNDLE_SCHEMA,
+		runtimeEntry: E2E_DIST_RUNTIME_ENTRY,
+		namespaces: E2E_DIST_NAMESPACE_SOURCES,
+		minimumEntries: 2,
+	});
+}
+
 export function validateServerPrebundle(dir, key) {
 	try {
 		return validateServerPrebundleManifest(readManifest(dir), key, (relativeFile) => {
@@ -186,12 +257,34 @@ export function validateServerPrebundle(dir, key) {
 	}
 }
 
-function sourceUrlPlugin(repoRoot) {
-	const webSourceRoots = [
+function isContainedPath(root, candidate, { allowRoot = false } = {}) {
+	const rel = relative(resolve(root), resolve(candidate));
+	if (allowRoot && rel === "") return true;
+	return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${win32.sep}`) && !rel.startsWith("../") && !rel.startsWith("..\\");
+}
+
+export function validateE2EDistServerPrebundle(dir, key) {
+	try {
+		const canonicalDir = realpathSync(dir);
+		return validateE2EDistServerPrebundleManifest(readManifest(canonicalDir), key, (relativeFile) => {
+			if (typeof relativeFile !== "string" || isAbsolute(relativeFile) || relativeFile.split(/[\\/]/).includes("..")) return undefined;
+			const artifact = join(canonicalDir, ...relativeFile.split("/"));
+			if (!existsSync(artifact)) return undefined;
+			const canonicalArtifact = realpathSync(artifact);
+			if (!isContainedPath(canonicalDir, canonicalArtifact)) return undefined;
+			return { bytes: statSync(canonicalArtifact).size, sha256: fileDigest(canonicalArtifact) };
+		});
+	} catch {
+		return false;
+	}
+}
+
+function sourceUrlPlugin(repoRoot, options = {}) {
+	const webSourceRoots = options.webSourceRoots ?? [
 		normalizeServerSourcePath(join(repoRoot, "src", "app")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "src", "ui")) + "/",
 	];
-	const sourceRoots = [
+	const sourceRoots = options.sourceRoots ?? [
 		normalizeServerSourcePath(join(repoRoot, "src", "server")) + "/",
 		...webSourceRoots,
 		normalizeServerSourcePath(join(repoRoot, "defaults", "tools")) + "/",
@@ -228,6 +321,59 @@ function sourceUrlPlugin(repoRoot) {
 	};
 }
 
+function importMetaResolveExternalPlugin(repoRoot) {
+	const distServerRoot = normalizeServerSourcePath(join(repoRoot, "dist", "server")) + "/";
+	return {
+		name: "bobbit-import-meta-resolve-external",
+		setup(buildApi) {
+			buildApi.onResolve({ filter: /^\./ }, (args) => {
+				const candidate = resolve(args.resolveDir, args.path);
+				const normalized = normalizeServerSourcePath(candidate);
+				if (!normalized.startsWith(distServerRoot) || !existsSync(candidate)) return undefined;
+				if (!/\bimport\.meta\.resolve\s*\(/.test(readFileSync(candidate, "utf8"))) return undefined;
+				// Node must evaluate import.meta.resolve from the checkout so bare
+				// package lookups retain the checkout's node_modules ancestry.
+				return { path: pathToFileURL(candidate).href, external: true };
+			});
+		},
+	};
+}
+
+function checkoutPackageExternalPlugin(repoRoot) {
+	const requireFromCheckout = createRequire(join(repoRoot, "package.json"));
+	const pluginMarker = Symbol("checkout-package-resolve");
+	return {
+		name: "bobbit-checkout-package-external",
+		setup(buildApi) {
+			buildApi.onResolve({ filter: /.*/ }, async (args) => {
+				if (args.pluginData === pluginMarker || args.kind === "entry-point" || args.path.startsWith(".") || args.path.startsWith("/")
+					|| args.path.startsWith("file:") || /^[A-Za-z]:[\\/]/.test(args.path)) return undefined;
+				if (isBuiltin(args.path)) return { path: args.path, external: true };
+				const resolved = await buildApi.resolve(args.path, {
+					importer: args.importer,
+					kind: args.kind,
+					resolveDir: args.resolveDir || repoRoot,
+					pluginData: pluginMarker,
+				});
+				if (resolved.errors.length === 0 && resolved.path) {
+					return {
+						path: args.kind === "require-call" ? resolved.path : pathToFileURL(resolved.path).href,
+						external: true,
+					};
+				}
+				// Some CommonJS-only dependencies deliberately lack import exports.
+				// Resolve those with Node's checkout-anchored require semantics.
+				try {
+					const required = requireFromCheckout.resolve(args.path);
+					return { path: args.kind === "require-call" ? required : pathToFileURL(required).href, external: true };
+				} catch {
+					return { errors: resolved.errors };
+				}
+			});
+		},
+	};
+}
+
 function runtimeEntryNamespaces(repoRoot) {
 	const source = readFileSync(join(repoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts"), "utf8");
 	return [...source.matchAll(/^export \* as ([A-Za-z_$][\w$]*) from /gm)].map((match) => match[1]).sort();
@@ -249,6 +395,10 @@ async function assertBundleParity(bundlePath, directServerEntry, repoRoot, artif
 		|| loaded.gatewayDeps.realCommandRunner !== loaded.server.realCommandRunner) {
 		throw new Error("[server-prebundle] dependency parity failed: shared gatewayDeps.realCommandRunner is missing or duplicated");
 	}
+	assertGeneratedSourcePreserved(artifactDir, manifest);
+}
+
+function assertGeneratedSourcePreserved(artifactDir, manifest) {
 	const generatedSourcePreserved = Object.keys(manifest.files)
 		.filter((file) => file.endsWith(".mjs"))
 		.some((file) => readFileSync(join(artifactDir, ...file.split("/")), "utf8").includes("createRequire(import.meta.url)"));
@@ -257,12 +407,32 @@ async function assertBundleParity(bundlePath, directServerEntry, repoRoot, artif
 	}
 }
 
+export async function assertE2EDistBundleParity(bundlePath, directServerEntry, artifactDir, manifest) {
+	const nonce = `validate-e2e-${process.pid}-${Date.now()}`;
+	const loaded = await import(`${pathToFileURL(bundlePath).href}?${nonce}`);
+	const directServer = await import(`${pathToFileURL(directServerEntry).href}?${nonce}`);
+	const expected = Object.keys(E2E_DIST_NAMESPACE_SOURCES).sort();
+	const actual = Object.keys(loaded).sort();
+	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+		throw new Error(`[e2e-dist-server-prebundle] export parity failed: expected [${expected.join(", ")}], got [${actual.join(", ")}]`);
+	}
+	for (const symbol of ["createGateway", "realCommandRunner", "__setGitStatusFake", "invalidateGitStatusCache"]) {
+		if (loaded.server?.[symbol] !== directServer[symbol]) {
+			throw new Error(`[e2e-dist-server-prebundle] server identity failed for ${symbol}`);
+		}
+	}
+	if (typeof loaded.server.realCommandRunner?.execFile !== "function") {
+		throw new Error("[e2e-dist-server-prebundle] realCommandRunner is missing");
+	}
+	assertGeneratedSourcePreserved(artifactDir, manifest);
+}
+
 function entryName(source, repoRoot) {
 	const relativeSource = toPosixPath(relative(repoRoot, source));
 	return relativeSource.replace(/\.(?:ts|js)$/, "");
 }
 
-function buildManifest({ key, repoRoot, tempDir, metafile, runtimeEntry }) {
+function buildManifest({ key, repoRoot, tempDir, metafile, runtimeEntry, schema = BUNDLE_SCHEMA, namespaces }) {
 	const entries = {};
 	const files = {};
 	for (const [outputPath, output] of Object.entries(metafile.outputs)) {
@@ -279,10 +449,11 @@ function buildManifest({ key, repoRoot, tempDir, metafile, runtimeEntry }) {
 	const runtime = entries[runtimeKey];
 	if (!runtime) throw new Error("[server-prebundle] esbuild did not emit the umbrella runtime entry");
 	const manifest = {
-		schema: BUNDLE_SCHEMA,
+		schema,
 		key,
 		createdAt: new Date().toISOString(),
 		runtime,
+		...(namespaces ? { namespaces } : {}),
 		entries: Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a.localeCompare(b))),
 		files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))),
 	};
@@ -390,6 +561,107 @@ export async function ensureServerTestPrebundle({ repoRoot = REPO_ROOT, cacheRoo
 		releaseLock();
 	}
 	if (!validateServerPrebundle(finalDir, key)) throw new Error(`[server-prebundle] invalid artifact after build: ${finalDir}`);
+	return resultFromCache(finalDir, key, false);
+}
+
+function e2eDistCacheRoot(runRoot) {
+	if (!runRoot || !existsSync(runRoot)) throw new Error("[e2e-dist-server-prebundle] runRoot must be an existing directory");
+	const canonicalRunRoot = realpathSync(runRoot);
+	const requestedCacheRoot = join(canonicalRunRoot, "e2e-dist-server-prebundle");
+	mkdirSync(requestedCacheRoot, { recursive: true });
+	const canonicalCacheRoot = realpathSync(requestedCacheRoot);
+	if (!isContainedPath(canonicalRunRoot, canonicalCacheRoot)) {
+		throw new Error(`[e2e-dist-server-prebundle] cache root escaped run root: ${canonicalCacheRoot}`);
+	}
+	return { canonicalRunRoot, cacheRoot: canonicalCacheRoot };
+}
+
+export async function ensureE2EDistServerPrebundle({ repoRoot = REPO_ROOT, runRoot } = {}) {
+	const absoluteRepoRoot = realpathSync(repoRoot);
+	const { canonicalRunRoot, cacheRoot } = e2eDistCacheRoot(runRoot);
+	const key = computeE2EDistServerPrebundleKey(absoluteRepoRoot);
+	const finalDir = join(cacheRoot, key);
+	if (!isContainedPath(canonicalRunRoot, finalDir)) {
+		throw new Error(`[e2e-dist-server-prebundle] artifact escaped run root: ${finalDir}`);
+	}
+	if (validateE2EDistServerPrebundle(finalDir, key)) return resultFromCache(finalDir, key, true);
+
+	const releaseLock = await acquireBuildLock(cacheRoot, key);
+	try {
+		if (validateE2EDistServerPrebundle(finalDir, key)) return resultFromCache(finalDir, key, true);
+		const tempDir = join(cacheRoot, `.tmp-${key}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+		if (!isContainedPath(canonicalRunRoot, tempDir)) {
+			throw new Error(`[e2e-dist-server-prebundle] temporary artifact escaped run root: ${tempDir}`);
+		}
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const runtimeEntry = join(absoluteRepoRoot, ...E2E_DIST_RUNTIME_ENTRY.split("/"));
+			const namespaceEntries = Object.values(E2E_DIST_NAMESPACE_SOURCES).map((source) => join(absoluteRepoRoot, ...source.split("/")));
+			for (const source of [runtimeEntry, ...namespaceEntries]) {
+				if (!existsSync(source)) throw new Error(`[e2e-dist-server-prebundle] missing compiled input: ${source}`);
+			}
+			const serverEntry = join(absoluteRepoRoot, ...E2E_DIST_NAMESPACE_SOURCES.server.split("/"));
+			const entryPoints = Object.fromEntries(
+				[runtimeEntry, serverEntry].map((source) => [entryName(source, absoluteRepoRoot), source]),
+			);
+			const distServerRoot = normalizeServerSourcePath(join(absoluteRepoRoot, "dist", "server")) + "/";
+			const buildResult = await build({
+				absWorkingDir: absoluteRepoRoot,
+				entryPoints,
+				outdir: tempDir,
+				entryNames: "entries/[dir]/[name]-[hash]",
+				chunkNames: "chunks/[name]-[hash]",
+				assetNames: "assets/[name]-[hash]",
+				outExtension: { ".js": ".mjs" },
+				bundle: true,
+				splitting: true,
+				platform: "node",
+				format: "esm",
+				target: "node22",
+				sourcemap: "external",
+				sourcesContent: true,
+				metafile: true,
+				logLevel: "silent",
+				plugins: [
+					importMetaResolveExternalPlugin(absoluteRepoRoot),
+					sourceUrlPlugin(absoluteRepoRoot, { sourceRoots: [distServerRoot], webSourceRoots: [] }),
+					checkoutPackageExternalPlugin(absoluteRepoRoot),
+				],
+			});
+			const manifest = buildManifest({
+				key,
+				repoRoot: absoluteRepoRoot,
+				tempDir,
+				metafile: buildResult.metafile,
+				runtimeEntry,
+				schema: E2E_DIST_BUNDLE_SCHEMA,
+				namespaces: E2E_DIST_NAMESPACE_SOURCES,
+			});
+			const serverOutput = manifest.entries[E2E_DIST_NAMESPACE_SOURCES.server];
+			if (!serverOutput) throw new Error(`[e2e-dist-server-prebundle] missing direct entry: ${E2E_DIST_NAMESPACE_SOURCES.server}`);
+			// Runtime evaluation belongs to focused parity coverage. The exact E2E
+			// command validates the immutable graph here without evaluating it twice;
+			// a worker-side import failure remains fatal once bundle mode is observed.
+			assertGeneratedSourcePreserved(tempDir, manifest);
+			writeFileSync(join(tempDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+			rmSync(finalDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+			try {
+				renameSync(tempDir, finalDir);
+			} catch (error) {
+				if (!validateE2EDistServerPrebundle(finalDir, key)) throw error;
+				rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+			}
+		} catch (error) {
+			rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+			throw error;
+		}
+	} finally {
+		releaseLock();
+	}
+	if (!validateE2EDistServerPrebundle(finalDir, key)) {
+		throw new Error(`[e2e-dist-server-prebundle] invalid artifact after build: ${finalDir}`);
+	}
 	return resultFromCache(finalDir, key, false);
 }
 

@@ -30,6 +30,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
+import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
@@ -519,22 +520,21 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Playwright workers share one transform cache. Let the first worker finish
 		// ordered dist/server imports before siblings begin; after readiness, every
 		// sibling imports concurrently rather than joining an all-worker lock queue.
-		const {
-			setProjectRoot,
-			scaffoldBobbitDir,
-			loadOrCreateToken,
-			createGateway,
-			registerRpcBridgeFactory,
-			defaultBgProcessSpawn,
-		} = await withDistServerImportWarmup(async () => {
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-			const { createGateway } = await import("../../dist/server/server.js");
-			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			const { defaultBgProcessSpawn } = await import("../../dist/server/agent/bg-process-manager.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory, defaultBgProcessSpawn };
-		});
+		const runtime = await withDistServerImportWarmup(() => loadE2EDistServerRuntime(async () => {
+			const bobbitDir = await import("../../dist/server/bobbit-dir.js");
+			const scaffold = await import("../../dist/server/scaffold.js");
+			const authToken = await import("../../dist/server/auth/token.js");
+			const server = await import("../../dist/server/server.js");
+			const rpcBridge = await import("../../dist/server/agent/rpc-bridge.js");
+			const bgProcessManager = await import("../../dist/server/agent/bg-process-manager.js");
+			return { bobbitDir, scaffold, authToken, server, rpcBridge, bgProcessManager };
+		}));
+		const { setProjectRoot } = runtime.bobbitDir;
+		const { scaffoldBobbitDir } = runtime.scaffold;
+		const { loadOrCreateToken } = runtime.authToken;
+		const { createGateway } = runtime.server;
+		const { registerRpcBridgeFactory } = runtime.rpcBridge;
+		const { defaultBgProcessSpawn } = runtime.bgProcessManager;
 		// Register the in-process mock bridge factory before any sessions are
 		// created. See in-process-harness.ts for rationale — same story here.
 		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");

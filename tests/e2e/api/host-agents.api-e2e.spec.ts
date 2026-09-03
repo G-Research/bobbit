@@ -24,6 +24,7 @@ import { createSession, deleteSession } from "../e2e-setup.js";
 import { pollUntil } from "../test-utils/cleanup.js";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -33,7 +34,10 @@ const FIXTURE_MODULE = resolve(FIXTURE_PACK_ROOT, "lib", "exerciser.mjs");
 /** Build the LIVE parent ServerHostApi bound to `ownerId`, wired to the gateway's
  *  real OrchestrationCore + a live status reader (exactly as server.ts wires it). */
 async function buildHost(gateway: any, ownerId: string): Promise<any> {
-	const { createServerHostApi } = await import("../../../dist/server/extension-host/server-host-api.js");
+	const runtime = await loadE2EDistServerRuntime(async () => ({
+		serverHostApi: await import("../../../dist/server/extension-host/server-host-api.js"),
+	}));
+	const { createServerHostApi } = runtime.serverHostApi;
 	return createServerHostApi({
 		sessionId: ownerId,
 		packId: "host-agents-exerciser",
@@ -44,7 +48,10 @@ async function buildHost(gateway: any, ownerId: string): Promise<any> {
 }
 
 async function runFixture(gateway: any, ownerId: string, member: string, arg: unknown): Promise<any> {
-	const { ModuleHost } = await import("../../../dist/server/extension-host/module-host-worker.js");
+	const runtime = await loadE2EDistServerRuntime(async () => ({
+		moduleHostWorker: await import("../../../dist/server/extension-host/module-host-worker.js"),
+	}));
+	const { ModuleHost } = runtime.moduleHostWorker;
 	const host = await buildHost(gateway, ownerId);
 	const workingDir = gateway.sessionManager.getSession(ownerId)?.cwd;
 	const mh = new ModuleHost({ timeoutMs: 30_000 });

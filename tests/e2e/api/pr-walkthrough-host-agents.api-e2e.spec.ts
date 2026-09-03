@@ -40,6 +40,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { test, expect } from "../in-process-harness.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 import { apiFetch, createSession, nonGitCwd, waitForSessionStatus } from "../e2e-setup.js";
 import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 
@@ -206,9 +207,14 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		});
 		expect(enabled.disabled.enabled).toBe(true);
 
-		ModuleHostClass = (await import("../../../dist/server/extension-host/module-host-worker.js")).ModuleHost;
-		createServerHostApi = (await import("../../../dist/server/extension-host/server-host-api.js")).createServerHostApi;
-		getPackStore = (await import("../../../dist/server/extension-host/pack-store.js")).getPackStore;
+		const runtime = await loadE2EDistServerRuntime(async () => ({
+			moduleHostWorker: await import("../../../dist/server/extension-host/module-host-worker.js"),
+			serverHostApi: await import("../../../dist/server/extension-host/server-host-api.js"),
+			packStore: await import("../../../dist/server/extension-host/pack-store.js"),
+		}));
+		ModuleHostClass = runtime.moduleHostWorker.ModuleHost;
+		createServerHostApi = runtime.serverHostApi.createServerHostApi;
+		getPackStore = runtime.packStore.getPackStore;
 		// ONE shared ModuleHost for the gateway-process lifetime, mirroring how
 		// server.ts constructs a single RouteDispatcher/ModuleHost.
 		moduleHost = new ModuleHostClass({ timeoutMs: 30_000 });
@@ -658,7 +664,10 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	// Journey 3: one submitted child pins restart survival and role re-resolution;
 	// a separate terminal child proves the generic boot reap remains intact.
 	test("restart keeps submitted reviewers resolvable and reaps only childTerminal children", async ({ gateway }) => {
-		const { resolveGrantPolicy } = await import("../../../dist/server/agent/tool-activation.js");
+		const runtime = await loadE2EDistServerRuntime(async () => ({
+			toolActivation: await import("../../../dist/server/agent/tool-activation.js"),
+		}));
+		const { resolveGrantPolicy } = runtime.toolActivation;
 		const sm: any = gateway.sessionManager;
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
