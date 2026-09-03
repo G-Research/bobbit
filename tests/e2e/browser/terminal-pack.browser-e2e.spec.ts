@@ -139,13 +139,13 @@ test.describe("terminal pack panel", () => {
 		const followUp = `${run}_FOLLOWUP_VISIBLE`;
 		// `attached` confirms the channel, not that the interactive shell has
 		// consumed input. First prove the shell-to-panel path, then emit the 90-line
-		// payload in acknowledged chunks. This removes the cold-PTY/bulk-output race
-		// without retries or a clock-based settle.
+		// payload in three acknowledged chunks. This removes the cold-PTY/bulk-output
+		// race without retries or a clock-based settle while limiting roundtrips.
 		await runTerminalCommandAndWaitForOutput(page, `echo ${run}_READY`, `${run}_READY`, "terminal shell readiness");
-		for (let batch = 0; batch < 9; batch += 1) {
-			const start = batch * 10;
-			const end = start + 9;
-			const completion = batch === 8 ? burstDone : `${run}_CHUNK_${batch}_DONE`;
+		for (let batch = 0; batch < 3; batch += 1) {
+			const start = batch * 30;
+			const end = start + 29;
+			const completion = batch === 2 ? burstDone : `${run}_CHUNK_${batch}_DONE`;
 			const burstCommand = process.platform === "win32"
 				? `(for /L %i in (${start},1,${end}) do @echo ${run}_LINE_%i_abc123xyz) & echo ${completion}`
 				: `i=${start}; while [ "$i" -le ${end} ]; do printf '${run}_LINE_%03d_abc123xyz\\n' "$i"; i=$((i + 1)); done; printf '${completion}\\n'`;
