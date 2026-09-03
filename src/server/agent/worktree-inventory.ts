@@ -369,7 +369,7 @@ export class WorktreeInventoryService {
 			candidate.pathExists = await this.exists(candidate.path);
 			if (candidate.legacyArchived) candidate.legacyArchived.pathExists = candidate.pathExists;
 		});
-		const localBranches = await mapWithConcurrency(candidateList, this.ioConcurrency, candidate => this.localBranchExists(candidate.repoPath, candidate.branch));
+		const localBranches = await this.localBranchesExist(candidateList);
 		// Ownership is the final asynchronous scan phase. Guard stores and pool
 		// snapshots are read only after their async repo-path prerequisites settle,
 		// so a claim arriving during any earlier filesystem/Git work is observed.
@@ -1268,6 +1268,53 @@ export class WorktreeInventoryService {
 	private localBranchExists(repoPath: string | undefined, branch: string | undefined): Promise<boolean> {
 		if (!repoPath || !branch) return Promise.resolve(false);
 		return (this.deps.commandRunner ?? realCommandRunner).execFile("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath }).then(() => true).catch(() => false);
+	}
+
+	/**
+	 * Batch local-branch existence for every scan candidate: ONE
+	 * `git for-each-ref refs/heads` per distinct repository instead of one
+	 * `git show-ref` child process per candidate. On a gateway with hundreds
+	 * of worktrees the per-candidate spawn storm was ~20% of main-thread CPU
+	 * (`child_process.spawn` is synchronous work on the loop) and the cleanup
+	 * path re-scans per selected item, multiplying it further.
+	 *
+	 * A repository whose ref listing fails falls back to the per-candidate
+	 * probe so a transient Git error cannot silently report "branch missing"
+	 * for every candidate of that repo. Results are index-aligned with input.
+	 */
+	private async localBranchesExist(candidates: ReadonlyArray<{ repoPath?: string; branch?: string }>): Promise<boolean[]> {
+		const repos = new Set<string>();
+		for (const candidate of candidates) if (candidate.repoPath && candidate.branch) repos.add(candidate.repoPath);
+		const listed = new Map<string, Set<string> | undefined>();
+		await mapWithConcurrency([...repos], this.ioConcurrency, async repoPath => {
+			listed.set(repoPath, await this.listLocalBranches(repoPath));
+		});
+		return mapWithConcurrency(candidates, this.ioConcurrency, async candidate => {
+			if (!candidate.repoPath || !candidate.branch) return false;
+			const branches = listed.get(candidate.repoPath);
+			if (branches) return branches.has(candidate.branch);
+			return this.localBranchExists(candidate.repoPath, candidate.branch);
+		});
+	}
+
+	/** Local branch names of `repoPath`, or undefined when the listing fails. */
+	private async listLocalBranches(repoPath: string): Promise<Set<string> | undefined> {
+		try {
+			const { stdout } = await (this.deps.commandRunner ?? realCommandRunner).execFile(
+				"git",
+				["for-each-ref", "--format=%(refname)", "refs/heads/"],
+				{ cwd: repoPath, timeout: 10_000 },
+			) as { stdout: string | Buffer };
+			const text = typeof stdout === "string" ? stdout : stdout.toString("utf-8");
+			const names = new Set<string>();
+			for (const line of text.split("\n")) {
+				const ref = line.trim();
+				if (ref.startsWith("refs/heads/")) names.add(ref.slice("refs/heads/".length));
+			}
+			return names;
+		} catch {
+			return undefined;
+		}
 	}
 
 	private async execGit(repoPath: string, args: readonly string[], opts?: { timeoutMs?: number }): Promise<string> {
