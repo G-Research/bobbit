@@ -157,9 +157,16 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		const pending = new Map<string, number>();
 		const evidence = new Map<string, ScrollProbe>();
 		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
-		const markerEventIds = new Map<string, string>();
+		type MarkerLifecycle = {
+			source: "event" | "dom";
+			eventId?: string;
+			eventClosed: boolean;
+			streamingDomSeen: boolean;
+			settledDomSeen: boolean;
+		};
+		const markerLifecycles = new Map<string, MarkerLifecycle>();
 		const markerOccurrences = new Map<string, number>();
-		let visibleMarkers = new Set<string>();
+		let visibleDomProjections = new Map<string, Map<string, number>>();
 		let nextExpectedMarkerIndex = 0;
 		let lastEvidenceHeight = el.scrollHeight;
 		let failure: Error | null = null;
@@ -181,45 +188,111 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 			}
 			return found;
 		};
-		const textAtMutation = (): string => {
-			const fromMessages = Array.from(document.querySelectorAll("assistant-message"))
-				.map((node) => JSON.stringify((node as any).message ?? ""))
-				.join(" ");
-			const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
-			return `${content.textContent ?? ""} ${fromMessages} ${JSON.stringify(remote?.state?.streamingMessage ?? "")}`;
+		const recordFirstOccurrence = (marker: string, lifecycle: MarkerLifecycle) => {
+			const index = expectedIndex.get(marker)!;
+			if (index !== nextExpectedMarkerIndex) {
+				fail(`marker ${marker} arrived out of protocol order; expected ${phaseMarkers[nextExpectedMarkerIndex] ?? "no further marker"}`);
+				return;
+			}
+			nextExpectedMarkerIndex++;
+			markerLifecycles.set(marker, lifecycle);
+			markerOccurrences.set(marker, 1);
+			// The exact marker is captured at its commit. Its proof must be a
+			// later, positive, post-repin height that no earlier phase used.
+			pending.set(marker, el.scrollHeight);
 		};
-		const detectMarkers = (text: string, fromDom: boolean, eventId?: string) => {
+		const detectEventMarkers = (text: string, eventId: string | undefined, eventType: string | undefined) => {
 			const found = exactMarkers(text);
 			for (const marker of found) {
 				if (!expected.has(marker)) fail(`unexpected exact marker ${marker}`);
 			}
 			for (const marker of expected) {
-				if (!found.has(marker) || (fromDom && visibleMarkers.has(marker))) continue;
-				if (pending.has(marker) || evidence.has(marker)) {
-					if (eventId && markerEventIds.get(marker) === eventId) continue;
-					// A server event is the occurrence authority. Lit can project that
-					// same event through the streaming container, briefly remove it on
-					// message_end, then commit it into the stable message list. Every DOM
-					// reappearance is still one render of the event, not another marker.
-					if (fromDom && markerEventIds.has(marker)) continue;
+				if (!found.has(marker)) continue;
+				const lifecycle = markerLifecycles.get(marker);
+				if (!lifecycle) {
+					recordFirstOccurrence(marker, {
+						source: "event",
+						eventId,
+						eventClosed: false,
+						streamingDomSeen: false,
+						settledDomSeen: false,
+					});
+					continue;
+				}
+				// Streaming updates are cumulative, so the same marker can occur in
+				// several frames for one authenticated message. A different/absent ID,
+				// a DOM-first occurrence, or a frame after message_end is a duplicate.
+				if (lifecycle.source !== "event"
+					|| !eventId
+					|| lifecycle.eventId !== eventId
+					|| lifecycle.eventClosed) {
 					fail(`duplicate exact marker ${marker}`);
-					continue;
 				}
-				const index = expectedIndex.get(marker)!;
-				if (index !== nextExpectedMarkerIndex) {
-					fail(`marker ${marker} arrived out of protocol order; expected ${phaseMarkers[nextExpectedMarkerIndex] ?? "no further marker"}`);
-					continue;
-				}
-				nextExpectedMarkerIndex++;
-				if (eventId) markerEventIds.set(marker, eventId);
-				markerOccurrences.set(marker, (markerOccurrences.get(marker) ?? 0) + 1);
-				// The exact marker is captured at its commit. Its proof must be a
-				// later, positive, post-repin height that no earlier phase used.
-				pending.set(marker, el.scrollHeight);
 			}
-			if (fromDom) visibleMarkers = found;
+			if (eventType === "message_end" && eventId) {
+				for (const lifecycle of markerLifecycles.values()) {
+					if (lifecycle.source === "event" && lifecycle.eventId === eventId) lifecycle.eventClosed = true;
+				}
+			}
 		};
-		const detectMarkersAtCommit = () => detectMarkers(textAtMutation(), true);
+		const scanDomProjections = (): Map<string, Map<string, number>> => {
+			const projections = new Map<string, Map<string, number>>();
+			const nodes = Array.from(content.querySelectorAll("assistant-message"));
+			const allText = [content.textContent ?? ""];
+			for (const node of nodes) {
+				const message = (node as any).message;
+				const serialized = JSON.stringify(message ?? "");
+				allText.push(serialized);
+				const id = typeof message?.id === "string" && message.id ? message.id : "<unauthenticated>";
+				const phase = node.closest("streaming-message-container") ? "streaming" : "settled";
+				for (const marker of exactMarkers(`${node.textContent ?? ""} ${serialized}`)) {
+					const byProjection = projections.get(marker) ?? new Map<string, number>();
+					const key = `${phase}:${id}`;
+					byProjection.set(key, (byProjection.get(key) ?? 0) + 1);
+					projections.set(marker, byProjection);
+				}
+			}
+			for (const marker of exactMarkers(allText.join(" "))) {
+				if (!expected.has(marker)) fail(`unexpected exact marker ${marker}`);
+			}
+			return projections;
+		};
+		const observeDomProjection = (marker: string, key: string) => {
+			const separator = key.indexOf(":");
+			const phase = key.slice(0, separator) as "streaming" | "settled";
+			const id = key.slice(separator + 1);
+			const lifecycle = markerLifecycles.get(marker);
+			if (!lifecycle) {
+				recordFirstOccurrence(marker, {
+					source: "dom",
+					eventClosed: false,
+					streamingDomSeen: phase === "streaming",
+					settledDomSeen: phase === "settled",
+				});
+				return;
+			}
+			if (lifecycle.source !== "event"
+				|| id === "<unauthenticated>"
+				|| id !== lifecycle.eventId
+				|| (phase === "streaming" && (lifecycle.streamingDomSeen || lifecycle.settledDomSeen))
+				|| (phase === "settled" && lifecycle.settledDomSeen)) {
+				fail(`duplicate exact marker ${marker}`);
+				return;
+			}
+			if (phase === "streaming") lifecycle.streamingDomSeen = true;
+			else lifecycle.settledDomSeen = true;
+		};
+		const detectMarkersAtCommit = () => {
+			const current = scanDomProjections();
+			for (const marker of expected) {
+				const previousCounts = visibleDomProjections.get(marker) ?? new Map<string, number>();
+				for (const [key, count] of current.get(marker) ?? []) {
+					const added = count - (previousCounts.get(key) ?? 0);
+					for (let occurrence = 0; occurrence < added; occurrence++) observeDomProjection(marker, key);
+				}
+			}
+			visibleDomProjections = current;
+		};
 		const publishSettledEvidence = () => {
 			// Consume only the head of the protocol queue. Multiple markers can arrive
 			// before the browser completes two re-pin frames; letting them share this
@@ -281,7 +354,7 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 				if (message?.type !== "messages") {
 					const event = message?.data ?? message;
 					const eventId = typeof event?.message?.id === "string" ? event.message.id : undefined;
-					detectMarkers(JSON.stringify(message), false, eventId);
+					detectEventMarkers(JSON.stringify(message), eventId, event?.type);
 				}
 				return originalHandleServerMessage.call(this, message);
 			}
