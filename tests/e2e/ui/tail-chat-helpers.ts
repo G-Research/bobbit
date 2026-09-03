@@ -312,7 +312,11 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 			};
 			if (growth <= 0 || sample.distance > pinnedTailPx) return;
 			if (sample.scrollHeight <= lastEvidenceHeight) {
-				fail(`marker ${marker} reused or regressed settled height ${sample.scrollHeight} (previous ${lastEvidenceHeight})`);
+				// Replacing an authenticated streaming projection with its settled DOM
+				// can shrink the transcript before a later marker grows it again. That
+				// intermediate geometry is not an ordered settled proof: retain the
+				// marker until a later lifecycle event produces a strictly newer height.
+				// If none does, finish() still rejects the marker as unsettled.
 				return;
 			}
 			lastEvidenceHeight = sample.scrollHeight;
