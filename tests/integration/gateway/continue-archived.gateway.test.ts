@@ -519,22 +519,29 @@ test.describe("fork/continue author replay lifecycle", () => {
 			}
 			throw new Error("fixture setup failure after sidecar copy");
 		};
+		let forkResponse!: Response;
+		let continueResponse!: Response;
 		try {
-			const forkResponse = await localApiFetch(gateway, `/api/sessions/${forkSourceId}/fork`, {
+			forkResponse = await localApiFetch(gateway, `/api/sessions/${forkSourceId}/fork`, {
 				method: "POST",
 				body: JSON.stringify({ newWorktree: false }),
 			});
-			expect(forkResponse.status).toBe(500);
-
-			const continueResponse = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
+			continueResponse = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 				method: "POST",
 				body: JSON.stringify({}),
 			});
-			expect(continueResponse.status).toBe(500);
 		} finally {
 			sessionManager.createSession = originalCreateSession;
 		}
 
+		expect(forkResponse.status).toBe(500);
+		expect(await forkResponse.json()).toEqual({
+			error: "failed to fork session: fixture setup failure after sidecar copy",
+		});
+		expect(continueResponse.status).toBe(500);
+		expect(await continueResponse.json()).toEqual({
+			error: "failed to create session: fixture setup failure after sidecar copy",
+		});
 		expect(failedDestinationIds).toHaveLength(2);
 		expect(bindingsBeforeFailure).toHaveLength(2);
 		for (const copied of bindingsBeforeFailure) {
@@ -542,6 +549,8 @@ test.describe("fork/continue author replay lifecycle", () => {
 			expect(copied[0].modelPrefix).toBe("[System]: ");
 		}
 		for (const destinationId of failedDestinationIds) {
+			expect(gateway.sessionManager.getSession(destinationId), "failed setup must not leave a live destination").toBeUndefined();
+			expect(gateway.sessionManager.getPersistedSession(destinationId), "failed setup must not leave a destination row").toBeUndefined();
 			expect(fs.existsSync(authorSidecarPath(gateway, destinationId))).toBe(false);
 		}
 	});
