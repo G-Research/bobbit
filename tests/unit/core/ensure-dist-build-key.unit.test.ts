@@ -295,7 +295,7 @@ afterAll(() => {
 });
 
 describe("dist build callers", () => {
-	it("routes E2E setup and packed-consumer builds through the mutex entrypoint", () => {
+	it("routes E2E setup through the mutex before the consolidated packed-consumer journey", () => {
 		const e2eGlobalSetup = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "e2e-global-setup.ts"), "utf8");
 		assert.match(
 			e2eGlobalSetup,
@@ -313,26 +313,19 @@ describe("dist build callers", () => {
 			"E2E global setup must not bypass the dist mutex with a direct build",
 		);
 
-		const packedConsumer = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "api", "pi-packed-consumer.api-e2e.spec.ts"), "utf8");
-		assert.match(
-			packedConsumer,
-			/const ENSURE_DIST_SCRIPT = join\(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist\.mjs"\);/,
-			"packed-consumer must target the shared mutex entrypoint",
+		const packedConsumer = readFileSync(
+			join(PROJECT_ROOT, "tests", "e2e", "browser", "packaged-inline-html-theme.browser-e2e.spec.ts"),
+			"utf8",
 		);
 		assert.match(
 			packedConsumer,
-			/runPiPackedConsumerCommand\(\s*process\.execPath,\s*\[ENSURE_DIST_SCRIPT\],\s*\{ cwd: PROJECT_ROOT, timeoutMs: 10 \* 60_000 \},\s*\)/s,
-			"packed-consumer must invoke ensure-dist with this Node runtime",
-		);
-		assert.match(
-			packedConsumer,
-			/report\.commands\.push\(build\);\s*expectSuccess\(build\);/s,
-			"packed-consumer must retain build command reporting and failure handling",
+			/Browser-v2 global setup produces a content-addressed fresh dist first\./,
+			"the consolidated consumer must explicitly rely on the mutex-protected global setup",
 		);
 		assert.doesNotMatch(
 			packedConsumer,
-			/runNpm\(\["run", "build"\]/,
-			"packed-consumer must not bypass the dist mutex with a direct build",
+			/ENSURE_DIST_SCRIPT|runNpm\(\["run", "build"\]|npm run build:(?:server|ui)/,
+			"the consolidated consumer must not repeat or bypass the global dist build",
 		);
 	});
 });

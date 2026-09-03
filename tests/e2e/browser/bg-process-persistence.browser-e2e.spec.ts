@@ -38,10 +38,13 @@ import type { Page } from "@playwright/test";
 
 test.describe.configure({ mode: "serial" });
 
-// A finite POSIX loop that prints `<prefix>-N` every 250ms then exits 0. Long
-// enough (≈12.5s) that it is still running when we crash+restart early, so we
-// can observe streaming RESUME after the gateway comes back, then watch it
-// finish with a real exit code.
+// A finite POSIX loop that prints `<prefix>-N` every 250ms then exits 0.
+// Coverage map: the former 50 chunks repeated the same tail/persist/broadcast
+// path after its pre/post-restart boundary probes. Twenty-four chunks (≈6s)
+// retain real intermediate output before restart, live output after restart,
+// and the final chunk + real exit. Deterministic multi-chunk ordering and
+// repeated-content behavior remain pinned in bg-process-persistence.unit.test.ts.
+const STREAM_CHUNK_COUNT = 24;
 function streamingCommand(prefix: string, count: number): string {
 	return `i=1; while [ "$i" -le ${count} ]; do echo "${prefix}-$i"; i=$((i+1)); sleep 0.25; done; exit 0`;
 }
@@ -114,6 +117,27 @@ async function createBgProcess(sessionId: string, command: string, name: string)
  * `event.server_crash()` + `event.server_restart()`.
  */
 async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> {
+	// Capture the last authenticated socket generation before the crash. A
+	// status-only check can accept this old socket before its close event reaches
+	// the page; the epoch proves auth_ok arrived after restart.
+	let connectionBeforeRestart: { epoch: number; sessionId: string } | null = null;
+	if (!page.isClosed()) {
+		try {
+			connectionBeforeRestart = await page.evaluate(() => {
+				const s = (window as any).bobbitState;
+				const sessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+				if (!sessionId || !s?.remoteAgent) return null;
+				return {
+					epoch: Number(s.remoteAgent._connectionEpoch) || 0,
+					sessionId,
+				};
+			});
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) throw err;
+		}
+	}
+
 	await gateway.crash();
 	if (!page.isClosed()) {
 		await page.waitForFunction(() => {
@@ -126,12 +150,32 @@ async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> 
 	await expect.poll(async () => {
 		try { return (await apiFetch("/api/health")).ok; } catch { return false; }
 	}, { timeout: 20_000, intervals: [250] }).toBe(true);
-	// Best-effort: the active session's WebSocket reconnects.
-	if (!page.isClosed()) {
-		await page.waitForFunction(() => {
+	if (page.isClosed() || !connectionBeforeRestart) return;
+
+	try {
+		// Gateway boot can outlast failed reconnect attempts. Trigger the product's
+		// existing visible-page recovery path once health is authoritative.
+		await page.evaluate(({ epoch, sessionId }) => {
 			const s = (window as any).bobbitState;
-			return !!s && s.connectionStatus === "connected";
-		}, undefined, { timeout: 15_000, polling: 250 }).catch(() => { /* best-effort */ });
+			if (window.location.hash !== `#/session/${sessionId}`) return;
+			if (s?.connectionStatus !== "connected"
+				|| !s?.remoteAgent?.connected
+				|| (Number(s.remoteAgent._connectionEpoch) || 0) <= epoch) {
+				document.dispatchEvent(new Event("visibilitychange"));
+			}
+		}, connectionBeforeRestart);
+		await page.waitForFunction(({ epoch, sessionId }) => {
+			const s = (window as any).bobbitState;
+			return window.location.hash === `#/session/${sessionId}`
+				&& s?.remoteAgent?.gatewaySessionId === sessionId
+				&& s.remoteAgent.connected === true
+				&& s.connectionStatus === "connected"
+				&& (Number(s.remoteAgent._connectionEpoch) || 0) > epoch;
+		}, connectionBeforeRestart, { timeout: 15_000, polling: 250 });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) return;
+		throw err;
 	}
 }
 
@@ -162,8 +206,8 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 		const sessionId = await activeSessionId(page);
 		expect(sessionId, "active session id resolved from hash").toBeTruthy();
 
-		// Create a long-ish streaming process (≈12.5s) via the production REST path.
-		const bgId = await createBgProcess(sessionId, streamingCommand("tick", 50), "stream-task");
+		// Create a finite streaming process via the production REST path.
+		const bgId = await createBgProcess(sessionId, streamingCommand("tick", STREAM_CHUNK_COUNT), "stream-task");
 
 		// Pill appears for the active session.
 		await expect(pill(page, bgId)).toBeVisible({ timeout: 15_000 });
@@ -200,6 +244,7 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 				return p ? { status: p.status, exitCode: p.exitCode } : null;
 			}, { timeout: 30_000, intervals: [300] })
 			.toEqual({ status: "exited", exitCode: 0 });
+		expect(await latestLine(sessionId, bgId, "tick"), "final streamed chunk persisted in order").toBe(STREAM_CHUNK_COUNT);
 
 		// The pill UI reflects the real exit code.
 		const dropdown = await openPillDropdown(page, bgId);

@@ -31,7 +31,16 @@ export interface PublishFsOps {
 	readdirSync: (dir: string) => unknown[];
 }
 
-const REAL_FS_OPS: PublishFsOps = { cpSync, rmSync, renameSync, existsSync, readdirSync };
+/**
+ * Resolve the live node:fs bindings when publishing starts. Tests run with
+ * isolate:false and may load this module before installing scoped fs spies;
+ * snapshotting these bindings at module evaluation would permanently bypass
+ * those spies in that worker. Production callers still receive the same
+ * built-in functions.
+ */
+function currentFsOps(): PublishFsOps {
+	return { cpSync, rmSync, renameSync, existsSync, readdirSync };
+}
 
 /** Directory name of the shared v2 transform-cache namespace. */
 export const V2_TRANSFORM_CACHE_SEGMENT = "pwtest-transform-cache-v2";
@@ -83,7 +92,7 @@ export function publishTransformCache(
 	tag: string = String(process.pid),
 	ops: Partial<PublishFsOps> = {},
 ): boolean {
-	const fs = { ...REAL_FS_OPS, ...ops };
+	const fs = { ...currentFsOps(), ...ops };
 	if (!runDir || !latestDir || runDir === latestDir) return false;
 	try {
 		if (!fs.existsSync(runDir) || fs.readdirSync(runDir).length === 0) return false;

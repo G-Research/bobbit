@@ -275,25 +275,46 @@ describe("built-in file explorer panel", () => {
 			read: () => ({ kind: "text", text: "new value" }),
 			diff: () => ({ kind: "text", text: "diff --git a/changed.ts b/changed.ts\n--- a/changed.ts\n+++ b/changed.ts\n@@ -1 +1 @@\n-old value\n+new value\n" }),
 		});
-		const root = mount("diff-toggle", fakeHost);
-		await tick();
+		const root = mount(`diff-toggle-${++mountAttempt}`, fakeHost);
+		await vi.waitFor(() => {
+			expect(row(root, "changed.ts")).not.toBeNull();
+			expect(root.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("false");
+			expect(fakeHost.callRoute).toHaveBeenCalledWith("list", {
+				method: "POST",
+				body: { path: "", includeStatus: true, snapshotGeneration: 1 },
+			});
+		});
+
 		click(row(root, "changed.ts"));
-		await tick();
-		expect(root.querySelector('[role="tablist"]')?.getAttribute("aria-label")).toBe("Preview mode");
-		expect(root.querySelector('[data-action="view-file"]')?.getAttribute("aria-selected")).toBe("true");
+		await vi.waitFor(() => {
+			expect(root.querySelector('[role="tablist"]')?.getAttribute("aria-label")).toBe("Preview mode");
+			expect(root.querySelector('[data-action="view-file"]')?.getAttribute("aria-selected")).toBe("true");
+			expect(root.textContent).toContain("new value");
+		});
 		expect(row(root, "changed.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged modified, Unstaged modified");
 
 		click(root.querySelector('[data-action="view-diff"]')!);
-		await tick();
-		expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
-		expect(root.querySelector('[aria-label="Working tree compared with HEAD"]')).not.toBeNull();
-		expect(root.querySelector(".bb-explorer-diff-file-header")).toBeNull();
-		expect(root.textContent).toContain("−old value");
-		expect(root.textContent).toContain("+new value");
-		expect(fakeHost.callRoute).toHaveBeenCalledWith("diff", expect.objectContaining({ body: { path: "changed.ts", rootPath: "C:\\Users\\tester\\worktrees\\bobbit" } }));
+		await vi.waitFor(() => {
+			expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
+			expect(root.querySelector('[aria-label="Working tree compared with HEAD"]')).not.toBeNull();
+			expect(root.querySelector(".bb-explorer-diff-file-header")).toBeNull();
+			expect(root.textContent).toContain("−old value");
+			expect(root.textContent).toContain("+new value");
+			expect(fakeHost.callRoute).toHaveBeenCalledWith("diff", {
+				method: "POST",
+				body: {
+					path: "changed.ts",
+					rootPath: "C:\\Users\\tester\\worktrees\\bobbit",
+					snapshotGeneration: 1,
+				},
+			});
+		});
+
 		click(root.querySelector('[data-action="view-file"]')!);
-		await tick();
-		expect(root.textContent).toContain("new value");
+		await vi.waitFor(() => {
+			expect(root.querySelector('[data-action="view-file"]')?.getAttribute("aria-selected")).toBe("true");
+			expect(root.textContent).toContain("new value");
+		});
 	});
 
 	it("remembers the File or Diff choice across file navigation", async () => {

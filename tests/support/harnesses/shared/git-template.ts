@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { getRunRoot, isOwnedRunChild, isRunRootOwner } from "./run-isolation.js";
 import { runFixtureCommand, type FixtureCommandOptions, type FixtureCommandResult } from "./spawn-with-retry.js";
@@ -120,6 +120,68 @@ function assertSafeDestination(source: string, destination: string): void {
 		if (!statSync(target).isDirectory() || readdirSync(target).length > 0) {
 			throw new Error(`[tests/git-template] destination must be an empty directory or absent: ${target}`);
 		}
+	}
+}
+
+export interface CopyGitTemplateOptions {
+	/** Checked-out branch name for the independent copy. The template stays on master. */
+	branch?: string;
+}
+
+/**
+ * Validate the conservative branch subset fixture callers need without
+ * spawning Git. This intentionally rejects edge-case refs rather than trying
+ * to duplicate every version-specific `git check-ref-format` allowance.
+ */
+function assertSafeFixtureBranch(branch: string): void {
+	const segments = branch.split("/");
+	const collidesWithMasterRef = segments[0]?.toLowerCase() === "master" && branch !== "master";
+	const hasNonPortableSegment = segments.some(segment =>
+		segment.length === 0
+		|| segment.startsWith(".")
+		|| segment.endsWith(".")
+		|| segment.toLowerCase().endsWith(".lock")
+		|| /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment)
+	);
+	if (
+		branch.length === 0
+		|| branch.length > 255
+		|| branch === "HEAD"
+		|| branch.startsWith("-")
+		|| branch.includes("..")
+		|| !/^[A-Za-z0-9._/-]+$/.test(branch)
+		|| collidesWithMasterRef
+		|| hasNonPortableSegment
+	) {
+		throw new TypeError(`[tests/git-template] branch must be a safe ordinary Git branch name: ${JSON.stringify(branch)}`);
+	}
+}
+
+function selectCopiedTemplateBranch(repository: string, branch: string): void {
+	const gitDir = join(repository, ".git");
+	const sourceRef = join(gitDir, "refs", "heads", "master");
+	const destinationRef = join(gitDir, "refs", "heads", ...branch.split("/"));
+	if (branch !== "master") {
+		mkdirSync(dirname(destinationRef), { recursive: true });
+		renameSync(sourceRef, destinationRef);
+
+		const sourceLog = join(gitDir, "logs", "refs", "heads", "master");
+		if (existsSync(sourceLog)) {
+			const destinationLog = join(gitDir, "logs", "refs", "heads", ...branch.split("/"));
+			mkdirSync(dirname(destinationLog), { recursive: true });
+			renameSync(sourceLog, destinationLog);
+		}
+		writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`, "utf8");
+	}
+
+	const head = readFileSync(join(gitDir, "HEAD"), "utf8");
+	const commit = readFileSync(destinationRef, "utf8").trim();
+	if (
+		head !== `ref: refs/heads/${branch}\n`
+		|| !/^[0-9a-f]{40}$/i.test(commit)
+		|| !existsSync(join(gitDir, "objects", commit.slice(0, 2), commit.slice(2)))
+	) {
+		throw new Error(`[tests/git-template] copied repository did not select branch ${JSON.stringify(branch)}`);
 	}
 }
 
@@ -330,10 +392,11 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 
 /**
  * Copy the prepared repository into an absent or empty destination using only
- * fs.cpSync. The copy is writable and independent; the shared source is checked
- * for mutation before every copy.
+ * filesystem operations. The copy is writable and independent; the shared
+ * source is checked for mutation before every copy. A caller may select a
+ * different checked-out branch without repeating Git init/config/commit work.
  */
-export function copyGitTemplate(destination: string): string {
+export function copyGitTemplate(destination: string, options: CopyGitTemplateOptions = {}): string {
 	const shared = state();
 	if (!shared.path || !shared.digest) {
 		throw new Error("[tests/git-template] template is not prepared; await prepareGitTemplate() before installing the tier-1 spawn guard");
@@ -341,17 +404,25 @@ export function copyGitTemplate(destination: string): string {
 	if (typeof destination !== "string" || destination.trim().length === 0) {
 		throw new TypeError("[tests/git-template] destination must be a non-empty filesystem path");
 	}
+	const branch = options.branch ?? "master";
+	assertSafeFixtureBranch(branch);
 	if (hashTree(shared.path) !== shared.digest) {
 		throw new Error("[tests/git-template] immutable template was modified; tests must mutate only copyGitTemplate() destinations");
 	}
 	const target = resolve(destination);
 	assertSafeDestination(shared.path, target);
 	mkdirSync(dirname(target), { recursive: true });
-	cpSync(shared.path, target, {
-		recursive: true,
-		force: false,
-		errorOnExist: true,
-		verbatimSymlinks: true,
-	});
-	return realpathSync(target);
+	try {
+		cpSync(shared.path, target, {
+			recursive: true,
+			force: false,
+			errorOnExist: true,
+			verbatimSymlinks: true,
+		});
+		selectCopiedTemplateBranch(target, branch);
+		return realpathSync(target);
+	} catch (error) {
+		rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
+		throw error;
+	}
 }

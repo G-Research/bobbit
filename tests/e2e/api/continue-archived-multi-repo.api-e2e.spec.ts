@@ -220,6 +220,7 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			const clonedCwds = clonedRuntimeCwdRecords.map((record) => record.cwd);
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source cwd").not.toContain(srcRec.cwd);
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source worktree container").not.toContain(srcRec.worktreePath);
+
 		} finally {
 			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
 			if (srcId) await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});

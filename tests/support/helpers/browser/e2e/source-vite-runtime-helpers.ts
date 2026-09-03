@@ -34,6 +34,15 @@ export interface StopSourceProcessOptions {
 	forceStopTimeoutMs?: number;
 }
 
+export interface SourceRuntimeFinalizationOptions {
+	vite?: RunningSourceProcess;
+	gateway?: RunningSourceProcess;
+	stopOptions?: StopSourceProcessOptions;
+	bodyFailure?: { reason: unknown };
+	report: () => Promise<void>;
+	removeTemp: () => Promise<void>;
+}
+
 const SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS = 2_000;
 
@@ -519,6 +528,44 @@ export async function stopSourceProcess(
 	if (await waitForProcessClose(runtime, forceStopTimeoutMs)) return;
 
 	releaseProcessStdio(runtime.child);
+}
+
+function cleanupStageFailure(label: string, reason: unknown): Error {
+	const detail = reason instanceof Error ? reason.message : String(reason);
+	return new Error(`${label} failed: ${detail}`, { cause: reason });
+}
+
+/**
+ * Stop every owned source runtime before diagnostics and temporary files are
+ * finalized. No stage may prevent the next one from being attempted.
+ */
+export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationOptions): Promise<void> {
+	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	const runtimes = [
+		options.vite ? { label: `${options.vite.label} stop`, runtime: options.vite } : undefined,
+		options.gateway ? { label: `${options.gateway.label} stop`, runtime: options.gateway } : undefined,
+	].filter((entry): entry is { label: string; runtime: RunningSourceProcess } => entry !== undefined);
+	const stopResults = await Promise.allSettled(
+		runtimes.map(({ runtime }) => stopSourceProcess(runtime, options.stopOptions)),
+	);
+	for (const [index, result] of stopResults.entries()) {
+		if (result.status === "rejected") failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+	}
+
+	try {
+		await options.report();
+	} catch (error) {
+		failures.push(cleanupStageFailure("source runtime report", error));
+	} finally {
+		try {
+			await options.removeTemp();
+		} catch (error) {
+			failures.push(cleanupStageFailure("source runtime temporary-root removal", error));
+		}
+	}
+
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "source runtime finalization failed");
 }
 
 export function processFailure(runtime: RunningSourceProcess, message: string): Error {

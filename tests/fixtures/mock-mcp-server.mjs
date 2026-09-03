@@ -11,9 +11,27 @@
  *
  * Usage: node mock-mcp-server.mjs
  */
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const rl = createInterface({ input: process.stdin });
+const profileTerminalFile = process.env.BOBBIT_V2_CHILD_TERMINAL_FILE;
+const profileTerminalId = process.env.BOBBIT_V2_CHILD_TERMINAL_ID;
+const profileCreationIdentity = process.env.BOBBIT_V2_CHILD_CREATION_IDENTITY;
+if (profileTerminalFile && profileTerminalId && profileCreationIdentity) {
+	process.once("exit", (exitCode) => {
+		try {
+			appendFileSync(profileTerminalFile, `${JSON.stringify({
+				type: "child_terminal",
+				id: profileTerminalId,
+				childPid: process.pid,
+				creationIdentity: profileCreationIdentity,
+				endedAt: Date.now(),
+				exitCode,
+			})}\n`, "utf8");
+		} catch { /* profiling must never change fixture behavior or stdio */ }
+	});
+}
 
 /** Send a JSON-RPC response to stdout */
 function sendResponse(response) {

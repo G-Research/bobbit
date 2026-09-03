@@ -3,8 +3,9 @@
  * docs/design/built-in-first-party-packs.md §11.2) + the NEW PR-Walkthrough
  * LAUNCH UX (docs/design/pr-walkthrough-launch-ux.md §1–§5, §8). Proves the
  * PR-walkthrough feature is served END-TO-END by the FIRST-PARTY PACK with NO
- * manual install — it is resolved active-by-default by the built-in resolver band —
- * and that its launch surface is now a SPAWN launcher: clicking a launcher calls the
+ * manual install — it is resolved by the built-in resolver band after the test
+ * explicitly enables its shipped default-off state — and that its launch surface is
+ * now a SPAWN launcher: clicking a launcher calls the
  * pack `run` route and, on `ok:true`, opens the panel in the returned reviewer CHILD
  * session (auto-switch). There is NO owner-session panel, NO `autorun`, and NO manual
  * Run/Load buttons anywhere. The panel renders ONLY inside a reviewer child session,
@@ -49,8 +50,8 @@ import type { Page, Response } from "@playwright/test";
 import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../../../tests/support/harnesses/browser/e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../../tests/support/helpers/browser/e2e/ui-helpers.js";
 
-// Within-file serial: a single end-to-end lifecycle test in describe 1; the
-// child-pane describe seeds its own state per test.
+// Within-file serial: three consolidated journeys own independent state, while
+// compatible launcher and child-pane cases reuse their session/Git/page lifecycle.
 test.describe.configure({ mode: "serial" });
 
 const PACK = "pr-walkthrough";
@@ -633,177 +634,98 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		return sid!;
 	}
 
-	// ── T-1: the composer slash command is `/pr-walkthrough` (not the internal
-	//    launcher filename/id suffix). Autocomplete completes the token only; the
-	//    completed slash command invokes the same run route on send. ──
-	test("T-1 — slash launcher is /pr-walkthrough and invokes run", async ({ page, gateway }) => {
-		await openApp(page);
-		const sid = await createSessionViaUI(page);
-		setupLaunchTestGitRepo(gateway, sid);
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
-
-		const textarea = page.locator("textarea").first();
-		await textarea.fill("/pr-walkthrough");
-		const command = page.getByTestId("slash-command-pr-walkthrough");
-		await expect(command, "slash autocomplete must expose /pr-walkthrough").toBeVisible({ timeout: 10_000 });
-		await expect(page.getByTestId("slash-command-pr-walkthrough.open"), "the old .open-suffixed command must not render").toHaveCount(0);
-
-		await textarea.press("Enter");
-		await expect(textarea, "selecting autocomplete should complete the command so args can be typed").toHaveValue("/pr-walkthrough ");
-
-		const runResp = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 20_000 },
-		);
-		await textarea.press("Enter");
-		const resp = await runResp;
-		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
-		await expect(textarea, "sending the completed slash command should consume the composer value").toHaveValue("");
-		// Launcher errors now surface via the persistent launcher-feedback element
-		// (dispatch-only from MessageEditor), not the transient header toast.
-		await expect(page.getByTestId("launcher-feedback")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
-	});
-
-	// ── T-2: a NO_PR launch from the shared session actions menu surfaces a visible
-	//    error, spawns NO reviewer child, and does NOT switch the view. ──
-	test("T-2 — NO_PR session-menu launch shows visible feedback, spawns no reviewer, no view switch", async ({ page, gateway }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		let sid: string | null = null;
-		await expect.poll(async () => {
-			sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
-			return sid;
-		}, { timeout: 15_000 }).toBeTruthy();
-		expect(sid).toBeTruthy();
-		await waitForSessionStatus(sid!, "idle");
-		setupLaunchTestGitRepo(gateway, sid!);
-
-		const runPosts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() === "POST" && /\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-		});
-
-		const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
-		await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
-		await trigger.click();
-		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
-		await expect(launcher, "the PR Walkthrough launcher must render in the session menu").toBeVisible({ timeout: 10_000 });
-
-		const runResp = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 20_000 },
-		);
-		await launcher.click();
-		const resp = await runResp;
-		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
-
-		await expect(page.locator("sidebar-actions-popover"), "session-menu launcher failures must not leave the menu wedged open").toHaveCount(0, { timeout: 5_000 });
-		await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
-		expect(runPosts, "the launcher must call `run` exactly once").toHaveLength(1);
-
-		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
-			const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
-			return cps?.parentSessionId === sid && cps?.childKind === "host-agents";
-		});
-		expect(reviewerSpawned, "a NO_PR launch must not mint a reviewer child").toBe(false);
-
-		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
-		expect(sidAfter, "a NO_PR launch must not switch the view").toBe(sid);
-	});
-
-	test("T-2b — inactive sidebar session-menu launch binds to that row without switching view", async ({ page, gateway }) => {
+	// T-1/T-2 share one real Git repository and page lifecycle. Each labelled step
+	// still crosses the production launcher route; the inactive-row step additionally
+	// proves the server-derived authorization identity is the row session.
+	test("T-1/T-2 — slash, active-menu, and inactive-row NO_PR launchers preserve binding and view", async ({ page, gateway }) => {
 		await openApp(page);
 		const ownerSid = await createSessionViaUI(page);
 		await waitForSessionStatus(ownerSid, "idle");
-		const activeSid = await createSessionViaUI(page);
-		await waitForSessionStatus(activeSid, "idle");
-		expect(activeSid).not.toBe(ownerSid);
 		setupLaunchTestGitRepo(gateway, ownerSid);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
 
-		const ownerRow = page.locator(`[data-session-id="${ownerSid}"][data-sidebar-actions-row-root]`).first();
-		await expect(ownerRow, "inactive owner row must be present in the sidebar").toBeVisible({ timeout: 10_000 });
-		await ownerRow.hover();
-		const trigger = ownerRow.getByTestId("sidebar-actions-trigger");
-		await expect(trigger, "inactive row session-actions trigger must be available").toBeVisible({ timeout: 10_000 });
-		await trigger.click();
-		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
-		await expect(launcher, "the PR Walkthrough launcher must render for inactive rows").toBeVisible({ timeout: 10_000 });
-
-		const runResp = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 25_000 },
-		);
-		await launcher.click();
-		const resp = await runResp;
-		expect(resp.request().headers()["x-bobbit-session-id"], "inactive-row launcher route must be authorized as the row session").toBe(ownerSid);
-		expect(JSON.parse(resp.request().postData() || "{}").sessionId, "inactive-row launcher route body must target the row session").toBe(ownerSid);
-		expect(resp.status(), `inactive launch run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
-
-		await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
-		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
-		expect(sidAfter, "a failed inactive-row PR walkthrough launch must stay on the currently selected session").toBe(activeSid);
-	});
-
-	// ── T-3: a BOUND reviewer child pane auto-shows the pending state on mount —
-	//    "PR Walkthrough: In Progress" + spinner — with NO Run/Load buttons. ──
-	test("T-3 — bound child pane auto-shows pending + spinner, no Run/Load buttons", async ({ page }) => {
-		const sid = await freshSessionWithPanel(page);
-
-		// Seed ONLY a child binding (jobId set, NO submitted/<jobId>): the pane is a
-		// bound reviewer child still producing the walkthrough. No git repo needed —
-		// the pending state does not recompute; the status poll returns running.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		const pendingJobId = "prw-t3-pending";
-		await getPackStore().put(PACK, `binding/${sid}`, {
-			jobId: pendingJobId,
-			parentSessionId: "prw-t3-owner-session",
-			status: "running",
-			target: {
-				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
-				canonicalKey: "github:SuuBro/bobbit#4242",
-			},
+		const runPosts: string[] = [];
+		page.on("request", (request) => {
+			if (request.method() === "POST" && /\/api\/ext\/route\/run\b/.test(request.url())) runPosts.push(request.url());
 		});
 
-		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
+		await test.step("T-1 slash autocomplete invokes the run route and surfaces NO_PR", async () => {
+			const textarea = page.locator("textarea").first();
+			await textarea.fill("/pr-walkthrough");
+			const command = page.getByTestId("slash-command-pr-walkthrough");
+			await expect(command, "slash autocomplete must expose /pr-walkthrough").toBeVisible({ timeout: 10_000 });
+			await expect(page.getByTestId("slash-command-pr-walkthrough.open"), "the old .open-suffixed command must not render").toHaveCount(0);
 
-		// Pending: exact copy "PR Walkthrough: In Progress" + the centred progress bar.
-		const pending = page.locator('[data-testid="prw-pending"]').first();
-		await expect(pending).toBeVisible({ timeout: 15_000 });
-		await expect(pending).toContainText("PR Walkthrough: In Progress");
-		await expect(pending.locator('[data-testid="prw-pending-overlay"] .progress-track').first()).toBeVisible();
-		// The manual Run/Load buttons are GONE.
-		await expect(page.locator('[data-testid="prw-run"]')).toHaveCount(0);
-		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
-		// The pane stays pending (the status poll keeps returning running).
-		await expect(pending).toBeVisible();
-	});
-
-	async function seedReadyWalkthrough(page: import("@playwright/test").Page, gateway: any, jobId: string): Promise<string> {
-		const sid = await freshSessionWithPanel(page);
-		const ps = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
-		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
-		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
-		setupSessionGitRepo(sessionWorktree!);
-
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		await getPackStore().put(PACK, `submitted/${jobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
-		await getPackStore().put(PACK, `binding/${sid}`, {
-			jobId,
-			parentSessionId: `${jobId}-owner-session`,
-			baseSha, headSha,
-			status: "submitted",
-			target: {
-				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
-				prUrl: "https://github.com/SuuBro/bobbit/pull/4242", baseSha, headSha,
-				canonicalKey: "github:SuuBro/bobbit#4242",
-			},
+			await textarea.press("Enter");
+			await expect(textarea, "selecting autocomplete should complete the command so args can be typed").toHaveValue("/pr-walkthrough ");
+			const runResp = page.waitForResponse(
+				(response) => /\/api\/ext\/route\/run\b/.test(response.url()) && response.request().method() === "POST",
+				{ timeout: 20_000 },
+			);
+			await textarea.press("Enter");
+			const response = await runResp;
+			expect(response.status(), `run route failed: ${await response.text().catch(() => "")}`).toBe(200);
+			await expect(textarea, "sending the completed slash command should consume the composer value").toHaveValue("");
+			await expect(page.getByTestId("launcher-feedback")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
 		});
-		return sid;
-	}
+
+		await test.step("T-2 active session-menu launcher shows NO_PR without spawning or switching", async () => {
+			const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
+			await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
+			await trigger.click();
+			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+			const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
+			await expect(launcher, "the PR Walkthrough launcher must render in the session menu").toBeVisible({ timeout: 10_000 });
+			const runResp = page.waitForResponse(
+				(response) => /\/api\/ext\/route\/run\b/.test(response.url()) && response.request().method() === "POST",
+				{ timeout: 20_000 },
+			);
+			await launcher.click();
+			const response = await runResp;
+			expect(response.status(), `run route failed: ${await response.text().catch(() => "")}`).toBe(200);
+			await expect(page.locator("sidebar-actions-popover"), "session-menu launcher failures must not leave the menu wedged open").toHaveCount(0, { timeout: 5_000 });
+			await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
+			expect(runPosts, "slash and active-menu launchers must each call `run` once").toHaveLength(2);
+
+			const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((session: any) => {
+				const persisted = gateway.sessionManager?.getPersistedSession?.(session.id);
+				return persisted?.parentSessionId === ownerSid && persisted?.childKind === "host-agents";
+			});
+			expect(reviewerSpawned, "NO_PR launches must not mint a reviewer child").toBe(false);
+			const selectedSid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+			expect(selectedSid, "an active-session NO_PR launch must not switch the view").toBe(ownerSid);
+		});
+
+		await test.step("T-2b inactive-row launcher authorizes as that row and keeps the active view", async () => {
+			const activeSid = await createSessionViaUI(page);
+			await waitForSessionStatus(activeSid, "idle");
+			expect(activeSid).not.toBe(ownerSid);
+
+			const ownerRow = page.locator(`[data-session-id="${ownerSid}"][data-sidebar-actions-row-root]`).first();
+			await expect(ownerRow, "inactive owner row must be present in the sidebar").toBeVisible({ timeout: 10_000 });
+			await ownerRow.hover();
+			const trigger = ownerRow.getByTestId("sidebar-actions-trigger");
+			await expect(trigger, "inactive row session-actions trigger must be available").toBeVisible({ timeout: 10_000 });
+			await trigger.click();
+			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+			const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
+			await expect(launcher, "the PR Walkthrough launcher must render for inactive rows").toBeVisible({ timeout: 10_000 });
+
+			const runResp = page.waitForResponse(
+				(response) => /\/api\/ext\/route\/run\b/.test(response.url()) && response.request().method() === "POST",
+				{ timeout: 25_000 },
+			);
+			await launcher.click();
+			const response = await runResp;
+			expect(response.request().headers()["x-bobbit-session-id"], "inactive-row launcher route must be authorized as the row session").toBe(ownerSid);
+			expect(JSON.parse(response.request().postData() || "{}").sessionId, "inactive-row launcher route body must target the row session").toBe(ownerSid);
+			expect(response.status(), `inactive launch run route failed: ${await response.text().catch(() => "")}`).toBe(200);
+			await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
+			expect(runPosts, "each of the three launcher surfaces must call `run` once").toHaveLength(3);
+			const selectedSid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+			expect(selectedSid, "a failed inactive-row launch must stay on the currently selected session").toBe(activeSid);
+		});
+	});
 
 	async function openRecoveredReadyWalkthrough(
 		page: Page,
@@ -853,111 +775,125 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect.soft(violations, `${label}: compact rail steps must stay centered and non-overlapping`).toEqual([]);
 	}
 
-	// ── T-4: the walkthrough pane lives WITH the reviewer-child session. On mount the
-	//    bound child pane self-resolves the READY cards from its OWN binding/<child>
-	//    via the child-self `recover` branch — NO click, NO Run/Load button — and a
-	//    reload re-renders the SAME persisted cards (child self-recover again). ──
-	test("T-4 — bound child pane self-recovers READY cards on mount and re-renders after reload", async ({ page, gateway }) => {
-		const recoverProbe = createRecoverRouteProbe(page);
-		const sid = await freshSessionWithPanel(page);
-		// The bound session's worktree must be a real git repo so publish/bundle
-		// recompute the LIVE diff. This sets the module-level baseSha/headSha that
-		// submitYaml()'s pr.base_sha/head_sha carry.
-		const ps = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
-		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
-		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
-		setupSessionGitRepo(sessionWorktree!);
-
-		// Seed the pack store so THIS session is a bound reviewer child whose pane
-		// recovers from its OWN binding/<child>. Seed binding/<sid> (the CHILD key) +
-		// submitted/<jobId> (NO owner pointer): a successful recover proves the child
-		// self-recover branch (binding/<me> → submitted) fired.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		const childJobId = "prw-t4-child-recover";
-		await getPackStore().put(PACK, `submitted/${childJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
-		await getPackStore().put(PACK, `binding/${sid}`, {
-			jobId: childJobId,
-			parentSessionId: "prw-t4-owner-session",
-			baseSha, headSha,
-			status: "submitted",
-			target: {
-				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
-				prUrl: "https://github.com/SuuBro/bobbit/pull/4242", baseSha, headSha,
-				canonicalKey: "github:SuuBro/bobbit#4242",
-			},
-		});
-
-		// The child pane AUTO-mounts: on mount it self-resolves binding/<self> →
-		// `recover` → re-publishes → renders cards. NO click, NO prw-load button.
-		const recoverAndAssertCards = (recoverMark = recoverProbe.mark()): Promise<string | undefined> =>
-			openRecoveredReadyWalkthrough(page, childJobId, recoverProbe, recoverMark);
-
-		const persistedAt1 = await recoverAndAssertCards();
-		expect(persistedAt1, "stored cards must carry a persistedAt").toBeTruthy();
-
-		// RELOAD persistence: a full reload clears the in-memory byJob; the child pane
-		// re-renders the SAME cards via the recover route (child self-resolve again).
-		const token = await readE2ETokenAsync();
-		const reloadRecoverMark = recoverProbe.mark();
-		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-		const persistedAt2 = await recoverAndAssertCards(reloadRecoverMark);
-		expect(persistedAt2, "reload must rehydrate the SAME persisted store record via recover").toBe(persistedAt1);
-	});
-
-	// ── T-5: regression coverage for the simplified PR walkthrough rail polish.
-	//    Orientation beats are represented once, labelled/toggle/resize rail chrome
-	//    stays absent, and compact step counters remain centered/non-overlapping. ──
-	test("T-5 — sidebar de-duplicates orientation and keeps rail counters compact/non-overlapping", async ({ page, gateway }) => {
+	// T-3/T-4/T-5 share one bound-child session, Git worktree, pack-store binding,
+	// and page. The journey retains the real running→submitted transition, two
+	// independent recover calls around a reload, and browser geometry assertions.
+	test("T-3/T-4/T-5 — bound child progresses from pending to durable cards with compact rail", async ({ page, gateway }) => {
 		await page.setViewportSize({ width: 1600, height: 900 });
-		const sid = await seedReadyWalkthrough(page, gateway, "prw-t5-sidebar-regression");
-		await apiFetch(`/api/sessions/${sid}/side-panel-workspace/resize`, {
-			method: "POST",
-			body: JSON.stringify({ sizeMode: "fullscreen" }),
+		const sid = await freshSessionWithPanel(page);
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const childJobId = "prw-child-lifecycle";
+
+		await test.step("T-3 bound child auto-shows pending progress without manual controls", async () => {
+			await getPackStore().put(PACK, `binding/${sid}`, {
+				jobId: childJobId,
+				parentSessionId: "prw-child-owner-session",
+				status: "running",
+				target: {
+					provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
+					canonicalKey: "github:SuuBro/bobbit#4242",
+				},
+			});
+			await page.evaluate((hash) => { window.location.hash = hash; }, `#/ext/${PACK}`);
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
+			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
+			const pending = page.locator('[data-testid="prw-pending"]').first();
+			await expect(pending).toBeVisible({ timeout: 15_000 });
+			await expect(pending).toContainText("PR Walkthrough: In Progress");
+			await expect(pending.locator('[data-testid="prw-pending-overlay"] .progress-track').first()).toBeVisible();
+			await expect(page.locator('[data-testid="prw-run"]')).toHaveCount(0);
+			await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
+			await expect(pending, "the running binding must remain pending").toBeVisible();
 		});
-		await openRecoveredReadyWalkthrough(page, "prw-t5-sidebar-regression");
 
-		const compactRail = page.getByTestId("pr-walkthrough-collapsed-rail");
-		await expect(compactRail, "simplified compact rail must render").toBeVisible();
-		await expect(page.getByTestId("pr-walkthrough-labelled-rail"), "obsolete labelled rail must not render").toHaveCount(0);
-		await expect(page.getByTestId("pr-walkthrough-rail-toggle"), "simplified rail must not expose expand/collapse controls").toHaveCount(0);
-		await expect(page.getByTestId("pr-walkthrough-rail-resize"), "simplified rail must not expose resize controls").toHaveCount(0);
-		await expect(page.getByTestId("pr-walkthrough-phase-button"), "simplified rail must not render phase/category rows").toHaveCount(0);
+		const persistedAt1 = await test.step("T-4 submitted binding self-recovers ready cards", async () => {
+			// Leave the running panel before replacing its binding so its status poll
+			// cannot consume the submitted transition intended for the fresh mount.
+			const token = await readE2ETokenAsync();
+			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 
-		const orientationRail = compactRail.getByTestId("pr-walkthrough-orientation-rail");
-		await expect(orientationRail, "orientation beats must render once in the compact rail").toBeVisible();
-		expect.soft(await compactRail.getByTestId("pr-walkthrough-orientation-rail").count(), "compact rail must not duplicate the orientation beat rail").toBe(1);
-		expect.soft(await compactRail.getByTestId("pr-walkthrough-orientation-step").count(), "orientation beat controls must be present").toBeGreaterThan(0);
-		expect.soft(
-			await compactRail.locator('.card-button[data-prw-nav="orientation-summary"]:visible').count(),
-			"compact rail must not duplicate orientation card buttons outside the orientation beat controls",
-		).toBe(0);
-		expect.soft(
-			await compactRail.locator('[data-testid="pr-walkthrough-phase-button"][aria-label="Orientation"]:visible').count(),
-			"compact rail must not render a duplicate Orientation phase pip when orientation beats are present",
-		).toBe(0);
+			const persisted = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
+			const sessionWorktree = persisted?.worktreePath ?? persisted?.cwd;
+			expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
+			setupSessionGitRepo(sessionWorktree!);
+			await getPackStore().put(PACK, `submitted/${childJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
+			await getPackStore().put(PACK, `binding/${sid}`, {
+				jobId: childJobId,
+				parentSessionId: "prw-child-owner-session",
+				baseSha, headSha,
+				status: "submitted",
+				target: {
+					provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
+					prUrl: "https://github.com/SuuBro/bobbit/pull/4242", baseSha, headSha,
+					canonicalKey: "github:SuuBro/bobbit#4242",
+				},
+			});
 
-		const reviewSteps = compactRail.getByTestId("pr-walkthrough-card-step");
-		expect(await reviewSteps.count(), "review card steps must render after orientation beats").toBeGreaterThan(0);
-		const firstReviewStepText = (await reviewSteps.first().textContent())?.trim() || "";
-		expect(firstReviewStepText, "review step counters must use compact numeric dots").toMatch(/^\d+$/);
-		const firstStepMetrics = await compactRail.locator('[data-testid="pr-walkthrough-orientation-step"], [data-testid="pr-walkthrough-card-step"]').first().evaluate((node) => {
-			const dot = node.querySelector(".step-dot, .card-dot") as HTMLElement | null;
-			const style = dot ? getComputedStyle(dot) : undefined;
-			return {
-				fontSize: style ? Number.parseFloat(style.fontSize) : 0,
-				width: dot?.getBoundingClientRect().width || 0,
-				height: dot?.getBoundingClientRect().height || 0,
-			};
+			const recoverProbe = createRecoverRouteProbe(page);
+			const recoverMark = recoverProbe.mark();
+			await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
+			const persistedAt = await openRecoveredReadyWalkthrough(page, childJobId, recoverProbe, recoverMark);
+			expect(persistedAt, "stored cards must carry a persistedAt").toBeTruthy();
+			return persistedAt;
 		});
-		expect.soft(firstStepMetrics.fontSize, "compact step counters must stay small").toBeLessThanOrEqual(12);
-		expect.soft(firstStepMetrics.width, "compact step dots must reserve a fixed width").toBeGreaterThanOrEqual(18);
-		expect.soft(firstStepMetrics.height, "compact step dots must reserve a fixed height").toBeGreaterThanOrEqual(18);
 
-		await assertCompactRailStepsDoNotOverlap(page, "fullscreen rail width");
-		await page.setViewportSize({ width: 900, height: 720 });
-		await expect(compactRail, "compact rail must remain visible in constrained width").toBeVisible();
-		await assertCompactRailStepsDoNotOverlap(page, "constrained rail width");
+		await test.step("T-4 reload independently recovers the same persisted cards", async () => {
+			const recoverProbe = createRecoverRouteProbe(page);
+			const recoverMark = recoverProbe.mark();
+			const token = await readE2ETokenAsync();
+			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+			await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
+			const persistedAt2 = await openRecoveredReadyWalkthrough(page, childJobId, recoverProbe, recoverMark);
+			expect(persistedAt2, "reload must rehydrate the same persisted store record via recover").toBe(persistedAt1);
+		});
+
+		await test.step("T-5 compact rail stays de-duplicated and non-overlapping", async () => {
+			await apiFetch(`/api/sessions/${sid}/side-panel-workspace/resize`, {
+				method: "POST",
+				body: JSON.stringify({ sizeMode: "fullscreen" }),
+			});
+			const compactRail = page.getByTestId("pr-walkthrough-collapsed-rail");
+			await expect(compactRail, "simplified compact rail must render").toBeVisible();
+			await expect(page.getByTestId("pr-walkthrough-labelled-rail"), "obsolete labelled rail must not render").toHaveCount(0);
+			await expect(page.getByTestId("pr-walkthrough-rail-toggle"), "simplified rail must not expose expand/collapse controls").toHaveCount(0);
+			await expect(page.getByTestId("pr-walkthrough-rail-resize"), "simplified rail must not expose resize controls").toHaveCount(0);
+			await expect(page.getByTestId("pr-walkthrough-phase-button"), "simplified rail must not render phase/category rows").toHaveCount(0);
+
+			const orientationRail = compactRail.getByTestId("pr-walkthrough-orientation-rail");
+			await expect(orientationRail, "orientation beats must render once in the compact rail").toBeVisible();
+			expect.soft(await compactRail.getByTestId("pr-walkthrough-orientation-rail").count(), "compact rail must not duplicate the orientation beat rail").toBe(1);
+			expect.soft(await compactRail.getByTestId("pr-walkthrough-orientation-step").count(), "orientation beat controls must be present").toBeGreaterThan(0);
+			expect.soft(
+				await compactRail.locator('.card-button[data-prw-nav="orientation-summary"]:visible').count(),
+				"compact rail must not duplicate orientation card buttons outside the orientation beat controls",
+			).toBe(0);
+			expect.soft(
+				await compactRail.locator('[data-testid="pr-walkthrough-phase-button"][aria-label="Orientation"]:visible').count(),
+				"compact rail must not render a duplicate Orientation phase pip when orientation beats are present",
+			).toBe(0);
+
+			const reviewSteps = compactRail.getByTestId("pr-walkthrough-card-step");
+			expect(await reviewSteps.count(), "review card steps must render after orientation beats").toBeGreaterThan(0);
+			const firstReviewStepText = (await reviewSteps.first().textContent())?.trim() || "";
+			expect(firstReviewStepText, "review step counters must use compact numeric dots").toMatch(/^\d+$/);
+			const firstStepMetrics = await compactRail.locator('[data-testid="pr-walkthrough-orientation-step"], [data-testid="pr-walkthrough-card-step"]').first().evaluate((node) => {
+				const dot = node.querySelector(".step-dot, .card-dot") as HTMLElement | null;
+				const style = dot ? getComputedStyle(dot) : undefined;
+				return {
+					fontSize: style ? Number.parseFloat(style.fontSize) : 0,
+					width: dot?.getBoundingClientRect().width || 0,
+					height: dot?.getBoundingClientRect().height || 0,
+				};
+			});
+			expect.soft(firstStepMetrics.fontSize, "compact step counters must stay small").toBeLessThanOrEqual(12);
+			expect.soft(firstStepMetrics.width, "compact step dots must reserve a fixed width").toBeGreaterThanOrEqual(18);
+			expect.soft(firstStepMetrics.height, "compact step dots must reserve a fixed height").toBeGreaterThanOrEqual(18);
+			await assertCompactRailStepsDoNotOverlap(page, "fullscreen rail width");
+			await page.setViewportSize({ width: 900, height: 720 });
+			await expect(compactRail, "compact rail must remain visible in constrained width").toBeVisible();
+			await assertCompactRailStepsDoNotOverlap(page, "constrained rail width");
+		});
 	});
 });

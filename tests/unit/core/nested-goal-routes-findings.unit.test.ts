@@ -303,6 +303,29 @@ describe("G2/C1 — spawn-child workflow override", () => {
 describe("spawn-child — canonical goal-candidate validation before mutation", () => {
 	const validSpec = "Implement and verify the requested child-goal behavior with focused regression coverage and no unrelated production changes.";
 
+	it("rejects each missing required route field before child mutation", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const cases = [
+			{ body: { title: "Missing plan", spec: validSpec }, error: /planId/i },
+			{ body: { planId: "missing-title", spec: validSpec }, error: /title/i },
+			{ body: { planId: "missing-spec", title: "Missing spec" }, error: /spec/i },
+		];
+		for (const entry of cases) {
+			const goalsBefore = structuredClone(h.goalStore.getAll());
+			const response = await h.call(
+				"POST",
+				`/api/goals/${h.parent.id}/spawn-child`,
+				entry.body,
+				h.authAs(TL),
+			);
+			assert.equal(response.status, 400, JSON.stringify(response.payload));
+			assert.match(response.payload.error, entry.error);
+			assert.deepEqual(h.goalStore.getAll(), goalsBefore);
+		}
+		assert.deepEqual(h.childStartRequests, []);
+		assert.deepEqual(h.worktreeSetupCalls, []);
+	});
+
 	async function expectCanonicalRejection(
 		body: Record<string, unknown>,
 		expected: { code: string; error: string },
@@ -393,22 +416,30 @@ describe("spawn-child — canonical goal-candidate validation before mutation", 
 		});
 	});
 
-	it("accepts a valid inline role and persists its frozen child snapshot", async () => {
+	it("persists valid role, attribution, suggested role, and plan metadata in one route mutation", async () => {
 		h.teamLeadByGoal[h.parent.id] = TL;
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "valid-inline-role",
 			title: "Valid role child",
 			spec: validSpec,
+			spawnedBySessionId: "explicit-spawner",
+			suggestedRole: "test-engineer",
 			inlineRoles: {
 				reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review the child." },
 			},
 		}, h.authAs(TL));
 
 		assert.equal(r.status, 201, JSON.stringify(r.payload));
-		const reviewer = h.goalStore.get(r.payload.id)?.inlineRoles?.reviewer;
+		assert.equal(r.payload.suggestedRole, "test-engineer");
+		assert.equal(r.payload.spawnedBySessionId, "explicit-spawner");
+		const child = h.goalStore.get(r.payload.id)!;
+		const reviewer = child.inlineRoles?.reviewer;
 		assert.equal(reviewer?.name, "reviewer");
 		assert.equal(reviewer?.label, "Reviewer");
 		assert.equal(reviewer?.promptTemplate, "Review the child.");
+		assert.equal(child.spawnedFromPlanId, "valid-inline-role");
+		assert.equal(child.spawnedBySessionId, "explicit-spawner");
+		assert.equal(child.suggestedRole, "test-engineer");
 	});
 
 	it("accepts a realpath-equivalent alias with a nonexistent suffix", async (context) => {

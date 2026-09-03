@@ -23,6 +23,7 @@ import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup
 import { pollUntil as pollUntilCleanup } from "../test-utils/cleanup.js";
 
 const TIMEOUT_WORKFLOW = `test-verif-timeout-${Date.now()}`;
+const TIMEOUT_SECONDS = 1;
 const CANCEL_WORKFLOW = `test-verif-cancel-${Date.now()}`;
 let projectId: string;
 
@@ -129,7 +130,10 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 	test.beforeAll(async () => {
 		projectId = (await defaultProjectId()) ?? "";
 		expect(projectId).toBeTruthy();
-		await createWorkflow(TIMEOUT_WORKFLOW, 10);
+		// The workflow API accepts any positive integer timeout. One second is the
+		// shortest production-valid deadline and still leaves enough time for the
+		// real command to publish both process IDs before tree cleanup begins.
+		await createWorkflow(TIMEOUT_WORKFLOW, TIMEOUT_SECONDS);
 	});
 
 	test.afterAll(async () => {
@@ -164,7 +168,7 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 			const latest = sigs[sigs.length - 1];
 			expect(latest.verification.status).toBe("failed");
 			const stepOutput = (latest.verification.steps?.[0]?.output ?? "") as string;
-			expect(stepOutput).toMatch(/timed out after 10s\s+\u2014\s+killed subprocess tree/);
+			expect(stepOutput).toMatch(new RegExp(`timed out after ${TIMEOUT_SECONDS}s\\s+\\u2014\\s+killed subprocess tree`));
 
 			// Verify the descendant node process was reaped via Node's portable
 			// kill(pid, 0). The step output contains both PARENT_PID and CHILD_PID.

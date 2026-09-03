@@ -8,9 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, w
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, expect } from "../in-process-harness.js";
-import { globalAgentDir } from "../../../src/server/bobbit-dir.js";
-import { projectSandboxVolumeNames } from "../../../src/server/agent/docker-args.js";
-import { ProjectSandbox } from "../../../src/server/agent/project-sandbox.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "../test-utils/docker.js";
 import {
 	apiFetch,
@@ -19,6 +17,22 @@ import {
 	waitForSessionStatus,
 	statusPredicate,
 } from "../e2e-setup.js";
+
+let globalAgentDir: typeof import("../../../src/server/bobbit-dir.js").globalAgentDir;
+let projectSandboxVolumeNames: typeof import("../../../src/server/agent/docker-args.js").projectSandboxVolumeNames;
+let ProjectSandbox: typeof import("../../../src/server/agent/project-sandbox.js").ProjectSandbox;
+type ProjectSandboxInstance = InstanceType<typeof import("../../../src/server/agent/project-sandbox.js").ProjectSandbox>;
+
+test.beforeAll(async () => {
+	const runtime = await loadE2EDistServerRuntime(async () => ({
+		bobbitDir: await import("../../../src/server/bobbit-dir.js"),
+		dockerArgs: await import("../../../src/server/agent/docker-args.js"),
+		projectSandbox: await import("../../../src/server/agent/project-sandbox.js"),
+	}));
+	({ globalAgentDir } = runtime.bobbitDir);
+	({ projectSandboxVolumeNames } = runtime.dockerArgs);
+	({ ProjectSandbox } = runtime.projectSandbox);
+});
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as
@@ -243,7 +257,7 @@ test.describe("sandbox ownership recovery", () => {
 		const priorRunId = process.env.BOBBIT_E2E_RUN_ID;
 		const volumes = projectSandboxVolumeNames(projectId, runId);
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8" }).trim();
-		let sandbox: ProjectSandbox | undefined;
+		let sandbox: ProjectSandboxInstance | undefined;
 		try {
 			docker(["image", "inspect", SANDBOX_IMAGE]);
 			mkdirSync(source, { recursive: true });

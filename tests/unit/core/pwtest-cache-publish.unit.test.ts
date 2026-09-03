@@ -13,8 +13,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
+// Intentionally preload before the scoped node:fs spies are installed. The
+// isolate:false unit pool may have already evaluated this module in a prior
+// file, so its filesystem bindings must remain live rather than be snapshotted.
+import * as cacheModule from "../../../scripts/testing-v2/pwtest-cache.js";
 
-type CacheModule = typeof import("../../../scripts/testing-v2/pwtest-cache.js");
+type CacheModule = typeof cacheModule;
 
 const ROOT = resolve("/memfs/pwtest-cache-publish");
 let fixtureSequence = 0;
@@ -27,7 +31,7 @@ let publishTransformCacheFromEnv: CacheModule["publishTransformCacheFromEnv"];
 let seedTransformCache: CacheModule["seedTransformCache"];
 let seedTransformCacheForRunDir: CacheModule["seedTransformCacheForRunDir"];
 
-beforeAll(async () => {
+beforeAll(() => {
 	const scoped = installScopedMemFs([
 		"cpSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync", "renameSync", "rmSync", "writeFileSync",
 	]);
@@ -41,7 +45,7 @@ beforeAll(async () => {
 		publishTransformCacheFromEnv,
 		seedTransformCache,
 		seedTransformCacheForRunDir,
-	} = await import("../../../scripts/testing-v2/pwtest-cache.js"));
+	} = cacheModule);
 });
 
 afterAll(() => restoreFs());
