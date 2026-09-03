@@ -103,36 +103,161 @@ function readJsonLines(root) {
 	return { records, artifacts, parseErrors };
 }
 
-function childActivity(root) {
-	const jsonLines = readJsonLines(root);
-	const { records } = jsonLines;
+function processAlive(pid) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; }
+	catch (error) { return error?.code === "EPERM"; }
+}
+
+function sleepSync(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Wait briefly for a child observed alive in its owner's synchronous exit hook.
+ * The reporter runs after the owner process has closed, so stdio-bound children
+ * normally terminate immediately. A child that remains alive at the deadline is
+ * retained as incomplete; this probe never signals or otherwise cleans it up.
+ */
+export function finalChildLiveness(pid, {
+	isAlive = processAlive,
+	timeoutMs = 1_000,
+	pollMs = 20,
+	now = Date.now,
+	sleep = sleepSync,
+} = {}) {
+	const startedAt = now();
+	let alive = isAlive(pid);
+	while (alive && now() - startedAt < timeoutMs) {
+		sleep(Math.min(pollMs, Math.max(1, timeoutMs - (now() - startedAt))));
+		alive = isAlive(pid);
+	}
+	return { alive, checkedAt: now() };
+}
+
+/** Reconcile raw child records without equating owner exit with child exit. */
+export function reconcileChildProcessRecords(records, {
+	checkFinalLiveness = (pid) => finalChildLiveness(pid),
+} = {}) {
 	const starts = new Map(records.filter((record) => record.type === "start" && record.id).map((record) => [record.id, record]));
-	const ends = new Map(records.filter((record) => record.type === "end" && record.id).map((record) => [record.id, record]));
-	const endedOwners = new Set(records.filter((record) => record.type === "owner_end").map((record) => Number(record.ownerPid)));
+	const rawEnds = new Map(records.filter((record) => record.type === "end" && record.id).map((record) => [record.id, record]));
+	const identities = new Map(records.filter((record) => record.type === "child_identity" && record.id).map((record) => [record.id, record]));
+	const childTerminals = new Map(records.filter((record) => record.type === "child_terminal" && record.id).map((record) => [record.id, record]));
+	const ownerLiveness = new Map(records.filter((record) => record.type === "owner_child_liveness" && record.id).map((record) => [record.id, record]));
+	const ownerEnds = new Map(records.filter((record) => record.type === "owner_end").map((record) => [Number(record.ownerPid), finite(record.endedAt)]));
+	const derivedEnds = new Map();
+	const terminalEvidence = [];
+
+	for (const [id, start] of starts) {
+		if (rawEnds.has(id)) continue;
+		const identity = identities.get(id);
+		const childTerminal = childTerminals.get(id);
+		const ownerState = ownerLiveness.get(id);
+		const ownerPid = Number(start.ownerPid);
+		const spawnPid = Number(identity?.childPid);
+		const terminalPid = Number(childTerminal?.childPid);
+		const creationIdentity = String(identity?.creationIdentity ?? "");
+		const identityMatches = Number.isInteger(spawnPid) && spawnPid > 0
+			&& creationIdentity.length > 0
+			&& String(start.creationIdentity ?? "") === creationIdentity
+			&& Number(identity?.ownerPid) === ownerPid;
+		const ownerStateMatches = Number(ownerState?.ownerPid) === ownerPid
+			&& Number(ownerState?.childPid) === spawnPid
+			&& String(ownerState?.creationIdentity ?? "") === creationIdentity;
+		// On Windows shell:true makes the directly spawned PID cmd.exe while the
+		// fixture terminal record comes from its node.exe descendant. The creation
+		// token is inherited by that exact child and remains the join authority.
+		const childTerminalMatches = Number.isInteger(terminalPid) && terminalPid > 0
+			&& String(childTerminal?.creationIdentity ?? "") === creationIdentity
+			&& finite(childTerminal?.endedAt) >= finite(start.startedAt);
+		if (!ownerEnds.has(ownerPid) || !identityMatches || (!ownerStateMatches && !childTerminalMatches)) continue;
+
+		const finalPids = [...new Set([spawnPid, ...(childTerminalMatches ? [terminalPid] : [])])];
+		const finalChecks = finalPids.map((pid) => ({ pid, ...checkFinalLiveness(pid) }));
+		const final = {
+			alive: finalChecks.some((check) => check.alive === true),
+			checkedAt: Math.max(...finalChecks.map((check) => finite(check.checkedAt))),
+		};
+		const evidence = {
+			type: "verified_terminal",
+			source: childTerminalMatches ? "child-exit" : "post-owner-liveness",
+			id: String(id),
+			ownerPid,
+			childPid: childTerminalMatches ? terminalPid : spawnPid,
+			spawnPid,
+			creationIdentity,
+			ownerCheckedAt: ownerStateMatches ? finite(ownerState.checkedAt) : null,
+			ownerObservedAlive: ownerStateMatches ? ownerState.alive === true : null,
+			childEndedAt: childTerminalMatches ? finite(childTerminal.endedAt) : null,
+			exitCode: childTerminalMatches && Number.isInteger(childTerminal.exitCode) ? childTerminal.exitCode : null,
+			signal: childTerminalMatches && childTerminal.signal ? String(childTerminal.signal) : null,
+			finalCheckedAt: finite(final?.checkedAt),
+			finalAlive: final?.alive === true,
+		};
+		terminalEvidence.push(evidence);
+		if (evidence.finalAlive) continue;
+		const endedAt = childTerminalMatches
+			? finite(childTerminal.endedAt)
+			: Math.max(finite(start.startedAt), evidence.finalCheckedAt, ownerEnds.get(ownerPid));
+		derivedEnds.set(id, {
+			type: "end",
+			...start,
+			endedAt,
+			durationMs: Math.max(0, endedAt - finite(start.startedAt)),
+			outcome: childTerminalMatches
+				? childTerminal.exitCode === 0 ? "ok" : "failed"
+				: "verified-exited-after-owner",
+			exitCode: evidence.exitCode ?? undefined,
+			signal: evidence.signal ?? undefined,
+			terminalEvidence: evidence,
+		});
+	}
+
+	const ends = new Map([...rawEnds, ...derivedEnds]);
 	const completed = [...ends.values()].filter((record) => starts.has(record.id)).map((record) => ({
 		startedAt: finite(record.startedAt),
 		endedAt: finite(record.endedAt),
 		durationMs: finite(record.durationMs),
 		executable: String(record.executable ?? "<unknown>"),
 		outcome: String(record.outcome ?? "unknown"),
+		...(record.terminalEvidence ? { terminalEvidence: record.terminalEvidence } : {}),
 	})).filter((record) => record.startedAt > 0 && record.endedAt >= record.startedAt);
-	const incompleteRecords = [...starts.values()].filter((record) => !ends.has(record.id)).map((record) => ({
-		id: String(record.id),
-		api: String(record.api ?? "unknown"),
-		executable: String(record.executable ?? "<unknown>"),
-		ownerPid: Number(record.ownerPid) || null,
-		startedAt: finite(record.startedAt),
-		ownerEnded: endedOwners.has(Number(record.ownerPid)),
-	}));
+	const incompleteRecords = [...starts.values()].filter((record) => !ends.has(record.id)).map((record) => {
+		const identity = identities.get(record.id);
+		const ownerState = ownerLiveness.get(record.id);
+		const evidence = terminalEvidence.find((item) => item.id === String(record.id));
+		return {
+			id: String(record.id),
+			api: String(record.api ?? "unknown"),
+			executable: String(record.executable ?? "<unknown>"),
+			ownerPid: Number(record.ownerPid) || null,
+			childPid: Number(identity?.childPid) || null,
+			creationIdentity: identity?.creationIdentity ? String(identity.creationIdentity) : null,
+			startedAt: finite(record.startedAt),
+			ownerEnded: ownerEnds.has(Number(record.ownerPid)),
+			ownerObservedAlive: ownerState?.alive === true,
+			finalAlive: evidence?.finalAlive ?? null,
+			finalCheckedAt: evidence?.finalCheckedAt ?? null,
+		};
+	});
 	return {
 		intervals: completed,
 		starts: starts.size,
 		ends: ends.size,
-		orphanEnds: [...ends.keys()].filter((id) => !starts.has(id)).length,
-		parseErrors: jsonLines.parseErrors,
+		orphanEnds: [...rawEnds.keys()].filter((id) => !starts.has(id)).length,
 		incompleteRecords,
+		terminalEvidence,
+		ownersEnded: ownerEnds.size,
+	};
+}
+
+function childActivity(root) {
+	const jsonLines = readJsonLines(root);
+	const activity = reconcileChildProcessRecords(jsonLines.records);
+	return {
+		...activity,
+		parseErrors: jsonLines.parseErrors,
 		artifacts: jsonLines.artifacts.length,
-		ownersEnded: endedOwners.size,
 	};
 }
 
@@ -252,6 +377,7 @@ export function buildE2EProfileManifest({
 			orphanEnds: child.orphanEnds,
 			parseErrors: child.parseErrors,
 			incompleteRecords: child.incompleteRecords,
+			terminalEvidence: child.terminalEvidence,
 			artifacts: child.artifacts,
 			ownersEnded: child.ownersEnded,
 			cumulativeMs: subprocesses.reduce((sum, record) => sum + record.durationMs, 0),
@@ -259,7 +385,7 @@ export function buildE2EProfileManifest({
 				const row = map[record.executable] ??= { executable: record.executable, count: 0, cumulativeMs: 0, failures: 0 };
 				row.count += 1;
 				row.cumulativeMs += record.durationMs;
-				if (record.outcome !== "ok") row.failures += 1;
+				if (!["ok", "verified-exited-after-owner"].includes(record.outcome)) row.failures += 1;
 				return map;
 			}, {})).sort((a, b) => b.cumulativeMs - a.cumulativeMs),
 		},

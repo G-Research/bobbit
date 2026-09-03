@@ -70,6 +70,13 @@ export function validateE2EProfileManifest(profile, expected = {}) {
 	add(errors, Number(profile.processActivity?.orphanEnds) === 0, "profile child-process telemetry must have no orphan ends");
 	add(errors, Number(profile.processActivity?.parseErrors) === 0, "profile child-process telemetry must have no parse errors");
 	add(errors, Array.isArray(profile.processActivity?.incompleteRecords) && profile.processActivity.incompleteRecords.length === 0, "profile unmatched child-process records must be empty");
+	for (const [index, evidence] of (profile.processActivity?.terminalEvidence ?? []).entries()) {
+		add(errors, Number.isInteger(evidence.childPid) && evidence.childPid > 0, `profile terminal evidence ${index} child PID is invalid`);
+		add(errors, Number.isInteger(evidence.spawnPid) && evidence.spawnPid > 0, `profile terminal evidence ${index} spawn PID is invalid`);
+		add(errors, typeof evidence.creationIdentity === "string" && evidence.creationIdentity.length > 0, `profile terminal evidence ${index} creation identity is required`);
+		add(errors, finite(evidence.finalCheckedAt), `profile terminal evidence ${index} final liveness timestamp is required`);
+		add(errors, evidence.finalAlive === false, `profile terminal evidence ${index} must verify the child is no longer alive`);
+	}
 	add(errors, Number(profile.hookActivity?.records) > 0, "profile gateway hook records are required");
 	add(errors, Number(profile.hookActivity?.artifacts) > 0, "profile gateway hook artifacts are required");
 	add(errors, Number(profile.hookActivity?.incompleteOwners) === 0, "profile gateway hook owners must all flush");
