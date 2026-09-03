@@ -92,17 +92,20 @@ function listArtifactFiles(root, suffixes) {
 
 function readJsonLines(root) {
 	const records = [];
-	for (const path of listArtifactFiles(root, [".jsonl"])) {
+	const artifacts = listArtifactFiles(root, [".jsonl"]);
+	let parseErrors = 0;
+	for (const path of artifacts) {
 		for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
 			if (!line.trim()) continue;
-			try { records.push({ ...JSON.parse(line), __artifact: path }); } catch { /* a torn diagnostic line is reported through owner completeness */ }
+			try { records.push({ ...JSON.parse(line), __artifact: path }); } catch { parseErrors += 1; }
 		}
 	}
-	return records;
+	return { records, artifacts, parseErrors };
 }
 
 function childActivity(root) {
-	const records = readJsonLines(root);
+	const jsonLines = readJsonLines(root);
+	const { records } = jsonLines;
 	const starts = new Map(records.filter((record) => record.type === "start" && record.id).map((record) => [record.id, record]));
 	const ends = new Map(records.filter((record) => record.type === "end" && record.id).map((record) => [record.id, record]));
 	const endedOwners = new Set(records.filter((record) => record.type === "owner_end").map((record) => Number(record.ownerPid)));
@@ -125,8 +128,10 @@ function childActivity(root) {
 		intervals: completed,
 		starts: starts.size,
 		ends: ends.size,
+		orphanEnds: [...ends.keys()].filter((id) => !starts.has(id)).length,
+		parseErrors: jsonLines.parseErrors,
 		incompleteRecords,
-		artifacts: new Set(records.map((record) => record.__artifact)).size,
+		artifacts: jsonLines.artifacts.length,
 		ownersEnded: endedOwners.size,
 	};
 }
@@ -134,9 +139,9 @@ function childActivity(root) {
 function gatewayActivity(root) {
 	const artifacts = listArtifactFiles(root, [".json", ".jsonl"]);
 	const jsonLines = readJsonLines(root);
-	const ownerArtifacts = new Set(jsonLines.map((record) => record.__artifact));
-	const completedOwnerArtifacts = new Set(jsonLines.filter((record) => record.type === "owner_end").map((record) => record.__artifact));
-	const rawRecords = jsonLines.filter((record) => record.type === "gateway_api");
+	const ownerArtifacts = new Set(jsonLines.records.map((record) => record.__artifact));
+	const completedOwnerArtifacts = new Set(jsonLines.records.filter((record) => record.type === "owner_end").map((record) => record.__artifact));
+	const rawRecords = jsonLines.records.filter((record) => record.type === "gateway_api");
 	for (const file of artifacts.filter((path) => path.endsWith(".json") && /gateway-api/i.test(path))) {
 		try {
 			const parsed = JSON.parse(readFileSync(file, "utf8"));
@@ -158,6 +163,7 @@ function gatewayActivity(root) {
 		artifacts: artifacts.length,
 		ownerArtifacts: ownerArtifacts.size,
 		incompleteOwners: Math.max(0, ownerArtifacts.size - completedOwnerArtifacts.size),
+		parseErrors: jsonLines.parseErrors,
 	};
 }
 
@@ -242,7 +248,9 @@ export function buildE2EProfileManifest({
 		processActivity: {
 			starts: child.starts,
 			completed: subprocesses.length,
-			incomplete: child.incompleteRecords.length,
+			incomplete: child.incompleteRecords.length + child.orphanEnds + child.parseErrors,
+			orphanEnds: child.orphanEnds,
+			parseErrors: child.parseErrors,
 			incompleteRecords: child.incompleteRecords,
 			artifacts: child.artifacts,
 			ownersEnded: child.ownersEnded,
@@ -260,6 +268,7 @@ export function buildE2EProfileManifest({
 			artifacts: hooks.artifacts,
 			ownerArtifacts: hooks.ownerArtifacts,
 			incompleteOwners: hooks.incompleteOwners,
+			parseErrors: hooks.parseErrors,
 		},
 		accounting: {
 			authority: "diagnostic",

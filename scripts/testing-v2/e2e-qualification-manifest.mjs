@@ -66,11 +66,14 @@ export function validateE2EProfileManifest(profile, expected = {}) {
 	add(errors, Array.isArray(profile.attempts) && profile.attempts.length === Number(profile.counts?.attempts), "profile attempt boundaries are incomplete");
 	add(errors, finite(profile.processActivity?.starts) && Number(profile.processActivity.starts) > 0, "profile child-process starts are required");
 	add(errors, finite(profile.processActivity?.completed), "profile completed child-process count is required");
-	add(errors, Number(profile.processActivity?.incomplete) === 0, "profile child-process telemetry must have no unmatched starts");
+	add(errors, Number(profile.processActivity?.incomplete) === 0, "profile child-process telemetry must be complete");
+	add(errors, Number(profile.processActivity?.orphanEnds) === 0, "profile child-process telemetry must have no orphan ends");
+	add(errors, Number(profile.processActivity?.parseErrors) === 0, "profile child-process telemetry must have no parse errors");
 	add(errors, Array.isArray(profile.processActivity?.incompleteRecords) && profile.processActivity.incompleteRecords.length === 0, "profile unmatched child-process records must be empty");
 	add(errors, Number(profile.hookActivity?.records) > 0, "profile gateway hook records are required");
 	add(errors, Number(profile.hookActivity?.artifacts) > 0, "profile gateway hook artifacts are required");
 	add(errors, Number(profile.hookActivity?.incompleteOwners) === 0, "profile gateway hook owners must all flush");
+	add(errors, Number(profile.hookActivity?.parseErrors) === 0, "profile gateway hook telemetry must have no parse errors");
 	add(errors, profile.accounting?.authority === "diagnostic" && profile.accounting?.boundary === "playwright-group-subtree", "profile accounting must be explicitly diagnostic");
 	add(errors, finite(profile.ownedProcess?.cpuMs), "profile ownedProcess.cpuMs is required");
 	add(errors, finite(profile.ownedProcess?.peakProcesses), "profile ownedProcess.peakProcesses is required");

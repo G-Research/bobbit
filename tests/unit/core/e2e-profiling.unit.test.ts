@@ -120,7 +120,7 @@ describe("E2E profiling completeness", () => {
 		]);
 		const profile = attachOwnedProcess(buildProfile(root));
 		const errors = validateE2EProfileManifest(profile);
-		expect(errors).toContain("profile child-process telemetry must have no unmatched starts");
+		expect(errors).toContain("profile child-process telemetry must be complete");
 		expect(errors).toContain("profile gateway hook records are required");
 		expect(errors).toContain("profile gateway hook artifacts are required");
 		expect(profile.processActivity.incompleteRecords[0]).toMatchObject({ id: "10:1", ownerEnded: true });
