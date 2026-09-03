@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -93,6 +93,18 @@ describe("canonical-only discovery", () => {
 		const { e2eGroups } = discoverTests({ repoRoot: root });
 		expect(e2eGroups.A).toEqual([processPath]);
 		expect(e2eGroups.C).toEqual([browserPath]);
+	});
+
+	it("owns PR walkthrough panel parity exactly once as a browser fixture", () => {
+		const repoRoot = join(import.meta.dirname, "..", "..", "..");
+		const fixturePath = "tests/browser/fixtures/pr-walkthrough-panel-parity.fixture.spec.ts";
+		const formerE2EPath = "tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts";
+		const discovery = discoverTests({ repoRoot });
+
+		expect(discovery.browser.filter((path: string) => path.includes("pr-walkthrough-panel-parity"))).toEqual([fixturePath]);
+		expect(discovery.e2eGroups.C).not.toContain(formerE2EPath);
+		expect(discovery.all.filter((path: string) => path.includes("pr-walkthrough-panel-parity"))).toEqual([fixturePath]);
+		expect(existsSync(join(repoRoot, ...formerE2EPath.split("/")))).toBe(false);
 	});
 
 	it("fails closed for runnable paths without canonical ownership", () => {
