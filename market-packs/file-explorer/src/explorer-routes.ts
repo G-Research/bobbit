@@ -164,6 +164,20 @@ interface SnapshotStore {
 	put<T = unknown>(key: string, value: T): Promise<void>;
 }
 
+const snapshotStoreMutationTails = new WeakMap<SnapshotStore, Promise<void>>();
+
+async function serializeSnapshotStoreMutation(store: SnapshotStore, operation: () => Promise<void>): Promise<void> {
+	const previous = snapshotStoreMutationTails.get(store) ?? Promise.resolve();
+	const result = previous.then(operation);
+	const settled = result.then(() => undefined, () => undefined);
+	snapshotStoreMutationTails.set(store, settled);
+	try {
+		await result;
+	} finally {
+		if (snapshotStoreMutationTails.get(store) === settled) snapshotStoreMutationTails.delete(store);
+	}
+}
+
 interface RouteContext {
 	workingDir?: string;
 	sessionId?: string;
@@ -944,20 +958,25 @@ async function writeCachedSnapshot(
 	const store = cacheStore(ctx);
 	if (!store) return;
 	try {
-		const now = deps.now();
-		const result = await store.read<GitSnapshotCacheRecord>(GIT_SNAPSHOT_CACHE_KEY);
-		let entries = result.state === "present" ? cachedEntries(result.value, now) : [];
-		// A root listing is the session's authoritative refresh boundary. Drop every
-		// older root/generation for that session so replaying an old client generation
-		// cannot revive stale status after refresh or root navigation.
-		entries = entries.filter((entry) => entry.sessionId !== ctx.sessionId);
-		entries.push({ sessionId: ctx.sessionId!, rootPath, generation, expiresAt: now + GIT_SNAPSHOT_CACHE_TTL_MS, snapshot });
-		entries = entries.slice(-GIT_SNAPSHOT_CACHE_ENTRY_LIMIT);
-		let record: GitSnapshotCacheRecord = { version: 1, entries };
-		while (record.entries.length > 0 && Buffer.byteLength(JSON.stringify(record)) > GIT_SNAPSHOT_CACHE_BYTE_LIMIT) {
-			record = { version: 1, entries: record.entries.slice(1) };
-		}
-		if (record.entries.length > 0) await store.put(GIT_SNAPSHOT_CACHE_KEY, record);
+		await serializeSnapshotStoreMutation(store, async () => {
+			const now = deps.now();
+			const result = await store.read<GitSnapshotCacheRecord>(GIT_SNAPSHOT_CACHE_KEY);
+			let entries = result.state === "present" ? cachedEntries(result.value, now) : [];
+			const currentGeneration = entries.reduce<number | undefined>((newest, entry) => entry.sessionId === ctx.sessionId
+				&& (newest === undefined || entry.generation > newest) ? entry.generation : newest, undefined);
+			if (currentGeneration !== undefined && generation < currentGeneration) return;
+			// A root listing is the session's authoritative refresh boundary. Drop every
+			// older root/generation for that session so replaying an old client generation
+			// cannot revive stale status after refresh or root navigation.
+			entries = entries.filter((entry) => entry.sessionId !== ctx.sessionId);
+			entries.push({ sessionId: ctx.sessionId!, rootPath, generation, expiresAt: now + GIT_SNAPSHOT_CACHE_TTL_MS, snapshot });
+			entries = entries.slice(-GIT_SNAPSHOT_CACHE_ENTRY_LIMIT);
+			let record: GitSnapshotCacheRecord = { version: 1, entries };
+			while (record.entries.length > 0 && Buffer.byteLength(JSON.stringify(record)) > GIT_SNAPSHOT_CACHE_BYTE_LIMIT) {
+				record = { version: 1, entries: record.entries.slice(1) };
+			}
+			if (record.entries.length > 0) await store.put(GIT_SNAPSHOT_CACHE_KEY, record);
+		});
 	} catch {
 		// Snapshot reuse is an optimization. Store errors degrade to a fresh Git read.
 	}
