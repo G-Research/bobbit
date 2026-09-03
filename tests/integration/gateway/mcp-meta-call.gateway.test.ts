@@ -28,7 +28,10 @@ class FakeMcpClient {
 	async connect(): Promise<void> { this.connected = true; }
 	async disconnect(): Promise<void> { this.connected = false; }
 	async listTools(): Promise<unknown[]> { return []; }
-	async callTool(_t: string, _a: Record<string, unknown>): Promise<unknown> {
+	async callTool(tool: string, _args: Record<string, unknown>): Promise<unknown> {
+		if (!STUB_OPS.some(operation => operation.name === tool)) {
+			return { content: [{ type: "text", text: "Unknown tool" }], isError: true };
+		}
 		return { content: [{ type: "text", text: "stub" }] };
 	}
 }
@@ -665,6 +668,39 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(callResp.status).toBe(500);
 		const body = await callResp.json();
 		expect(body.error).toMatch(/fake-server/);
+	});
+
+	test("POST /api/internal/mcp-call returns deterministic unknown operation and server errors", async ({ gateway }) => {
+		await seedFakeScopedMcpManager(gateway, projectId);
+		const sessionId = await createOwnedSession();
+		const headers = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${token}`,
+			"X-Bobbit-Session-Id": sessionId,
+		};
+
+		const unknownOperationResp = await fetch(`${base()}/api/internal/mcp-call`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ tool: "mcp__fake-server__missing", args: {} }),
+		});
+		expect(unknownOperationResp.status).toBe(200);
+		expect(await unknownOperationResp.json()).toEqual({
+			content: [{ type: "text", text: "Unknown tool" }],
+			isError: true,
+		});
+
+		const unknownServerResp = await fetch(`${base()}/api/internal/mcp-call`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ tool: "mcp__missing-server__echo", args: {} }),
+		});
+		expect(unknownServerResp.status).toBe(500);
+		expect(await unknownServerResp.json()).toMatchObject({
+			error: 'MCP tool "mcp__missing-server__echo" is not available or is disabled',
+			server: "missing-server",
+			operation: "echo",
+		});
 	});
 
 	// 5. mcp-call never-policy enforcement (Layer B)
