@@ -433,7 +433,7 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("uses stable, contained serial cache slots while retaining PID isolation elsewhere", () => {
+  it("uses contained PID slots for every serial preload while retaining legacy isolation", () => {
     const require = createRequire(import.meta.url);
     const { configureTransformCache, resolveCacheSlot } = require("../../../scripts/playwright-e2e-cache-bootstrap.cjs") as {
       configureTransformCache: (env: NodeJS.ProcessEnv, pid: number) => { root: string; cacheDir: string } | null;
@@ -451,38 +451,32 @@ describe("unit run isolation", () => {
         BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT: cacheRoot,
       };
 
-      expect(resolveCacheSlot(serial, 101)?.cacheDir).toBe(join(cacheRoot, "runner"));
-      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "4", TEST_PARALLEL_INDEX: "0" }, 102)?.cacheDir)
-        .toBe(join(cacheRoot, "worker-0"));
-      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "5", TEST_PARALLEL_INDEX: "1" }, 103)?.cacheDir)
-        .toBe(join(cacheRoot, "worker-1"));
-      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "9", TEST_PARALLEL_INDEX: "0" }, 999)?.cacheDir)
-        .toBe(join(cacheRoot, "worker-0"));
-
-      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "4" }, 104)?.cacheDir)
-        .toBe(join(cacheRoot, "worker-4-104"));
-      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "4", TEST_PARALLEL_INDEX: "../escape" }, 105)?.cacheDir)
-        .toBe(join(cacheRoot, "worker-4-105"));
-      expect(resolveCacheSlot({ ...serial, BOBBIT_V2_E2E_SERIAL_CACHE: "0" }, 106)?.cacheDir)
-        .toBe(join(cacheRoot, "runner-106"));
+      // Playwright's worker indices are assigned after NODE_OPTIONS preloads.
+      // No-index preloads must therefore still have distinct writable slots.
+      expect(resolveCacheSlot(serial, 101)?.cacheDir).toBe(join(cacheRoot, "process-101"));
+      expect(resolveCacheSlot(serial, 102)?.cacheDir).toBe(join(cacheRoot, "process-102"));
+      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "4", TEST_PARALLEL_INDEX: "0" }, 103)?.cacheDir)
+        .toBe(join(cacheRoot, "process-103"));
+      expect(resolveCacheSlot({ ...serial, TEST_WORKER_INDEX: "4", TEST_PARALLEL_INDEX: "../escape" }, 104)?.cacheDir)
+        .toBe(join(cacheRoot, "process-104"));
+      expect(resolveCacheSlot({ ...serial, BOBBIT_V2_E2E_SERIAL_CACHE: "0" }, 105)?.cacheDir)
+        .toBe(join(cacheRoot, "runner-105"));
 
       const outside = join(temp, "outside-cache");
       const contained = resolveCacheSlot({
         ...serial,
         BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT: outside,
-        TEST_WORKER_INDEX: "0",
-        TEST_PARALLEL_INDEX: "0",
-      }, 107);
+      }, 106);
       expect(contained?.root).toBe(cacheRoot);
-      expect(contained?.cacheDir).toBe(join(cacheRoot, "worker-0"));
+      expect(contained?.cacheDir).toBe(join(cacheRoot, "process-106"));
 
       const legacyBase = join(temp, "legacy-base");
       const legacyEnv: NodeJS.ProcessEnv = {
         BOBBIT_E2E_PWTEST_CACHE_ROOT: legacyBase,
         BOBBIT_E2E_RUN_ID: "legacy-run",
       };
-      const configured = configureTransformCache(legacyEnv, 108);
-      expect(configured?.cacheDir).toBe(join(legacyBase, "pwtest-transform-cache", "legacy-run", "runner-108"));
+      const configured = configureTransformCache(legacyEnv, 107);
+      expect(configured?.cacheDir).toBe(join(legacyBase, "pwtest-transform-cache", "legacy-run", "runner-107"));
       expect(legacyEnv.BOBBIT_E2E_PWTEST_CACHE_OWNED).toBe("1");
       expect(existsSync(configured!.cacheDir)).toBe(true);
     } finally {
@@ -490,41 +484,73 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("fans out the snapshotted B worker cache union without clobbering target entries", () => {
+  it("unions completed B PID slots and seeds independent C PID slots without clobbering", () => {
+    const require = createRequire(import.meta.url);
+    const { configureTransformCache } = require("../../../scripts/playwright-e2e-cache-bootstrap.cjs") as {
+      configureTransformCache: (env: NodeJS.ProcessEnv, pid: number, argv?: string[]) => { root: string; cacheDir: string } | null;
+    };
     const runRoot = mkdtempSync(join(tmpdir(), "serial-pwtest-fanout-"));
     try {
       const cacheRoot = join(runRoot, "pwtest-transform-cache");
-      const worker0 = join(cacheRoot, "worker-0");
-      const worker1 = join(cacheRoot, "worker-1");
-      mkdirSync(worker0, { recursive: true });
-      mkdirSync(worker1, { recursive: true });
-      writeFileSync(join(worker0, "hash-a.js"), "A");
-      writeFileSync(join(worker0, "collision.js"), "worker-zero");
-      writeFileSync(join(worker1, "hash-b.js"), "B");
-      writeFileSync(join(worker1, "collision.js"), "worker-one");
+      const process201 = join(cacheRoot, "process-201");
+      const process202 = join(cacheRoot, "process-202");
+      mkdirSync(process201, { recursive: true });
+      mkdirSync(process202, { recursive: true });
+      mkdirSync(join(cacheRoot, "process-203"));
+      writeFileSync(join(process201, "hash-a.js"), "A");
+      writeFileSync(join(process201, "collision.js"), "process-201");
+      writeFileSync(join(process202, "hash-b.js"), "B");
+      writeFileSync(join(process202, "collision.js"), "process-202");
 
-      const result = fanOutSerialTransformCache(cacheRoot, 3, runRoot);
-      expect(result).toMatchObject({ enabled: true, sourceSlots: 2, targetSlots: 3, seedAttempts: 6, seeded: 6 });
-      for (let index = 0; index < 3; index++) {
-        const target = join(cacheRoot, `worker-${index}`);
-        expect(readFileSync(join(target, "hash-a.js"), "utf8")).toBe("A");
-        expect(readFileSync(join(target, "hash-b.js"), "utf8")).toBe("B");
-      }
-      expect(readFileSync(join(worker0, "collision.js"), "utf8")).toBe("worker-zero");
-      expect(readFileSync(join(worker1, "collision.js"), "utf8")).toBe("worker-one");
-      expect(readFileSync(join(cacheRoot, "worker-2", "collision.js"), "utf8")).toBe("worker-zero");
+      const result = fanOutSerialTransformCache(cacheRoot, runRoot);
+      expect(result).toMatchObject({ enabled: true, sourceSlots: 2, seedAttempts: 2, seeded: 2 });
+      expect(result.snapshotPath).toBe(join(runRoot, "pwtest-transform-cache-phase-b-snapshot"));
+      expect(readFileSync(join(result.snapshotPath!, "hash-a.js"), "utf8")).toBe("A");
+      expect(readFileSync(join(result.snapshotPath!, "hash-b.js"), "utf8")).toBe("B");
+      expect(readFileSync(join(result.snapshotPath!, "collision.js"), "utf8")).toBe("process-201");
+
+      const serialC = {
+        BOBBIT_V2_E2E_SERIAL_CACHE: "1",
+        BOBBIT_E2E_PWTEST_CACHE_OWNED: "1",
+        BOBBIT_V2_RUN_ROOT: runRoot,
+        BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT: cacheRoot,
+        BOBBIT_V2_E2E_SERIAL_CACHE_SEED: result.snapshotPath!,
+      };
+      const c301 = join(cacheRoot, "process-301");
+      mkdirSync(c301);
+      writeFileSync(join(c301, "collision.js"), "C already compiled");
+      const playwrightWorkerArgv = [process.execPath, join("playwright", "lib", "worker", "workerProcessEntry.js")];
+      configureTransformCache(serialC, 301, playwrightWorkerArgv);
+      configureTransformCache({ ...serialC }, 302, playwrightWorkerArgv);
+      expect(readFileSync(join(c301, "hash-a.js"), "utf8")).toBe("A");
+      expect(readFileSync(join(c301, "hash-b.js"), "utf8")).toBe("B");
+      expect(readFileSync(join(c301, "collision.js"), "utf8")).toBe("C already compiled");
+      expect(readFileSync(join(cacheRoot, "process-302", "hash-a.js"), "utf8")).toBe("A");
+      expect(readFileSync(join(cacheRoot, "process-302", "hash-b.js"), "utf8")).toBe("B");
+
+      const outsideSeed = join(dirname(runRoot), "outside-seed");
+      mkdirSync(outsideSeed);
+      writeFileSync(join(outsideSeed, "escape.js"), "outside");
+      configureTransformCache({ ...serialC, BOBBIT_V2_E2E_SERIAL_CACHE_SEED: outsideSeed }, 303, playwrightWorkerArgv);
+      expect(existsSync(join(cacheRoot, "process-303", "escape.js"))).toBe(false);
+      configureTransformCache({ ...serialC, BOBBIT_V2_E2E_SERIAL_CACHE_SEED: join(runRoot, "missing") }, 304, playwrightWorkerArgv);
+      expect(readdirSync(join(cacheRoot, "process-304"))).toEqual([]);
+      configureTransformCache({ ...serialC }, 305, [process.execPath, "ordinary-child.mjs"]);
+      expect(readdirSync(join(cacheRoot, "process-305"))).toEqual([]);
 
       const emptyCache = join(runRoot, "empty-cache");
       mkdirSync(emptyCache);
-      expect(fanOutSerialTransformCache(emptyCache, 2, runRoot)).toMatchObject({
+      expect(fanOutSerialTransformCache(emptyCache, runRoot)).toMatchObject({
         enabled: true,
         sourceSlots: 0,
         seedAttempts: 0,
         seeded: 0,
+        snapshotPath: null,
       });
-      expect(fanOutSerialTransformCache(join(dirname(runRoot), "outside"), 2, runRoot)).toMatchObject({
+      expect(fanOutSerialTransformCache(join(dirname(runRoot), "outside"), runRoot)).toMatchObject({
         enabled: false,
         seedAttempts: 0,
+        snapshotPath: null,
       });
     } finally {
       rmSync(runRoot, { recursive: true, force: true });
