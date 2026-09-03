@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
 	collectGitSnapshot,
 	createExplorerRoutes,
+	GIT_SNAPSHOT_CACHE_ENTRY_LIMIT,
+	GIT_SNAPSHOT_CACHE_TTL_MS,
 	type BoundedGitResult,
 	type DirectoryEntryLike,
 	type DirectoryHandleLike,
@@ -58,6 +60,47 @@ class ScriptedGit implements ExplorerGitRunner {
 		if (!response) throw new Error(`Unexpected Git call: ${args.join(" ")}`);
 		return typeof response === "function" ? response(args, options) : response;
 	}
+}
+
+class MemorySnapshotStore {
+	value: unknown;
+	reads = 0;
+	writes = 0;
+	failReads = false;
+	failWrites = false;
+
+	async read<T>(): Promise<{ state: "absent" } | { state: "present"; value: T }> {
+		this.reads++;
+		if (this.failReads) throw new Error("store read failed");
+		return this.value === undefined ? { state: "absent" } : { state: "present", value: this.value as T };
+	}
+
+	async put<T>(_key: string, value: T): Promise<void> {
+		this.writes++;
+		if (this.failWrites) throw new Error("store write failed");
+		this.value = value;
+	}
+}
+
+function cachedRouteContext(sessionId: string, store: MemorySnapshotStore, workingDir = SESSION_ROOT) {
+	return {
+		workingDir,
+		sessionId,
+		host: { capabilities: { store: true }, store },
+	};
+}
+
+function rootOnlyFs(): ExplorerFsAdapter {
+	return {
+		realpath: async (target) => target,
+		lstat: async (target) => directoryStat(identityFor(target)),
+		opendir: async () => new ArrayDirectoryHandle([]),
+		open: async () => { throw new Error("unused"); },
+	};
+}
+
+function trackedGitResponses(diff = "diff --git a/file.ts b/file.ts\n@@ -1 +1 @@\n-old\n+new\n"): BoundedGitResult[] {
+	return [ok(""), ok("head\n"), ok(" M file.ts\0"), ok(""), ok(diff)];
 }
 
 function entry(name: string, kind: "directory" | "file" | "symlink" | "other"): DirectoryEntryLike {
@@ -1185,6 +1228,118 @@ describe("file explorer Git snapshot collection", () => {
 
 		const malformedCopy = new ScriptedGit([ok(""), ok("head"), ok("A  copied.ts\0"), ok("C100\0source.ts\0")]);
 		expect(await collectGitSnapshot(SESSION_ROOT, malformedCopy)).toMatchObject({ kind: "unavailable", error: { code: "GIT_FAILED" } });
+	});
+});
+
+describe("file explorer Git snapshot reuse", () => {
+	it("reuses only the server-stored root snapshot and still runs the live path-specific diff in source and packaged handlers", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const store = new MemorySnapshotStore();
+			const git = new ScriptedGit(trackedGitResponses());
+			const routes = createRoutes({ fs: rootOnlyFs(), git, now: () => 1_000 });
+			const ctx = cachedRouteContext("session-a", store);
+
+			expect(await routes.list(ctx, { body: { path: "", includeStatus: true, snapshotGeneration: 7 } })).toMatchObject({
+				ok: true,
+				value: { rootPath: SESSION_ROOT, status: { kind: "git", files: [{ path: "file.ts" }] } },
+			});
+			expect(await routes.diff(ctx, { body: { path: "file.ts", snapshotGeneration: 7 } })).toMatchObject({
+				ok: true,
+				value: { path: "file.ts", kind: "text" },
+			});
+			expect(git.calls).toHaveLength(5);
+			expect(git.calls.at(-1)?.args).toEqual([
+				"diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder",
+				"--unified=3", "HEAD", "--", "file.ts",
+			]);
+		}
+	});
+
+	it("ignores client-provided snapshot content", async () => {
+		const store = new MemorySnapshotStore();
+		const git = new ScriptedGit(trackedGitResponses());
+		const routes = createExplorerRoutes({ fs: rootOnlyFs(), git, now: () => 1_000 });
+		const result = await routes.diff(cachedRouteContext("session-a", store), {
+			body: { path: "file.ts", snapshotGeneration: 1, snapshot: { kind: "none" } },
+		});
+		expect(result).toMatchObject({ ok: true, value: { kind: "text" } });
+		expect(git.calls).toHaveLength(5);
+	});
+
+	it("isolates snapshots by trusted session, canonical root and refresh generation", async () => {
+		const otherRoot = path.resolve("file-explorer-other-root");
+		const cases = [
+			{ name: "session", diffSession: "session-b", diffGeneration: 3, diffBody: {} },
+			{ name: "root", diffSession: "session-a", diffGeneration: 3, diffBody: { rootPath: otherRoot } },
+			{ name: "generation", diffSession: "session-a", diffGeneration: 4, diffBody: {} },
+		];
+		for (const testCase of cases) {
+			const store = new MemorySnapshotStore();
+			const listCtx = cachedRouteContext("session-a", store);
+			const diffCtx = cachedRouteContext(testCase.diffSession, store);
+			const git = new ScriptedGit([...trackedGitResponses().slice(0, 4), ...trackedGitResponses()]);
+			const routes = createExplorerRoutes({ fs: rootOnlyFs(), git, now: () => 1_000 });
+			await routes.list(listCtx, { body: { path: "", includeStatus: true, snapshotGeneration: 3 } });
+			const result = await routes.diff(diffCtx, {
+				body: { path: "file.ts", snapshotGeneration: testCase.diffGeneration, ...testCase.diffBody },
+			});
+			expect(result, testCase.name).toMatchObject({ ok: true, value: { kind: "text" } });
+			expect(git.calls, testCase.name).toHaveLength(9);
+		}
+	});
+
+	it("expires entries, bounds retained snapshots, and never stores unavailable snapshots", async () => {
+		let now = 1_000;
+		const expiringStore = new MemorySnapshotStore();
+		const expiringGit = new ScriptedGit([...trackedGitResponses().slice(0, 4), ...trackedGitResponses()]);
+		const expiringRoutes = createExplorerRoutes({ fs: rootOnlyFs(), git: expiringGit, now: () => now });
+		const expiringCtx = cachedRouteContext("session-expiry", expiringStore);
+		await expiringRoutes.list(expiringCtx, { body: { path: "", includeStatus: true, snapshotGeneration: 1 } });
+		now += GIT_SNAPSHOT_CACHE_TTL_MS + 1;
+		expect(await expiringRoutes.diff(expiringCtx, { body: { path: "file.ts", snapshotGeneration: 1 } })).toMatchObject({ ok: true });
+		expect(expiringGit.calls).toHaveLength(9);
+
+		const boundedStore = new MemorySnapshotStore();
+		const boundedGit = new ScriptedGit(Array.from(
+			{ length: GIT_SNAPSHOT_CACHE_ENTRY_LIMIT + 2 },
+			() => trackedGitResponses().slice(0, 4),
+		).flat());
+		const boundedRoutes = createExplorerRoutes({ fs: rootOnlyFs(), git: boundedGit, now: () => 2_000 });
+		for (let generation = 0; generation < GIT_SNAPSHOT_CACHE_ENTRY_LIMIT + 2; generation++) {
+			const boundedCtx = cachedRouteContext(`session-bound-${generation}`, boundedStore);
+			await boundedRoutes.list(boundedCtx, { body: { path: "", includeStatus: true, snapshotGeneration: generation } });
+		}
+		const stored = boundedStore.value as { entries: Array<{ sessionId: string }> };
+		expect(stored.entries).toHaveLength(GIT_SNAPSHOT_CACHE_ENTRY_LIMIT);
+		expect(stored.entries.map((entry) => entry.sessionId)).toEqual([
+			"session-bound-2", "session-bound-3", "session-bound-4", "session-bound-5",
+		]);
+
+		const failureStore = new MemorySnapshotStore();
+		const failureGit = new ScriptedGit([
+			ok(""), ok("head\n"), failed("timeout"),
+			...trackedGitResponses(),
+		]);
+		const failureRoutes = createExplorerRoutes({ fs: rootOnlyFs(), git: failureGit, now: () => 3_000 });
+		const failureCtx = cachedRouteContext("session-failure", failureStore);
+		expect(await failureRoutes.list(failureCtx, { body: { path: "", includeStatus: true, snapshotGeneration: 9 } })).toMatchObject({
+			ok: true,
+			value: { status: { kind: "unavailable" } },
+		});
+		expect(failureStore.writes).toBe(0);
+		expect(await failureRoutes.diff(failureCtx, { body: { path: "file.ts", snapshotGeneration: 9 } })).toMatchObject({ ok: true });
+		expect(failureGit.calls).toHaveLength(8);
+	});
+
+	it("degrades to fresh Git collection when the server cache store fails", async () => {
+		const store = new MemorySnapshotStore();
+		store.failWrites = true;
+		const git = new ScriptedGit([...trackedGitResponses().slice(0, 4), ...trackedGitResponses()]);
+		const routes = createExplorerRoutes({ fs: rootOnlyFs(), git, now: () => 1_000 });
+		const ctx = cachedRouteContext("session-a", store);
+		expect(await routes.list(ctx, { body: { path: "", includeStatus: true, snapshotGeneration: 1 } })).toMatchObject({ ok: true });
+		expect(await routes.diff(ctx, { body: { path: "file.ts", snapshotGeneration: 1 } })).toMatchObject({ ok: true });
+		expect(git.calls).toHaveLength(9);
 	});
 });
 
