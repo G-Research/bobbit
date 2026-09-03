@@ -407,24 +407,30 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		const fixture = createBundleFixture();
 		const api = await loadBuildApi();
 		const entry = path.join(fixture.packRoot, "entry.ts");
-		fs.writeFileSync(entry, 'import "bobbit:pack-native-assets";\n', "utf8");
-		await expect(build({
+		fs.writeFileSync(entry, [
+			'import "bobbit:pack-native-assets";',
+			'import "bobbit:anything-else";',
+			"",
+		].join("\n"), "utf8");
+
+		// One real browser build still crosses both plugin resolution branches,
+		// without paying for a second esbuild build invocation.
+		const failure = await build({
 			entryPoints: [entry],
 			bundle: true,
 			write: false,
 			platform: "browser",
 			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "browser" })],
 			logLevel: "silent",
-		})).rejects.toThrow(/bobbit:pack-native-assets|node|browser|platform/i);
-
-		fs.writeFileSync(entry, 'import "bobbit:anything-else";\n', "utf8");
-		await expect(build({
-			entryPoints: [entry],
-			bundle: true,
-			write: false,
-			platform: "node",
-			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "node" })],
-			logLevel: "silent",
-		})).rejects.toThrow(/bobbit:anything-else|unsupported|unknown/i);
+		}).then(() => null, (error: unknown) => error);
+		expect(failure).toBeInstanceOf(Error);
+		const diagnostic = [
+			String(failure),
+			...((failure as { errors?: Array<{ text?: string }> }).errors ?? []).map(error => error.text ?? ""),
+		].join("\n");
+		expect(diagnostic).toMatch(/bobbit:pack-native-assets/i);
+		expect(diagnostic).toMatch(/available only to Node pack entries/i);
+		expect(diagnostic).toMatch(/bobbit:anything-else/i);
+		expect(diagnostic).toMatch(/unsupported Bobbit build-time specifier/i);
 	}, 60_000);
 });
