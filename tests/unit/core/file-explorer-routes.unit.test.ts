@@ -52,7 +52,7 @@ function failed(
 
 class ScriptedGit implements ExplorerGitRunner {
 	readonly calls: Array<{ args: string[]; options: GitRunOptions }> = [];
-	constructor(private readonly responses: Array<BoundedGitResult | ((args: readonly string[], options: GitRunOptions) => BoundedGitResult)>) {}
+	constructor(private readonly responses: Array<BoundedGitResult | ((args: readonly string[], options: GitRunOptions) => BoundedGitResult | Promise<BoundedGitResult>)>) {}
 
 	async run(args: readonly string[], options: GitRunOptions): Promise<BoundedGitResult> {
 		this.calls.push({ args: [...args], options: { ...options } });
@@ -60,6 +60,12 @@ class ScriptedGit implements ExplorerGitRunner {
 		if (!response) throw new Error(`Unexpected Git call: ${args.join(" ")}`);
 		return typeof response === "function" ? response(args, options) : response;
 	}
+}
+
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((resolvePromise) => { resolve = resolvePromise; });
+	return { promise, resolve };
 }
 
 class MemorySnapshotStore {
@@ -78,6 +84,39 @@ class MemorySnapshotStore {
 	async put<T>(_key: string, value: T): Promise<void> {
 		this.writes++;
 		if (this.failWrites) throw new Error("store write failed");
+		this.value = value;
+	}
+}
+
+class BlockingFirstReadSnapshotStore extends MemorySnapshotStore {
+	readonly readStarted = deferred();
+	readonly releaseRead = deferred();
+	private blockFirstRead = true;
+
+	override async read<T>(): Promise<{ state: "absent" } | { state: "present"; value: T }> {
+		if (!this.blockFirstRead) return super.read<T>();
+		this.blockFirstRead = false;
+		this.reads++;
+		const captured = this.value;
+		this.readStarted.resolve();
+		await this.releaseRead.promise;
+		return captured === undefined ? { state: "absent" } : { state: "present", value: captured as T };
+	}
+}
+
+class FailingFirstPutSnapshotStore extends MemorySnapshotStore {
+	readonly putStarted = deferred();
+	readonly releasePut = deferred();
+	private failFirstPut = true;
+
+	override async put<T>(_key: string, value: T): Promise<void> {
+		this.writes++;
+		if (this.failFirstPut) {
+			this.failFirstPut = false;
+			this.putStarted.resolve();
+			await this.releasePut.promise;
+			throw new Error("store write failed");
+		}
 		this.value = value;
 	}
 }
@@ -1285,6 +1324,76 @@ describe("file explorer Git snapshot reuse", () => {
 			});
 			expect(result, testCase.name).toMatchObject({ ok: true, value: { kind: "text" } });
 			expect(git.calls, testCase.name).toHaveLength(9);
+		}
+	});
+
+	it("serializes concurrent cache updates without dropping either session", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const store = new BlockingFirstReadSnapshotStore();
+			const firstRoutes = createRoutes({ fs: rootOnlyFs(), git: new ScriptedGit(trackedGitResponses().slice(0, 4)), now: () => 1_000 });
+			const secondRoutes = createRoutes({ fs: rootOnlyFs(), git: new ScriptedGit(trackedGitResponses().slice(0, 4)), now: () => 1_000 });
+			const first = firstRoutes.list(cachedRouteContext("session-a", store), {
+				body: { path: "", includeStatus: true, snapshotGeneration: 1 },
+			});
+			await store.readStarted.promise;
+			const second = secondRoutes.list(cachedRouteContext("session-b", store), {
+				body: { path: "", includeStatus: true, snapshotGeneration: 1 },
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			store.releaseRead.resolve();
+			await Promise.all([first, second]);
+
+			const stored = store.value as { entries: Array<{ sessionId: string }> };
+			expect(stored.entries.map((entry) => entry.sessionId).sort()).toEqual(["session-a", "session-b"]);
+		}
+	});
+
+	it("continues queued cache updates after a store failure", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const store = new FailingFirstPutSnapshotStore();
+			const firstRoutes = createRoutes({ fs: rootOnlyFs(), git: new ScriptedGit(trackedGitResponses().slice(0, 4)), now: () => 1_000 });
+			const secondRoutes = createRoutes({ fs: rootOnlyFs(), git: new ScriptedGit(trackedGitResponses().slice(0, 4)), now: () => 1_000 });
+			const first = firstRoutes.list(cachedRouteContext("session-a", store), {
+				body: { path: "", includeStatus: true, snapshotGeneration: 1 },
+			});
+			await store.putStarted.promise;
+			const second = secondRoutes.list(cachedRouteContext("session-b", store), {
+				body: { path: "", includeStatus: true, snapshotGeneration: 1 },
+			});
+			store.releasePut.resolve();
+			await Promise.all([first, second]);
+
+			const stored = store.value as { entries: Array<{ sessionId: string }> };
+			expect(store.writes).toBe(2);
+			expect(stored.entries.map((entry) => entry.sessionId)).toEqual(["session-b"]);
+		}
+	});
+
+	it("does not let an older concurrent generation replace a newer session snapshot", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const oldGitStarted = deferred();
+			const releaseOldGit = deferred();
+			const oldGit = new ScriptedGit([
+				async () => {
+					oldGitStarted.resolve();
+					await releaseOldGit.promise;
+					return ok("");
+				},
+				ok("head\n"), ok(" M old.ts\0"), ok(""),
+			]);
+			const newGit = new ScriptedGit([ok(""), ok("head\n"), ok(" M new.ts\0"), ok("")]);
+			const store = new MemorySnapshotStore();
+			const oldRoutes = createRoutes({ fs: rootOnlyFs(), git: oldGit, now: () => 1_000 });
+			const newRoutes = createRoutes({ fs: rootOnlyFs(), git: newGit, now: () => 1_000 });
+			const ctx = cachedRouteContext("session-a", store);
+			const oldList = oldRoutes.list(ctx, { body: { path: "", includeStatus: true, snapshotGeneration: 1 } });
+			await oldGitStarted.promise;
+			await newRoutes.list(ctx, { body: { path: "", includeStatus: true, snapshotGeneration: 2 } });
+			releaseOldGit.resolve();
+			await oldList;
+
+			const stored = store.value as { entries: Array<{ generation: number; snapshot: { files: Array<{ path: string }> } }> };
+			expect(stored.entries).toMatchObject([{ generation: 2, snapshot: { files: [{ path: "new.ts" }] } }]);
 		}
 	});
 
