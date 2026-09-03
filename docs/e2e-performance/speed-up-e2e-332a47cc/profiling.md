@@ -28,7 +28,9 @@ Then run exactly:
 npm run test:e2e
 ```
 
-The runner writes `group-B.json` and `group-C.json` plus raw child-process and hook artifacts below the requested directory. Each group manifest includes per-spec wall time, lifecycle attribution, activity overlays, attempts/retries/failures, subtree CPU, peak process count, and `(pid, creation)` identities. Activity overlays may overlap lifecycle time.
+The runner writes `group-B.json` and `group-C.json` plus raw child-process and hook artifacts below the requested directory. Each group manifest includes per-spec wall time, lifecycle attribution, activity overlays, attempts/retries/failures, diagnostic group subtree CPU, peak process count, and `(pid, creation)` identities. The Playwright reporter first records attempt boundaries; after the phase process closes, the outer E2E coordinator rebuilds child and loopback-gateway overlays from exit-flushed artifacts. Unmatched child starts, missing gateway observations, or hook owners without an exit flush make the profile ineligible. Activity overlays may overlap lifecycle time.
+
+Use `profile:build-cache:npm-lock-only` and `profile:build-cache:npm-ci` as the Playwright step labels for the two packaged-consumer npm phases. Both are attributed to `buildCache` without changing their command arguments.
 
 A focused `--group` run is diagnostic only and is explicitly marked ineligible. Baseline/candidate qualification uses the full exact command.
 
@@ -49,6 +51,8 @@ The measured interval starts with the unchanged packed-consumer prewarm and then
 ```text
 totalSubtreeCpuMinutes = prewarmCpu + exactCommandCpu
 ```
+
+`measure-subtree.mjs` is the authoritative outer boundary. Its reports declare `accounting.authority=outer`, `boundary=spawned-command-subtree`, and `method=pid-creation-subtree`. The E2E runner's whole-run and per-group samplers are explicitly diagnostic because they exclude npm/ensure-dist wrappers; never compare, sum, or substitute their CPU values for the outer meters. A qualification sample marks its combined row `outer-derived` and names the prewarm and exact-command meters that contribute to it.
 
 Example POSIX exact-command capture after state preparation:
 

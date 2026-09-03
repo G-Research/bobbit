@@ -4,8 +4,8 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { E2E_ATTRIBUTION_CATEGORIES, E2E_PROFILE_SCHEMA } from "./e2e-profile-reporter.mjs";
 
-export const E2E_SAMPLE_SCHEMA = 1;
-export const E2E_QUALIFICATION_SCHEMA = 1;
+export const E2E_SAMPLE_SCHEMA = 2;
+export const E2E_QUALIFICATION_SCHEMA = 2;
 export const PRODUCT_BASELINE_SHA = "3a90cf55ab5226249529b00ecb874be4a79d5e54";
 export const REQUIRED_GROUPS = Object.freeze(["A", "B", "C", "D"]);
 export const REQUIRED_STATES = Object.freeze(["cold", "warm"]);
@@ -19,7 +19,7 @@ export const REQUIRED_VALIDATIONS = Object.freeze([
 ]);
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value);
-const finite = (value) => Number.isFinite(Number(value));
+const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const sha = (value) => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
 const add = (errors, condition, message) => { if (!condition) errors.push(message); };
 
@@ -63,8 +63,22 @@ export function validateE2EProfileManifest(profile, expected = {}) {
 	add(errors, finite(profile.counts?.attempts), "profile counts.attempts is required");
 	add(errors, finite(profile.counts?.retries), "profile counts.retries is required");
 	add(errors, finite(profile.counts?.failures), "profile counts.failures is required");
+	add(errors, Array.isArray(profile.attempts) && profile.attempts.length === Number(profile.counts?.attempts), "profile attempt boundaries are incomplete");
+	add(errors, finite(profile.processActivity?.starts) && Number(profile.processActivity.starts) > 0, "profile child-process starts are required");
+	add(errors, finite(profile.processActivity?.completed), "profile completed child-process count is required");
+	add(errors, Number(profile.processActivity?.incomplete) === 0, "profile child-process telemetry must be complete");
+	add(errors, Number(profile.processActivity?.orphanEnds) === 0, "profile child-process telemetry must have no orphan ends");
+	add(errors, Number(profile.processActivity?.parseErrors) === 0, "profile child-process telemetry must have no parse errors");
+	add(errors, Array.isArray(profile.processActivity?.incompleteRecords) && profile.processActivity.incompleteRecords.length === 0, "profile unmatched child-process records must be empty");
+	add(errors, Number(profile.hookActivity?.records) > 0, "profile gateway hook records are required");
+	add(errors, Number(profile.hookActivity?.artifacts) > 0, "profile gateway hook artifacts are required");
+	add(errors, Number(profile.hookActivity?.incompleteOwners) === 0, "profile gateway hook owners must all flush");
+	add(errors, Number(profile.hookActivity?.parseErrors) === 0, "profile gateway hook telemetry must have no parse errors");
+	add(errors, profile.accounting?.authority === "diagnostic" && profile.accounting?.boundary === "playwright-group-subtree", "profile accounting must be explicitly diagnostic");
 	add(errors, finite(profile.ownedProcess?.cpuMs), "profile ownedProcess.cpuMs is required");
 	add(errors, finite(profile.ownedProcess?.peakProcesses), "profile ownedProcess.peakProcesses is required");
+	add(errors, profile.ownedProcess?.accounting?.authority === "diagnostic", "profile ownedProcess accounting must be diagnostic");
+	add(errors, profile.ownedProcess?.accounting?.method === "pid-creation-subtree", "profile ownedProcess accounting method must be pid-creation-subtree");
 	add(errors, Array.isArray(profile.ownedProcess?.processes), "profile ownedProcess.processes identity list is required");
 	for (const [index, process] of (profile.ownedProcess?.processes ?? []).entries()) {
 		add(errors, Number.isInteger(process.pid) && process.pid > 0, `profile process ${index} pid is invalid`);
@@ -73,12 +87,24 @@ export function validateE2EProfileManifest(profile, expected = {}) {
 	return errors;
 }
 
-function validateTiming(errors, timing, path) {
+function validateTiming(errors, timing, path, { derived = false } = {}) {
 	add(errors, object(timing), `${path} is required`);
 	for (const field of ["wallMs", "cpuMs", "peakProcesses"])
 		add(errors, finite(timing?.[field]), `${path}.${field} is required and numeric`);
+	add(errors, timing?.accounting?.authority === (derived ? "outer-derived" : "outer"), `${path} must use authoritative outer accounting`);
+	add(errors, timing?.accounting?.method === "pid-creation-subtree", `${path} accounting method must be pid-creation-subtree`);
+	add(errors, timing?.accounting?.boundary === (derived ? "prewarm-plus-exact-command" : "spawned-command-subtree"), `${path} accounting boundary is invalid`);
+	if (derived) {
+		add(errors, Array.isArray(timing?.contributingMeters) && timing.contributingMeters.length === 2, `${path}.contributingMeters must name prewarm and exact-command`);
+		return;
+	}
 	add(errors, Number.isInteger(timing?.rootProcess?.pid) && timing.rootProcess.pid > 0, `${path}.rootProcess.pid is required`);
 	add(errors, finite(timing?.rootProcess?.creation), `${path}.rootProcess.creation is required`);
+	add(errors, Array.isArray(timing?.processes) && timing.processes.length > 0, `${path}.processes identity list is required`);
+	for (const [index, process] of (timing?.processes ?? []).entries()) {
+		add(errors, Number.isInteger(process.pid) && process.pid > 0, `${path}.processes[${index}].pid is invalid`);
+		add(errors, finite(process.creation), `${path}.processes[${index}].creation is required`);
+	}
 }
 
 export function validateE2ESampleManifest(sample, {
@@ -112,7 +138,7 @@ export function validateE2ESampleManifest(sample, {
 	add(errors, sample.preparation?.insideMeasuredInterval === false, "provisioning/preparation must be outside the measured interval");
 	add(errors, sample.prewarm?.included === true, "prewarm accounting must be included");
 	add(errors, sample.snapshotUsed === false, "qualification must not use a snapshot");
-	validateTiming(errors, sample.timing?.combined, "sample.timing.combined");
+	validateTiming(errors, sample.timing?.combined, "sample.timing.combined", { derived: true });
 	validateTiming(errors, sample.timing?.prewarm, "sample.timing.prewarm");
 	validateTiming(errors, sample.timing?.exactCommand, "sample.timing.exactCommand");
 	if (finite(sample.timing?.combined?.cpuMs) && finite(sample.timing?.prewarm?.cpuMs) && finite(sample.timing?.exactCommand?.cpuMs)) {
@@ -149,6 +175,10 @@ export function validateE2ESampleManifest(sample, {
 	const referencedGroups = new Set();
 	for (const reference of sample.profileRefs ?? []) {
 		add(errors, reference?.group === "B" || reference?.group === "C", "profile reference group must be B or C");
+		add(errors, reference?.missing === false, "profile reference must be finalized and present");
+		add(errors, Number(reference?.incompleteProcesses) === 0, "profile reference child-process telemetry is incomplete");
+		add(errors, Number(reference?.incompleteHookOwners) === 0, "profile reference gateway hook telemetry is incomplete");
+		add(errors, Number(reference?.hookRecords) > 0, "profile reference gateway hook records are required");
 		if (reference?.group) referencedGroups.add(reference.group);
 		add(errors, typeof reference?.path === "string" && reference.path.length > 0, "profile reference path is required");
 		if (loadProfile && reference?.path) {
