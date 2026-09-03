@@ -205,41 +205,34 @@ test.describe("staff cwd parity regressions", () => {
 		}
 	});
 
-	for (const cwdCase of [
-		{ label: "missing cwd", patch: {} },
-		{ label: "blank cwd", patch: { cwd: "" } },
-	]) {
-		test(`POST /api/staff with projectId and ${cwdCase.label} uses the project-derived worktree`, async ({ gateway }) => {
-			const root = makeTempRoot(cwdCase.label.replace(/\s+/g, "-"));
-			cleanupDirs.push(root);
-			const repo = makeGitRepo(root, "project-repo");
-			const project = await createProject(`staff-cwd-${cwdCase.label}-${Date.now()}`, repo);
-			cleanupProjectIds.push(project.id);
+	test("POST /api/staff preserves project, cwd, worktree, and rejection boundaries", async ({ gateway }) => {
+		const root = makeTempRoot("post-matrix");
+		cleanupDirs.push(root);
+		const gitProject = await createProject(`staff-cwd-git-${Date.now()}`, makeGitRepo(root, "git-project"));
+		const plainProject = await createProject(`staff-cwd-plain-${Date.now()}`, makePlainDir(root, "plain-project"));
+		cleanupProjectIds.push(gitProject.id, plainProject.id);
 
+		await test.step("missing cwd derives a git-project worktree and permanent-session cwd", async () => {
 			const created = await postStaff({
-				name: `Staff cwd ${cwdCase.label}`,
+				name: "Staff cwd missing",
 				systemPrompt: "Stay inside the selected project.",
-				projectId: project.id,
-				...cwdCase.patch,
+				projectId: gitProject.id,
 			});
 			if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-
 			expect(
 				created.status,
-				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: ${cwdCase.label} should derive cwd from projectId=${project.id}, not defaultCwd=${gateway.bobbitDir}. body=${created.text}`,
+				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: missing cwd should derive from projectId=${gitProject.id}, not defaultCwd=${gateway.bobbitDir}. body=${created.text}`,
 			).toBe(201);
 
 			const staff = created.json;
-			expect(staff.projectId, "STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: staff should remain attached to the selected project").toBe(project.id);
+			expect(staff.projectId, "STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: staff should remain attached to the selected project").toBe(gitProject.id);
 			expect(staff.worktreePath, "STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: git project should create a staff worktree by default").toBeTruthy();
 			expect(
-				isSameOrUnder(staff.worktreePath, `${project.rootPath}-wt`),
-				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: worktreePath=${staff.worktreePath} must be under project worktree root ${project.rootPath}-wt, not server default ${gateway.bobbitDir}`,
+				isSameOrUnder(staff.worktreePath, `${gitProject.rootPath}-wt`),
+				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: worktreePath=${staff.worktreePath} must be under project worktree root ${gitProject.rootPath}-wt, not server default ${gateway.bobbitDir}`,
 			).toBe(true);
 
-			const sessionRes = await apiFetch(`/api/sessions/${staff.currentSessionId}`);
-			expect(sessionRes.status, "STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: staff permanent session should be readable").toBe(200);
-			const session = await sessionRes.json();
+			const session = await getSession(staff.currentSessionId);
 			expect(
 				isSameOrUnder(session.cwd, staff.worktreePath),
 				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: session cwd=${session.cwd} must run inside staff worktree ${staff.worktreePath}`,
@@ -249,216 +242,184 @@ test.describe("staff cwd parity regressions", () => {
 				`STAFF_CWD_PARITY_PROJECT_ID_EMPTY_CWD: session cwd=${session.cwd} must not run under server default cwd ${gateway.bobbitDir}`,
 			).toBe(false);
 		});
-	}
 
-	test("POST /api/staff without projectId and without cwd returns project-resolution 400", async () => {
-		const created = await postStaff({
-			name: "No project staff",
-			systemPrompt: "This request has no resolvable project.",
+		await test.step("blank cwd and worktree opt-out derive the git project root without ownership metadata", async () => {
+			const created = await postStaff({
+				name: "No worktree staff",
+				systemPrompt: "Run directly from the selected project directory.",
+				projectId: gitProject.id,
+				cwd: "",
+				worktree: false,
+			});
+			if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+			expect(created.status, `STAFF_CWD_PARITY_WORKTREE_OPTOUT: blank cwd with worktree=false should succeed. body=${created.text}`).toBe(201);
+
+			const staff = created.json;
+			expect(staff.worktreePath, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: worktree=false must not allocate worktreePath").toBeFalsy();
+			expect(staff.branch, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: worktree=false must not allocate branch").toBeFalsy();
+			expect(normalisePath(staff.cwd), "STAFF_CWD_PARITY_WORKTREE_OPTOUT: blank cwd should derive the project root").toBe(normalisePath(gitProject.rootPath));
+
+			const session = await getSession(staff.currentSessionId);
+			expect(normalisePath(session.cwd), "STAFF_CWD_PARITY_WORKTREE_OPTOUT: session cwd should stay at project root").toBe(normalisePath(gitProject.rootPath));
+			expect(session.worktreePath, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: session must not have worktreePath").toBeFalsy();
 		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
 
-		expect(
-			created.status,
-			`STAFF_CWD_PARITY_NO_PROJECT_400: staff creation with no projectId and no cwd must fail with project-resolution 400, not fall back to default cwd. body=${created.text}`,
-		).toBe(400);
+		await test.step("registered non-git project runs staff and its permanent session from the project root", async () => {
+			const created = await postStaff({
+				name: "Non-git staff",
+				systemPrompt: "Run from the project directory without a worktree.",
+				projectId: plainProject.id,
+				cwd: plainProject.rootPath,
+			});
+			if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+			expect(
+				created.status,
+				`STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: registered non-git project should create staff in project cwd without git worktree failure. body=${created.text}`,
+			).toBe(201);
+
+			const staff = created.json;
+			expect(staff.worktreePath, "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: non-git staff must not have worktreePath").toBeFalsy();
+			expect(staff.branch, "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: non-git staff must not have branch").toBeFalsy();
+			const session = await getSession(staff.currentSessionId);
+			expect(normalisePath(session.cwd), "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: session must run in project cwd").toBe(normalisePath(plainProject.rootPath));
+		});
+
+		await test.step("explicit cwd from another registered project is rejected", async () => {
+			const created = await postStaff({
+				name: "Mismatched cwd staff",
+				systemPrompt: "Do not cross project boundaries.",
+				projectId: gitProject.id,
+				cwd: plainProject.rootPath,
+			});
+			if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+			expect(
+				created.status,
+				`STAFF_CWD_PARITY_MISMATCHED_CWD_422: projectId=${gitProject.id} with cwd from projectId=${plainProject.id} must be rejected. body=${created.text}`,
+			).toBe(422);
+			expect(created.json?.code).toBe("CWD_OUTSIDE_PROJECT");
+		});
+
+		await test.step("missing and blank cwd cannot replace the required projectId", async () => {
+			for (const cwdCase of [
+				{ label: "missing cwd", patch: {} },
+				{ label: "blank cwd", patch: { cwd: "" } },
+			]) {
+				const created = await postStaff({
+					name: `No project staff (${cwdCase.label})`,
+					systemPrompt: "This request has no resolvable project.",
+					...cwdCase.patch,
+				});
+				if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+				expect(
+					created.status,
+					`STAFF_CWD_PARITY_NO_PROJECT_400: staff creation with no projectId and ${cwdCase.label} must fail with project-resolution 400. body=${created.text}`,
+				).toBe(400);
+				expect(created.json?.code).toBe("PROJECT_ID_REQUIRED");
+			}
+		});
 	});
 
-	test("POST /api/staff without projectId and with blank cwd returns project-resolution 400", async () => {
-		const created = await postStaff({
-			name: "Blank project staff",
-			systemPrompt: "This request has only blank cwd.",
-			cwd: "",
-		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-
-		expect(
-			created.status,
-			`STAFF_CWD_PARITY_NO_PROJECT_400: staff creation with no projectId and blank cwd must fail with project-resolution 400, not fall back to default cwd. body=${created.text}`,
-		).toBe(400);
-	});
-
-	test("registered non-git project staff creation succeeds without a worktree", async () => {
-		const root = makeTempRoot("non-git");
-		cleanupDirs.push(root);
-		const projectDir = makePlainDir(root, "plain-project");
-		const project = await createProject(`staff-cwd-non-git-${Date.now()}`, projectDir);
-		cleanupProjectIds.push(project.id);
-
-		const created = await postStaff({
-			name: "Non-git staff",
-			systemPrompt: "Run from the project directory without a worktree.",
-			projectId: project.id,
-			cwd: project.rootPath,
-		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-
-		expect(
-			created.status,
-			`STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: registered non-git project should create staff in project cwd without git worktree failure. body=${created.text}`,
-		).toBe(201);
-
-		const staff = created.json;
-		expect(staff.worktreePath, "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: non-git staff must not have worktreePath").toBeFalsy();
-		expect(staff.branch, "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: non-git staff must not have branch").toBeFalsy();
-		const session = await (await apiFetch(`/api/sessions/${staff.currentSessionId}`)).json();
-		expect(normalisePath(session.cwd), "STAFF_CWD_PARITY_NON_GIT_NO_WORKTREE: session must run in project cwd").toBe(normalisePath(project.rootPath));
-	});
-
-	test("git project with worktree false creates staff in project cwd without branch or worktreePath", async () => {
-		const root = makeTempRoot("opt-out");
-		cleanupDirs.push(root);
-		const repo = makeGitRepo(root, "project-repo");
-		const project = await createProject(`staff-cwd-opt-out-${Date.now()}`, repo);
-		cleanupProjectIds.push(project.id);
-
-		const created = await postStaff({
-			name: "No worktree staff",
-			systemPrompt: "Run directly from the selected project directory.",
-			projectId: project.id,
-			cwd: project.rootPath,
-			worktree: false,
-		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-
-		expect(
-			created.status,
-			`STAFF_CWD_PARITY_WORKTREE_OPTOUT: worktree=false staff creation should succeed. body=${created.text}`,
-		).toBe(201);
-
-		const staff = created.json;
-		expect(staff.worktreePath, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: worktree=false must not allocate worktreePath").toBeFalsy();
-		expect(staff.branch, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: worktree=false must not allocate branch").toBeFalsy();
-		expect(normalisePath(staff.cwd), "STAFF_CWD_PARITY_WORKTREE_OPTOUT: staff cwd should stay at project root").toBe(normalisePath(project.rootPath));
-
-		const sessionRes = await apiFetch(`/api/sessions/${staff.currentSessionId}`);
-		expect(sessionRes.status, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: staff permanent session should be readable").toBe(200);
-		const session = await sessionRes.json();
-		expect(normalisePath(session.cwd), "STAFF_CWD_PARITY_WORKTREE_OPTOUT: session cwd should stay at project root").toBe(normalisePath(project.rootPath));
-		expect(session.worktreePath, "STAFF_CWD_PARITY_WORKTREE_OPTOUT: session must not have worktreePath").toBeFalsy();
-	});
-
-	test("explicit cwd from a different registered project is rejected", async () => {
-		const root = makeTempRoot("mismatch");
-		cleanupDirs.push(root);
-		const repoA = makeGitRepo(root, "project-a");
-		const repoB = makeGitRepo(root, "project-b");
-		const projectA = await createProject(`staff-cwd-project-a-${Date.now()}`, repoA);
-		const projectB = await createProject(`staff-cwd-project-b-${Date.now()}`, repoB);
-		cleanupProjectIds.push(projectA.id, projectB.id);
-
-		const created = await postStaff({
-			name: "Mismatched cwd staff",
-			systemPrompt: "Do not cross project boundaries.",
-			projectId: projectA.id,
-			cwd: projectB.rootPath,
-		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-
-		expect(
-			created.status,
-			`STAFF_CWD_PARITY_MISMATCHED_CWD_422: projectId=${projectA.id} with cwd from projectId=${projectB.id} must be rejected. body=${created.text}`,
-		).toBe(422);
-		expect(created.json?.code).toBe("CWD_OUTSIDE_PROJECT");
-	});
-
-	test("PUT /api/staff/:id allows orphaned legacy field edits when cwd is unchanged", async ({ gateway }) => {
-		const root = makeTempRoot("orphan-unchanged");
-		cleanupDirs.push(root);
-		const projectDir = makePlainDir(root, "legacy-project");
-		const originalCwd = projectDir;
-		const legacy = seedLegacySystemStaff(gateway, {
-			name: "Legacy orphan staff",
-			cwd: originalCwd,
-		});
-		cleanupStaffIds.push(legacy.id);
-
-		const updated = await putStaff(legacy.id, {
-			name: "Renamed legacy orphan",
-			description: "Updated description",
-			systemPrompt: "Updated prompt.",
-			cwd: `${originalCwd}   `,
-		});
-		expect(
-			updated.status,
-			`STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd from the edit page should not require a registered project. body=${updated.text}`,
-		).toBe(200);
-		expect(updated.json.name).toBe("Renamed legacy orphan");
-		expect(updated.json.description).toBe("Updated description");
-		expect(updated.json.systemPrompt).toBe("Updated prompt.");
-		expect(updated.json.cwd, "STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd must not be rewritten just because the UI re-sent it").toBe(originalCwd);
-	});
-
-	test("PUT /api/staff/:id rejects orphaned legacy cwd changes and preserves stored cwd", async ({ gateway }) => {
-		const root = makeTempRoot("orphan-change");
-		cleanupDirs.push(root);
-		const projectDir = makePlainDir(root, "legacy-project");
-		const newCwd = makePlainDir(root, "new-cwd");
-		const originalCwd = projectDir;
-		const legacy = seedLegacySystemStaff(gateway, {
-			name: "Legacy orphan cwd guard",
-			cwd: originalCwd,
-		});
-		cleanupStaffIds.push(legacy.id);
-		const staffId = legacy.id;
-
-		const updated = await putStaff(staffId, {
-			name: "Should not persist",
-			cwd: newCwd,
-		});
-		expect(
-			updated.status,
-			`STAFF_CWD_PARITY_ORPHAN_CHANGE_400: orphaned staff cwd changes must still be rejected before cwd validation when no registered project is attached. body=${updated.text}`,
-		).toBe(400);
-
-		const storedRes = await apiFetch(`/api/staff/${staffId}`);
-		expect(storedRes.status, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: staff should remain readable after rejected cwd change").toBe(200);
-		const stored = await storedRes.json();
-		expect(stored.name, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected update must not mutate other fields").toBe("Legacy orphan cwd guard");
-		expect(stored.cwd, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected cwd change must not mutate stored cwd").toBe(originalCwd);
-	});
-
-	test("PUT /api/staff/:id rejects cwd outside the staff project and preserves stored cwd", async () => {
-		const root = makeTempRoot("put-reject");
+	test("PUT /api/staff/:id preserves registered-project cwd updates and rejections", async () => {
+		const root = makeTempRoot("put-matrix");
 		cleanupDirs.push(root);
 		const projectADir = makePlainDir(root, "project-a");
 		const projectBDir = makePlainDir(root, "project-b");
 		const arbitraryDir = makePlainDir(root, "outside-registered-projects");
+		const subdir = join(projectADir, "packages", "app");
+		mkdirSync(subdir, { recursive: true });
 		const projectA = await createProject(`staff-cwd-put-a-${Date.now()}`, projectADir);
 		const projectB = await createProject(`staff-cwd-put-b-${Date.now()}`, projectBDir);
 		cleanupProjectIds.push(projectA.id, projectB.id);
 
 		const created = await postStaff({
 			name: "Update cwd guard staff",
-			systemPrompt: "Do not accept cwd edits outside this project.",
+			systemPrompt: "Accept only cwd edits inside this project.",
 			projectId: projectA.id,
 			cwd: projectA.rootPath,
 		});
 		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
 		expect(created.status, `STAFF_CWD_PARITY_UPDATE_GUARD_SETUP: staff creation failed. body=${created.text}`).toBe(201);
 		const staffId = created.json.id;
-		const originalCwd = created.json.cwd;
 
-		for (const [label, cwd, expectedStatus, expectedCode] of [
-			["different registered project", projectB.rootPath, 422, "CWD_OUTSIDE_PROJECT"],
-			["unregistered temp dir", arbitraryDir, 422, "CWD_OUTSIDE_PROJECT"],
-			["blank cwd", "   ", 400, undefined],
-		] as const) {
-			const updated = await putStaff(staffId, { cwd });
+		await test.step("inside-project cwd is trimmed, stored, and retains project ownership", async () => {
+			const updated = await putStaff(staffId, { cwd: `  ${subdir}  ` });
 			expect(
 				updated.status,
-				`STAFF_CWD_PARITY_UPDATE_GUARD_${expectedStatus}: PUT cwd=${label} must be rejected. body=${updated.text}`,
-			).toBe(expectedStatus);
-			if (expectedCode) expect(updated.json?.code).toBe(expectedCode);
+				`STAFF_CWD_PARITY_UPDATE_ALLOWED: PUT cwd to a subdirectory inside projectId=${projectA.id} should succeed. body=${updated.text}`,
+			).toBe(200);
+			expect(normalisePath(updated.json.cwd), "STAFF_CWD_PARITY_UPDATE_ALLOWED: stored cwd should update to the project subdirectory").toBe(normalisePath(subdir));
+			expect(updated.json.projectId, "STAFF_CWD_PARITY_UPDATE_ALLOWED: staff should remain attached to its project").toBe(projectA.id);
+		});
 
-			const storedRes = await apiFetch(`/api/staff/${staffId}`);
-			expect(storedRes.status, `STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: staff should remain readable after rejected ${label}`).toBe(200);
-			const stored = await storedRes.json();
+		await test.step("outside, unregistered, and blank cwd are rejected without mutating the accepted cwd", async () => {
+			for (const [label, cwd, expectedStatus, expectedCode] of [
+				["different registered project", projectB.rootPath, 422, "CWD_OUTSIDE_PROJECT"],
+				["unregistered temp dir", arbitraryDir, 422, "CWD_OUTSIDE_PROJECT"],
+				["blank cwd", "   ", 400, undefined],
+			] as const) {
+				const updated = await putStaff(staffId, { cwd });
+				expect(
+					updated.status,
+					`STAFF_CWD_PARITY_UPDATE_GUARD_${expectedStatus}: PUT cwd=${label} must be rejected. body=${updated.text}`,
+				).toBe(expectedStatus);
+				if (expectedCode) expect(updated.json?.code).toBe(expectedCode);
+
+				const storedRes = await apiFetch(`/api/staff/${staffId}`);
+				expect(storedRes.status, `STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: staff should remain readable after rejected ${label}`).toBe(200);
+				const stored = await storedRes.json();
+				expect(
+					normalisePath(stored.cwd),
+					`STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: rejected ${label} must not mutate stored cwd`,
+				).toBe(normalisePath(subdir));
+			}
+		});
+	});
+
+	test("PUT /api/staff/:id preserves orphaned legacy canonicalization and rejection boundaries", async ({ gateway }) => {
+		const root = makeTempRoot("orphan-matrix");
+		cleanupDirs.push(root);
+		const originalCwd = makePlainDir(root, "legacy-project");
+		const newCwd = makePlainDir(root, "new-cwd");
+		const legacy = seedLegacySystemStaff(gateway, {
+			name: "Legacy orphan staff",
+			cwd: originalCwd,
+		});
+		cleanupStaffIds.push(legacy.id);
+
+		await test.step("canonical-equivalent cwd permits unrelated legacy field edits without rewriting cwd", async () => {
+			const updated = await putStaff(legacy.id, {
+				name: "Renamed legacy orphan",
+				description: "Updated description",
+				systemPrompt: "Updated prompt.",
+				cwd: `${originalCwd}   `,
+			});
 			expect(
-				normalisePath(stored.cwd),
-				`STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: rejected ${label} must not mutate stored cwd`,
-			).toBe(normalisePath(originalCwd));
-		}
+				updated.status,
+				`STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd from the edit page should not require a registered project. body=${updated.text}`,
+			).toBe(200);
+			expect(updated.json.name).toBe("Renamed legacy orphan");
+			expect(updated.json.description).toBe("Updated description");
+			expect(updated.json.systemPrompt).toBe("Updated prompt.");
+			expect(updated.json.cwd, "STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd must not be rewritten just because the UI re-sent it").toBe(originalCwd);
+		});
+
+		await test.step("changed cwd is rejected before project validation and leaves the accepted fields intact", async () => {
+			const updated = await putStaff(legacy.id, {
+				name: "Should not persist",
+				cwd: newCwd,
+			});
+			expect(
+				updated.status,
+				`STAFF_CWD_PARITY_ORPHAN_CHANGE_400: orphaned staff cwd changes must still be rejected before cwd validation when no registered project is attached. body=${updated.text}`,
+			).toBe(400);
+
+			const storedRes = await apiFetch(`/api/staff/${legacy.id}`);
+			expect(storedRes.status, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: staff should remain readable after rejected cwd change").toBe(200);
+			const stored = await storedRes.json();
+			expect(stored.name, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected update must not mutate other fields").toBe("Renamed legacy orphan");
+			expect(stored.description, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: prior accepted fields must remain stored").toBe("Updated description");
+			expect(stored.cwd, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected cwd change must not mutate stored cwd").toBe(originalCwd);
+		});
 	});
 
 	test("poly-repo staff creation matches session worktree shape and never worktrees the non-git container", async () => {
@@ -595,32 +556,5 @@ test.describe("staff cwd parity regressions", () => {
 			existsSync(join(projectRoot, ".git")),
 			`STAFF_CWD_PARITY_POLYREPO: the registered non-git container root ${projectRoot} must remain non-git after staff + session creation`,
 		).toBe(false);
-	});
-
-	test("PUT /api/staff/:id accepts cwd inside the staff project", async () => {
-		const root = makeTempRoot("put-accept");
-		cleanupDirs.push(root);
-		const projectDir = makePlainDir(root, "project-a");
-		const subdir = join(projectDir, "packages", "app");
-		mkdirSync(subdir, { recursive: true });
-		const project = await createProject(`staff-cwd-put-accept-${Date.now()}`, projectDir);
-		cleanupProjectIds.push(project.id);
-
-		const created = await postStaff({
-			name: "Update cwd allowed staff",
-			systemPrompt: "Allow cwd edits inside this project.",
-			projectId: project.id,
-			cwd: project.rootPath,
-		});
-		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
-		expect(created.status, `STAFF_CWD_PARITY_UPDATE_ALLOWED_SETUP: staff creation failed. body=${created.text}`).toBe(201);
-
-		const updated = await putStaff(created.json.id, { cwd: subdir });
-		expect(
-			updated.status,
-			`STAFF_CWD_PARITY_UPDATE_ALLOWED: PUT cwd to a subdirectory inside projectId=${project.id} should succeed. body=${updated.text}`,
-		).toBe(200);
-		expect(normalisePath(updated.json.cwd), "STAFF_CWD_PARITY_UPDATE_ALLOWED: stored cwd should update to the project subdirectory").toBe(normalisePath(subdir));
-		expect(updated.json.projectId, "STAFF_CWD_PARITY_UPDATE_ALLOWED: staff should remain attached to its project").toBe(project.id);
 	});
 });
