@@ -21,7 +21,7 @@ import {
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
 
 const PACKED_CONSUMER_SOURCE = readFileSync(
-	new URL("../../../tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts", import.meta.url),
+	new URL("../../../tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts", import.meta.url),
 	"utf8",
 );
 const COMMAND_HELPER_SOURCE = readFileSync(
@@ -559,17 +559,17 @@ describe("packed-consumer offline install contract", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
 		assert.match(
 			packedConsumer,
-			/const packed = await runNpm\(\["pack", "--json", "--pack-destination", packDir\], PROJECT_ROOT, 3 \* 60_000\);/,
-			"the test must create the real publishable tarball",
+			/const packed = await runPiPackedConsumerNpm\(\s*\["pack", "--json", "--ignore-scripts", "--pack-destination", packDir\],\s*\{ cwd: REPO_ROOT, timeoutMs: 3 \* 60_000 \},\s*\);/s,
+			"the retained browser journey must create the real publishable tarball",
 		);
 		assert.match(
 			packedConsumer,
-			/const tarballPath = resolve\(packDir, packEntry\.filename as string\);\s*expect\(existsSync\(tarballPath\), `npm pack did not create \$\{tarballPath\}`\)\.toBe\(true\);/s,
+			/const tarballPath = resolve\(packDir, pack\.filename!\);\s*expect\(existsSync\(tarballPath\), `npm pack did not create \$\{tarballPath\}`\)\.toBe\(true\);/s,
 			"the install target must be npm pack's actual emitted tarball",
 		);
 
 		const installCall = packedConsumer.match(
-			/const install = await runNpm\((\["install"[^\n]+), consumerDir, (10 \* 60_000), consumerEnv\);/,
+			/const install = await runPiPackedConsumerNpm\(\s*(\["install", "--offline", tarballPath\]),\s*\{ cwd: consumerDir, env: consumerEnv, timeoutMs: (10 \* 60_000) \},\s*\);/s,
 		);
 		assert.ok(installCall, "packed consumer must retain one explicit npm install call");
 		assert.equal(installCall[1], '["install", "--offline", tarballPath]',
@@ -577,8 +577,10 @@ describe("packed-consumer offline install contract", () => {
 		assert.equal(installCall[2], "10 * 60_000", "the unchanged ten-minute timeout remains only a hard safety bound");
 		assert.doesNotMatch(installCall[0], /prefer-offline|registry|cache|force/,
 			"the install must not add a best-effort or registry fallback");
-		assert.doesNotMatch(packedConsumer, /test\.describe\.configure\(\{[^}]*retries|testInfo\.retry/,
-			"the real E2E must retain the suite's normal retry policy");
+		assert.match(packedConsumer, /test\.describe\.configure\(\{ retries: 0 \}\)/,
+			"the retained clean-consumer browser journey must remain first-attempt only");
+		assert.doesNotMatch(packedConsumer, /testInfo\.retry/,
+			"the journey must not branch on or hide a retry");
 
 		const helper = COMMAND_HELPER_SOURCE;
 		assert.match(helper, /const env: NodeJS\.ProcessEnv = \{ \.\.\.process\.env \};/,
@@ -591,8 +593,8 @@ describe("packed-consumer offline install contract", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
 		assert.match(packedConsumer, /const packDir = join\(tempRoot, "pack"\);\s*const consumerDir = join\(tempRoot, "consumer"\);/s,
 			"packing and consumer installation must stay in separate directories");
-		assert.match(packedConsumer, /name: "bobbit-packed-consumer-e2e",\s*version: "1\.0\.0",\s*private: true,/s,
-			"the consumer must begin as an empty package rather than a seeded dependency graph");
+		assert.match(packedConsumer, /name: "bobbit-inline-theme-clean-consumer",\s*version: "1\.0\.0",\s*private: true,/s,
+			"the combined consumer must begin as an empty package rather than a seeded dependency graph");
 		assert.match(packedConsumer, /"clean consumer must use npm's normal package-lock=true default"/);
 		assert.match(packedConsumer, /"consumer install must create its own lockfile"/);
 		assert.match(packedConsumer, /"published pi-coding-agent must include its dependency-owned shrinkwrap"/);
