@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -20,6 +21,9 @@ import {
 } from "../../../tests/support/harnesses/shared/run-isolation.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
+const mutableFs = createRequire(import.meta.url)("node:fs") as {
+	renameSync: typeof import("node:fs").renameSync;
+};
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 function inheritedDescriptor() {
@@ -213,13 +217,15 @@ describe("setup-prepared git template", () => {
 		expect(readFileSync(join(copies[2], ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
 	});
 
-	it("selects an independent branch with identical committed content and exact cleanup", async () => {
+	it("selects a Git-recognizable nested branch with identical committed content and exact cleanup", async () => {
 		const source = await prepareGitTemplate(inheritedDescriptor());
 		const copy = copyGitTemplate(join(root, "develop-copy"), { branch: "feature/develop" });
 		const sourceHead = readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8");
+		const symbolicHead = readFileSync(join(copy, ".git", "HEAD"), "utf8").trim();
+		const selectedRef = symbolicHead.slice("ref: ".length);
 
-		expect(readFileSync(join(copy, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/feature/develop");
-		expect(readFileSync(join(copy, ".git", "refs", "heads", "feature", "develop"), "utf8")).toBe(sourceHead);
+		expect(symbolicHead).toBe("ref: refs/heads/feature/develop");
+		expect(readFileSync(join(copy, ".git", ...selectedRef.split("/")), "utf8")).toBe(sourceHead);
 		expect(existsSync(join(copy, ".git", "refs", "heads", "master"))).toBe(false);
 		expect(readFileSync(join(copy, "README.md"), "utf8")).toBe(readFileSync(join(source.path, "README.md"), "utf8"));
 		expect(readFileSync(join(source.path, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
@@ -229,13 +235,47 @@ describe("setup-prepared git template", () => {
 		expect(readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8")).toBe(sourceHead);
 	});
 
-	it("rejects unsafe branch names before creating a destination", async () => {
+	it("rejects Git-invalid, loose-ref-colliding, and non-portable branches before copying", async () => {
 		await prepareGitTemplate(inheritedDescriptor());
-		for (const branch of ["../escape", "refs/heads/main.lock", "bad name", "bad@{name", "-option"]) {
-			const destination = join(root, `unsafe-${branch.length}-${branch.charCodeAt(0)}`);
+		const branches = [
+			"../escape",
+			"refs/heads/main.lock",
+			"bad name",
+			"bad@{name",
+			"-option",
+			"HEAD",
+			"master/foo",
+			"MASTER/feature",
+			"CON",
+			"feature/aux.txt",
+			"feature/NUL.json",
+			"feature/trailing./name",
+			"feature/release.LOCK",
+		];
+		for (const branch of branches) {
+			const destination = join(root, `unsafe-${Buffer.from(branch).toString("hex")}`);
 			expect(() => copyGitTemplate(destination, { branch })).toThrow(/safe ordinary Git branch name/);
 			expect(existsSync(destination)).toBe(false);
 		}
+	});
+
+	it("removes the destination when post-copy branch selection fails", async () => {
+		const source = await prepareGitTemplate(inheritedDescriptor());
+		const destination = join(root, "failed-selection");
+		const sourceHead = readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8");
+		const originalRenameSync = mutableFs.renameSync;
+		mutableFs.renameSync = () => { throw new Error("injected branch selection failure"); };
+		syncBuiltinESMExports();
+		try {
+			expect(() => copyGitTemplate(destination, { branch: "develop" }))
+				.toThrow(/injected branch selection failure/);
+		} finally {
+			mutableFs.renameSync = originalRenameSync;
+			syncBuiltinESMExports();
+		}
+
+		expect(existsSync(destination)).toBe(false);
+		expect(readFileSync(join(source.path, ".git", "refs", "heads", "master"), "utf8")).toBe(sourceHead);
 	});
 
 	it("rejects arbitrary template mutations rather than filtering hash changes", async () => {
