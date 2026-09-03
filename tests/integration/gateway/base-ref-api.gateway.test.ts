@@ -1,11 +1,12 @@
 /**
- * API E2E — representative PUT /api/projects/:id/config validation for `base_ref`.
+ * Authenticated integration contracts for base-ref project routes.
  *
  * Pure grammar/error-shape inventory lives in tests/unit/core/base-ref-validation.unit.test.ts.
- * This file keeps route-level coverage for persistence plus git-backed tag,
- * sandbox, local-branch, multi-repo, and warning paths. Keep related route
- * checks batched: the in-process integration cleanup runs after every test, so
- * splitting pure scenario permutations here materially increases suite time.
+ * This file keeps deterministic POST pinning, GET detection, and PUT validation
+ * coverage; the retained real-Git E2E complements it at the remote boundary.
+ * Keep related route checks batched: the in-process integration cleanup runs
+ * after every test, so splitting pure scenario permutations here materially
+ * increases suite time.
  */
 import { it } from "vitest";
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
@@ -21,6 +22,7 @@ let restoreCommandRunner: (() => void) | undefined;
 let nameCounter = 0;
 let gitProjectId = "";
 let multiProjectId = "";
+let nonGitProjectId = "";
 let warningProjectId = "";
 let warningRoot = "";
 let fixtureGateway: any;
@@ -54,6 +56,9 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 	}
 	if (key === "rev-parse --show-toplevel") return cwd;
 	if (key === "rev-parse --is-inside-work-tree") return "true";
+	if (key === "symbolic-ref refs/remotes/origin/HEAD" && detectedDevelopRemotes.has(path.resolve(cwd))) {
+		return "refs/remotes/origin/develop";
+	}
 	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify develop") return "a".repeat(40);
 	if (key === "rev-parse --verify refs/tags/v1.2.3") return "b".repeat(40);
 	if (key === "rev-parse --verify origin/develop" && originDevelopRepos.has(path.resolve(cwd))) return "a".repeat(40);
@@ -106,7 +111,7 @@ function fakeOriginRef(repo: string, branch: string): void {
 
 function fakeDetectedRemoteHead(repo: string, branch: string): void {
 	if (branch !== "develop") return;
-	const remote = path.join(path.dirname(repo), `${path.basename(repo)}-remote.git`);
+	const remote = path.join(repo, ".fixture-origin.git");
 	fs.mkdirSync(path.join(remote, "objects"), { recursive: true });
 	fs.writeFileSync(path.join(remote, "HEAD"), "ref: refs/heads/develop\n");
 	detectedDevelopRemotes.set(path.resolve(repo), remote);
@@ -158,6 +163,11 @@ async function get(id: string): Promise<any> {
 	return res.json();
 }
 
+async function detect(id: string): Promise<{ status: number; json: any }> {
+	const res = await fetch(`${base()}/api/projects/${id}/base-ref/detect`, { headers: headers() });
+	return { status: res.status, json: await res.json() };
+}
+
 function expectBaseRefUnset(config: any): void {
 	expect(config.base_ref === undefined || config.base_ref === "").toBe(true);
 }
@@ -168,6 +178,7 @@ test.beforeAll(async ({ gateway }) => {
 	await installCannedGitRunner();
 
 	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
+	fakeDetectedRemoteHead(gitRoot, "develop");
 	gitProjectId = registerProject(gateway, "baseref-git", gitRoot);
 
 	const multiRoot = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-")));
@@ -179,6 +190,7 @@ test.beforeAll(async ({ gateway }) => {
 	copyTemplateRepo(repoB);
 	copyTemplateRepo(repoC);
 	fakeOriginRef(repoA, "develop");
+	fakeDetectedRemoteHead(repoA, "develop");
 	multiProjectId = registerProject(
 		gateway,
 		"baseref-multi",
@@ -189,6 +201,12 @@ test.beforeAll(async ({ gateway }) => {
 			{ name: "shared", repo: "shared" },
 		],
 	);
+
+	const lexicalNonGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nongit-"));
+	fs.writeFileSync(path.join(lexicalNonGitRoot, "README.md"), "not a git repo\n");
+	const nonGitRoot = canonicalPath(lexicalNonGitRoot);
+	cleanupRoots.push(nonGitRoot);
+	nonGitProjectId = registerProject(gateway, "baseref-nongit", nonGitRoot);
 
 	const lexicalWarningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
 	fs.mkdirSync(path.join(lexicalWarningRoot, "docs"), { recursive: true });
@@ -222,7 +240,7 @@ test.afterAll(async () => {
 // Suite-owned project contexts and the canned runner make each declaration
 // deterministic without the compatibility harness's per-test entity sweep.
 test.describe("base_ref API validation", () => {
-	it("pins a detected add-time ref only when every component has it", async () => {
+	it("pins a detected add-time ref only when every component has it and stays unset without a remote", async () => {
 		const makeProjectRoot = (prefix: string, webHasDevelop: boolean): string => {
 			const root = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`)));
 			cleanupRoots.push(root);
@@ -247,6 +265,33 @@ test.describe("base_ref API validation", () => {
 		const mismatch = await postProject("baseref-add-mismatch", makeProjectRoot("add-mismatch", false), components);
 		expect(mismatch.status, JSON.stringify(mismatch.json)).toBe(201);
 		expectBaseRefUnset(await get(mismatch.json.id));
+
+		const noRemote = await postProject(
+			"baseref-add-no-remote",
+			fixtureRepo("add-no-remote"),
+			[{ name: "root", repo: "." }],
+		);
+		expect(noRemote.status, JSON.stringify(noRemote.json)).toBe(201);
+		expectBaseRefUnset(await get(noRemote.json.id));
+	});
+
+	it("returns exact detect responses for known, mismatched, non-git, and unknown projects", async () => {
+		expect(await detect(gitProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "origin/develop", detected: "origin/develop" },
+		});
+		expect(await detect(multiProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "origin/develop", detected: null },
+		});
+		expect(await detect(nonGitProjectId)).toEqual({
+			status: 200,
+			json: { resolved: "", detected: null },
+		});
+		expect(await detect("does-not-exist")).toEqual({
+			status: 404,
+			json: { error: "Project not found" },
+		});
 	});
 
 	it("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
