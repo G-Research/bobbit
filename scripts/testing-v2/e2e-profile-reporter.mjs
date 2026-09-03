@@ -258,10 +258,42 @@ function childActivity(root) {
 		...activity,
 		parseErrors: jsonLines.parseErrors,
 		artifacts: jsonLines.artifacts.length,
+		rawRecords: jsonLines.records,
 	};
 }
 
-function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts) {
+const RAW_GROUP_B_SPEC_FILES = new Set([
+	"tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts",
+]);
+
+function profiledGatewayOwnerIdentities(childRecords, gatewayCalls, completedOwnerPids) {
+	const starts = new Map(childRecords.filter((record) => record.type === "start" && record.id).map((record) => [record.id, record]));
+	const ends = new Map(childRecords.filter((record) => record.type === "end" && record.id).map((record) => [record.id, record]));
+	const identities = [];
+	for (const identity of childRecords.filter((record) => record.type === "child_identity" && record.id)) {
+		const start = starts.get(identity.id);
+		const end = ends.get(identity.id);
+		const pid = Number(identity.childPid);
+		const creationIdentity = String(identity.creationIdentity ?? "");
+		const startedAt = Number(start?.startedAt);
+		const endedAt = Number(end?.endedAt);
+		if (!Number.isInteger(pid) || pid <= 0 || !completedOwnerPids.has(pid)
+			|| !creationIdentity || creationIdentity !== String(start?.creationIdentity ?? "")
+			|| Number(identity.ownerPid) !== Number(start?.ownerPid)
+			|| !Number.isFinite(startedAt) || startedAt <= 0
+			|| !Number.isFinite(endedAt) || endedAt < startedAt
+			|| !gatewayCalls.some((call) => call.ownerPid === pid && call.startedAt >= startedAt && call.endedAt <= endedAt)) continue;
+		identities.push({ pid, creationIdentity, startedAt, endedAt });
+	}
+	return identities;
+}
+
+function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts, {
+	expectBundledRuntimeLoads = false,
+	ownerIdentities = [],
+	rawOwnerAllowance = 0,
+	eligibleTestsExist = false,
+} = {}) {
 	const intervals = [];
 	let malformed = 0;
 	const ownerCounts = new Map();
@@ -271,6 +303,8 @@ function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts) 
 		const startedAt = Number(record.startedAt);
 		const endedAt = Number(record.endedAt);
 		const durationMs = Number(record.durationMs);
+		const ownerIdentity = ownerIdentities.find((identity) => identity.pid === ownerPid
+			&& workerStartedAt >= identity.startedAt && endedAt <= identity.endedAt);
 		const valid = Number.isInteger(ownerPid) && ownerPid > 0
 			&& Number.isFinite(workerStartedAt) && workerStartedAt > 0 && workerStartedAt <= startedAt
 			&& Number.isFinite(startedAt) && startedAt > 0
@@ -281,13 +315,16 @@ function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts) 
 			&& (record.outcome === "success" || record.outcome === "error")
 			&& completedOwnerArtifacts.has(record.__artifact);
 		if (!valid) { malformed += 1; continue; }
-		ownerCounts.set(ownerPid, (ownerCounts.get(ownerPid) ?? 0) + 1);
+		const ownerKey = ownerIdentity?.creationIdentity ?? `pid:${ownerPid}`;
+		ownerCounts.set(ownerKey, (ownerCounts.get(ownerKey) ?? 0) + 1);
 		const firstGateway = gatewayCalls
-			.filter((call) => call.ownerPid === ownerPid)
+			.filter((call) => call.ownerPid === ownerPid && (!ownerIdentity
+				|| (call.startedAt >= ownerIdentity.startedAt && call.endedAt <= ownerIdentity.endedAt)))
 			.sort((a, b) => a.startedAt - b.startedAt)[0] ?? null;
 		intervals.push({
 			id: String(record.id ?? `${ownerPid}:e2e-runtime-load`),
 			ownerPid,
+			...(ownerIdentity ? { creationIdentity: ownerIdentity.creationIdentity } : {}),
 			workerStartedAt,
 			bundleIdentity: record.bundleIdentity,
 			mode: record.mode,
@@ -307,22 +344,42 @@ function runtimeLoadActivity(rawRecords, gatewayCalls, completedOwnerArtifacts) 
 		});
 	}
 	const duplicateOwners = [...ownerCounts.values()].filter((count) => count !== 1).length;
+	const errors = intervals.filter((record) => record.outcome === "error").length;
+	const successfulOwnerKeys = new Set(intervals.filter((record) => record.outcome === "success")
+		.map((record) => record.creationIdentity ?? `pid:${record.ownerPid}`));
+	// The reporter can identify profiled worker lifetimes from the parent spawn
+	// token and their loopback API calls. It cannot map the deliberately raw
+	// real-push project to one particular PID, so subtract that project's bounded
+	// one-worker allowance rather than falsely requiring a bundle record from it.
+	const expectedOwners = expectBundledRuntimeLoads && eligibleTestsExist
+		? Math.max(1, ownerIdentities.length - rawOwnerAllowance)
+		: 0;
+	const observedOwners = ownerIdentities.length > 0
+		? ownerIdentities.filter((identity) => successfulOwnerKeys.has(identity.creationIdentity)).length
+		: successfulOwnerKeys.size;
+	const missingOwners = Math.max(0, expectedOwners - observedOwners);
 	return {
+		expectation: expectBundledRuntimeLoads ? "bundled-group-b" : "none",
+		expectedOwners,
+		observedOwners,
+		missingOwners,
 		intervals: intervals.sort((a, b) => a.startedAt - b.startedAt),
 		records: intervals.length,
 		successes: intervals.filter((record) => record.outcome === "success").length,
-		errors: intervals.filter((record) => record.outcome === "error").length,
+		errors,
 		cumulativeMs: intervals.reduce((sum, record) => sum + record.durationMs, 0),
 		unjoinedGatewayRecords: intervals.filter((record) => !record.firstGateway).length,
-		incomplete: malformed + duplicateOwners,
+		incomplete: malformed + duplicateOwners + errors + missingOwners,
 	};
 }
 
-function gatewayActivity(root) {
+function gatewayActivity(root, { childRecords = [], group, tests = [], expectBundledRuntimeLoads = false } = {}) {
 	const artifacts = listArtifactFiles(root, [".json", ".jsonl"]);
 	const jsonLines = readJsonLines(root);
 	const ownerArtifacts = new Set(jsonLines.records.map((record) => record.__artifact));
-	const completedOwnerArtifacts = new Set(jsonLines.records.filter((record) => record.type === "owner_end").map((record) => record.__artifact));
+	const completedOwnerRecords = jsonLines.records.filter((record) => record.type === "owner_end");
+	const completedOwnerArtifacts = new Set(completedOwnerRecords.map((record) => record.__artifact));
+	const completedOwnerPids = new Set(completedOwnerRecords.map((record) => Number(record.ownerPid)).filter((pid) => Number.isInteger(pid) && pid > 0));
 	const rawRecords = jsonLines.records.filter((record) => record.type === "gateway_api");
 	for (const file of artifacts.filter((path) => path.endsWith(".json") && /gateway-api/i.test(path))) {
 		try {
@@ -348,10 +405,15 @@ function gatewayActivity(root) {
 		});
 	}
 	const intervals = [...unique.values()];
+	const ownerIdentities = profiledGatewayOwnerIdentities(childRecords, intervals, completedOwnerPids);
+	const normalizedFiles = new Set(tests.map((test) => posix(test.file)));
+	const rawOwnerAllowance = group === "B" && [...normalizedFiles].some((file) => RAW_GROUP_B_SPEC_FILES.has(file)) ? 1 : 0;
+	const eligibleTestsExist = group === "B" && [...normalizedFiles].some((file) => !RAW_GROUP_B_SPEC_FILES.has(file));
 	const runtimeLoads = runtimeLoadActivity(
 		jsonLines.records.filter((record) => record.type === "e2e_runtime_load"),
 		intervals,
 		completedOwnerArtifacts,
+		{ expectBundledRuntimeLoads, ownerIdentities, rawOwnerAllowance, eligibleTestsExist },
 	);
 	return {
 		intervals,
@@ -383,10 +445,16 @@ export function buildE2EProfileManifest({
 	tests,
 	childProfileDir,
 	hookProfileDir,
+	expectBundledRuntimeLoads = false,
 	createdAt = new Date().toISOString(),
 }) {
 	const child = childActivity(childProfileDir);
-	const hooks = gatewayActivity(hookProfileDir);
+	const hooks = gatewayActivity(hookProfileDir, {
+		childRecords: child.rawRecords,
+		group,
+		tests,
+		expectBundledRuntimeLoads: group === "B" && expectBundledRuntimeLoads,
+	});
 	const subprocesses = child.intervals;
 	const gatewayCalls = hooks.intervals;
 	const byFile = new Map();
@@ -507,6 +575,7 @@ export function refreshE2EProfileManifest(manifest, { childProfileDir, hookProfi
 		tests: manifest.attempts,
 		childProfileDir,
 		hookProfileDir,
+		expectBundledRuntimeLoads: manifest.hookActivity?.runtimeLoads?.expectation === "bundled-group-b",
 		createdAt: manifest.createdAt,
 	});
 }
@@ -554,6 +623,8 @@ export default class E2EProfileReporter {
 			tests: this.tests,
 			childProfileDir: process.env.BOBBIT_V2_CHILD_PROFILE_DIR,
 			hookProfileDir: process.env.BOBBIT_V2_HOOK_PROFILE_DIR,
+			expectBundledRuntimeLoads: process.env.BOBBIT_V2_E2E_PROFILE_GROUP === "B"
+				&& Boolean(process.env.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE?.trim()),
 		});
 		mkdirSync(dirname(output), { recursive: true });
 		const temporary = `${output}.tmp-${process.pid}`;

@@ -41,9 +41,9 @@ function writeLines(path: string, records: object[]): void {
 	writeFileSync(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
 }
 
-function attempt() {
+function attempt(file = "tests/e2e/api/example.api-e2e.spec.ts") {
 	return {
-		file: "tests/e2e/api/example.api-e2e.spec.ts",
+		file,
 		title: "example",
 		status: "passed",
 		retry: 0,
@@ -54,9 +54,33 @@ function attempt() {
 	};
 }
 
-function buildProfile(root: string) {
+function workerProcessRecords(pid: number, sequence: number) {
+	const id = `1:${sequence}`;
+	const startedAt = 900 + sequence;
+	const endedAt = 2_100 + sequence;
+	const creationIdentity = `${id}:${startedAt}`;
+	return [
+		{ type: "start", id, api: "spawn", executable: "node", ownerPid: 1, startedAt, creationIdentity },
+		{ type: "child_identity", id, ownerPid: 1, childPid: pid, creationIdentity },
+		{ type: "end", id, api: "spawn", executable: "node", ownerPid: 1, startedAt, endedAt, durationMs: endedAt - startedAt, outcome: "ok", creationIdentity },
+	];
+}
+
+function gatewayRecord(pid: number, sequence = 1) {
+	return { type: "gateway_api", id: `${pid}:${sequence}`, ownerPid: pid, startedAt: 1_300, endedAt: 1_325, durationMs: 25, method: "GET", path: "/api/health", status: 200 };
+}
+
+function runtimeLoadRecord(pid: number, outcome: "success" | "error" = "success") {
+	return {
+		type: "e2e_runtime_load", id: `${pid}:e2e-runtime-load`, ownerPid: pid,
+		workerStartedAt: 1_000, bundleIdentity: "run/key/entries/runtime.mjs", mode: "bundle",
+		startedAt: 1_100, endedAt: 1_150, durationMs: 50, outcome,
+	};
+}
+
+function buildProfile(root: string, options: { group?: "B" | "C"; tests?: ReturnType<typeof attempt>[]; expectBundledRuntimeLoads?: boolean } = {}) {
 	return buildE2EProfileManifest({
-		group: "B",
+		group: options.group ?? "B",
 		sha: SHA,
 		productBaselineSha: BASELINE_SHA,
 		instrumentationSha: SHA,
@@ -65,9 +89,10 @@ function buildProfile(root: string) {
 		arch: "x64",
 		node: process.version,
 		status: "passed",
-		tests: [attempt()],
+		tests: options.tests ?? [attempt()],
 		childProfileDir: join(root, "processes"),
 		hookProfileDir: join(root, "hooks"),
+		expectBundledRuntimeLoads: options.expectBundledRuntimeLoads ?? false,
 		createdAt: "2026-01-01T00:00:00.000Z",
 	});
 }
@@ -161,6 +186,56 @@ describe("E2E profiling completeness", () => {
 		expect(profile.hookActivity.runtimeLoads).toMatchObject({ records: 0, incomplete: 1 });
 		expect(profile.hookActivity.parseErrors).toBe(1);
 		expect(validateE2EProfileManifest(profile)).toContain("profile gateway hook telemetry must have no parse errors");
+	});
+
+	it("fails closed when an eligible bundled Group B owner writes gateway hooks but no runtime load", () => {
+		const root = tempRoot("e2e-profile-runtime-load-absent");
+		writeLines(join(root, "processes", "process-1.jsonl"), workerProcessRecords(10, 1));
+		writeLines(join(root, "hooks", "gateway-api-10.jsonl"), [gatewayRecord(10), { type: "owner_end", ownerPid: 10, endedAt: 2_000 }]);
+
+		const runtimeLoads = buildProfile(root, { expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads;
+		expect(runtimeLoads).toMatchObject({ expectation: "bundled-group-b", expectedOwners: 1, observedOwners: 0, missingOwners: 1, records: 0, incomplete: 1 });
+	});
+
+	it("detects one missing eligible owner among otherwise complete bundled workers", () => {
+		const root = tempRoot("e2e-profile-runtime-load-mixed");
+		writeLines(join(root, "processes", "process-1.jsonl"), [...workerProcessRecords(10, 1), ...workerProcessRecords(11, 2)]);
+		writeLines(join(root, "hooks", "gateway-api-10.jsonl"), [runtimeLoadRecord(10), gatewayRecord(10), { type: "owner_end", ownerPid: 10, endedAt: 2_000 }]);
+		writeLines(join(root, "hooks", "gateway-api-11.jsonl"), [gatewayRecord(11), { type: "owner_end", ownerPid: 11, endedAt: 2_000 }]);
+
+		const runtimeLoads = buildProfile(root, { expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads;
+		expect(runtimeLoads).toMatchObject({ expectedOwners: 2, observedOwners: 1, missingOwners: 1, successes: 1, errors: 0, incomplete: 1 });
+		expect(runtimeLoads.intervals[0].creationIdentity).toBe("1:1:901");
+	});
+
+	it("accepts one successful runtime load for every complete bundled worker identity", () => {
+		const root = tempRoot("e2e-profile-runtime-load-complete-owners");
+		writeLines(join(root, "processes", "process-1.jsonl"), [...workerProcessRecords(10, 1), ...workerProcessRecords(11, 2)]);
+		for (const pid of [10, 11]) writeLines(join(root, "hooks", `gateway-api-${pid}.jsonl`), [runtimeLoadRecord(pid), gatewayRecord(pid), { type: "owner_end", ownerPid: pid, endedAt: 2_000 }]);
+
+		expect(buildProfile(root, { expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads).toMatchObject({
+			expectedOwners: 2, observedOwners: 2, missingOwners: 0, successes: 2, errors: 0, incomplete: 0,
+		});
+	});
+
+	it("does not require runtime loads from the bounded raw Group B owner or Group C", () => {
+		const root = tempRoot("e2e-profile-runtime-load-ineligible");
+		writeLines(join(root, "processes", "process-1.jsonl"), [...workerProcessRecords(10, 1), ...workerProcessRecords(11, 2)]);
+		writeLines(join(root, "hooks", "gateway-api-10.jsonl"), [runtimeLoadRecord(10), gatewayRecord(10), { type: "owner_end", ownerPid: 10, endedAt: 2_000 }]);
+		writeLines(join(root, "hooks", "gateway-api-11.jsonl"), [gatewayRecord(11), { type: "owner_end", ownerPid: 11, endedAt: 2_000 }]);
+		const tests = [attempt(), attempt("tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts")];
+
+		expect(buildProfile(root, { tests, expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads).toMatchObject({ expectedOwners: 1, observedOwners: 1, incomplete: 0 });
+		expect(buildProfile(root, { group: "C", tests, expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads).toMatchObject({ expectation: "none", expectedOwners: 0, incomplete: 0 });
+	});
+
+	it("fails closed on a terminal bundled runtime-load error without affecting optional profiles", () => {
+		const root = tempRoot("e2e-profile-runtime-load-error");
+		writeLines(join(root, "processes", "process-1.jsonl"), workerProcessRecords(10, 1));
+		writeLines(join(root, "hooks", "gateway-api-10.jsonl"), [runtimeLoadRecord(10, "error"), gatewayRecord(10), { type: "owner_end", ownerPid: 10, endedAt: 2_000 }]);
+
+		expect(buildProfile(root, { expectBundledRuntimeLoads: true }).hookActivity.runtimeLoads).toMatchObject({ errors: 1, successes: 0, missingOwners: 1, incomplete: 2 });
+		expect(buildProfile(root).hookActivity.runtimeLoads).toMatchObject({ expectation: "none", expectedOwners: 0, missingOwners: 0, errors: 1, incomplete: 1 });
 	});
 
 	it("rejects unmatched children and absent or unflushed gateway hooks", () => {
