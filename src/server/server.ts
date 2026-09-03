@@ -79,7 +79,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
+import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ResolvedToolCatalogueEntry, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost, type InvokeRequest } from "./extension-host/module-host-worker.js";
@@ -88,7 +88,7 @@ import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaEr
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { PackLocalDataError, PackLocalDataResolver } from "./extension-host/pack-local-data.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
-import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
+import { resolvePackIdentity, resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import {
 	HostProjectReadInputError,
@@ -1005,14 +1005,15 @@ export function buildPiExtensionToolRows(contributions: readonly ResolvedPiExten
 }
 
 export function appendPiExtensionToolRows(tools: Array<Record<string, unknown>>, piRows: readonly Record<string, unknown>[]): void {
-	const byName = new Map(tools.map((tool) => [String(tool.name), tool]));
+	const byName = new Map(tools.map((tool) => [String(tool.name).toLowerCase(), tool]));
 	for (const row of piRows) {
 		const name = String(row.name ?? "");
 		if (!name) continue;
-		const existing = byName.get(name);
+		const identity = name.toLowerCase();
+		const existing = byName.get(identity);
 		if (!existing) {
 			tools.push({ ...row });
-			byName.set(name, tools[tools.length - 1]);
+			byName.set(identity, tools[tools.length - 1]);
 			continue;
 		}
 		const providers = Array.isArray(existing.providers) ? existing.providers : [];
@@ -2780,8 +2781,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
 	ck("stores-pre-tooldocs");
-	toolManager.generateDetailDocs(stateDir);
-	ck("generateDetailDocs");
 	// Extension host (design docs/design/extension-host.md §4b): the action
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
@@ -2872,6 +2871,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
+		getToolsDir: () => toolManager.getToolsDir(),
 		// ConfigCascade owns the builtin layer; expose only server overrides here.
 		getToolGroupPolicies: () => groupPolicyStore.getAllLocal(),
 	}, projectContextManager);
@@ -2881,6 +2881,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// tool exists at runtime but is missing from the cascade (surfacing as origin
 	// "mcp"). Production passes undefined ⇒ same dist default the constructor uses.
 	configCascade.setBuiltinPacksDir(resolveBuiltinPacksDir(config.builtinPacksDir));
+	// ConfigCascade/PackResolver chooses the YAML winner. ToolManager only hydrates
+	// that exact entry with runtime fields; the live provider keeps customization,
+	// marketplace, and activation changes visible without a second cache.
+	toolManager.setResolvedToolEntriesProvider(() => configCascade.resolveToolsEntries(undefined));
 	sessionManager.configCascade = configCascade;
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
@@ -2964,6 +2968,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+		ctx.toolManager.setResolvedToolEntriesProvider(() => configCascade.resolveToolsEntries(ctx.project.id));
 		// Keep the project store local-only. Builtin and server policies are
 		// composed at read time by ConfigCascade, preserving layer precedence.
 		ctx.toolGroupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
@@ -3302,6 +3307,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 		},
 	});
+	// Materialize startup detail docs only after the authoritative cascade and all
+	// of its live marketplace/activation inputs are wired.
+	toolManager.generateDetailDocs(stateDir);
+	ck("generateDetailDocs");
 
 	const staffManager = new StaffManager(projectContextManager, { commandRunner: gatewayDeps.commandRunner, remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
 	sessionManager.setStaffManager(staffManager);
@@ -5989,6 +5998,33 @@ async function handleApiRoute(
 		originPackId: r.originPackId ?? null,
 		originPackName: r.originPackName ?? null,
 	});
+	const toolOriginForScope = (scope: PackScope): "builtin" | "server" | "user" | "project" =>
+		scope === "global-user" ? "user" : scope;
+	/** Serialize runtime fields and provenance from one authoritative catalogue generation. */
+	const withResolvedToolOrigin = (
+		catalogueEntry: ResolvedToolCatalogueEntry,
+		projectId?: string,
+	): Record<string, unknown> => {
+		const tool = catalogueEntry.tool as unknown as Record<string, unknown>;
+		const resolved = catalogueEntry.resolved;
+		if (!resolved) return { ...tool, origin: tool.origin ?? "mcp" };
+		const market = resolved.origin.kind === "market";
+		const detail: Record<string, unknown> = {
+			...tool,
+			origin: toolOriginForScope(resolved.origin.scope),
+			...(resolved.shadows.length > 0
+				? { overrides: toolOriginForScope(resolved.shadows[resolved.shadows.length - 1].scope) }
+				: {}),
+			originPackId: market ? resolved.origin.id : null,
+			originPackName: market ? (resolved.origin.manifest?.name ?? null) : null,
+		};
+		if (market) {
+			const packId = resolvePackIdentity(catalogueEntry.location, catalogueEntry.tool.name).packId;
+			if (packId) detail.packId = packId;
+			if (packDeclaresLocalData(projectId, packId)) detail.hasLocalData = true;
+		}
+		return detail;
+	};
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
 		return cascadeRole ?? roleManager.getRole(roleId);
@@ -10299,21 +10335,25 @@ async function handleApiRoute(
 				diagnostics.push(row);
 			}
 		};
-		if (toolManager) add(toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>>);
-		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>> | undefined);
+		add(toolManager.getToolDiagnostics("server") as unknown as Array<Record<string, unknown>>);
+		add(configCascade.getToolDiagnostics(projectId) as unknown as Array<Record<string, unknown>>);
+		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics("project") as unknown as Array<Record<string, unknown>> | undefined);
 		return diagnostics;
 	};
 	const attachToolDiagnostics = (tools: Array<Record<string, unknown>>, diagnostics: Array<Record<string, unknown>>): void => {
 		if (diagnostics.length === 0) return;
 		for (const tool of tools) {
-			const name = typeof tool.name === "string" ? tool.name : undefined;
+			const name = typeof tool.name === "string" ? tool.name.toLowerCase() : undefined;
 			if (!name) continue;
-			const related = diagnostics.filter((diagnostic) => diagnostic.toolName === name || diagnostic.tool === name || diagnostic.name === name);
+			const related = diagnostics.filter((diagnostic) =>
+				[diagnostic.toolName, diagnostic.tool, diagnostic.name]
+					.some((candidate) => typeof candidate === "string" && candidate.toLowerCase() === name),
+			);
 			if (related.length > 0) tool.diagnostics = related;
 		}
 	};
 
-	// GET /api/tools — list available agent tools (with cascade origin)
+	// GET /api/tools — list the exact scoped runtime catalogue and dynamic overlays.
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		// Require an explicit projectId. First-party UI/test helpers pass
 		// `headquarters` for the server scope; normalize it before any downstream
@@ -10322,36 +10362,29 @@ async function handleApiRoute(
 		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 		const effectiveConfigProjectId = projectScope.effectiveProjectId;
-		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
-		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
-		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
-		// the renderer/action endpoints + /api/ext/contributions use) so a tool
-		// renderer's `host.ui.openPanel({panelId})` resolves the panel WITHIN its own
-		// pack (panel ids are pack-local) via /api/ext/packs/:packId/panels/:panelId.
-		// Empty/absent for builtins. Tool-scoped origin identity only — NOT a
-		// pack-scoped contribution field.
-		const toolPackTm = resolveActionToolManager(
-			toolManager,
-			projectScope.context?.toolManager,
-		);
-		const tools: Array<Record<string, unknown>> = resolved.map(r => {
-			const out = withOrigin(r as any);
-			if (r.originPackId && toolPackTm) {
-				const packId = resolvePackIdentityForTool(toolPackTm, r.item.name).packId;
-				if (packId) {
-					out.packId = packId;
-					if (packDeclaresLocalData(effectiveConfigProjectId, packId)) out.hasLocalData = true;
-				}
-			}
-			return out;
-		});
-		// Include MCP/external tools not covered by the config cascade
-		if (toolManager) {
-			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: effectiveConfigProjectId }))) {
-				if (!resolvedNames.has(t.name)) {
-					tools.push({ ...t, origin: t.origin ?? "mcp" });
-				}
+		const scopedToolManager = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
+		const scopedContext = piExtensionToolScopeContext({ projectId: effectiveConfigProjectId });
+		const scopedCatalogue = scopedToolManager.getResolvedToolCatalogue(scopedContext);
+		const tools: Array<Record<string, unknown>> = [];
+		const seen = new Set<string>();
+		for (const tool of scopedCatalogue.tools) {
+			const identity = tool.name.toLowerCase();
+			if (seen.has(identity)) continue;
+			const entry = scopedCatalogue.byName.get(identity);
+			if (!entry) continue;
+			tools.push(withResolvedToolOrigin(entry, effectiveConfigProjectId));
+			seen.add(identity);
+		}
+		// MCP registrations are process-level dynamic overlays. Project managers own
+		// their scoped YAML/Pi winners, while the server manager owns these external
+		// rows; only append identities that are not YAML entries in either manager.
+		if (scopedToolManager !== toolManager) {
+			const serverCatalogue = toolManager.getResolvedToolCatalogue(scopedContext);
+			for (const external of serverCatalogue.tools) {
+				const identity = external.name.toLowerCase();
+				if (seen.has(identity) || serverCatalogue.byName.get(identity)?.resolved) continue;
+				tools.push({ ...external, origin: external.origin ?? "mcp" });
+				seen.add(identity);
 			}
 		}
 		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId)));
@@ -10367,51 +10400,32 @@ async function handleApiRoute(
 		const name = decodeURIComponent(toolMatch[1]);
 
 		if (req.method === "GET") {
-			// Resolve via the selected project's toolManager so project-scope
-			// market-pack tools are visible. Headquarters normalizes to the
-			// server/global scope; missing or unknown projectId never falls back.
+			// Resolve through the same scoped manager used for activation. Headquarters
+			// normalizes to server/global scope; unknown projects never fall back.
 			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 			const effectiveConfigProjectId = projectScope.effectiveProjectId;
-			const tm = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
-			const fallbackTm = fallbackToolManagerForConfig(projectScope.context?.configDir ?? bobbitConfigDir());
+			const scopedToolManager = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
+			const scopedContext = piExtensionToolScopeContext({ projectId: effectiveConfigProjectId });
 			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));
-			const piTool = piRows.find((row) => row.name === name);
-			const tool = tm.getToolByName(name) ?? fallbackTm?.getToolByName(name);
-			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
-			// Merge in cascade origin metadata so the detail payload carries the same
-			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
-			// Without this, the tools edit page replaces the cascade list item with the
-			// raw detail and a market-pack tool loses its origin badge + read-only state.
-			const cascadeEntry = configCascade.resolveTools(effectiveConfigProjectId).find(r => r.item.name === name);
-			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
-			if (cascadeEntry && tool) {
-				const withMeta = withOrigin(cascadeEntry as any);
-				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
-				// tools edit page keeps the same own-pack identity for a market-pack tool.
-				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
-				const detail: Record<string, unknown> = {
-					...tool,
-					origin: withMeta.origin,
-					...(withMeta.overrides ? { overrides: withMeta.overrides } : {}),
-					originPackId: withMeta.originPackId,
-					originPackName: withMeta.originPackName,
-					...(packId ? { packId } : {}),
-					...(packDeclaresLocalData(effectiveConfigProjectId, packId) ? { hasLocalData: true } : {}),
-				};
-				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
-			} else if (tool) {
-				const detail: Record<string, unknown> = { ...tool };
-				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
-			} else {
-				const detail: Record<string, unknown> = { ...(piTool as Record<string, unknown>) };
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
+			const identity = name.toLowerCase();
+			const piTool = piRows.find((row) => String(row.name ?? "").toLowerCase() === identity);
+			const scopedCatalogue = scopedToolManager.getResolvedToolCatalogue(scopedContext);
+			const scopedEntry = scopedCatalogue.byName.get(identity);
+			let catalogueEntry = scopedEntry;
+			if (!catalogueEntry && scopedToolManager !== toolManager) {
+				const serverEntry = toolManager.getResolvedToolCatalogue(scopedContext).byName.get(identity);
+				if (serverEntry && !serverEntry.resolved) catalogueEntry = serverEntry;
 			}
+			const tool = catalogueEntry?.tool;
+			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
+			const detail = catalogueEntry
+				? withResolvedToolOrigin(catalogueEntry, effectiveConfigProjectId)
+				: { ...(piTool as Record<string, unknown>) };
+			if (tool && piTool) appendPiExtensionToolRows([detail], [piTool]);
+			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
+			attachToolDiagnostics([detail], toolDiagnostics);
+			json(detail);
 			return;
 		}
 

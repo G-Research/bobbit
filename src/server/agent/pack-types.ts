@@ -126,9 +126,18 @@ export type PackLayout = "defaults-tree" | "skills-flat" | "commands-flat";
  * `name` is the merge key (unique within a type); `item` is the parsed
  * entity (`Role | ToolInfo | SlashSkill | ...`).
  */
+export interface EntitySource {
+	/** Absolute parent directory containing the entity type subtree. */
+	baseDir: string;
+	/** Absolute source file when the loader can identify it. */
+	filePath?: string;
+}
+
 export interface LoadedEntity<T> {
 	name: string;
 	item: T;
+	/** Physical source retained through winner selection for exact runtime hydration. */
+	source?: EntitySource;
 }
 
 /** One entry in the single ordered pack list (low→high priority). */
@@ -182,6 +191,8 @@ export interface ResolvedEntity<T> {
 	item: T;
 	/** The winning pack. */
 	origin: PackEntry;
+	/** Physical source of the winning definition, when known. */
+	source?: EntitySource;
 	/** Lower-priority packs that defined the same name (oldest→newest). */
 	shadows: PackEntry[];
 }

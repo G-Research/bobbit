@@ -1,23 +1,26 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
-import { profile } from "./profiling.js";
-import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { PackResolver, ToolLoader } from "./pack-resolver.js";
+import type { EntityType, LoadedEntity, PackEntry, ResolvedEntity } from "./pack-types.js";
+import { computeRendererKind } from "./tool-contributions.js";
+import {
+	attachToolRuntimeDefinition,
+	getToolRuntimeDefinition,
+	toolRuntimeDefinitionFromData,
+	type ToolProvider,
+	type ToolRuntimeDefinition,
+	type ToolWithRuntimeDefinition,
+} from "./tool-definition.js";
 import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+export type { ToolProvider } from "./tool-definition.js";
 
-export interface ToolProvider {
-	type: 'builtin' | 'bobbit-extension' | 'mcp' | 'pi-extension';
-	tool?: string;       // for builtin
-	extension?: string;  // for bobbit-extension
-	server?: string;     // for mcp
-	mcpTool?: string;    // for mcp
-	providerKey?: string; // for pi-extension
-}
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface ScopedToolContext {
 	projectId?: string;
@@ -74,31 +77,10 @@ export interface InactiveToolContribution {
 	groupDir: string;
 }
 
-/** Base tool definition loaded from YAML */
-interface BaseToolInfo {
-	name: string;
-	description: string;
-	summary?: string;
-	group: string;
-	renderer?: string;
-	docs?: string;
-	detail_docs?: string;
-	provider?: ToolProvider;
-	/** Grant policy loaded from YAML; undefined means "not configured" */
-	grantPolicy?: GrantPolicy;
-	/** Optional positional parameter names (trailing `?` marks optional). Drives compact `(args)` rendering. */
-	params?: string[];
-	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
-	groupDir: string;
-	/** Absolute path to the YAML file on disk. */
-	filePath: string;
-	/** Absolute path to the tools/ parent directory where this tool was found. */
-	baseDir: string;
-	/** Extension-host contribution points parsed from the tool YAML (design §2). */
-	contributions: ToolContributions;
-}
+/** Base tool definition loaded from YAML. */
+type BaseToolInfo = ToolRuntimeDefinition;
 
-export interface ToolInfo {
+export interface ToolInfo extends ToolWithRuntimeDefinition {
 	name: string;
 	description: string;
 	group: string;
@@ -127,6 +109,28 @@ export interface ToolInfo {
 	diagnostics?: ToolExtensionDiagnostic[];
 }
 
+/** One entry in a read-consistent catalogue generation. Dynamic overlays have no YAML provenance. */
+export interface ResolvedToolCatalogueEntry {
+	tool: ToolInfo;
+	resolved?: ResolvedEntity<ToolInfo>;
+	location?: { baseDir: string; groupDir: string };
+}
+
+/** A live, per-call catalogue generation; callers may reuse it throughout one request. */
+export interface ResolvedToolCatalogue {
+	tools: ToolInfo[];
+	byName: ReadonlyMap<string, ResolvedToolCatalogueEntry>;
+}
+
+type HydratedToolSnapshot = Array<{
+	entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
+	tool: BaseToolInfo;
+}>;
+
+interface ToolReadGeneration {
+	value?: HydratedToolSnapshot;
+}
+
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
@@ -141,15 +145,6 @@ function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" |
 		hasActions: !!c.actions,
 		actionNames: c.actions?.names,
 	};
-}
-
-function parseParamsField(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const out: string[] = [];
-	for (const v of value) {
-		if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
-	}
-	return out.length > 0 ? out : undefined;
 }
 
 import { bobbitConfigDir } from "../bobbit-dir.js";
@@ -181,9 +176,11 @@ function defaultBuiltinToolsDir(): string {
  */
 function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
+	const seen = new Set<string>();
 
 	try {
-		const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+		const entries = fs.readdirSync(toolsDir, { withFileTypes: true })
+			.sort((a, b) => a.name.localeCompare(b.name));
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
@@ -191,30 +188,17 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
-				const files = fs.readdirSync(groupPath, { withFileTypes: true });
+				const files = fs.readdirSync(groupPath, { withFileTypes: true })
+					.sort((a, b) => a.name.localeCompare(b.name));
 				for (const file of files) {
 					if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
 					const filePath = path.join(groupPath, file.name);
 					try {
 						const raw = fs.readFileSync(filePath, "utf-8");
 						const data = parse(raw);
-						if (data && typeof data === "object" && data.name) {
-							tools.push({
-								name: data.name,
-								description: data.description || "",
-								summary: data.summary,
-								group: data.group || groupDir,
-								renderer: data.renderer,
-								docs: data.docs,
-								detail_docs: data.detail_docs,
-								provider: data.provider,
-								grantPolicy: data.grantPolicy,
-								params: parseParamsField(data.params),
-								groupDir,
-								filePath,
-								baseDir,
-								contributions: parseContributions(data, filePath),
-							});
+						if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
+							seen.add(data.name.toLowerCase());
+							tools.push(toolRuntimeDefinitionFromData(data, groupDir, groupDir, baseDir, filePath));
 						}
 					} catch (err) {
 						console.error(`[tool-manager] Failed to load tool ${filePath}:`, err);
@@ -232,23 +216,9 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
-				if (data && typeof data === "object" && data.name) {
-					tools.push({
-						name: data.name,
-						description: data.description || "",
-						summary: data.summary,
-						group: data.group || "Other",
-						renderer: data.renderer,
-						docs: data.docs,
-						detail_docs: data.detail_docs,
-						provider: data.provider,
-						grantPolicy: data.grantPolicy,
-						params: parseParamsField(data.params),
-						groupDir: "",
-						filePath,
-						baseDir,
-						contributions: parseContributions(data, filePath),
-					});
+				if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
+					seen.add(data.name.toLowerCase());
+					tools.push(toolRuntimeDefinitionFromData(data, "Other", "", baseDir, filePath));
 				}
 			} catch (err) {
 				console.error(`[tool-manager] Failed to load tool ${entry.name}:`, err);
@@ -271,6 +241,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 // of a false miss is one full scan; the cost of a false hit would be a
 // stale tool list, so we err on the side of re-scanning.
 const _scanCache = new Map<string, { fingerprint: string; tools: BaseToolInfo[] }>();
+let _toolResolutionGeneration = 0;
 
 function directoryFingerprint(dir: string): string | undefined {
 	try {
@@ -315,6 +286,7 @@ function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 /** Test/maintenance hook: drop the scan cache. */
 export function __resetToolScanCache(): void {
 	_scanCache.clear();
+	_toolResolutionGeneration++;
 	__resetToolExtensionPreflightDiagnostics();
 }
 
@@ -390,6 +362,56 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
 }
 
 /**
+ * Shared pre-merge loader for mutable user tool scopes. Invalid extension
+ * definitions are omitted before PackResolver sees them, allowing the valid
+ * lower winner and provenance to reappear consistently.
+ */
+export function loadValidatedUserTools(
+	toolsDir: string,
+	scope: "server" | "global-user" | "project",
+	options: { omitHistoricalAgentSnapshot?: boolean } = {},
+): { tools: ToolInfo[]; diagnostics: ToolExtensionDiagnostic[] } {
+	let scanned = scanToolsDir(toolsDir, toolsDir);
+	if (options.omitHistoricalAgentSnapshot && isHistoricalUnmodifiedAgentGroup(toolsDir)) {
+		scanned = scanned.filter((tool) => tool.groupDir !== "agent");
+	}
+	const groupDiagnostics = collectInvalidConfigGroupExtensionDiagnostics(toolsDir, scanned);
+	const toolDiagnostics = collectInvalidConfigToolDiagnostics(scanned);
+	const seen = new Set<string>();
+	const diagnostics = [...groupDiagnostics, ...toolDiagnostics]
+		.map((diagnostic) => ({ ...diagnostic, scope }))
+		.filter((diagnostic) => {
+			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	for (const diagnostic of diagnostics) logToolExtensionDiagnostic(diagnostic);
+
+	const invalidGroups = new Set(groupDiagnostics.map((diagnostic) => diagnostic.groupDir));
+	const invalidNames = new Set(toolDiagnostics.map((diagnostic) => diagnostic.toolName.toLowerCase()));
+	const valid = scanned.filter((tool) =>
+		!invalidNames.has(tool.name.toLowerCase())
+		&& !toolDependsOnInvalidGroupExtension(tool, invalidGroups),
+	);
+	return {
+		tools: valid.map((tool) => attachToolRuntimeDefinition({
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			detail_docs: tool.detail_docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+			...contributionFields(tool),
+			grantPolicy: tool.grantPolicy,
+			params: tool.params,
+		}, tool)),
+		diagnostics,
+	};
+}
+
+/**
  * Load tool definitions over an ordered cascade of layers (low→high priority):
  *
  *   builtin (lowest)  <  market-pack roots (low→high)  <  config-level toolsDir
@@ -399,14 +421,11 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
  * that powers `/api/tools` (design §3.2). Runtime resolution and the config
  * API therefore return the SAME tool set for any pack arrangement (finding #1).
  *
- * The ONE legacy exception, preserved byte-identical, is the builtin ↔ user
- * `toolsDir` pair: if the user layer defines a group, it shadows that ENTIRE
- * same-named group in the BUILTIN layer (the pre-cascade two-layer behavior
- * pinned by `tests/e2e/tools-cascade.spec.ts` etc.). This whole-group replace
- * is identical to a by-name merge in practice because customizing a builtin
- * tool copies the WHOLE group into `toolsDir` first (see `updateToolMetadata`).
+ * Every layer is a pure **by-name overlay**: a partial higher-priority group
+ * leaves unrelated lower-priority siblings available. This is the same merge
+ * contract used by ConfigCascade in production.
  *
- * Market-pack layers are pure **by-name overlays**: they add new tools and may
+ * Market-pack layers add new tools and may
  * override an individual same-named tool, but NEVER shadow the rest of a
  * builtin/user group. So installing a market pack that touches a shared group
  * (e.g. `tools/shell/extra.yaml`) can never drop builtin tools like `bash`.
@@ -416,7 +435,7 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
  * docs/design/pack-based-marketplace.md §3.2 / finding #1.
  */
 function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
-	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
+	return resolveStandaloneToolEntries(toolsDir, builtinToolsDir, marketRoots).map((entry) => entry.item);
 }
 
 // Exact shipped Agent-group snapshots that metadata customization copied into
@@ -448,76 +467,80 @@ function isHistoricalUnmodifiedAgentGroup(toolsDir: string): boolean {
 	}
 }
 
-function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
-	// Ordered layers, low→high priority. The builtin layer is lowest, the
-	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit
-	// in between (caller orders them server < global-user < project, design §3.2).
-	// Each market layer carries its pack-activation `disabledTools` set so a
-	// disabled pack tool is dropped at winner selection — mirroring the
-	// ConfigCascade activation filter so runtime and `/api/tools` never split-brain.
-	const layers: Array<{ dir: string; isBuiltin: boolean; disabledTools?: Set<string> }> = [];
-	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
-	for (const r of marketRoots) {
-		// Whole inactive/default-disabled packs remain classified for diagnostics via
-		// getInactiveToolContribution(), but must not register any active providers.
-		if (r.inactiveReason) continue;
-		layers.push({
-			dir: r.dir,
-			isBuiltin: false,
-			disabledTools: r.disabledTools && r.disabledTools.length > 0 ? new Set(r.disabledTools) : undefined,
+function resolvedEntrySource(tool: BaseToolInfo): LoadedEntity<unknown> {
+	return {
+		name: tool.name,
+		item: tool,
+		source: { baseDir: tool.baseDir, filePath: tool.filePath },
+	};
+}
+
+/**
+ * Adapt legacy standalone roots into the authoritative PackResolver primitive.
+ * Production managers receive ConfigCascade entries instead; this path exists for
+ * focused tests and embedders which construct ToolManager directly.
+ */
+function resolveStandaloneToolEntries(
+	toolsDir: string,
+	builtinToolsDir?: string,
+	marketRoots: MarketToolRoot[] = [],
+): ResolvedEntity<BaseToolInfo>[] {
+	const entries: PackEntry[] = [];
+	if (builtinToolsDir) {
+		const tools = scanToolsDirCached(builtinToolsDir, builtinToolsDir);
+		entries.push({
+			id: "builtin",
+			kind: "builtin",
+			scope: "builtin",
+			path: path.dirname(builtinToolsDir),
+			readOnly: true,
+			layout: "defaults-tree",
+			preloaded: { tools: tools.map(resolvedEntrySource) },
 		});
 	}
-	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
-	const userIdx = layers.length - 1;
 
-	const invalidUserGroupExtensions = new Set<string>();
-	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir)) {
-		logToolExtensionDiagnostic(diagnostic);
-		invalidUserGroupExtensions.add(diagnostic.groupDir);
+	marketRoots.forEach((root, index) => {
+		if (root.inactiveReason) return;
+		const tools = scanToolsDirCached(root.dir, root.dir);
+		entries.push({
+			id: `legacy:market:${index}`,
+			kind: "legacy-implicit",
+			scope: "project",
+			path: path.dirname(root.dir),
+			readOnly: true,
+			layout: "defaults-tree",
+			preloaded: { tools: tools.map(resolvedEntrySource) },
+		});
+	});
+
+	let userTools = scanToolsDirCached(toolsDir, toolsDir);
+	if (isHistoricalUnmodifiedAgentGroup(toolsDir)) {
+		userTools = userTools.filter((tool) => tool.groupDir !== "agent");
 	}
-	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
-	const ignoreHistoricalAgentGroup = isHistoricalUnmodifiedAgentGroup(toolsDir);
-	const scanned = layers.map((l, idx) => {
-		let tools = scanToolsDirCached(l.dir, l.dir);
-		if (idx !== userIdx) return tools;
-		if (ignoreHistoricalAgentGroup) tools = tools.filter((tool) => tool.groupDir !== "agent");
-		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
-		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
+	const invalidGroupExtensions = new Set<string>();
+	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir, userTools)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidGroupExtensions.add(diagnostic.groupDir);
+	}
+	userTools = filterInvalidConfigTools(userTools, invalidGroupExtensions);
+	entries.push({
+		id: "user:project",
+		kind: "user",
+		scope: "project",
+		path: path.dirname(toolsDir),
+		readOnly: false,
+		layout: "defaults-tree",
+		preloaded: { tools: userTools.map(resolvedEntrySource) },
 	});
 
-	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
-	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
-	// Market layers neither own nor are shadowed by groups — they overlay by
-	// tool NAME only (design §3.2 / finding #1). If any config tool/extension in
-	// the group failed preflight, disable whole-group shadowing so lower-priority
-	// builtins can still provide per-tool fallbacks while valid config tools keep
-	// winning by name.
-	const userGroups = new Set<string>();
-	for (const t of scanned[userIdx]) if (t.groupDir && !invalidUserToolGroups.has(t.groupDir)) userGroups.add(t.groupDir);
-
-	// Resolve the winner per tool name (higher layer wins — matches the
-	// PackResolver), but emit in first-seen low→high order so prompt/doc output
-	// order is stable (builtins first).
-	const winner = new Map<string, BaseToolInfo>();
-	const order: string[] = [];
-	scanned.forEach((tools, idx) => {
-		const isBuiltin = layers[idx].isBuiltin;
-		const disabledTools = layers[idx].disabledTools;
-		for (const t of tools) {
-			// Builtin tool in a group the user owns ⇒ whole-group shadowed.
-			if (isBuiltin && t.groupDir && userGroups.has(t.groupDir)) continue;
-			// pack-schema-v1 §7: a market-pack tool disabled via pack_activation
-			// drops out, so a lower-priority same-name tool (an earlier market
-			// layer or the builtin) becomes the resolved winner — exactly as the
-			// ConfigCascade does for the `/api/tools` listing. Builtins are never
-			// toggleable (no disabledTools set), so they are unaffected.
-			if (disabledTools && disabledTools.has(t.name)) continue;
-			if (!winner.has(t.name)) order.push(t.name);
-			winner.set(t.name, t); // higher layer overwrites lower by name
-		}
-	});
-
-	return order.map((n) => winner.get(n)!);
+	const filter = (entry: PackEntry, _type: EntityType, name: string): boolean => {
+		if (!entry.id.startsWith("legacy:market:")) return true;
+		const index = Number(entry.id.slice("legacy:market:".length));
+		const disabled = marketRoots[index]?.disabledTools ?? [];
+		const identity = name.toLowerCase();
+		return !disabled.some((candidate) => candidate.toLowerCase() === identity);
+	};
+	return new PackResolver(entries, [new ToolLoader()], filter).resolve<BaseToolInfo>("tools");
 }
 
 /** Recursively copy a directory, overwriting matching files while retaining extras. */
@@ -551,8 +574,8 @@ export function copyToolGroupWithSharedDependencies(sourceToolsDir: string, targ
 
 /**
  * Manages tool definitions and metadata.
- * Tool definitions are loaded from tools/<group>/*.yaml on every read.
- * Supports a two-layer cascade: builtinToolsDir (read-only) → toolsDir (overrides).
+ * Production reads hydrate ConfigCascade's authoritative PackResolver winners;
+ * standalone construction adapts its roots through that same resolver.
  */
 export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
@@ -568,10 +591,155 @@ export class ToolManager {
 	 * See docs/design/pack-based-marketplace.md §3.2 / finding #1.
 	 */
 	private marketRootsProvider?: () => Array<string | MarketToolRoot>;
+	private resolvedToolEntriesProvider?: () => ResolvedEntity<ToolInfo>[];
+	/** Per-async-operation immutable YAML generation; concurrent setups never share it. */
+	private readonly toolReadGeneration = new AsyncLocalStorage<ToolReadGeneration>();
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
+	}
+
+	/**
+	 * Bind this manager to ConfigCascade's live authoritative YAML winners.
+	 * The provider is deliberately evaluated on every effective read so file,
+	 * customization, marketplace, and activation changes need no second cache.
+	 */
+	setResolvedToolEntriesProvider(provider: () => ResolvedEntity<ToolInfo>[]): void {
+		this.resolvedToolEntriesProvider = provider;
+	}
+
+	private resolvedEntries(): Array<ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>> {
+		if (this.resolvedToolEntriesProvider) return this.resolvedToolEntriesProvider();
+		return resolveStandaloneToolEntries(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+	}
+
+	private hydrateResolvedEntry(
+		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>,
+		sourceBaseDir: string | undefined,
+	): BaseToolInfo {
+		// Production loaders attach the full parsed definition to the exact item
+		// before PackResolver selects its winner. Runtime projections consume that
+		// same parse rather than fingerprinting and parsing the winner's whole root.
+		const embedded = getToolRuntimeDefinition(entry.item);
+		if (embedded) return embedded;
+
+		// Standalone ToolManager adapters already resolve full BaseToolInfo items.
+		const direct = entry.item as Partial<BaseToolInfo>;
+		if (typeof direct.baseDir === "string" && typeof direct.filePath === "string" && direct.contributions) {
+			return direct as BaseToolInfo;
+		}
+
+		// Compatibility for embedders that provide a source-aware ToolInfo without
+		// symbol metadata: hydrate only the authoritative file, never its root and
+		// never a same-name candidate from another layer.
+		const exactFile = entry.source?.filePath;
+		if (sourceBaseDir && exactFile) {
+			try {
+				const data = parse(fs.readFileSync(exactFile, "utf-8"));
+				if (data && typeof data === "object" && typeof data.name === "string") {
+					const relativeDir = path.relative(sourceBaseDir, path.dirname(exactFile));
+					const groupDir = relativeDir === "" ? "" : relativeDir;
+					return toolRuntimeDefinitionFromData(data, groupDir || "Other", groupDir, sourceBaseDir, exactFile);
+				}
+			} catch { /* preserve the authoritative catalogue item below */ }
+		}
+
+		// Preloaded adapters without a physical file retain catalogue fields. No
+		// alternate file or precedence layer is consulted.
+		const item = entry.item as ToolInfo;
+		return {
+			name: item.name,
+			description: item.description,
+			group: item.group,
+			renderer: item.rendererFile,
+			docs: item.docs,
+			detail_docs: item.detail_docs,
+			grantPolicy: item.grantPolicy,
+			params: item.params,
+			groupDir: "",
+			filePath: exactFile ?? "",
+			baseDir: sourceBaseDir ?? "",
+			contributions: { renderer: item.rendererFile, reserved: {} },
+		};
+	}
+
+	/**
+	 * Reuse one authoritative generation across a bounded synchronous operation.
+	 * Nested reads inherit the caller's generation; unrelated operations stay live.
+	 */
+	withToolReadGenerationSync<T>(operation: () => T): T {
+		if (this.toolReadGeneration.getStore()) return operation();
+		return this.toolReadGeneration.run({}, operation);
+	}
+
+	/**
+	 * Capture one immutable generation across awaited setup work. Async-local
+	 * ownership prevents one session's snapshot from leaking into concurrent API
+	 * reads or another session setup.
+	 */
+	withToolReadGeneration<T>(operation: () => Promise<T>): Promise<T> {
+		if (this.toolReadGeneration.getStore()) return operation();
+		return this.toolReadGeneration.run({}, operation);
+	}
+
+	/** One read-consistent, source-aware YAML snapshot. */
+	private resolveHydratedSnapshot(): HydratedToolSnapshot {
+		const generation = this.toolReadGeneration.getStore();
+		if (generation?.value) return generation.value;
+
+		const entries = this.resolvedEntries();
+		const value = entries.map((entry) => {
+			const configuredBaseDir = entry.source?.baseDir
+				|| (entry.origin.path ? path.join(entry.origin.path, "tools") : undefined);
+			const sourceBaseDir = configuredBaseDir ? path.resolve(configuredBaseDir) : undefined;
+			return {
+				entry,
+				tool: this.hydrateResolvedEntry(entry, sourceBaseDir),
+			};
+		});
+		if (generation) generation.value = value;
+		return value;
+	}
+
+	private resolveYamlSnapshot(): BaseToolInfo[] {
+		return this.resolveHydratedSnapshot().map(({ tool }) => tool);
+	}
+
+	private diagnosticEntry(
+		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>,
+		hydrated: BaseToolInfo,
+	): ResolvedEntity<ToolInfo> {
+		return {
+			...(entry as ResolvedEntity<ToolInfo>),
+			source: {
+				baseDir: hydrated.baseDir,
+				...(hydrated.filePath ? { filePath: hydrated.filePath } : {}),
+			},
+		};
+	}
+
+	/** Return the authoritative winner record for provenance diagnostics. */
+	getResolvedToolEntry(name: string): ResolvedEntity<ToolInfo> | undefined {
+		const identity = name.toLowerCase();
+		const resolved = this.resolveHydratedSnapshot()
+			.find(({ entry }) => entry.name.toLowerCase() === identity);
+		return resolved ? this.diagnosticEntry(resolved.entry, resolved.tool) : undefined;
+	}
+
+	private toolInfoFromBase(tool: BaseToolInfo): ToolInfo {
+		return attachToolRuntimeDefinition({
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			detail_docs: tool.detail_docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+			...contributionFields(tool),
+			grantPolicy: tool.grantPolicy,
+			params: tool.params,
+		}, tool);
 	}
 
 	private configGroupHasInvalidExtension(groupDir: string): boolean {
@@ -691,6 +859,26 @@ export class ToolManager {
 	}
 
 	/**
+	 * Resolve the extension required by the exact winning provider. Named tools
+	 * never fall back merely because their group happens to contain extension.ts.
+	 * Builtin bash is the intentional exception: Bobbit supplies it through the
+	 * support extension beside the winning YAML definition.
+	 */
+	resolveToolExtensionPath(toolName: string, fallbackFilename?: string): string | undefined {
+		const identity = toolName.toLowerCase();
+		const tool = this.resolveYamlSnapshot().find((candidate) => candidate.name.toLowerCase() === identity);
+		if (!tool?.provider) return undefined;
+		let filename: string | undefined;
+		if (tool.provider.type === "bobbit-extension") {
+			filename = tool.provider.extension;
+		} else if (tool.provider.type === "builtin" && tool.provider.tool === "bash") {
+			filename = fallbackFilename ?? "extension.ts";
+		}
+		if (!filename) return undefined;
+		return path.resolve(tool.baseDir, tool.groupDir, filename);
+	}
+
+	/**
 	 * Delete a tool group from the config-level tools directory, reverting to the builtin version.
 	 * Returns true if the group was deleted, false if it didn't exist.
 	 */
@@ -699,9 +887,10 @@ export class ToolManager {
 		try {
 			if (fs.statSync(configGroup).isDirectory()) {
 				fs.rmSync(configGroup, { recursive: true, force: true });
-				// Invalidate the scan cache (PR #388) so the next read sees the
-				// reverted state on Windows where mtime resolution is coarse.
+				// Invalidate every manager's current work-unit snapshot: a server-level
+				// revert can change the winner of every project manager.
 				_scanCache.delete(this.toolsDir);
+				_toolResolutionGeneration++;
 				return true;
 			}
 		} catch { /* not found */ }
@@ -839,67 +1028,39 @@ export class ToolManager {
 	 * Used by the config cascade to determine which tools are server/project overrides.
 	 */
 	getLocalTools(): ToolInfo[] {
-		// Scan only the config-level tools dir — no builtins. Apply the same
-		// invalid direct group-extension filtering as runtime resolution so the
-		// config cascade and /api/tools do not advertise overrides that launch will skip.
-		let scanned = scanToolsDir(this.toolsDir, this.toolsDir);
-		if (isHistoricalUnmodifiedAgentGroup(this.toolsDir)) {
-			scanned = scanned.filter((tool) => tool.groupDir !== "agent");
-		}
-		const invalidGroupExtensions = new Set<string>();
-		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
-			logToolExtensionDiagnostic(diagnostic);
-			invalidGroupExtensions.add(diagnostic.groupDir);
-		}
-		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
-		return tools.map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			group: tool.group,
-			docs: tool.docs,
-			detail_docs: tool.detail_docs,
-			hasRenderer: !!tool.renderer,
-			rendererFile: tool.renderer,
-			...contributionFields(tool),
-			grantPolicy: tool.grantPolicy,
-			params: tool.params,
-		}));
+		return loadValidatedUserTools(this.toolsDir, "project", { omitHistoricalAgentSnapshot: true }).tools;
 	}
 
 	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
-	getToolDiagnostics(): ToolExtensionDiagnostic[] {
-		const diagnostics = [
-			...collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir),
-			...collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir)),
-		];
-		const seen = new Set<string>();
-		const unique = diagnostics.filter((diagnostic) => {
-			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
-			if (seen.has(key)) return false;
-			seen.add(key);
-			return true;
-		});
-		for (const diagnostic of unique) logToolExtensionDiagnostic(diagnostic);
-		return unique;
+	getToolDiagnostics(scope: "server" | "project" = "project"): ToolExtensionDiagnostic[] {
+		return loadValidatedUserTools(this.toolsDir, scope, { omitHistoricalAgentSnapshot: true }).diagnostics;
 	}
 
-	/** Returns all tools, re-scanning the YAML directory on every call. */
-	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const result: ToolInfo[] = tools.map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			group: tool.group,
-			docs: tool.docs,
-			detail_docs: tool.detail_docs,
-			hasRenderer: !!tool.renderer,
-			rendererFile: tool.renderer,
-			...contributionFields(tool),
-			grantPolicy: tool.grantPolicy,
-			params: tool.params,
-		}));
+	/**
+	 * Resolve YAML winners, provenance, locations, and dynamic overlays once.
+	 * The result is intentionally not cached across calls: request handlers can
+	 * reuse one generation without hiding file or activation changes from the next.
+	 */
+	getResolvedToolCatalogue(scopedContext?: ScopedToolContext): ResolvedToolCatalogue {
+		const hydrated = this.resolveHydratedSnapshot();
+		const result: ToolInfo[] = [];
+		const byName = new Map<string, ResolvedToolCatalogueEntry>();
+		for (const { entry, tool: base } of hydrated) {
+			const tool = this.toolInfoFromBase(base);
+			const identity = tool.name.toLowerCase();
+			result.push(tool);
+			byName.set(identity, {
+				tool,
+				resolved: this.diagnosticEntry(entry, base),
+				location: { baseDir: base.baseDir, groupDir: base.groupDir },
+			});
+		}
 		for (const ext of this.externalTools.values()) {
-			result.push({
+			const identity = ext.name.toLowerCase();
+			// Dynamic registrations are fallback definitions. A YAML winner owns the
+			// semantic identity everywhere, including case-only collisions.
+			if (byName.has(identity)) continue;
+			const tool: ToolInfo = {
 				name: ext.name,
 				description: ext.description,
 				group: ext.group,
@@ -909,53 +1070,36 @@ export class ToolManager {
 				rendererFile: undefined,
 				grantPolicy: undefined,
 				params: undefined,
-			});
+			};
+			result.push(tool);
+			byName.set(identity, { tool });
 		}
-		const byLower = new Map<string, ToolInfo>();
-		for (const tool of result) byLower.set(tool.name.toLowerCase(), tool);
+
+		const overlayTargets = new Map<string, ToolInfo>();
+		for (const tool of result) overlayTargets.set(tool.name.toLowerCase(), tool);
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
-			const existing = byLower.get(entry.runtimeName.toLowerCase());
+			const identity = entry.runtimeName.toLowerCase();
+			const existing = overlayTargets.get(identity);
 			if (existing) {
 				existing.providers = [...(existing.providers ?? []), ...entry.providers];
 				continue;
 			}
-			const info = this.piToolInfoFromGroup(entry);
-			result.push(info);
-			byLower.set(info.name.toLowerCase(), info);
+			const tool = this.piToolInfoFromGroup(entry);
+			result.push(tool);
+			overlayTargets.set(identity, tool);
+			if (!byName.has(identity)) byName.set(identity, { tool });
 		}
-		return result;
+		return { tools: result, byName };
 	}
 
-	/** Returns a single tool's full detail, or undefined if not found. Case-insensitive lookup. */
+	/** Returns all tools from one fresh, read-consistent catalogue generation. */
+	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
+		return this.getResolvedToolCatalogue(scopedContext).tools;
+	}
+
+	/** Returns a single canonical catalogue winner. Case-insensitive lookup. */
 	getToolByName(name: string, scopedContext?: ScopedToolContext): ToolInfo | undefined {
-		const nameLower = name.toLowerCase();
-		// Check external tools (case-insensitive)
-		for (const ext of this.externalTools.values()) {
-			if (ext.name.toLowerCase() === nameLower) {
-				const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined, providers: pi?.providers };
-			}
-		}
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
-		if (base) {
-			const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-			return {
-				name: base.name,
-				description: base.description,
-				group: base.group,
-				docs: base.docs,
-				detail_docs: base.detail_docs,
-				hasRenderer: !!base.renderer,
-				rendererFile: base.renderer,
-				...contributionFields(base),
-				grantPolicy: base.grantPolicy,
-				params: base.params,
-				providers: pi?.providers,
-			};
-		}
-		const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
-		return pi ? this.piToolInfoFromGroup(pi) : undefined;
+		return this.getResolvedToolCatalogue(scopedContext).byName.get(name.toLowerCase())?.tool;
 	}
 
 	/**
@@ -964,7 +1108,7 @@ export class ToolManager {
 	 * Called at startup and rematerialized alongside prompt docs when definitions change.
 	 */
 	generateDetailDocs(stateDir: string): void {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		this.materializeDetailDocs(stateDir, tools);
 	}
 
@@ -1004,15 +1148,16 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		if (stateDir) this.materializeDetailDocs(stateDir, tools);
+		const requested = toolNames ? new Set(toolNames.map((name) => name.toLowerCase())) : undefined;
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();
 		const included = new Set<string>();
 
 		for (const tool of tools) {
-			if (toolNames && !toolNames.includes(tool.name)) continue;
+			if (requested && !requested.has(tool.name.toLowerCase())) continue;
 			const group = tool.group;
 			const summary = tool.summary ?? tool.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
@@ -1020,19 +1165,21 @@ export class ToolManager {
 			included.add(tool.name.toLowerCase());
 		}
 
-		// Include external tools (e.g. MCP) — no params, no inlined docs.
+		// Include external fallback tools only when YAML does not own the identity.
 		for (const ext of this.externalTools.values()) {
-			if (toolNames && !toolNames.includes(ext.name)) continue;
+			const identity = ext.name.toLowerCase();
+			if (included.has(identity)) continue;
+			if (requested && !requested.has(identity)) continue;
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
 			grouped.get(group)!.entries.push({ name: ext.name, summary });
-			included.add(ext.name.toLowerCase());
+			included.add(identity);
 		}
 
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
 			if (included.has(entry.runtimeName.toLowerCase())) continue;
-			if (toolNames && !toolNames.includes(entry.runtimeName)) continue;
+			if (requested && !requested.has(entry.runtimeName.toLowerCase())) continue;
 			const info = this.piToolInfoFromGroup(entry);
 			if (!grouped.has(info.group)) grouped.set(info.group, { groupDir: '', entries: [] });
 			grouped.get(info.group)!.entries.push({ name: info.name, summary: info.description });
@@ -1083,22 +1230,21 @@ export class ToolManager {
 		return sections.join("\n");
 	}
 
-	/** Returns the provider info for a tool, or undefined if not found. */
+	/** Returns the canonical winner's provider, or undefined if not found. */
 	getToolProvider(name: string, scopedContext?: ScopedToolContext): ToolProvider | undefined {
-		const ext = this.externalTools.get(name);
+		const identity = name.toLowerCase();
+		const base = this.resolveYamlSnapshot().find((tool) => tool.name.toLowerCase() === identity);
+		if (base) return base.provider;
+		const ext = [...this.externalTools.values()].find((candidate) => candidate.name.toLowerCase() === identity);
 		if (ext) return ext.provider;
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const base = tools.find((t) => t.name === name);
-		if (base?.provider) return base.provider;
-		const pi = this.scopedPiToolGroups(scopedContext).get(name.toLowerCase());
-		const provider = pi?.providers[0];
+		const provider = this.scopedPiToolGroups(scopedContext).get(identity)?.providers[0];
 		return provider ? { type: "pi-extension", providerKey: provider.providerKey } : undefined;
 	}
 
 	/**
 	 * Resolve the WINNING tool's on-disk location + extension-host contribution
-	 * metadata, sourced from `loadToolDefinitions()` so it honors the SAME pack
-	 * precedence/shadowing every other resolution uses (design §4b). Unlike
+	 * metadata, sourced from the hydrated authoritative snapshot so it honors the
+	 * SAME pack precedence/shadowing every other resolution uses (design §4b). Unlike
 	 * `getToolProviders()` (which gates on `provider:` for the MCP/extension
 	 * activation path), this returns location for ANY scanned tool — a pack tool
 	 * declaring `renderer:`/`actions:` needs NO `provider:` to be served/dispatched.
@@ -1113,9 +1259,10 @@ export class ToolManager {
 		actionNames?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
-		if (!base) return undefined;
+		const match = this.resolveHydratedSnapshot()
+			.find(({ entry }) => entry.name.toLowerCase() === nameLower);
+		if (!match) return undefined;
+		const base = match.tool;
 		const c = base.contributions;
 		return {
 			baseDir: base.baseDir,
@@ -1130,18 +1277,25 @@ export class ToolManager {
 		};
 	}
 
-	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
+	/** Returns all canonical providers while preserving each winner's display spelling. */
 	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
+		const identities = new Set<string>();
 		for (const tool of tools) {
+			identities.add(tool.name.toLowerCase());
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
 		}
 		for (const [name, ext] of this.externalTools) {
+			const identity = name.toLowerCase();
+			if (identities.has(identity)) continue;
+			identities.add(identity);
 			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
 		}
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
-			if (map.has(entry.runtimeName)) continue;
+			const identity = entry.runtimeName.toLowerCase();
+			if (identities.has(identity)) continue;
+			identities.add(identity);
 			const provider = entry.providers[0];
 			map.set(entry.runtimeName, { type: "pi-extension", providerKey: provider.providerKey, groupDir: '', baseDir: '' });
 		}
@@ -1185,11 +1339,11 @@ export class ToolManager {
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(filePath, doc.toString(), "utf-8");
-			// Invalidate the mtime-keyed scan cache. Without this, a PUT followed
-			// by an immediate GET can return stale data on Windows where mtime
-			// resolution is coarse (1–2s) and the directory fingerprint matches
-			// the pre-write state. PR #388 introduced the cache; PUT must drop it.
+			// Invalidate every manager's current work-unit snapshot: a server-level
+			// customization can change the winner of every project manager. The scan
+			// cache is also dropped so same-length writes remain immediately visible.
 			_scanCache.delete(this.toolsDir);
+			_toolResolutionGeneration++;
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);

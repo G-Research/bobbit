@@ -26,6 +26,7 @@ import {
 	projectSandboxVolumeCreateArgs,
 	projectSandboxVolumeNames,
 	SANDBOX_STATE_MOUNTS,
+	sandboxStateMountHostPath,
 	validatedE2ERunId,
 	type PackLocalDataMountPlan,
 } from "./docker-args.js";
@@ -36,7 +37,7 @@ import {
 	trustedAgentSessionsRoots,
 } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
-import { toDockerPath } from "./rpc-bridge.js";
+import { resolveUserToolSandboxMounts, toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -52,6 +53,10 @@ const DOCKER_BIN = "docker";
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
+
+function projectUserToolsRoot(projectDir: string): string {
+	return path.join(projectDir, ".bobbit", "config", "tools");
+}
 
 export const SESSION_RUNTIME_ROLE_LABEL = "bobbit-session-runtime";
 export const SESSION_RUNTIME_ROLE_VERSION = "2";
@@ -160,6 +165,10 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
+}
+
+export interface UserToolMountExpectation {
+	projectUserToolsRoot: string;
 }
 
 export interface SessionPreviewMountExpectation extends StateDirMountExpectation {
@@ -278,16 +287,37 @@ export function getAgentDirMountStaleness(
 	return { stale: false };
 }
 
+/** Require exactly one read-only bind for every ordinary user-tool scope. */
+export function getUserToolMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: UserToolMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	for (const contract of resolveUserToolSandboxMounts(expected.projectUserToolsRoot)) {
+		const matching = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === contract.containerPath);
+		if (matching.length !== 1) {
+			return { stale: true, reason: `${matching.length ? "duplicate" : "missing"} ${contract.scope} user-tools mount ${contract.containerPath}` };
+		}
+		const actual = matching[0];
+		if (actual.Type !== "bind" || !mountSourceMatches(actual.Source, contract.hostPath)) {
+			return { stale: true, reason: `${contract.scope} user-tools mount ${contract.containerPath} has the wrong host source` };
+		}
+		if (!isMountReadOnly(actual)) {
+			return { stale: true, reason: `${contract.scope} user-tools mount ${contract.containerPath} is writable` };
+		}
+	}
+	return { stale: false };
+}
+
 export function getStateDirMountStaleness(
 	mounts: DockerMountInfo[] | unknown,
 	expected: StateDirMountExpectation & { sessionId?: string },
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
-	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
+	for (const stateMount of SANDBOX_STATE_MOUNTS) {
+		const { sub, readOnly } = stateMount;
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = sub === "sessions" && expected.sessionId
-			? sessionStateSessionsRoot(expected.stateDir, expected.sessionId)
-			: path.join(expected.stateDir, sub);
+		const hostPath = sandboxStateMountHostPath(stateMount, expected.stateDir, expected.sessionId);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
@@ -1672,6 +1702,7 @@ export class ProjectSandbox {
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
 			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
+			projectUserToolsRoot: projectUserToolsRoot(this.options.projectDir),
 			label: projectId,
 			labelPrefix: "bobbit-project",
 			additionalLabels: e2eRunId ? { "bobbit-e2e-run": e2eRunId } : undefined,
@@ -2008,7 +2039,12 @@ export class ProjectSandbox {
 				env: DOCKER_ENV,
 			});
 			const mounts = JSON.parse(stdout.trim() || "[]") as DockerMountInfo[];
-			const result = getStateDirMountStaleness(mounts, expected);
+			const stateResult = getStateDirMountStaleness(mounts, expected);
+			const result = stateResult.stale
+				? stateResult
+				: getUserToolMountStaleness(mounts, {
+					projectUserToolsRoot: projectUserToolsRoot(this.options.projectDir),
+				});
 			if (result.stale && result.reason) {
 				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
 			}
@@ -2074,6 +2110,7 @@ export class ProjectSandbox {
 			image,
 			workspaceDir: "",
 			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
+			projectUserToolsRoot: projectUserToolsRoot(this.options.projectDir),
 			additionalLabels: runtimeLabels(projectId, sessionId, this.e2eRunId),
 			e2eRunId: this.e2eRunId ?? "",
 			projectId,
@@ -2164,6 +2201,9 @@ export class ProjectSandbox {
 			modelsJsonExists,
 		}).stale) return false;
 		if (getStateDirMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
+		if (getUserToolMountStaleness(inspection.Mounts, {
+			projectUserToolsRoot: projectUserToolsRoot(this.options.projectDir),
+		}).stale) return false;
 		if (this.options.resolvePackLocalDataMounts) {
 			const expected = await this._resolvePackLocalDataMounts();
 			if (getPackLocalDataMountStaleness(inspection.Mounts, expected).stale) return false;

@@ -16,6 +16,11 @@ import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { BOBBIT_PACK_LOCAL_DATA_ENV } from "./pack-local-data-runtime.js";
+import {
+	materializeToolExtensionAdapter,
+	TOOL_EXTENSION_ADAPTER_STATE_DIR,
+	TOOL_EXTENSION_TARGETS_ENV,
+} from "./tool-extension-activation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -26,6 +31,36 @@ export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 export const SERVER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-server";
 export const GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-global-user";
 export const PROJECT_MARKET_PACKS_CONTAINER_DIR = "/market-packs-project";
+/** Stable mounts for ordinary user-authored tool definitions and provider modules. */
+export const GLOBAL_USER_TOOLS_CONTAINER_DIR = "/tools-global-user";
+export const PROJECT_USER_TOOLS_CONTAINER_DIR = "/tools-project";
+
+export interface UserToolSandboxMount {
+	scope: "server" | "global-user" | "project";
+	hostPath: string;
+	containerPath: string;
+}
+
+/**
+ * Authoritative ordinary user-tool mount contract. Docker creation, path
+ * translation, and stale-container checks all consume this exact declaration.
+ * The project root is explicit because a sandbox runtime cwd is normally a
+ * container-only `/workspace[-wt]` path.
+ */
+export function resolveUserToolSandboxMounts(projectUserToolsRoot?: string): UserToolSandboxMount[] {
+	const mounts: UserToolSandboxMount[] = [
+		{ scope: "server", hostPath: TOOLS_DIR, containerPath: "/tools" },
+		{
+			scope: "global-user",
+			hostPath: path.join(scopePaths("global-user", os.homedir()).userPackRoot, "tools"),
+			containerPath: GLOBAL_USER_TOOLS_CONTAINER_DIR,
+		},
+	];
+	if (projectUserToolsRoot) {
+		mounts.push({ scope: "project", hostPath: projectUserToolsRoot, containerPath: PROJECT_USER_TOOLS_CONTAINER_DIR });
+	}
+	return mounts;
+}
 
 /**
  * Redact sensitive env vars from Docker arg arrays for logging.
@@ -123,6 +158,8 @@ export interface RpcBridgeOptions {
 	containerId?: string;
 	/** Host project marketplace pack root mounted as /market-packs-project in named-volume sandbox mode. */
 	projectMarketPacksRoot?: string;
+	/** Host project user-tools root; independent of the container runtime cwd. */
+	projectUserToolsRoot?: string;
 	/** Enabled Marketplace pi extensions passed as --extension; used for sandbox remap and runtime diagnostics. */
 	piExtensions?: RuntimePiExtensionInfo[];
 	/** Receives runtime/remap diagnostics observed after extension handoff. */
@@ -594,15 +631,26 @@ export class RpcBridge {
 
 		// When computeToolActivationArgs runs, it adds --no-extensions and explicitly
 		// loads needed extensions (shell + _builtins + others). For sessions that
-		// don't go through tool activation (no role, fallback path), force-load
-		// shell/extension.ts (bash + bash_bg) and _builtins/extension.ts (file
-		// tools) so the agent has its baseline toolset.
+		// don't carry that marker, retain the fixed raw builtin compatibility path
+		// only when no manager exists. A manager-backed session must filter the exact
+		// authoritative bash winner so a shared extension cannot register losing
+		// sibling tools such as bash_bg.
 		if (!args.includes("--no-extensions")) {
-			const bashExtPath = this.options.toolManager
-				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
-				: path.join(TOOLS_DIR, "shell", "extension.ts");
-			if (!args.includes(bashExtPath)) {
-				args.push("--extension", bashExtPath);
+			if (this.options.toolManager) {
+				const bashTargetPath = this.options.toolManager.resolveToolExtensionPath("bash", "extension.ts");
+				if (bashTargetPath) {
+					const adapter = materializeToolExtensionAdapter({
+						targetPath: bashTargetPath,
+						allowedToolNames: ["bash"],
+					});
+					if (!args.includes(adapter.adapterPath)) args.push("--extension", adapter.adapterPath);
+					this.mergeToolExtensionTarget(adapter.adapterId, adapter.targetUrl);
+				} else {
+					console.warn("[rpc-bridge] Authoritative bash winner has no loadable extension; raw group fallback is disabled");
+				}
+			} else {
+				const bashExtPath = path.join(TOOLS_DIR, "shell", "extension.ts");
+				if (!args.includes(bashExtPath)) args.push("--extension", bashExtPath);
 			}
 			const builtinsExtPath = this.options.toolManager
 				? this.options.toolManager.getExtensionPath("_builtins", "extension.ts")
@@ -1007,6 +1055,14 @@ export class RpcBridge {
 	 * Spawn an agent process inside an already-running pool container via docker exec.
 	 * The container already has all bind mounts and env vars configured.
 	 */
+	private mergeToolExtensionTarget(adapterId: string, targetUrl: string): void {
+		const existing = parseToolExtensionTargets(this.options.env?.[TOOL_EXTENSION_TARGETS_ENV]);
+		this.options.env = {
+			...this.options.env,
+			[TOOL_EXTENSION_TARGETS_ENV]: JSON.stringify({ ...existing, [adapterId]: targetUrl }),
+		};
+	}
+
 	private spawnDockerExec(containerId: string, _cliPath: string, agentArgs: string[]): ChildProcess {
 		if (!this.options.sessionId || this.options.env?.BOBBIT_SESSION_ID !== this.options.sessionId) {
 			throw new Error("Sandbox runtime is missing its trusted session owner");
@@ -1027,6 +1083,10 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
 		execArgs.push(...packLocalDataDockerExecArgs(this.options.env));
+		const toolExtensionTargets = this.options.env?.[TOOL_EXTENSION_TARGETS_ENV];
+		if (toolExtensionTargets) {
+			execArgs.push("-e", `${TOOL_EXTENSION_TARGETS_ENV}=${remapToolExtensionTargetsForContainer(toolExtensionTargets, this.containerRemapOptions())}`);
+		}
 		if (this.options.gatewayToken) {
 			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}
@@ -1039,7 +1099,7 @@ export class RpcBridge {
 		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
 		if (this.options.sandboxCredentials) {
 			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key === TOOL_EXTENSION_TARGETS_ENV) continue;
 				execArgs.push("-e", `${key}=${value}`);
 			}
 		}
@@ -1072,16 +1132,20 @@ export class RpcBridge {
 	 * Remap agent CLI args from host paths to container paths.
 	 * All sandbox sessions use pool containers with session-prompts/ mounted.
 	 */
-	private remapArgsForContainer(agentArgs: string[]): string[] {
-		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths.
-		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
-		const remapOpts = {
-			builtinToolsDir,
+	private containerRemapOptions(): HostPathToContainerOptions {
+		return {
+			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
 			projectBase: this.options.cwd,
 			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+			projectUserToolsRoot: this.options.projectUserToolsRoot,
 			sessionId: this.options.sessionId,
 			sessionStateDir: this.options.sessionStateDir,
 		};
+	}
+
+	private remapArgsForContainer(agentArgs: string[]): string[] {
+		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths.
+		const remapOpts = this.containerRemapOptions();
 		const remappedArgs: string[] = [];
 
 		for (let i = 0; i < agentArgs.length; i++) {
@@ -1133,21 +1197,13 @@ export class RpcBridge {
 	}
 
 	private recordPiExtensionLoadFailureFromStderr(line: string): void {
-		const extension = matchPiExtensionRuntimeFailure(line, this.options.piExtensions ?? [], {
-			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
-			projectBase: this.options.cwd,
-			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
-		});
+		const extension = matchPiExtensionRuntimeFailure(line, this.options.piExtensions ?? [], this.containerRemapOptions());
 		if (!extension) return;
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${line}`);
 	}
 
 	private recordPiExtensionLoadFailureFromEvent(event: any): void {
-		const extension = matchPiExtensionStructuredRuntimeFailure(event, this.options.piExtensions ?? [], {
-			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
-			projectBase: this.options.cwd,
-			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
-		});
+		const extension = matchPiExtensionStructuredRuntimeFailure(event, this.options.piExtensions ?? [], this.containerRemapOptions());
 		if (!extension) return;
 		const rawMessage = typeof event?.message === "string" ? event.message : typeof event?.error === "string" ? event.error : JSON.stringify(event);
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${rawMessage}`);
@@ -1283,6 +1339,8 @@ export interface HostPathToContainerOptions {
 	builtinToolsDir?: string;
 	projectBase?: string;
 	projectMarketPacksRoot?: string;
+	/** Explicit host root mounted at /tools-project; never infer it from a container cwd. */
+	projectUserToolsRoot?: string;
 	sessionId?: string;
 	sessionStateDir?: string;
 }
@@ -1303,6 +1361,11 @@ function joinContainerPath(containerPrefix: string, relative: string): string {
 	return clean ? `${containerPrefix}/${clean}` : containerPrefix;
 }
 
+function projectBaseIsContainerPath(projectBase: string | undefined): boolean {
+	return projectBase === "/workspace" || projectBase?.startsWith("/workspace/") === true
+		|| projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/") === true;
+}
+
 function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: string): MountMapping[] {
 	const mappings: MountMapping[] = [
 		{
@@ -1314,8 +1377,7 @@ function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: 
 			hostPath: scopePaths("global-user", os.homedir()).marketPacksRoot,
 		},
 	];
-	const projectBaseIsContainerPath = projectBase === "/workspace" || projectBase?.startsWith("/workspace/") || projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/");
-	const projectHostRoot = projectMarketPacksRoot ?? (projectBase && !projectBaseIsContainerPath ? scopePaths("project", projectBase).marketPacksRoot : undefined);
+	const projectHostRoot = projectMarketPacksRoot ?? (projectBase && !projectBaseIsContainerPath(projectBase) ? scopePaths("project", projectBase).marketPacksRoot : undefined);
 	if (projectHostRoot) {
 		mappings.push({
 			containerPrefix: PROJECT_MARKET_PACKS_CONTAINER_DIR,
@@ -1342,12 +1404,25 @@ function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
  *
  * Accepts optional builtinToolsDir to handle cascade-resolved builtin paths.
  */
+function projectUserToolsRootFromOptions(opts: MountTableOptions): string | undefined {
+	if (opts.projectUserToolsRoot) return opts.projectUserToolsRoot;
+	// SessionManager already preserves the registered project's market-pack host
+	// root before replacing cwd with /workspace-wt. Both roots are siblings in
+	// the same narrow config directory, so this remains independent of cwd.
+	if (opts.projectMarketPacksRoot) return path.join(path.dirname(opts.projectMarketPacksRoot), "tools");
+	if (opts.projectBase && !projectBaseIsContainerPath(opts.projectBase)) {
+		return path.join(scopePaths("project", opts.projectBase).userPackRoot, "tools");
+	}
+	return undefined;
+}
+
 function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
 	const agentSessionsDir = opts.sessionId ? sessionTranscriptRoot(opts.sessionId) : activeAgentSessionsDir();
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
 	const builtinPacksDir = resolveBuiltinPacksDir();
+	const userToolMounts = resolveUserToolSandboxMounts(projectUserToolsRootFromOptions(opts));
 
 	// Order matters: most specific prefixes first so /home/node/.bobbit/agent/sessions
 	// matches before a hypothetical /home/node/.bobbit/agent would.
@@ -1369,13 +1444,21 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
 		{ containerPrefix: "/bobbit-state/aigw-dns-guard", hostPath: path.join(stateDir, "aigw-dns-guard") },
-		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
+		{ containerPrefix: `/bobbit-state/${TOOL_EXTENSION_ADAPTER_STATE_DIR}`, hostPath: path.join(stateDir, TOOL_EXTENSION_ADAPTER_STATE_DIR) },
+		...userToolMounts.map((mount) => ({
+			containerPrefix: mount.containerPath,
+			hostPath: mount.hostPath,
+		})),
 	];
 
-	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
+	// Add builtin tools dir mapping (for cascade-resolved builtin paths). User
+	// mount declaration order stays server → global-user → project so identical
+	// physical roots retain established lower-scope attribution.
 	if (opts.builtinToolsDir) {
-		// Insert before /tools so /tools-builtin matches first
-		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: opts.builtinToolsDir });
+		table.splice(table.length - userToolMounts.length, 0, {
+			containerPrefix: "/tools-builtin",
+			hostPath: opts.builtinToolsDir,
+		});
 	}
 
 	return table;
@@ -1411,12 +1494,112 @@ export function tryHostPathToContainer(hostPath: string, opts: MountTableOptions
 	const normalized = normalizePathForPrefix(hostPath);
 	for (const { containerPrefix, hostPath: hp } of buildMountTable({ builtinToolsDir: BUILTIN_TOOLS_DIR, ...opts })) {
 		const normalizedHost = normalizePathForPrefix(hp);
-		if (isSameOrChildPath(normalized, normalizedHost)) {
+		const windowsPath = /^[A-Za-z]:\//.test(normalized) || /^[A-Za-z]:\//.test(normalizedHost);
+		const comparablePath = windowsPath ? normalized.toLowerCase() : normalized;
+		const comparableHost = windowsPath ? normalizedHost.toLowerCase() : normalizedHost;
+		if (isSameOrChildPath(comparablePath, comparableHost)) {
 			const relative = normalized.substring(normalizedHost.length);
 			return joinContainerPath(containerPrefix, relative);
 		}
 	}
 	return null;
+}
+
+const MAX_TOOL_EXTENSION_TARGETS_ENV_LENGTH = 256 * 1024;
+const MAX_TOOL_EXTENSION_TARGET_COUNT = 1024;
+
+function parseToolExtensionTargets(raw: string | undefined): Record<string, string> {
+	if (!raw) return {};
+	if (raw.length > MAX_TOOL_EXTENSION_TARGETS_ENV_LENGTH) {
+		throw new Error(`[rpc-bridge] ${TOOL_EXTENSION_TARGETS_ENV} exceeds ${MAX_TOOL_EXTENSION_TARGETS_ENV_LENGTH} bytes`);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error(`[rpc-bridge] ${TOOL_EXTENSION_TARGETS_ENV} must be a JSON object`);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`[rpc-bridge] ${TOOL_EXTENSION_TARGETS_ENV} must be a JSON object`);
+	}
+	const entries = Object.entries(parsed);
+	if (entries.length > MAX_TOOL_EXTENSION_TARGET_COUNT) {
+		throw new Error(`[rpc-bridge] ${TOOL_EXTENSION_TARGETS_ENV} contains more than ${MAX_TOOL_EXTENSION_TARGET_COUNT} targets`);
+	}
+	const targets: Record<string, string> = Object.create(null) as Record<string, string>;
+	for (const [adapterId, target] of entries) {
+		if (!/^[A-Za-z0-9._-]{1,128}$/.test(adapterId) || typeof target !== "string" || !target) {
+			throw new Error(`[rpc-bridge] ${TOOL_EXTENSION_TARGETS_ENV} contains an invalid adapter target`);
+		}
+		targets[adapterId] = target;
+	}
+	return targets;
+}
+
+function toolExtensionTargetHostPath(target: string): string {
+	if (/^file:/i.test(target)) {
+		let url: URL;
+		try {
+			url = new URL(target);
+		} catch {
+			throw new Error("target is not a valid file URL");
+		}
+		if (url.protocol !== "file:") throw new Error("target URL must use file:");
+		if (url.search || url.hash) throw new Error("target file URL must not contain a query or fragment");
+		if (url.hostname && url.hostname.toLowerCase() !== "localhost") {
+			throw new Error("target file URL must not name a remote host");
+		}
+		// Decode explicitly using POSIX URL-path semantics so a gateway can validate
+		// both Windows and POSIX aliases independent of its own host OS. Encoded path
+		// separators are rejected rather than being allowed to change mount identity.
+		if (/%2f|%5c/i.test(url.pathname)) throw new Error("target file URL contains an encoded path separator");
+		let hostPath: string;
+		try {
+			hostPath = decodeURIComponent(url.pathname);
+		} catch {
+			throw new Error("target is not a valid local file URL");
+		}
+		if (/^\/[A-Za-z]:\//.test(hostPath)) hostPath = hostPath.slice(1);
+		return hostPath;
+	}
+	if (path.isAbsolute(target) || target.startsWith("/") || /^[A-Za-z]:[/\\]/.test(target)) return target;
+	throw new Error("target must be an absolute path or file URL");
+}
+
+function containerFileUrl(containerPath: string): string {
+	const url = new URL("file:///");
+	url.pathname = containerPath;
+	return url.href;
+}
+
+function boundedTarget(value: string): string {
+	return value.replace(/[\r\n\t]+/g, " ").slice(0, 240);
+}
+
+/** Remap immutable adapter targets before they cross into a Docker sandbox. */
+export function remapToolExtensionTargetsForContainer(
+	raw: string,
+	opts: HostPathToContainerOptions = {},
+): string {
+	const targets = parseToolExtensionTargets(raw);
+	const remapped: Record<string, string> = Object.create(null) as Record<string, string>;
+	for (const [adapterId, target] of Object.entries(targets)) {
+		let hostPath: string;
+		try {
+			hostPath = toolExtensionTargetHostPath(target);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : "invalid target";
+			throw new Error(`[rpc-bridge] Cannot activate filtered adapter ${adapterId.slice(0, 32)} in the sandbox: ${reason}`);
+		}
+		const containerPath = tryHostPathToContainer(hostPath, opts);
+		if (!containerPath) {
+			throw new Error(
+				`[rpc-bridge] Cannot activate filtered adapter ${adapterId.slice(0, 32)} in the sandbox: target is outside mounted tool roots (${boundedTarget(target)}). Check the winning tool provider path and recreate the sandbox.`,
+			);
+		}
+		remapped[adapterId] = containerFileUrl(containerPath);
+	}
+	return JSON.stringify(remapped);
 }
 
 export function hostPathToContainer(hostPath: string, opts: MountTableOptions = {}): string {

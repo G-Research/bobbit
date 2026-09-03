@@ -18,6 +18,8 @@ export interface ToolExtensionDiagnostic {
 	extensionPath: string;
 	path?: string;
 	sourcePath?: string;
+	/** Mutable configuration scope which supplied the rejected definition. */
+	scope?: "server" | "global-user" | "project";
 	message: string;
 	skipped: true;
 }

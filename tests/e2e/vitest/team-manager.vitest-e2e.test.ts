@@ -72,7 +72,28 @@ function createMockGoal(overrides: Partial<MockGoal> = {}): MockGoal {
 	};
 }
 
-function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any {
+interface MockTeamToolManager {
+	resolveToolExtensionPath(toolName: string, fallbackFilename?: string): string | undefined;
+}
+
+function createWinningTeamSpawnToolManager(extensionPath: string) {
+	const winningTool = {
+		name: "team_spawn",
+		provider: { type: "bobbit-extension", extension: "extension.ts" },
+	};
+	return {
+		winningTool,
+		resolveToolExtensionPath: vi.fn((toolName: string) =>
+			toolName === winningTool.name && winningTool.provider.type === "bobbit-extension"
+				? extensionPath
+				: undefined),
+	};
+}
+
+function createMockSessionManager(
+	goals: Map<string, MockGoal> = new Map(),
+	toolManagerForGoal?: (goalId: string | undefined) => MockTeamToolManager | undefined,
+): any {
 	const sessions = new Map<string, any>();
 	let nextSessionId = 0;
 
@@ -93,6 +114,13 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			opts?: any,
 		) => {
 			const id = `session-${nextSessionId++}`;
+			const runtimeArgs = [...(_args ?? [])];
+			const teamExtension = opts?.roleName === "team-lead"
+				? toolManagerForGoal?.(goalId)?.resolveToolExtensionPath("team_spawn", "extension.ts")
+				: undefined;
+			if (teamExtension && !runtimeArgs.includes(teamExtension)) {
+				runtimeArgs.push("--extension", teamExtension);
+			}
 			const session = {
 				id,
 				title: "New session",
@@ -101,6 +129,7 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 				titleGenerated: false,
 				goalId,
 				createOpts: opts,
+				runtimeArgs,
 				rpcClient: {
 					prompt: vi.fn(async () => {}),
 					onEvent: vi.fn(() => {}),
@@ -320,16 +349,10 @@ describe("TeamManager", () => {
 		it("uses the goal-owning project Team extension for the startTeam lifecycle", async () => {
 			const goal = createMockGoal({ projectId: "project-1" });
 			const goals = new Map([[goal.id, goal]]);
-			const sm = createMockSessionManager(goals);
-			const createSession = vi.spyOn(sm, "createSession");
 			const projectExtension = path.join("project-tools", "team", "extension.ts");
 			const serverExtension = path.join("server-tools", "team", "extension.ts");
-			const projectToolManager = {
-				getExtensionPath: vi.fn(() => projectExtension),
-			};
-			const serverToolManager = {
-				getExtensionPath: vi.fn(() => serverExtension),
-			};
+			const projectToolManager = createWinningTeamSpawnToolManager(projectExtension);
+			const serverToolManager = createWinningTeamSpawnToolManager(serverExtension);
 			const teamStore = { getAll: () => [], put: vi.fn(), remove: vi.fn() };
 			const projectContext = {
 				goalStore: { get: (id: string) => goals.get(id), getAll: () => [...goals.values()] },
@@ -347,17 +370,23 @@ describe("TeamManager", () => {
 				all: () => [],
 				getContextForGoal: (id: string) => id === goal.id ? projectContext : null,
 			};
+			const sm = createMockSessionManager(goals, (goalId) =>
+				projectContextManager.getContextForGoal(goalId ?? "")?.toolManager ?? serverToolManager);
+			const createSession = vi.spyOn(sm, "createSession");
 			const team = createTeamManager(sm, {
 				...DEFAULT_CONFIG,
 				projectContextManager,
 				toolManager: serverToolManager,
 			} as unknown as TeamManagerConfig);
 
-			await team.startTeam(goal.id);
+			const session = await team.startTeam(goal.id);
 
-			assert.deepEqual(createSession.mock.calls[0]?.[1], ["--extension", projectExtension]);
-			assert.deepEqual(projectToolManager.getExtensionPath.mock.calls, [["team", "extension.ts"]]);
-			assert.equal(serverToolManager.getExtensionPath.mock.calls.length, 0,
+			assert.deepEqual(createSession.mock.calls[0]?.[1], [],
+				"TeamManager must defer winning-provider resolution to the session pipeline");
+			const capturedSession = sm.getSession(session.id) as { runtimeArgs: string[] };
+			assert.deepEqual(capturedSession.runtimeArgs, ["--extension", projectExtension]);
+			assert.deepEqual(projectToolManager.resolveToolExtensionPath.mock.calls, [["team_spawn", "extension.ts"]]);
+			assert.equal(serverToolManager.resolveToolExtensionPath.mock.calls.length, 0,
 				"a project-owned goal must not consult the server ToolManager");
 		});
 
@@ -397,19 +426,22 @@ describe("TeamManager", () => {
 		it("retains the configured server Team extension for non-PCM startTeam", async () => {
 			const goal = createMockGoal();
 			const goals = new Map([[goal.id, goal]]);
-			const sm = createMockSessionManager(goals);
-			const createSession = vi.spyOn(sm, "createSession");
 			const serverExtension = path.join("server-tools", "team", "extension.ts");
-			const serverToolManager = { getExtensionPath: vi.fn(() => serverExtension) };
+			const serverToolManager = createWinningTeamSpawnToolManager(serverExtension);
+			const sm = createMockSessionManager(goals, () => serverToolManager);
+			const createSession = vi.spyOn(sm, "createSession");
 			const team = createTeamManager(sm, {
 				...DEFAULT_CONFIG,
 				toolManager: serverToolManager,
 			} as unknown as TeamManagerConfig);
 
-			await team.startTeam(goal.id);
+			const session = await team.startTeam(goal.id);
 
-			assert.deepEqual(createSession.mock.calls[0]?.[1], ["--extension", serverExtension]);
-			assert.deepEqual(serverToolManager.getExtensionPath.mock.calls, [["team", "extension.ts"]]);
+			assert.deepEqual(createSession.mock.calls[0]?.[1], [],
+				"TeamManager must defer winning-provider resolution to the session pipeline");
+			const capturedSession = sm.getSession(session.id) as { runtimeArgs: string[] };
+			assert.deepEqual(capturedSession.runtimeArgs, ["--extension", serverExtension]);
+			assert.deepEqual(serverToolManager.resolveToolExtensionPath.mock.calls, [["team_spawn", "extension.ts"]]);
 		});
 
 		it("should transition goal from todo to in-progress", async () => {
