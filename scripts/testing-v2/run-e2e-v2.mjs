@@ -43,6 +43,7 @@ import { performance } from "node:perf_hooks";
 import { createCpuSampler } from "./assert-budget.mjs";
 import { createIdentityCpuSampler } from "./process-tree-sampler.mjs";
 import { PRODUCT_BASELINE_SHA } from "./e2e-qualification-manifest.mjs";
+import { refreshE2EProfileManifest } from "./e2e-profile-reporter.mjs";
 import {
 	coordinatorTempDirectory,
 	createE2ERunPaths,
@@ -85,10 +86,15 @@ function profileOutputPath(profile, group) {
 	return join(profile.root, `group-${group}.json`);
 }
 
+function profileRawPaths(profile, group) {
+	const root = join(profile.root, `group-${group}-raw`);
+	return { childProfileDir: join(root, "processes"), hookProfileDir: join(root, "hooks") };
+}
+
 /** Add observational reporter/preload sinks to a single Playwright phase. */
 export function createE2EProfilingEnvironment(environment, profile, group, platform = process.platform) {
 	if (!profile || (group !== "B" && group !== "C")) return environment;
-	const phaseRoot = join(profile.root, `group-${group}-raw`);
+	const { childProfileDir, hookProfileDir } = profileRawPaths(profile, group);
 	const nodeOptions = [`--import=${CHILD_PROFILE_PRELOAD}`, environment.NODE_OPTIONS].filter(Boolean).join(" ");
 	return composeE2EChildEnvironment(environment, {
 		NODE_OPTIONS: nodeOptions,
@@ -98,24 +104,38 @@ export function createE2EProfilingEnvironment(environment, profile, group, platf
 		BOBBIT_V2_E2E_PROFILE_INSTRUMENTATION_SHA: profile.instrumentationSha,
 		BOBBIT_V2_E2E_PRODUCT_BASELINE_SHA: profile.productBaselineSha,
 		BOBBIT_V2_E2E_DIST_STATE: profile.distState,
-		BOBBIT_V2_CHILD_PROFILE_DIR: join(phaseRoot, "processes"),
+		BOBBIT_V2_CHILD_PROFILE_DIR: childProfileDir,
 		// The Playwright coordinator is equivalent to the Vitest coordinator in
 		// the reusable preload's three-level topology; workers become depth 2 and
 		// observe their direct children without recursively instrumenting them.
 		BOBBIT_V2_CHILD_PROFILE_DEPTH: "1",
-		BOBBIT_V2_HOOK_PROFILE_DIR: join(phaseRoot, "hooks"),
+		BOBBIT_V2_HOOK_PROFILE_DIR: hookProfileDir,
 	}, platform);
 }
 
-function finalizeGroupProfile(profile, group, groupResult, ownedProcess) {
+export function finalizeGroupProfile(profile, group, groupResult, ownedProcess) {
 	if (!profile || (group !== "B" && group !== "C")) return null;
 	const output = profileOutputPath(profile, group);
 	if (!existsSync(output)) return { group, path: output, missing: true };
 	try {
-		const manifest = JSON.parse(readFileSync(output, "utf8"));
+		// Playwright's reporter runs before its coordinator and worker preloads have
+		// necessarily emitted their exit records. Rebuild overlays only here, after
+		// the phase child's `close`, so success and failure paths use flushed raw
+		// telemetry rather than the reporter's provisional snapshot.
+		let manifest = refreshE2EProfileManifest(
+			JSON.parse(readFileSync(output, "utf8")),
+			profileRawPaths(profile, group),
+		);
 		manifest.instrumentationSha = profile.instrumentationSha;
 		manifest.groupWallMs = groupResult.wallMs;
-		manifest.ownedProcess = ownedProcess;
+		manifest.ownedProcess = {
+			...ownedProcess,
+			accounting: {
+				authority: "diagnostic",
+				boundary: "e2e-runner-group-subtree",
+				method: "pid-creation-subtree",
+			},
+		};
 		const temporary = `${output}.tmp-${process.pid}`;
 		writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`);
 		renameSync(temporary, output);
@@ -128,10 +148,28 @@ function finalizeGroupProfile(profile, group, groupResult, ownedProcess) {
 			platform: manifest.platform,
 			retries: manifest.counts?.retries ?? null,
 			failures: manifest.counts?.failures ?? null,
+			incompleteProcesses: manifest.processActivity?.incomplete ?? null,
+			incompleteHookOwners: manifest.hookActivity?.incompleteOwners ?? null,
+			hookRecords: manifest.hookActivity?.records ?? null,
 		};
 	} catch (error) {
 		return { group, path: output, missing: true, error: String(error) };
 	}
+}
+
+export function e2eProfileIneligibilityReasons({ profile, only, retryCount, profileRefs, results }) {
+	if (!profile) return [];
+	return [
+		...(only ? ["focused group runs are diagnostic only"] : []),
+		...(retryCount !== 0 ? ["retry-free mode is required"] : []),
+		...(profileRefs.length !== 2 || profileRefs.some((reference) => reference.missing) ? ["a B/C profile is missing"] : []),
+		...(profileRefs.some((reference) => reference.retries !== 0) ? ["a retry was observed"] : []),
+		...(profileRefs.some((reference) => reference.failures !== 0) ? ["a first-attempt failure was observed"] : []),
+		...(profileRefs.some((reference) => reference.incompleteProcesses !== 0) ? ["child-process telemetry did not flush completely"] : []),
+		...(profileRefs.some((reference) => reference.incompleteHookOwners !== 0) ? ["gateway hook telemetry did not flush completely"] : []),
+		...(profileRefs.some((reference) => !Number.isInteger(reference.hookRecords) || reference.hookRecords <= 0) ? ["gateway hook telemetry is missing"] : []),
+		...(results.some((result) => result.code !== 0) ? ["a group failed"] : []),
+	];
 }
 
 /**
@@ -627,14 +665,13 @@ async function main() {
 	const identitySample = identitySampler ? sample : null;
 	const wallMs = Math.round(performance.now() - startWall);
 
-	const profileEligibilityReasons = [
-		...(profile && only ? ["focused group runs are diagnostic only"] : []),
-		...(profile && resolveE2ERetryCount(coordinatorEnv) !== 0 ? ["retry-free mode is required"] : []),
-		...(profile && profileRefs.some((reference) => reference.missing) ? ["a B/C profile is missing"] : []),
-		...(profile && profileRefs.some((reference) => reference.retries !== 0) ? ["a retry was observed"] : []),
-		...(profile && profileRefs.some((reference) => reference.failures !== 0) ? ["a first-attempt failure was observed"] : []),
-		...(profile && results.some((result) => result.code !== 0) ? ["a group failed"] : []),
-	];
+	const profileEligibilityReasons = e2eProfileIneligibilityReasons({
+		profile,
+		only,
+		retryCount: resolveE2ERetryCount(coordinatorEnv),
+		profileRefs,
+		results,
+	});
 	const samplePath = defaultPerformanceReportPath(paths);
 	mkdirSync(dirname(samplePath), { recursive: true });
 	const report = {
@@ -644,6 +681,12 @@ async function main() {
 		wallMs,
 		wallSec: +(wallMs / 1000).toFixed(1),
 		peakProcesses: sample.peakProcesses,
+		accounting: {
+			authority: "diagnostic",
+			boundary: "e2e-runner-process-subtree",
+			method: profile ? "pid-creation-subtree" : "legacy-pid-subtree",
+			note: "This inner runner sample excludes npm/ensure-dist wrappers and must never be substituted for the authoritative outer measure-subtree sample.",
+		},
 		docker,
 		dockerCapability,
 		serialTransformCache,

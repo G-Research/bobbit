@@ -66,7 +66,8 @@ export async function measureSubtree({ label, outPath, command }, {
 	const sample = sampler.stop();
 	const endedAt = Date.now();
 	const report = {
-		schema: 2,
+		schema: 3,
+		kind: "subtree-measurement",
 		label,
 		cmd: command,
 		code: exit.code,
@@ -83,7 +84,13 @@ export async function measureSubtree({ label, outPath, command }, {
 		processes: sample.processes,
 		startedAt: new Date(startedAt).toISOString(),
 		endedAt: new Date(endedAt).toISOString(),
-		note: "subtree CPU keyed on (pid,creation); pre-run descendants and PID 0/4 excluded",
+		accounting: {
+			authority: "outer",
+			boundary: "spawned-command-subtree",
+			method: "pid-creation-subtree",
+			identity: "pid+creation",
+		},
+		note: "authoritative outer subtree CPU keyed on (pid,creation); pre-run descendants and PID 0/4 excluded",
 	};
 	mkdirSync(dirname(outPath), { recursive: true });
 	writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
