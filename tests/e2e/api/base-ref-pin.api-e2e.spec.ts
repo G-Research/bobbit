@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { copyGitTemplate, prepareGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 
 let token: string;
 
@@ -25,17 +26,9 @@ function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
 }
 
-/** Create a standalone git repo with a single commit on `branch` (default master). */
-function gitInit(dir: string, branch = "master"): void {
-	fs.mkdirSync(dir, { recursive: true });
-	git(dir, "init", "--quiet");
-	git(dir, "config", "user.email", "test@bobbit.local");
-	git(dir, "config", "user.name", "test");
-	git(dir, "config", "commit.gpgsign", "false");
-	git(dir, "checkout", "--quiet", "-b", branch);
-	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	git(dir, "add", ".");
-	git(dir, "commit", "--quiet", "-m", "init");
+/** Create an independent committed repository on `branch` without rerunning Git bootstrap. */
+function seedRepo(dir: string, branch = "master"): void {
+	copyGitTemplate(dir, { branch });
 }
 
 /**
@@ -48,7 +41,7 @@ function makeRepoWithRemote(root: string, branch = "master"): string {
 	const src = path.join(root, "src");
 	const bare = path.join(root, "remote.git");
 	const clone = path.join(root, "clone");
-	gitInit(src, branch);
+	seedRepo(src, branch);
 	// Bare clone mirrors src's HEAD (→ branch), giving the remote a HEAD symref.
 	git(root, "clone", "--quiet", "--bare", src, bare);
 	// Working clone wires `origin` + sets origin/HEAD symref automatically.
@@ -68,7 +61,7 @@ function makeMultiRepoProject(root: string, repos: Array<{ name: string; branch:
 		const src = path.join(root, `${name}-src`);
 		const bare = path.join(root, `${name}-remote.git`);
 		const clone = path.join(root, name);
-		gitInit(src, branch);
+		seedRepo(src, branch);
 		git(root, "clone", "--quiet", "--bare", src, bare);
 		git(root, "clone", "--quiet", bare, clone);
 	}
@@ -81,7 +74,10 @@ async function getConfig(id: string): Promise<any> {
 	return res.json();
 }
 
-test.beforeAll(() => { token = readE2EToken(); });
+test.beforeAll(async () => {
+	token = readE2EToken();
+	await prepareGitTemplate();
+});
 
 // Remote/default-branch detection shells out to git and creates several repos.
 // Serializing this file avoids fully-parallel Windows FS/process contention that
@@ -107,7 +103,7 @@ test.describe("base_ref add-time pinning", () => {
 
 	test("repo with no reachable remote leaves base_ref blank (no failure)", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-noremote-"));
-		gitInit(root, "master");
+		seedRepo(root, "master");
 		const proj = await registerProjectShared({ name: `baseref-noremote-${Date.now()}`, rootPath: root });
 		const cfg = await getConfig(proj.id);
 		expect(cfg.base_ref === undefined || cfg.base_ref === "").toBe(true);
