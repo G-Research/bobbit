@@ -159,7 +159,6 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
 		const markerEventIds = new Map<string, string>();
 		const markerOccurrences = new Map<string, number>();
-		const pendingDomEchoes = new Set<string>();
 		let visibleMarkers = new Set<string>();
 		let nextExpectedMarkerIndex = 0;
 		let lastEvidenceHeight = el.scrollHeight;
@@ -198,7 +197,11 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 				if (!found.has(marker) || (fromDom && visibleMarkers.has(marker))) continue;
 				if (pending.has(marker) || evidence.has(marker)) {
 					if (eventId && markerEventIds.get(marker) === eventId) continue;
-					if (fromDom && pendingDomEchoes.delete(marker)) continue;
+					// A server event is the occurrence authority. Lit can project that
+					// same event through the streaming container, briefly remove it on
+					// message_end, then commit it into the stable message list. Every DOM
+					// reappearance is still one render of the event, not another marker.
+					if (fromDom && markerEventIds.has(marker)) continue;
 					fail(`duplicate exact marker ${marker}`);
 					continue;
 				}
@@ -208,10 +211,7 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 					continue;
 				}
 				nextExpectedMarkerIndex++;
-				if (eventId) {
-					markerEventIds.set(marker, eventId);
-					pendingDomEchoes.add(marker);
-				}
+				if (eventId) markerEventIds.set(marker, eventId);
 				markerOccurrences.set(marker, (markerOccurrences.get(marker) ?? 0) + 1);
 				// The exact marker is captured at its commit. Its proof must be a
 				// later, positive, post-repin height that no earlier phase used.
