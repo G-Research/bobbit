@@ -4,6 +4,31 @@ import { basename, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { performance } from "node:perf_hooks";
 
+const customPromisify = Symbol.for("nodejs.util.promisify.custom");
+
+/**
+ * Preserve Node's exec/execFile promisifier contract on a profiled wrapper.
+ * Command failures can still carry useful stdout/stderr (for example,
+ * `git diff --no-index` exits 1 when it produced a diff), so copy both callback
+ * values onto the rejected error exactly as Node's native promisifier does.
+ */
+export function preserveExecCustomPromisifier(original, profiledAsync) {
+	if (!original[customPromisify]) return;
+	profiledAsync[customPromisify] = function (...args) {
+		return new Promise((resolve, reject) => {
+			profiledAsync.call(this, ...args, (error, stdout, stderr) => {
+				if (error) {
+					error.stdout = stdout;
+					error.stderr = stderr;
+					reject(error);
+				} else {
+					resolve({ stdout, stderr });
+				}
+			});
+		});
+	};
+}
+
 const outDir = process.env.BOBBIT_V2_CHILD_PROFILE_DIR;
 const profileDepth = Math.max(0, Number(process.env.BOBBIT_V2_CHILD_PROFILE_DEPTH) || 0);
 // The preload is installed on the lane runner, Vitest coordinator, and Vitest
@@ -84,19 +109,8 @@ if (outDir && profileDepth < 3) {
 			return child;
 		};
 		// exec/execFile expose a custom promisifier that returns { stdout, stderr }.
-		// Preserve it: dropping the symbol changes promisify(execFile)'s return shape
-		// and makes profiling alter the code under test.
-		const customPromisify = Symbol.for("nodejs.util.promisify.custom");
-		if (original[customPromisify]) {
-			profiledAsync[customPromisify] = function (...args) {
-				return new Promise((resolve, reject) => {
-					profiledAsync.call(this, ...args, (error, stdout, stderr) => {
-						if (error) reject(error);
-						else resolve({ stdout, stderr });
-					});
-				});
-			};
-		}
+		// Preserve its success and failure shapes so profiling stays observational.
+		preserveExecCustomPromisifier(original, profiledAsync);
 		childProcess[name] = profiledAsync;
 	};
 	const wrapSync = (name, commandIndex = 0) => {
