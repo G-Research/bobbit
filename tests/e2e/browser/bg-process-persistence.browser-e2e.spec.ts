@@ -114,6 +114,27 @@ async function createBgProcess(sessionId: string, command: string, name: string)
  * `event.server_crash()` + `event.server_restart()`.
  */
 async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> {
+	// Capture the last authenticated socket generation before the crash. A
+	// status-only check can accept this old socket before its close event reaches
+	// the page; the epoch proves auth_ok arrived after restart.
+	let connectionBeforeRestart: { epoch: number; sessionId: string } | null = null;
+	if (!page.isClosed()) {
+		try {
+			connectionBeforeRestart = await page.evaluate(() => {
+				const s = (window as any).bobbitState;
+				const sessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+				if (!sessionId || !s?.remoteAgent) return null;
+				return {
+					epoch: Number(s.remoteAgent._connectionEpoch) || 0,
+					sessionId,
+				};
+			});
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) throw err;
+		}
+	}
+
 	await gateway.crash();
 	if (!page.isClosed()) {
 		await page.waitForFunction(() => {
@@ -126,12 +147,32 @@ async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> 
 	await expect.poll(async () => {
 		try { return (await apiFetch("/api/health")).ok; } catch { return false; }
 	}, { timeout: 20_000, intervals: [250] }).toBe(true);
-	// Best-effort: the active session's WebSocket reconnects.
-	if (!page.isClosed()) {
-		await page.waitForFunction(() => {
+	if (page.isClosed() || !connectionBeforeRestart) return;
+
+	try {
+		// Gateway boot can outlast failed reconnect attempts. Trigger the product's
+		// existing visible-page recovery path once health is authoritative.
+		await page.evaluate(({ epoch, sessionId }) => {
 			const s = (window as any).bobbitState;
-			return !!s && s.connectionStatus === "connected";
-		}, undefined, { timeout: 15_000, polling: 250 }).catch(() => { /* best-effort */ });
+			if (window.location.hash !== `#/session/${sessionId}`) return;
+			if (s?.connectionStatus !== "connected"
+				|| !s?.remoteAgent?.connected
+				|| (Number(s.remoteAgent._connectionEpoch) || 0) <= epoch) {
+				document.dispatchEvent(new Event("visibilitychange"));
+			}
+		}, connectionBeforeRestart);
+		await page.waitForFunction(({ epoch, sessionId }) => {
+			const s = (window as any).bobbitState;
+			return window.location.hash === `#/session/${sessionId}`
+				&& s?.remoteAgent?.gatewaySessionId === sessionId
+				&& s.remoteAgent.connected === true
+				&& s.connectionStatus === "connected"
+				&& (Number(s.remoteAgent._connectionEpoch) || 0) > epoch;
+		}, connectionBeforeRestart, { timeout: 15_000, polling: 250 });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) return;
+		throw err;
 	}
 }
 
