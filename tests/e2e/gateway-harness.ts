@@ -302,6 +302,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableMcp: boolean;
 	enableWorktreePool: boolean;
 	enableDevHarnessRestart: boolean;
+	/**
+	 * Scheduler-only discriminator for specs that must not inherit durable state
+	 * from other files assigned to the same Playwright worker.
+	 */
+	gatewayStateGroup: string;
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
 	basePath: string;
@@ -347,6 +352,13 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
 	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
 
+	// Worker-scoped scheduler discriminator. Most specs deliberately share the
+	// default fixture pool; a spec that validates durable restart state can choose
+	// a unique value to force Playwright to give it a fresh worker gateway. The
+	// value changes grouping only: the gateway keeps the same coordinator-owned
+	// roots, ports, options, and teardown behavior, and never purges foreign state.
+	gatewayStateGroup: ["shared", { scope: "worker", option: true }],
+
 	// Worker-scoped option for Headquarters split coverage. Default false preserves
 	// legacy harness topology for broad suites; Headquarters-specific specs opt in.
 	splitHeadquartersServerRoot: [false, { scope: "worker", option: true }],
@@ -365,11 +377,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// that falls back to the UI origin fail loudly.
 	separateUiOrigin: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, gatewayStateGroup, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
 		// Depend on browserRenderLease purely for ordering: the global browser-render
 		// slot must be held BEFORE this worker boots a gateway, so a queued worker
-		// holds no gateway while it waits. The value itself is void.
+		// holds no gateway while it waits. The value itself is void. Likewise,
+		// gatewayStateGroup is consumed only to include it in this fixture's worker
+		// pool identity; no runtime path or gateway behavior depends on its label.
 		void browserRenderLease;
+		void gatewayStateGroup;
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Every worker gets an owned child of the coordinator's canonical run root.
 		let bobbitDir = createRunChild(`e2e-browser-${process.pid}-${workerInfo.workerIndex}`);

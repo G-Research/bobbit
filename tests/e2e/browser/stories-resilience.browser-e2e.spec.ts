@@ -37,6 +37,10 @@ import {
 	STORY_RE08,
 } from "../ui/story-registry.js";
 
+// Restart assertions must restore only state created by these scenarios, not
+// sessions retained by unrelated files that previously occupied the worker.
+test.use({ gatewayStateGroup: "stories-resilience" });
+
 test.describe("CT-05: Resilience", () => {
 	let s: SpecContext;
 	let re02GoalId: string | undefined;
