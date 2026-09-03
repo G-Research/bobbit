@@ -194,6 +194,29 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		);
 	});
 
+	it("reachable discovery refuses an unmarked user-owned provider byte-identically", async () => {
+		const mock = await startMockGateway(["openai/gpt-5.2"]);
+		try {
+			const modelsPath = path.join(tmp, "models.json");
+			const before = '{\n  // user-owned routing must not be claimed\n  "providers": {\n    "aigw": { "baseUrl": "https://user.invalid", "apiKey": "user-key", "unknown": true, "models": [] }\n  },\n  "unknownRoot": [1, 1],\n}\n';
+			writeFileSync(modelsPath, before);
+			const prefs = new PreferencesStore(stateDir);
+			prefs.set("aigw.url", mock.url);
+
+			const result = await startupAigwCheck(prefs as any);
+
+			assert.equal(result, true);
+			assert.ok(mock.requestCount() > 0, "startup must discover before ownership validation");
+			assert.equal(
+				readFileSync(modelsPath, "utf-8"),
+				before,
+				"startup publication must refuse and preserve an unmarked user-owned provider byte-for-byte",
+			);
+		} finally {
+			await mock.close();
+		}
+	});
+
 	it("BOBBIT_SKIP_AIGW_DISCOVERY=1 → no HTTP request, file untouched, but Bedrock env vars set", async () => {
 		// Use a mock gateway and assert no request reaches it under the flag.
 		const mock = await startMockGateway(["should-not-be-fetched"]);
