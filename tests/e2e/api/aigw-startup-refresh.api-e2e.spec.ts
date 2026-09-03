@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 // Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
 // workers cold-import dist/server once per process, so a per-worker cache gives
@@ -110,11 +111,19 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const runtime = await loadE2EDistServerRuntime(async () => {
+		const bobbitDir = await import("../../../dist/server/bobbit-dir.js");
+		const scaffold = await import("../../../dist/server/scaffold.js");
+		const authToken = await import("../../../dist/server/auth/token.js");
+		const server = await import("../../../dist/server/server.js");
+		const rpcBridge = await import("../../../dist/server/agent/rpc-bridge.js");
+		return { bobbitDir, scaffold, authToken, server, rpcBridge };
+	});
+	const { setProjectRoot, resetAgentDirStateForTests } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { registerRpcBridgeFactory } = runtime.rpcBridge;
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((opts: any) => {
 		if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);

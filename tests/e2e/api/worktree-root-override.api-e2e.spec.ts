@@ -12,9 +12,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { worktreeRoot, branchContainer } from "../../../src/server/skills/worktree-paths.js";
-import { createWorktree, createWorktreeSet, cleanupWorktree } from "../../../src/server/skills/git.js";
 import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
+
+let worktreeRoot: typeof import("../../../src/server/skills/worktree-paths.js").worktreeRoot;
+let branchContainer: typeof import("../../../src/server/skills/worktree-paths.js").branchContainer;
+let createWorktree: typeof import("../../../src/server/skills/git.js").createWorktree;
+let createWorktreeSet: typeof import("../../../src/server/skills/git.js").createWorktreeSet;
+let cleanupWorktree: typeof import("../../../src/server/skills/git.js").cleanupWorktree;
+
+test.beforeAll(async () => {
+	const runtime = await loadE2EDistServerRuntime(async () => ({
+		worktreePaths: await import("../../../src/server/skills/worktree-paths.js"),
+		git: await import("../../../src/server/skills/git.js"),
+	}));
+	({ worktreeRoot, branchContainer } = runtime.worktreePaths);
+	({ createWorktree, createWorktreeSet, cleanupWorktree } = runtime.git);
+});
 
 // Repos come from the immutable committed template (master + README.md +
 // .gitattributes + one commit); nothing here asserts on tree contents.

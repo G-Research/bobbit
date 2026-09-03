@@ -28,6 +28,7 @@ import module from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadE2EDistServerRuntime } from "../../support/harnesses/e2e/dist-server-runtime.js";
 
 // Per-worker V8 compile cache (mirrors in-process-harness.ts).
 {
@@ -127,13 +128,21 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const bobbitDirMod = await import("../../../dist/server/bobbit-dir.js");
+	const runtime = await loadE2EDistServerRuntime(async () => {
+		const bobbitDir = await import("../../../dist/server/bobbit-dir.js");
+		const scaffold = await import("../../../dist/server/scaffold.js");
+		const authToken = await import("../../../dist/server/auth/token.js");
+		const server = await import("../../../dist/server/server.js");
+		const rpcBridge = await import("../../../dist/server/agent/rpc-bridge.js");
+		return { bobbitDir, scaffold, authToken, server, rpcBridge };
+	});
+	const bobbitDirMod = runtime.bobbitDir;
 	const { setProjectRoot } = bobbitDirMod;
 	const prevProjectRoot = bobbitDirMod.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { registerRpcBridgeFactory } = runtime.rpcBridge;
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	// registerRpcBridgeFactory is a singleton setter — the in-process-harness
 	// worker fixture installs its own factory at worker startup, so capture

@@ -53,6 +53,7 @@ import {
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
 import { seedTransformCache } from "./pwtest-cache.ts";
+import { ensureE2EDistServerPrebundle } from "./server-prebundle.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -179,6 +180,7 @@ export function e2eProfileIneligibilityReasons({ profile, only, retryCount, prof
  */
 export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
 	const env = createIsolatedE2EEnvironment(paths, inheritedEnv, platform);
+	deleteEnvironmentValue(env, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE", platform);
 	return copyEnvironment(env, {
 		BOBBIT_V2_RUN_ROOT: paths.root,
 		BOBBIT_V2_RUN_ROOT_OWNER_PID: String(process.pid),
@@ -439,6 +441,31 @@ export function resolveE2ERetryCount(env = process.env) {
 	return env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3;
 }
 
+export async function prepareE2EDistServerPrebundle(paths, ensure = ensureE2EDistServerPrebundle) {
+	const startedAt = performance.now();
+	try {
+		const result = await ensure({ repoRoot: REPO_ROOT, runRoot: paths.root });
+		return {
+			observed: true,
+			status: result.cacheHit ? "reused" : "built",
+			key: result.key,
+			bundlePath: result.bundlePath,
+			buildWallMs: Math.round(performance.now() - startedAt),
+			fallback: false,
+		};
+	} catch (error) {
+		return {
+			observed: true,
+			status: "raw-fallback",
+			key: null,
+			bundlePath: null,
+			buildWallMs: Math.round(performance.now() - startedAt),
+			fallback: true,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
 function isRetryFreeQualification(env = process.env) {
 	return resolveE2ERetryCount(env) === 0;
 }
@@ -626,6 +653,14 @@ async function main() {
 	const results = [];
 	const profileRefs = [];
 	let serialTransformCache = null;
+	let bundle = {
+		observed: true,
+		status: only ? "focused-raw" : "pending",
+		key: null,
+		bundlePath: null,
+		buildWallMs: 0,
+		fallback: false,
+	};
 	const captureLatestProfile = (group) => {
 		if (!identitySampler) return;
 		const phase = identitySampler.mark(group);
@@ -648,13 +683,23 @@ async function main() {
 		console.log("[e2e-v2] schedule: A → B → C → D (serialized; B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
 		captureLatestProfile("A");
+		bundle = await prepareE2EDistServerPrebundle(paths);
+		if (bundle.fallback) {
+			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
+		} else {
+			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
+		}
 		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
+		if (bundle.bundlePath) sharedPlaywrightEnv.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle.bundlePath;
 		const retries = resolveE2ERetryCount(coordinatorEnv);
 		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
 		results.push(await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries));
 		captureLatestProfile("B");
+		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
 		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
+		// C receives the same shared cache environment only after the runner removes
+		// Group B's bundle setting. No C worker can observe bundled server mode.
 		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
 		captureLatestProfile("C");
 		results.push(await runGroupD(D, { coordinatorEnv }));
@@ -689,6 +734,7 @@ async function main() {
 		},
 		docker,
 		dockerCapability,
+		bundle,
 		serialTransformCache,
 		profiling: profile ? {
 			enabled: true,
