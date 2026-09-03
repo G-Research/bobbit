@@ -135,35 +135,54 @@ export interface CopyGitTemplateOptions {
  */
 function assertSafeFixtureBranch(branch: string): void {
 	const segments = branch.split("/");
+	const collidesWithMasterRef = segments[0]?.toLowerCase() === "master" && branch !== "master";
+	const hasNonPortableSegment = segments.some(segment =>
+		segment.length === 0
+		|| segment.startsWith(".")
+		|| segment.endsWith(".")
+		|| segment.toLowerCase().endsWith(".lock")
+		|| /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment)
+	);
 	if (
 		branch.length === 0
 		|| branch.length > 255
+		|| branch === "HEAD"
 		|| branch.startsWith("-")
-		|| branch.endsWith(".")
 		|| branch.includes("..")
 		|| !/^[A-Za-z0-9._/-]+$/.test(branch)
-		|| (branch.toLowerCase() === "master" && branch !== "master")
-		|| segments.some(segment => segment.length === 0 || segment.startsWith(".") || segment.endsWith(".lock"))
+		|| collidesWithMasterRef
+		|| hasNonPortableSegment
 	) {
 		throw new TypeError(`[tests/git-template] branch must be a safe ordinary Git branch name: ${JSON.stringify(branch)}`);
 	}
 }
 
 function selectCopiedTemplateBranch(repository: string, branch: string): void {
-	if (branch === "master") return;
 	const gitDir = join(repository, ".git");
 	const sourceRef = join(gitDir, "refs", "heads", "master");
 	const destinationRef = join(gitDir, "refs", "heads", ...branch.split("/"));
-	mkdirSync(dirname(destinationRef), { recursive: true });
-	renameSync(sourceRef, destinationRef);
+	if (branch !== "master") {
+		mkdirSync(dirname(destinationRef), { recursive: true });
+		renameSync(sourceRef, destinationRef);
 
-	const sourceLog = join(gitDir, "logs", "refs", "heads", "master");
-	if (existsSync(sourceLog)) {
-		const destinationLog = join(gitDir, "logs", "refs", "heads", ...branch.split("/"));
-		mkdirSync(dirname(destinationLog), { recursive: true });
-		renameSync(sourceLog, destinationLog);
+		const sourceLog = join(gitDir, "logs", "refs", "heads", "master");
+		if (existsSync(sourceLog)) {
+			const destinationLog = join(gitDir, "logs", "refs", "heads", ...branch.split("/"));
+			mkdirSync(dirname(destinationLog), { recursive: true });
+			renameSync(sourceLog, destinationLog);
+		}
+		writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`, "utf8");
 	}
-	writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`, "utf8");
+
+	const head = readFileSync(join(gitDir, "HEAD"), "utf8");
+	const commit = readFileSync(destinationRef, "utf8").trim();
+	if (
+		head !== `ref: refs/heads/${branch}\n`
+		|| !/^[0-9a-f]{40}$/i.test(commit)
+		|| !existsSync(join(gitDir, "objects", commit.slice(0, 2), commit.slice(2)))
+	) {
+		throw new Error(`[tests/git-template] copied repository did not select branch ${JSON.stringify(branch)}`);
+	}
 }
 
 /**
@@ -393,12 +412,17 @@ export function copyGitTemplate(destination: string, options: CopyGitTemplateOpt
 	const target = resolve(destination);
 	assertSafeDestination(shared.path, target);
 	mkdirSync(dirname(target), { recursive: true });
-	cpSync(shared.path, target, {
-		recursive: true,
-		force: false,
-		errorOnExist: true,
-		verbatimSymlinks: true,
-	});
-	selectCopiedTemplateBranch(target, branch);
-	return realpathSync(target);
+	try {
+		cpSync(shared.path, target, {
+			recursive: true,
+			force: false,
+			errorOnExist: true,
+			verbatimSymlinks: true,
+		});
+		selectCopiedTemplateBranch(target, branch);
+		return realpathSync(target);
+	} catch (error) {
+		rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
+		throw error;
+	}
 }
