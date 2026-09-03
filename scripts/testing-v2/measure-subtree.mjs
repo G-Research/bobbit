@@ -1,160 +1,110 @@
+#!/usr/bin/env node
 /**
- * measure-subtree.mjs — fair subtree-scoped wall+CPU measurement (task 7862db76).
- *
- * Re-implements the head-to-head §2/§5 methodology as a committed, reusable tool
- * (the original `measure.mjs` was kept out-of-tree). It spawns a command and
- * samples the CPU of ONLY the spawned command's process subtree, correcting the
- * two Windows over-count failure modes the pid-only sampler suffers (§5):
- *   1. PID reuse — key cumulative CPU on (pid, CreationDate), not pid alone.
- *   2. Stale-ppid / Idle (PID 0/4) misattribution — EXCLUDE any subtree process
- *      created BEFORE the run started (and PID 0/4), so the Windows Idle process,
- *      the dev server, Defender, etc. can never leak in via a reused-ppid collision.
+ * Fair subtree-scoped wall/CPU measurement.
  *
  * Usage:
  *   node scripts/testing-v2/measure-subtree.mjs <label> <out.json> -- <cmd...>
- * Emits a JSON report and prints a one-line summary. Exit code = child's code.
+ *
+ * CPU is keyed by `(pid, creation)` on every supported OS. Processes created
+ * before the measured command and Windows PID 0/4 are excluded, preventing PID
+ * reuse and stale-PPID collisions from inflating qualification evidence.
  */
-import { spawn, spawnSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { performance } from "node:perf_hooks";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createIdentityCpuSampler } from "./process-tree-sampler.mjs";
 
-const argv = process.argv.slice(2);
-const sep = argv.indexOf("--");
-if (sep < 0 || sep < 2) {
-	console.error("usage: measure-subtree.mjs <label> <out.json> -- <cmd...>");
-	process.exit(2);
+export function parseMeasureSubtreeArgs(argv) {
+	const separator = argv.indexOf("--");
+	if (separator < 2) throw new Error("usage: measure-subtree.mjs <label> <out.json> -- <cmd...>");
+	const command = argv.slice(separator + 1);
+	if (command.length === 0) throw new Error("measure-subtree.mjs: no command");
+	return { label: argv[0], outPath: argv[1], command };
 }
-const label = argv[0];
-const outPath = argv[1];
-const cmd = argv.slice(sep + 1);
-if (cmd.length === 0) { console.error("no command"); process.exit(2); }
 
-const isWin = process.platform === "win32";
-
-/** Parse a CIM/WMI CreationDate (either "/Date(ms)/" or ISO/CIM string) → epoch ms, or null. */
-function parseCreation(raw) {
-	if (raw == null) return null;
-	if (typeof raw === "number") return raw;
-	const s = String(raw);
-	const m = s.match(/\/Date\((\d+)\)\//);
-	if (m) return Number(m[1]);
-	// CIM DMTF datetime: yyyymmddHHMMSS.ffffff+zzz
-	const dmtf = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
-	if (dmtf) {
-		const [, y, mo, d, h, mi, se] = dmtf;
-		const t = Date.UTC(+y, +mo - 1, +d, +h, +mi, +se);
-		return Number.isFinite(t) ? t : null;
+export async function measureSubtree({ label, outPath, command }, {
+	platform = process.platform,
+	spawnProcess = spawn,
+	createSampler = createIdentityCpuSampler,
+} = {}) {
+	const startedAt = Date.now();
+	// Resolve the two Windows command shims used by qualification to their JS
+	// entrypoints. Node cannot spawn .cmd with shell:false; using the npm CLI
+	// keeps every following token opaque instead of concatenating shell text.
+	let executable = command[0];
+	let commandArgs = command.slice(1);
+	if (platform === "win32" && /^(?:npm|npx)$/i.test(command[0])) {
+		const tool = command[0].toLowerCase();
+		const inheritedNpmCli = process.env.npm_execpath;
+		const npmBin = inheritedNpmCli && /npm-cli\.js$/i.test(basename(inheritedNpmCli))
+			? dirname(inheritedNpmCli)
+			: join(dirname(process.execPath), "node_modules", "npm", "bin");
+		const cli = join(npmBin, `${tool}-cli.js`);
+		if (!existsSync(cli)) throw new Error(`measure-subtree.mjs: cannot resolve ${tool} CLI at ${cli}`);
+		executable = process.execPath;
+		commandArgs = [cli, ...commandArgs];
 	}
-	const t = Date.parse(s);
-	return Number.isFinite(t) ? t : null;
-}
+	const child = spawnProcess(executable, commandArgs, {
+		stdio: ["inherit", "pipe", "pipe"],
+		shell: false,
+	});
+	child.stdout?.pipe(process.stdout);
+	child.stderr?.pipe(process.stderr);
+	const sampler = createSampler(child.pid, { runStartedAt: startedAt, intervalMs: 1000 });
 
-function listProcesses() {
-	if (!isWin) {
-		// ps: pid,ppid,etimes(seconds),time(cpu). Good enough on posix; CI is Windows-first.
-		const res = spawnSync("ps", ["-eo", "pid=,ppid=,time=,lstart="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-		if (res.status !== 0 || !res.stdout) return [];
-		return res.stdout.trim().split("\n").map((ln) => {
-			const parts = ln.trim().split(/\s+/);
-			const pid = Number(parts[0]); const ppid = Number(parts[1]);
-			const time = parts[2];
-			const [hh, mm, ss] = time.includes(":") ? time.split(":") : ["0", "0", time];
-			const cpuMs = ((+hh || 0) * 3600 + (+mm || 0) * 60 + (+ss || 0)) * 1000;
-			return { pid, ppid, cpuMs, creation: null };
-		}).filter((r) => Number.isFinite(r.pid));
-	}
-	const ps = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,KernelModeTime,UserModeTime | ConvertTo-Json -Compress";
-	const res = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
-	if (res.status !== 0 || !res.stdout) return [];
-	let rows;
-	try { rows = JSON.parse(res.stdout); } catch { return []; }
-	if (!Array.isArray(rows)) rows = [rows];
-	return rows.map((r) => ({
-		pid: Number(r.ProcessId),
-		ppid: Number(r.ParentProcessId),
-		creation: parseCreation(r.CreationDate),
-		cpuMs: ((Number(r.KernelModeTime) || 0) + (Number(r.UserModeTime) || 0)) / 10_000,
-	})).filter((r) => Number.isFinite(r.pid) && Number.isFinite(r.ppid));
-}
-
-function descendants(all, root) {
-	const byParent = new Map();
-	for (const r of all) { if (!byParent.has(r.ppid)) byParent.set(r.ppid, []); byParent.get(r.ppid).push(r); }
-	const out = []; const seen = new Set(); const stack = [root];
-	while (stack.length) {
-		const pid = stack.pop();
-		for (const child of byParent.get(pid) || []) {
-			if (seen.has(child.pid)) continue;
-			seen.add(child.pid); out.push(child); stack.push(child.pid);
-		}
-	}
-	return out;
-}
-
-const runStart = Date.now();
-// small grace so a child created in the same ms as runStart is not excluded
-const CREATION_FLOOR = runStart - 1500;
-
-const perKey = new Map(); // `${pid}|${creation}` -> max cumulative cpuMs
-let peakProcesses = 0;
-let samples = 0;
-let excludedCpuMs = 0; // CPU attributed to excluded (pre-run / PID 0/4) procs — reported for transparency
-
-const child = spawn(cmd[0], cmd.slice(1), {
-	stdio: ["inherit", "pipe", "pipe"],
-	shell: isWin, // npm.cmd / npx.cmd need a shell on Windows
-});
-// Explicitly forward child output: under shell:true on Windows, plain
-// stdio:"inherit" did not always propagate the grandchild TAP stream to a
-// captured pipe. Piping guarantees the run's pass/fail summary is visible.
-child.stdout?.pipe(process.stdout);
-child.stderr?.pipe(process.stderr);
-
-function sampleOnce(rootPid) {
-	const all = listProcesses();
-	const tree = descendants(all, rootPid);
-	// include the root itself
-	const rootRow = all.find((r) => r.pid === rootPid);
-	if (rootRow) tree.push(rootRow);
-	let live = 0;
-	for (const r of tree) {
-		const included = r.pid !== 0 && r.pid !== 4 && r.creation != null && r.creation >= CREATION_FLOOR;
-		if (!included) { excludedCpuMs = Math.max(excludedCpuMs, excludedCpuMs); continue; }
-		live++;
-		const key = `${r.pid}|${r.creation}`;
-		perKey.set(key, Math.max(perKey.get(key) || 0, r.cpuMs));
-	}
-	peakProcesses = Math.max(peakProcesses, live);
-	samples++;
-}
-
-const timer = setInterval(() => { try { sampleOnce(child.pid); } catch { /* ignore */ } }, 1000);
-
-child.on("close", (code, signal) => {
-	clearInterval(timer);
-	try { sampleOnce(child.pid); } catch { /* ignore */ }
-	let cpuMs = 0;
-	for (const v of perKey.values()) cpuMs += v;
-	const wallMs = Math.round(performance.now() - performance.timeOrigin + performance.timeOrigin) && (Date.now() - runStart);
+	const exit = await new Promise((resolve) => {
+		let settled = false;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
+		child.once("close", (code, signal) => finish({ code: code ?? (signal ? 1 : 0), signal: signal ?? null }));
+		child.once("error", (error) => finish({ code: 1, signal: null, error: String(error) }));
+	});
+	const sample = sampler.stop();
+	const endedAt = Date.now();
 	const report = {
+		schema: 2,
 		label,
-		cmd,
-		code: code ?? (signal ? 1 : 0),
-		signal: signal || null,
-		wallMs: Date.now() - runStart,
-		wallSec: +((Date.now() - runStart) / 1000).toFixed(1),
-		cpuMin: +(cpuMs / 60000).toFixed(2),
-		cpuMs: Math.round(cpuMs),
-		peakProcesses,
-		samples,
-		trackedProcesses: perKey.size,
-		startedAt: new Date(runStart).toISOString(),
-		note: "subtree CPU keyed on (pid,CreationDate); procs created before run start and PID 0/4 excluded (corrects head-to-head §5 over-count).",
+		cmd: command,
+		code: exit.code,
+		signal: exit.signal,
+		...(exit.error ? { error: exit.error } : {}),
+		wallMs: endedAt - startedAt,
+		wallSec: +((endedAt - startedAt) / 1000).toFixed(1),
+		cpuMin: +(sample.cpuMs / 60_000).toFixed(3),
+		cpuMs: sample.cpuMs,
+		peakProcesses: sample.peakProcesses,
+		samples: sample.samples,
+		trackedProcesses: sample.trackedProcesses,
+		rootProcess: { pid: child.pid, creation: sample.processes.find((row) => row.pid === child.pid)?.creation ?? null },
+		processes: sample.processes,
+		startedAt: new Date(startedAt).toISOString(),
+		endedAt: new Date(endedAt).toISOString(),
+		note: "subtree CPU keyed on (pid,creation); pre-run descendants and PID 0/4 excluded",
 	};
-	try { mkdirSync(dirname(outPath), { recursive: true }); } catch { /* ignore */ }
-	writeFileSync(outPath, JSON.stringify(report, null, 2) + "\n");
-	console.log(`\n[measure] ${label}: ${report.wallSec}s wall, ${report.cpuMin} CPU-min (peak procs ${peakProcesses}, tracked ${perKey.size}) → ${outPath}`);
+	mkdirSync(dirname(outPath), { recursive: true });
+	writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
+	return report;
+}
+
+async function main() {
+	let options;
+	try {
+		options = parseMeasureSubtreeArgs(process.argv.slice(2));
+	} catch (error) {
+		console.error(error.message);
+		process.exit(2);
+	}
+	const report = await measureSubtree(options);
+	console.log(`\n[measure] ${report.label}: ${report.wallSec}s wall, ${report.cpuMin} CPU-min (peak procs ${report.peakProcesses}, tracked ${report.trackedProcesses}) → ${options.outPath}`);
 	process.exit(report.code);
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) main().catch((error) => {
+	console.error("[measure] fatal:", error);
+	process.exit(1);
 });
-child.on("error", (e) => { clearInterval(timer); console.error("[measure] spawn error:", e); process.exit(1); });

@@ -70,6 +70,11 @@ prepareE2ERuntimeCaches();
 const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
+// Qualification profiling is environment-gated so the exact Playwright argv,
+// retries, worker caps, ordering, and normal reporter output remain unchanged.
+const performanceProfileReporters: Array<[string]> = process.env.BOBBIT_V2_E2E_PROFILE_OUTPUT
+	? [["./scripts/testing-v2/e2e-profile-reporter.mjs"]]
+	: [];
 
 // Workflow retries protect developer productivity after isolated transients.
 // Retry-free qualification sets BOBBIT_V2_RETRY_FREE=1 and remains the only
@@ -98,6 +103,7 @@ export default {
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
 		...recordScreenReporters,
+		...performanceProfileReporters,
 	],
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
