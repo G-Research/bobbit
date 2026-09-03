@@ -37,8 +37,6 @@ import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-test.use({ enableWorktreePool: false });
-
 async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	const ws = await connectWs(id);
 	try {

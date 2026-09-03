@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 export type E2EDistServerRuntime = typeof import("./dist-server-runtime-entry.js");
@@ -6,6 +8,54 @@ export type E2EDistServerRuntime = typeof import("./dist-server-runtime-entry.js
 let bundledRuntimePromise: Promise<E2EDistServerRuntime> | undefined;
 let observedMode: "bundle" | "raw" | undefined;
 let observedBundlePath: string | undefined;
+
+function runtimeLoadProfilePath(): string | undefined {
+	const configured = process.env.BOBBIT_V2_HOOK_PROFILE_DIR?.trim();
+	if (configured) return join(configured, `gateway-api-${process.pid}.jsonl`);
+
+	// Worker preloads deliberately remove the hook directory from descendants,
+	// while the Playwright profile output remains available. Reconstruct the
+	// same run-owned hook stream rather than creating a second owner artifact.
+	const output = process.env.BOBBIT_V2_E2E_PROFILE_OUTPUT?.trim();
+	const group = process.env.BOBBIT_V2_E2E_PROFILE_GROUP?.trim();
+	if (!output || !group) return undefined;
+	return join(dirname(output), `group-${group}-raw`, "hooks", `gateway-api-${process.pid}.jsonl`);
+}
+
+function importBundledRuntime(bundlePath: string): Promise<E2EDistServerRuntime> {
+	const profilePath = runtimeLoadProfilePath();
+	if (!profilePath) {
+		return import(/* @vite-ignore */ pathToFileURL(bundlePath).href) as Promise<E2EDistServerRuntime>;
+	}
+
+	const startedAt = Date.now();
+	const startedPerf = performance.now();
+	const finish = (outcome: "success" | "error", error?: unknown): void => {
+		const endedAt = Date.now();
+		const record = {
+			type: "e2e_runtime_load",
+			id: `${process.pid}:e2e-runtime-load`,
+			ownerPid: process.pid,
+			workerStartedAt: performance.timeOrigin,
+			bundleIdentity: bundlePath,
+			mode: "bundle",
+			startedAt,
+			endedAt,
+			durationMs: Math.max(0, performance.now() - startedPerf),
+			outcome,
+			...(error instanceof Error ? { errorName: error.name } : {}),
+		};
+		try {
+			mkdirSync(dirname(profilePath), { recursive: true });
+			appendFileSync(profilePath, `${JSON.stringify(record)}\n`, "utf8");
+		} catch { /* observational profiling must never change runtime behavior */ }
+	};
+
+	return (import(/* @vite-ignore */ pathToFileURL(bundlePath).href) as Promise<E2EDistServerRuntime>).then(
+		(runtime) => { finish("success"); return runtime; },
+		(error) => { finish("error", error); throw error; },
+	);
+}
 
 /**
  * Load Group B's server graph after the worker has installed its environment
@@ -36,7 +86,7 @@ export async function loadE2EDistServerRuntime<T>(loadRaw: () => Promise<T>): Pr
 	}
 	observedMode = "bundle";
 	observedBundlePath = bundlePath;
-	bundledRuntimePromise ??= import(/* @vite-ignore */ pathToFileURL(bundlePath).href) as Promise<E2EDistServerRuntime>;
+	bundledRuntimePromise ??= importBundledRuntime(bundlePath);
 	return bundledRuntimePromise as Promise<T>;
 }
 

@@ -114,6 +114,55 @@ describe("E2E profiling completeness", () => {
 		expect(validateE2EProfileManifest(refreshed)).toEqual([]);
 	});
 
+	it("retains complete runtime-load intervals and joins worker start to the first gateway call", () => {
+		const root = tempRoot("e2e-profile-runtime-load");
+		const hookFile = join(root, "hooks", "gateway-api-10.jsonl");
+		writeLines(hookFile, [
+			{
+				type: "e2e_runtime_load", id: "10:e2e-runtime-load", ownerPid: 10,
+				workerStartedAt: 1_000, bundleIdentity: "run/key/entries/runtime.mjs", mode: "bundle",
+				startedAt: 1_100, endedAt: 1_150, durationMs: 50, outcome: "success",
+			},
+			{ type: "gateway_api", id: "10:1", ownerPid: 10, startedAt: 1_175, endedAt: 1_200, durationMs: 25, method: "GET", path: "/api/health", status: 200 },
+			{ type: "owner_end", ownerPid: 10, endedAt: 2_100 },
+		]);
+		const profile = buildProfile(root);
+
+		expect(profile.hookActivity.runtimeLoads).toMatchObject({
+			records: 1,
+			successes: 1,
+			errors: 0,
+			cumulativeMs: 50,
+			unjoinedGatewayRecords: 0,
+			incomplete: 0,
+			intervals: [{
+				ownerPid: 10,
+				startupToLoadMs: 100,
+				firstGateway: {
+					method: "GET",
+					path: "/api/health",
+					startupToGatewayMs: 175,
+					loadEndToGatewayMs: 25,
+				},
+			}],
+		});
+		expect(profile.hookActivity.parseErrors).toBe(0);
+	});
+
+	it("marks malformed or unflushed runtime-load intervals incomplete", () => {
+		const root = tempRoot("e2e-profile-runtime-load-incomplete");
+		writeLines(join(root, "hooks", "gateway-api-10.jsonl"), [{
+			type: "e2e_runtime_load", ownerPid: 10, workerStartedAt: 1_200,
+			bundleIdentity: "bundle.mjs", mode: "bundle", startedAt: 1_100,
+			endedAt: 1_150, durationMs: 50, outcome: "success",
+		}]);
+		const profile = attachOwnedProcess(buildProfile(root));
+
+		expect(profile.hookActivity.runtimeLoads).toMatchObject({ records: 0, incomplete: 1 });
+		expect(profile.hookActivity.parseErrors).toBe(1);
+		expect(validateE2EProfileManifest(profile)).toContain("profile gateway hook telemetry must have no parse errors");
+	});
+
 	it("rejects unmatched children and absent or unflushed gateway hooks", () => {
 		const root = tempRoot("e2e-profile-incomplete");
 		writeLines(join(root, "processes", "process-10.jsonl"), [
