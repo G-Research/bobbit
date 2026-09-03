@@ -15,8 +15,8 @@
  * Every step is fail-open: the cache is an optimization, never a correctness
  * dependency, so any FS error degrades to a cold cache rather than a failure.
  */
-import { cpSync, existsSync, lstatSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { cpSync, existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 /**
  * Injectable fs seam for publishTransformCache — lets the unit test simulate a
@@ -63,107 +63,6 @@ export function seedTransformCache(latestDir: string, runDir: string): boolean {
 		console.log(`[pwtest-cache] transform-cache seed skipped (cold start): ${(err as Error)?.message ?? err}`);
 		return false;
 	}
-}
-
-function isWithin(root: string, candidate: string, allowRoot = false): boolean {
-	const rel = relative(root, candidate);
-	return (allowRoot && rel === "")
-		|| (rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith("../") && !rel.startsWith("..\\"));
-}
-
-/**
- * Resolve an existing cache directory only when both its declared and real
- * locations stay below the coordinator-owned root. Rejecting symlink entries
- * prevents a seemingly contained snapshot from retaining links back outside
- * the run root when copied to a follower.
- */
-function containedCacheDirectory(containmentRoot: string, candidate: string): string | null {
-	try {
-		const declaredRoot = resolve(containmentRoot);
-		const declaredCandidate = resolve(candidate);
-		if (!isWithin(declaredRoot, declaredCandidate)) return null;
-		const realRoot = realpathSync(declaredRoot);
-		const realCandidate = realpathSync(declaredCandidate);
-		if (!isWithin(realRoot, realCandidate) || !lstatSync(realCandidate).isDirectory()) return null;
-		const pending = [realCandidate];
-		while (pending.length > 0) {
-			const directory = pending.pop()!;
-			for (const entry of readdirSync(directory, { withFileTypes: true })) {
-				const entryPath = join(directory, entry.name);
-				if (entry.isSymbolicLink()) return null;
-				if (entry.isDirectory()) pending.push(entryPath);
-			}
-		}
-		return realCandidate;
-	} catch {
-		return null;
-	}
-}
-
-/** Validate a possibly absent publication path without following an escape. */
-function containedCacheTarget(containmentRoot: string, candidate: string): string | null {
-	try {
-		const declaredRoot = resolve(containmentRoot);
-		const declaredCandidate = resolve(candidate);
-		if (!isWithin(declaredRoot, declaredCandidate)) return null;
-		const realRoot = realpathSync(declaredRoot);
-		const realParent = realpathSync(dirname(declaredCandidate));
-		if (!isWithin(realRoot, realParent, true)) return null;
-		if (existsSync(declaredCandidate)) {
-			if (lstatSync(declaredCandidate).isSymbolicLink()) return null;
-			const realCandidate = realpathSync(declaredCandidate);
-			if (!isWithin(realRoot, realCandidate)) return null;
-		}
-		return declaredCandidate;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Atomically publish an immutable transform-cache snapshot below one owned run
- * root. The source remains writable only by its process; followers never use
- * the published directory as PWTEST_CACHE_DIR. All validation/copy failures
- * are cache misses so test execution remains fail-open.
- */
-export function publishContainedTransformCacheSnapshot(
-	runDir: string,
-	snapshotDir: string,
-	containmentRoot: string,
-	tag: string = String(process.pid),
-): boolean {
-	if (!runDir || !snapshotDir || !containmentRoot) return false;
-	const containedRun = containedCacheDirectory(containmentRoot, runDir);
-	const containedSnapshot = containedCacheTarget(containmentRoot, snapshotDir);
-	if (!containedRun || !containedSnapshot || containedRun === containedSnapshot) return false;
-	if (!/^[a-zA-Z0-9._-]+$/.test(tag)) return false;
-	const temporarySnapshot = `${containedSnapshot}-${tag}-tmp`;
-	if (!containedCacheTarget(containmentRoot, temporarySnapshot)) return false;
-	try {
-		// A killed publisher may leave its unique staging directory behind. It is
-		// never a valid source and must not be merged into the next publication.
-		rmSync(temporarySnapshot, { recursive: true, force: true });
-	} catch {
-		return false;
-	}
-	return publishTransformCache(containedRun, containedSnapshot, tag);
-}
-
-/**
- * Non-clobber seed an immutable contained snapshot into a follower's distinct,
- * process-owned writable cache directory. Symlink escapes and missing/partial
- * publications degrade to an independent cold cache.
- */
-export function seedContainedTransformCacheSnapshot(
-	snapshotDir: string,
-	runDir: string,
-	containmentRoot: string,
-): boolean {
-	if (!snapshotDir || !runDir || !containmentRoot) return false;
-	const containedSnapshot = containedCacheDirectory(containmentRoot, snapshotDir);
-	const containedRun = containedCacheDirectory(containmentRoot, runDir);
-	if (!containedSnapshot || !containedRun || containedSnapshot === containedRun) return false;
-	return seedTransformCache(containedSnapshot, containedRun);
 }
 
 /**
