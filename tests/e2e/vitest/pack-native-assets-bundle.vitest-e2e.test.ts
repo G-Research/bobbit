@@ -8,7 +8,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { build, type Metafile, type Plugin } from "esbuild";
+import { buildSync, type Metafile, type OnResolveResult, type Plugin, type PluginBuild } from "esbuild";
 import { makeTmpDir } from "../../helpers/tmp.ts";
 
 type NativeAssetRuntime = {
@@ -84,7 +84,6 @@ const TARGET_RUNTIMES: ReadonlyArray<[CanonicalTarget, NativeAssetRuntime]> = [
 // normally far shorter. Keep bounded headroom without retrying torn-down work.
 const REAL_PROCESS_TEST_TIMEOUT_MS = 180_000;
 const temporaryRoots = new Set<string>();
-const outstandingBuilds = new Set<Promise<Awaited<ReturnType<typeof build>>>>();
 
 async function loadBuildApi(): Promise<BuildApi> {
 	return await import(/* @vite-ignore */ BUILD_MODULE) as unknown as BuildApi;
@@ -127,7 +126,7 @@ function writeResolverSource(packRoot: string): string {
 	return sourceFile;
 }
 
-function assertSelfContainedBundle(result: Awaited<ReturnType<typeof build>>, bundle: string): void {
+function assertSelfContainedBundle(result: ReturnType<typeof buildSync>, bundle: string): void {
 	const metafile = result.metafile as Metafile;
 	const normalizedInputs = Object.keys(metafile.inputs).map(input => input.replaceAll("\\", "/"));
 	assert.equal(normalizedInputs.some(input => input.endsWith("/src/server/extension-host/native-assets.ts")), true, "production helper must be bundled");
@@ -139,9 +138,46 @@ function assertSelfContainedBundle(result: Awaited<ReturnType<typeof build>>, bu
 	assert.equal(bundle.includes(REPO_ROOT), false, "bundle must not embed its checkout path");
 }
 
+async function resolveBuildAlias(api: BuildApi, platform: string, specifier: string): Promise<OnResolveResult> {
+	let resolver: Parameters<PluginBuild["onResolve"]>[1] | undefined;
+	let resolverFilter: RegExp | undefined;
+	const plugin = api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform });
+	plugin.setup({
+		onResolve(
+			options: Parameters<PluginBuild["onResolve"]>[0],
+			callback: Parameters<PluginBuild["onResolve"]>[1],
+		) {
+			resolverFilter = options.filter;
+			resolver = callback;
+		},
+	} as never);
+	assert.ok(resolver, "native asset plugin must register its resolver");
+	assert.ok(resolverFilter?.test(specifier), `native asset plugin filter did not match ${specifier}`);
+	const result = await resolver({
+		path: specifier,
+		importer: "",
+		namespace: "file",
+		resolveDir: REPO_ROOT,
+		kind: "import-statement",
+		pluginData: undefined,
+		with: {},
+	});
+	assert.ok(result, `native asset plugin did not resolve ${specifier}`);
+	return result;
+}
+
 async function buildResolver(api: BuildApi, packRoot: string, sourceFile: string): Promise<string> {
 	const outfile = path.join(packRoot, "lib", "resolver.mjs");
-	const buildPromise = build({
+	const aliasResolution = await resolveBuildAlias(api, "node", "bobbit:pack-native-assets");
+	assert.equal(aliasResolution.errors, undefined);
+	assert.equal(typeof aliasResolution.path, "string");
+
+	// The async API owns a long-lived esbuild service. Under a measured cold
+	// Windows build its first request remained pending through both the 180s test
+	// and 180s cleanup hooks. The synchronous API gives this one-shot fixture one
+	// child lifecycle, while the production plugin's exact resolver output still
+	// supplies the alias consumed by the real bundle.
+	const result = buildSync({
 		absWorkingDir: packRoot,
 		entryPoints: [sourceFile],
 		outfile,
@@ -154,15 +190,9 @@ async function buildResolver(api: BuildApi, packRoot: string, sourceFile: string
 		minify: true,
 		legalComments: "none",
 		splitting: false,
-		plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "node" })],
+		alias: { "bobbit:pack-native-assets": aliasResolution.path! },
+		logLevel: "silent",
 	});
-	outstandingBuilds.add(buildPromise);
-	let result: Awaited<typeof buildPromise>;
-	try {
-		result = await buildPromise;
-	} finally {
-		outstandingBuilds.delete(buildPromise);
-	}
 	assert.ok(result.outputFiles);
 	assert.equal(result.outputFiles.length, 1);
 	const bundle = result.outputFiles[0].text;
@@ -170,32 +200,6 @@ async function buildResolver(api: BuildApi, packRoot: string, sourceFile: string
 	fs.mkdirSync(path.dirname(outfile), { recursive: true });
 	fs.writeFileSync(outfile, bundle, "utf8");
 	return outfile;
-}
-
-function createBundleFixture(): { root: string; packRoot: string; sourceFile: string } {
-	const root = makeTmpDir("pack-native-assets-bundle-");
-	temporaryRoots.add(root);
-	const packRoot = path.join(root, "source", "fixture-pack");
-	const sourceFile = writeResolverSource(packRoot);
-	const family = path.join(packRoot, "lib", "native", "database-driver");
-	const target = "linux-musl-arm64";
-	const filename = `${target}.node`;
-	const bytes = Buffer.from(`fixture-native:${target}\n`, "utf8");
-	fs.mkdirSync(family, { recursive: true });
-	fs.writeFileSync(path.join(family, filename), bytes);
-	writeJson(path.join(family, "manifest.json"), {
-		schema: 1,
-		package: "fixture-native",
-		version: PACKAGE_VERSION,
-		targets: {
-			[target]: {
-				file: filename,
-				size: bytes.byteLength,
-				sha256: createHash("sha256").update(bytes).digest("hex"),
-			},
-		},
-	});
-	return { root, packRoot, sourceFile };
 }
 
 async function runBuiltinCopy(fixtureRoot: string, outputRoot: string): Promise<void> {
@@ -253,11 +257,7 @@ async function runNpm(cwd: string, argv: string[]): Promise<{ stdout: string; st
 	}
 }
 
-afterEach(async () => {
-	// esbuild's build API has no cancellation handle, and a Vitest timeout does
-	// not stop the pending promise. Keep fixture sources alive until every real
-	// build settles so teardown and retries cannot race the same build lifecycle.
-	await Promise.allSettled([...outstandingBuilds]);
+afterEach(() => {
 	for (const root of temporaryRoots) {
 		restoreWritable(root);
 		fs.rmSync(root, { recursive: true, force: true });
@@ -403,31 +403,13 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		expect(fs.readFileSync(resolverFile)).toEqual(resolverBefore);
 	}, REAL_PROCESS_TEST_TIMEOUT_MS);
 
-	it("rejects the helper alias in browser bundles and rejects unknown bobbit aliases", async () => {
-		const fixture = createBundleFixture();
+	it("rejects the helper alias for browser builds and rejects unknown bobbit aliases", async () => {
 		const api = await loadBuildApi();
-		const entry = path.join(fixture.packRoot, "entry.ts");
-		fs.writeFileSync(entry, [
-			'import "bobbit:pack-native-assets";',
-			'import "bobbit:anything-else";',
-			"",
-		].join("\n"), "utf8");
-
-		// One real browser build still crosses both plugin resolution branches,
-		// without paying for a second esbuild build invocation.
-		const failure = await build({
-			entryPoints: [entry],
-			bundle: true,
-			write: false,
-			platform: "browser",
-			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "browser" })],
-			logLevel: "silent",
-		}).then(() => null, (error: unknown) => error);
-		expect(failure).toBeInstanceOf(Error);
-		const diagnostic = [
-			String(failure),
-			...((failure as { errors?: Array<{ text?: string }> }).errors ?? []).map(error => error.text ?? ""),
-		].join("\n");
+		const browserResult = await resolveBuildAlias(api, "browser", "bobbit:pack-native-assets");
+		const unknownResult = await resolveBuildAlias(api, "node", "bobbit:anything-else");
+		const diagnostic = [...(browserResult.errors ?? []), ...(unknownResult.errors ?? [])]
+			.map(error => error.text)
+			.join("\n");
 		expect(diagnostic).toMatch(/bobbit:pack-native-assets/i);
 		expect(diagnostic).toMatch(/available only to Node pack entries/i);
 		expect(diagnostic).toMatch(/bobbit:anything-else/i);
