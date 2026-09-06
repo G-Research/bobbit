@@ -32,14 +32,24 @@ class FakeWebSocket extends EventEmitter {
 }
 
 function makeAssistantUpdate(text: string, delta: string) {
+	const usage = {
+		input: 10,
+		output: text.length,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 10 + text.length,
+		cost: { input: 0.1, output: text.length / 100, cacheRead: 0, cacheWrite: 0, total: 0.1 + text.length / 100 },
+	};
 	const message = {
 		role: "assistant",
 		id: "stream-1",
 		content: [{ type: "text", text }],
+		usage: structuredClone(usage),
 		timestamp: 1_735_000_000_000,
 	};
 	return {
 		type: "message_update",
+		usage,
 		message,
 		assistantMessageEvent: {
 			type: "text_delta",
@@ -63,6 +73,7 @@ function makeToolUpdate(argumentsValue: Record<string, unknown>, type: "toolcall
 		assistantMessageEvent: {
 			type,
 			contentIndex: 0,
+			...(type === "toolcall_start" ? { id: "call-1", toolName: "edit" } : {}),
 			...(delta === undefined ? {} : { delta }),
 			partial: structuredClone(message),
 		},
@@ -228,7 +239,9 @@ describe("assistant stream session broadcast", () => {
 		assert.equal(capableFirst.assistantStreamDelta, 1);
 		assert.equal("message" in capableFirst, false);
 		assert.equal(capableFirst.assistantMessageBaseline.content[0].text, "");
+		assert.deepEqual(capableFirst.usage, first.usage);
 		assert.equal(legacyFirst.message.content[0].text, "Hello");
+		assert.deepEqual(legacyFirst.message.usage, first.usage);
 
 		const second = makeAssistantUpdate("Hello world", " world");
 		emitSessionEvent(session, second);
@@ -237,7 +250,13 @@ describe("assistant stream session broadcast", () => {
 		const legacySecond = eventFrames(legacy)[1].data;
 		assert.equal(capableSecond.assistantStreamDelta, 1);
 		assert.equal("assistantMessageBaseline" in capableSecond, false);
+		assert.deepEqual(capableSecond.usage, second.usage);
+		const reconstructedFirst = reconstructAssistantStreamDelta(capableFirst) as any;
+		const reconstructedSecond = reconstructAssistantStreamDelta(capableSecond, reconstructedFirst.message) as any;
+		assert.deepEqual(reconstructedSecond.message.usage, second.usage);
+		assert.deepEqual(reconstructedSecond.assistantMessageEvent.partial.usage, second.usage);
 		assert.equal(legacySecond.message.content[0].text, "Hello world");
+		assert.deepEqual(legacySecond.message.usage, second.usage);
 
 		assert.deepEqual(
 			session.eventBuffer.getAll().map((entry: any) => entry.event.message.content[0].text),
@@ -277,9 +296,13 @@ describe("assistant stream session broadcast", () => {
 		}
 
 		let previous: any;
-		for (const frame of eventFrames(capable)) {
+		for (const [index, frame] of eventFrames(capable).entries()) {
 			assert.equal(frame.data.assistantStreamDelta, 1, "every capable tool frame stays compact");
 			assert.equal("message" in frame.data, false);
+			if (index === 0) {
+				assert.equal(frame.data.assistantMessageEvent.id, "call-1");
+				assert.equal(frame.data.assistantMessageEvent.toolName, "edit");
+			}
 			const reconstructed = reconstructAssistantStreamDelta(frame.data, previous) as any;
 			previous = reconstructed.message;
 		}
