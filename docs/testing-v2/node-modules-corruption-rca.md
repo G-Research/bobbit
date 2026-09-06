@@ -69,8 +69,9 @@ runtime tree or conceal a damaged installation.
 The running gateway resolves the pi-coding-agent runtime from **its own install** for
 **every** automatic direct (non-sandbox) agent and verification spawn. The direct-host
 runtime resolver delegates package lookup to `import.meta.resolve`, converts the resolved
-entry URL to a filesystem path, derives the package's `node_modules` root and `dist/cli.js`,
-and verifies that both the resolved entry and derived CLI exist. This preserves Node's
+entry URL to a filesystem path, derives the package's `node_modules` root and Pi `0.85.1`'s
+declared `dist/bundle/cli.js`, and verifies that both the resolved entry and bundled CLI exist.
+This preserves Node's
 package and subpath semantics while turning a partial installation into the same actionable
 failure as a missing package. An explicit `--agent-cli` / `cliPath` override takes precedence
 and does not invoke automatic resolution or its availability checks.
@@ -340,9 +341,9 @@ mutation under live processes.
 
 Automatic direct host resolution uses Bobbit's installed
 `@earendil-works/pi-coding-agent` package in place through `import.meta.resolve`. It verifies
-the resolved entry and derived `dist/cli.js`; a missing or partial package produces actionable
-install or `--agent-cli` guidance. The explicit CLI override remains first choice and bypasses
-automatic resolution.
+the resolved entry and Pi's declared `dist/bundle/cli.js`; a missing or partial package produces
+actionable install or `--agent-cli` guidance. The explicit CLI override remains first choice and
+bypasses automatic resolution.
 
 The retired ring-fence previously copied or hardlinked the installed tree recursively into
 `<stateDir>/runtime`; on high-latency NFS that synchronous traversal could delay gateway port

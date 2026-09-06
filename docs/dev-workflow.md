@@ -136,11 +136,12 @@ packages missing.
 
 **Why it bricks direct spawns**: automatic direct host-side agent and verification
 spawns resolve Bobbit's installed `@earendil-works/pi-coding-agent` package in place
-using Node's normal package-resolution semantics. Resolution verifies both the resolved
-package entry and its derived `dist/cli.js`, so a missing **or partial** installation fails
-with guidance to install the package or supply an explicit `--agent-cli` path. An explicit
-CLI override remains first choice. Docker spawns are not exposed because the sandbox image
-contains its own Pi runtime and does not bind-mount host `node_modules` for it.
+using Node's normal package-resolution semantics. Pi `0.85.1` declares its bundled CLI at
+`dist/bundle/cli.js` and requires Node.js `>=22.19.0`; resolution verifies both the package
+entry and that declared CLI, so a missing **or partial** installation fails with guidance
+to install the package or supply an explicit `--agent-cli` path. An explicit CLI override
+remains first choice. Docker spawns are not exposed because the sandbox image contains its
+own version-matched Pi runtime and does not bind-mount host `node_modules` for it.
 
 **Current policy**: the runtime ring-fence and automatic dependency healing are
 retired on every platform. The `dev:harness`, `dev:nord`, and `dev:watchdog` wrappers
