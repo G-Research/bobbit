@@ -120,10 +120,11 @@ interface AuthoritativeModelCapacityFact {
  * - https://developers.openai.com/api/docs/models/gpt-5.6-luna.md
  * - https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
  * - https://developers.openai.com/api/docs/models/gpt-5.6-terra.md
+ * - https://developers.openai.com/api/docs/models/gpt-6-astra.md
  *
- * The three openai-codex GPT-5.6 routes use the matching OpenAI model page plus
- * Codex #33961 and Pi #6838 to establish 272K as the deliberate client/pricing
- * target rather than the physical model window:
+ * The openai-codex GPT-5.6 and GPT-6 Astra routes use the matching OpenAI
+ * model page plus Codex #33961 and Pi #6838 to establish 272K as the deliberate
+ * client/pricing target rather than the physical model window:
  * - https://github.com/openai/codex/issues/33961
  * - https://github.com/earendil-works/pi/issues/6838
  *
@@ -137,9 +138,11 @@ const AUTHORITATIVE_MODEL_CAPACITY_FACTS: readonly AuthoritativeModelCapacityFac
 	{ provider: "openai", id: "gpt-5.6-luna", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 	{ provider: "openai", id: "gpt-5.6-sol", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 	{ provider: "openai", id: "gpt-5.6-terra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai", id: "gpt-6-astra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 	{ provider: "openai-codex", id: "gpt-5.6-luna", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 	{ provider: "openai-codex", id: "gpt-5.6-sol", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 	{ provider: "openai-codex", id: "gpt-5.6-terra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai-codex", id: "gpt-6-astra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
 ];
 
 /** Resolve only a reviewed exact capacity fact; never infer from an ID family. */

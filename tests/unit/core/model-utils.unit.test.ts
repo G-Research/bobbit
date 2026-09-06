@@ -13,7 +13,10 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferLegacyAigwMeta } from "../../../src/server/agent/aigw-manager.ts";
-import { modelRecencyRank as serverModelRecencyRank } from "../../../src/server/agent/model-registry.ts";
+import {
+	modelRecencyRank as serverModelRecencyRank,
+	resolveAuthoritativeModelCapacity,
+} from "../../../src/server/agent/model-registry.ts";
 import { modelRecencyRank } from "../../../src/shared/model-ranks.ts";
 
 // ── Legacy /v1/models inference tests ─────────────────────────────
@@ -215,7 +218,7 @@ describe("inferLegacyAigwMeta()", () => {
 // ── Pi model catalog tests ─────────────────────────────────────────
 
 describe("pi-ai model catalog", () => {
-	it("exposes Pi 0.84.1's authoritative direct Claude Opus 5 metadata", () => {
+	it("exposes Pi 0.85.1's authoritative direct Claude Opus 5 metadata", () => {
 		const model = getBuiltinModels("anthropic").find((candidate) => candidate.id === "claude-opus-5");
 		assert.ok(model, "anthropic/claude-opus-5 should exist in the Pi catalog");
 		assert.equal(model.name, "Claude Opus 5");
@@ -227,12 +230,22 @@ describe("pi-ai model catalog", () => {
 		assert.equal(model.reasoning, true);
 		assert.deepEqual(model.input, ["text", "image"]);
 		assert.deepEqual(model.cost, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
-		assert.deepEqual(model.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+		assert.deepEqual(model.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
 		assert.deepEqual((model as any).compat, {
+			supportsMidConvoEffort: true,
 			forceAdaptiveThinking: true,
 			supportsTemperature: false,
 			supportsStrictTools: true,
 		});
+	});
+
+	it("assigns Astra display capacity only to reviewed exact catalog tuples", () => {
+		for (const provider of ["openai", "openai-codex"]) {
+			assert.equal(resolveAuthoritativeModelCapacity(provider, "gpt-6-astra", 272_000), 1_050_000);
+			assert.equal(resolveAuthoritativeModelCapacity(provider, "gpt-6-astra", 1_050_000), undefined);
+		}
+		assert.equal(resolveAuthoritativeModelCapacity("openrouter", "gpt-6-astra", 272_000), undefined);
+		assert.equal(resolveAuthoritativeModelCapacity("openai", "gpt-6-astra-preview", 272_000), undefined);
 	});
 });
 

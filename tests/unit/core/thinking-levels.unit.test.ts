@@ -1,5 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import {
 	THINKING_LEVELS,
 	clampThinkingLevel,
@@ -57,6 +58,14 @@ test("only explicit non-null map entries grant extended levels", () => {
 	};
 	assert.equal(supportsXHigh(denied), false);
 	assert.deepEqual(getSupportedThinkingLevels(denied), BASE);
+});
+
+test("Pi's Astra row exposes minimal through max and clamps off upward", () => {
+	const astra = getBuiltinModel("openai-codex", "gpt-6-astra");
+	assert.ok(astra, "Pi should contain openai-codex/gpt-6-astra");
+	assert.deepEqual(getSupportedThinkingLevels(astra), ["minimal", "low", "medium", "high", "xhigh", "max"]);
+	assert.equal(clampThinkingLevel("off", astra), "minimal");
+	assert.equal(clampThinkingLevel("max", astra), "max");
 });
 
 test("exact maps retain absent base tiers and drop explicit null tiers", () => {
