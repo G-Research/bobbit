@@ -1,4 +1,6 @@
-FROM node:22-slim
+# Pi 0.85.1 requires Node >=22.19.0; pin the sandbox runtime so builds fail
+# closed instead of depending on a floating Node 22 tag.
+FROM node:22.19.0-slim
 
 # Install build tools, git, curl, gh CLI, ripgrep.
 #
@@ -52,7 +54,7 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 # detects its own pi-coding-agent version from node_modules and passes it in via
 # --build-arg PI_AGENT_VERSION=<host-version>; the ARG default below is only a
 # fallback for manual `docker build docker/` invocations.
-ARG PI_AGENT_VERSION=0.74.0
+ARG PI_AGENT_VERSION=0.85.1
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
@@ -61,7 +63,7 @@ LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
-# Run as non-root user. node:22-slim includes a 'node' user (uid=1000).
+# Run as non-root user. node:22.19.0-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000
 # on the host, matching typical developer user IDs.
 USER node

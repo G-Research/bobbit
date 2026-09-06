@@ -342,10 +342,11 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		const modulesDir = path.join(root, "node_modules");
 		const packageRoot = path.join(modulesDir, "@earendil-works", "pi-coding-agent");
 		const entryPath = path.join(packageRoot, "dist", "index.js");
-		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		const cliPath = path.join(packageRoot, "dist", "bundle", "cli.js");
 		fs.mkdirSync(path.dirname(entryPath), { recursive: true });
+		fs.mkdirSync(path.dirname(cliPath), { recursive: true });
 		fs.writeFileSync(entryPath, "export {};\n", "utf-8");
-		fs.writeFileSync(cliPath, "// fake Pi CLI\n", "utf-8");
+		fs.writeFileSync(cliPath, "// fake Pi bundled CLI\n", "utf-8");
 		writeJson(path.join(packageRoot, "package.json"), { name: PI_PACKAGE, type: "module" });
 
 		const specifiers: string[] = [];
@@ -382,11 +383,13 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		const beforeStat = statIdentity(sentinel);
 
 		const modulesDir = path.join(root, "installed", "node_modules");
-		const entryPath = path.join(modulesDir, "@earendil-works", "pi-coding-agent", "dist", "index.js");
-		const cliPath = path.join(path.dirname(entryPath), "cli.js");
+		const packageRoot = path.join(modulesDir, "@earendil-works", "pi-coding-agent");
+		const entryPath = path.join(packageRoot, "dist", "index.js");
+		const cliPath = path.join(packageRoot, "dist", "bundle", "cli.js");
 		fs.mkdirSync(path.dirname(entryPath), { recursive: true });
+		fs.mkdirSync(path.dirname(cliPath), { recursive: true });
 		fs.writeFileSync(entryPath, "export {};\n", "utf-8");
-		fs.writeFileSync(cliPath, "// fake Pi CLI\n", "utf-8");
+		fs.writeFileSync(cliPath, "// fake Pi bundled CLI\n", "utf-8");
 
 		const observer = observeLegacyRuntimeAccess(runtimeDir);
 		const spawnCalls: Array<{ command: string; args: readonly string[] }> = [];
@@ -466,12 +469,12 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 
 	it.each([
 		{ unavailable: "resolved package entry", entryAvailable: false },
-		{ unavailable: "derived dist/cli.js", entryAvailable: true },
+		{ unavailable: "derived dist/bundle/cli.js", entryAvailable: true },
 	])("turns an unavailable $unavailable into actionable partial-install guidance", async ({ entryAvailable }) => {
 		const root = makeTempDir("bobbit-partial-pi-");
 		const packageRoot = path.join(root, "node_modules", "@earendil-works", "pi-coding-agent");
 		const entryPath = path.join(packageRoot, "dist", "index.js");
-		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		const cliPath = path.join(packageRoot, "dist", "bundle", "cli.js");
 		const availabilityChecks: string[] = [];
 
 		await expect(async () => Promise.resolve(directRuntimeResolver()({

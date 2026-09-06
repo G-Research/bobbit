@@ -98,7 +98,7 @@ export function redactDockerArgs(args: string[]): string {
 	}).join(" ");
 }
 
-/** Container home directory for the Docker sandbox (node:20-slim, USER node) */
+/** Container home directory for the Docker sandbox (node:22.19.0-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
 export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
@@ -132,7 +132,7 @@ export interface RuntimePiExtensionDiagnostic {
 }
 
 export interface RpcBridgeOptions {
-	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
+	/** Path to the pi-coding-agent bundled CLI. Auto-resolved if omitted. */
 	cliPath?: string;
 	/** Working directory for the agent process */
 	cwd?: string;
@@ -191,8 +191,10 @@ export interface RpcBridgeOptions {
 export interface RpcBridgeStartDeps {
 	/** `import.meta.resolve`-compatible package resolver used by direct starts. */
 	resolvePackage?: (specifier: string, parent?: string | URL) => string;
-	/** Direct child spawn seam. Docker continues to use its existing spawn path. */
+	/** Direct child spawn seam. */
 	spawnDirect?: typeof spawn;
+	/** Docker child spawn seam for verifying the baked-in Pi entrypoint. */
+	spawnDocker?: typeof spawn;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -1114,7 +1116,7 @@ export class RpcBridge {
 
 		execArgs.push(
 			containerId,
-			"node", "--disable-warning=DEP0123", "/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+			"node", "--disable-warning=DEP0123", `/node_modules/${PI_CODING_AGENT_PACKAGE}/${PI_CODING_AGENT_CLI_RELATIVE_PATH}`,
 			...this.remapArgsForContainer(agentArgs),
 		);
 
@@ -1122,7 +1124,8 @@ export class RpcBridge {
 
 		// Host-side spawn doesn't need a specific cwd — the container working
 		// directory is set via `docker exec -w` above.
-		return spawn("docker", execArgs, {
+		const spawnDocker = this.startDeps.spawnDocker ?? spawn;
+		return spawnDocker("docker", execArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 		});
@@ -1607,6 +1610,7 @@ export function hostPathToContainer(hostPath: string, opts: MountTableOptions = 
 }
 
 const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+const PI_CODING_AGENT_CLI_RELATIVE_PATH = "dist/bundle/cli.js";
 
 export interface DirectHostPiRuntime {
 	/** Present for automatic package resolution; an explicit CLI may live anywhere. */
@@ -1660,7 +1664,7 @@ export function resolveDirectHostPiRuntime(
 			throw new Error(`Resolved package entry is unavailable: ${entryPath}`);
 		}
 		const packageRoot = piPackageRootFromEntry(entryPath);
-		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		const cliPath = path.join(packageRoot, ...PI_CODING_AGENT_CLI_RELATIVE_PATH.split("/"));
 		if (!exists(cliPath)) {
 			throw new Error(`Resolved package CLI is unavailable: ${cliPath}`);
 		}

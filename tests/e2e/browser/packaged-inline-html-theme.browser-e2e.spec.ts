@@ -47,7 +47,8 @@ const DEV_ONLY_BUNDLED_PACKAGES = [
 	"qrcode",
 	"sortablejs",
 ] as const;
-const REQUIRED_PI_VERSION = "0.84.1";
+const REQUIRED_PI_VERSION = "0.85.1";
+const MINIMUM_PI_NODE_VERSION = "22.19.0";
 
 interface JsonRecord {
 	[key: string]: unknown;
@@ -89,6 +90,8 @@ interface RuntimeReport {
 		installedPackageCount: number;
 	};
 	selectedPiVersion?: string;
+	nodeVersion?: string;
+	piCli?: { declaredPath: string; stdout: string; stderr: string };
 	tree?: unknown;
 	binaries?: unknown;
 	bridgeAssets: string[];
@@ -478,16 +481,26 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(install);
 			expect(install.code, commandFailure(install)).toBe(0);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
+			const installedPiRoot = join(consumerDir, "node_modules", "@earendil-works", "pi-coding-agent");
 			expect(
-				existsSync(join(
-					consumerDir,
-					"node_modules",
-					"@earendil-works",
-					"pi-coding-agent",
-					"npm-shrinkwrap.json",
-				)),
+				existsSync(join(installedPiRoot, "npm-shrinkwrap.json")),
 				"published pi-coding-agent must include its dependency-owned shrinkwrap",
 			).toBe(true);
+
+			const nodeVersionResult = await runPiPackedConsumerCommand(process.execPath, ["--version"], {
+				cwd: consumerDir,
+				env: consumerEnv,
+				timeoutMs: 30_000,
+			});
+			report.commands.push(nodeVersionResult);
+			expect(nodeVersionResult.code, commandFailure(nodeVersionResult)).toBe(0);
+			const nodeVersion = nodeVersionResult.stdout.trim().replace(/^v/, "");
+			parseVersion(nodeVersion, "packed consumer Node version");
+			expect(
+				compareVersions(nodeVersion, MINIMUM_PI_NODE_VERSION),
+				`packed consumer Node ${nodeVersion} must satisfy Pi's >=${MINIMUM_PI_NODE_VERSION} engine`,
+			).toBeGreaterThanOrEqual(0);
+			report.nodeVersion = nodeVersion;
 
 			const installedRoot = join(consumerDir, "node_modules", ...PACKAGE_INSTALL_SEGMENTS);
 			const installedManifest = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8")) as {
@@ -518,6 +531,28 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			parseVersion(selectedPiVersion, "selected Pi pin");
 			expect(selectedPiVersion, "packed Bobbit must pin Pi exactly to the supported version").toBe(REQUIRED_PI_VERSION);
 			report.selectedPiVersion = selectedPiVersion;
+
+			const installedPiManifest = JSON.parse(await readFile(join(installedPiRoot, "package.json"), "utf8")) as {
+				bin?: Record<string, string>;
+				engines?: { node?: string };
+			};
+			expect(installedPiManifest.engines?.node, "installed Pi must declare its supported Node floor").toBe(">=22.19.0");
+			expect(installedPiManifest.bin?.pi, "installed Pi must declare its bundled CLI").toBe("dist/bundle/cli.js");
+			const declaredPiCli = join(installedPiRoot, ...installedPiManifest.bin!.pi.split("/"));
+			expect(existsSync(declaredPiCli), `installed Pi CLI does not exist at ${declaredPiCli}`).toBe(true);
+			const piCliSmoke = await runPiPackedConsumerCommand(process.execPath, [declaredPiCli, "--version"], {
+				cwd: consumerDir,
+				env: consumerEnv,
+				timeoutMs: 30_000,
+			});
+			report.commands.push(piCliSmoke);
+			expect(piCliSmoke.code, commandFailure(piCliSmoke)).toBe(0);
+			expect(`${piCliSmoke.stdout}\n${piCliSmoke.stderr}`, "Pi bundled CLI --version must report 0.85.1").toContain(REQUIRED_PI_VERSION);
+			report.piCli = {
+				declaredPath: installedPiManifest.bin!.pi,
+				stdout: piCliSmoke.stdout,
+				stderr: piCliSmoke.stderr,
+			};
 
 			const lsResult = await runPiPackedConsumerNpm(
 				["ls", ...INSPECTED_PACKAGES, "--all", "--json"],

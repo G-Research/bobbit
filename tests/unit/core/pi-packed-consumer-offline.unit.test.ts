@@ -599,7 +599,15 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(packedConsumer, /"consumer install must create its own lockfile"/);
 		assert.match(packedConsumer, /"published pi-coding-agent must include its dependency-owned shrinkwrap"/);
 		assert.match(packedConsumer, /"npm ls must have no invalid, missing, stale, or extraneous edges"/);
+		assert.match(packedConsumer, /const REQUIRED_PI_VERSION = "0\.85\.1";/,
+			"the packed consumer must pin the selected Pi compatibility line");
+		assert.match(packedConsumer, /const MINIMUM_PI_NODE_VERSION = "22\.19\.0";/,
+			"the packed consumer must enforce Pi's Node engine floor");
 		assert.match(packedConsumer, /"packed Bobbit must pin Pi exactly to the supported version"/);
+		assert.match(packedConsumer, /installedPiManifest\.bin\?\.pi[^\n]+\.toBe\("dist\/bundle\/cli\.js"\)/,
+			"the packed consumer must resolve Pi's declared bundled entrypoint");
+		assert.match(packedConsumer, /runPiPackedConsumerCommand\(process\.execPath, \[declaredPiCli, "--version"\]/,
+			"the declared Pi entrypoint must execute under the compatible consumer runtime");
 		assert.match(packedConsumer, /`every brace-expansion edge must be 5\.0\.7\+:/);
 		assert.match(packedConsumer, /`Pi \$\{selectedPiVersion\} must resolve every protobufjs edge to 7\.6\.5\+:/);
 		assert.match(packedConsumer, /expect\(resolution\.source, `\$\{tool\} must resolve from \$\{expectedBinaryPackage\}`\)\.toBe\("bundled"\)/);

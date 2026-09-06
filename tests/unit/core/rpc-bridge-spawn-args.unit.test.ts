@@ -18,8 +18,11 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
-import { buildAgentArgs, resolveEffectivePiSelection } from "../../../src/server/agent/rpc-bridge.ts";
+import { buildAgentArgs, resolveEffectivePiSelection, RpcBridge } from "../../../src/server/agent/rpc-bridge.ts";
 
 describe("resolveEffectivePiSelection", () => {
 	it("resolves repeated raw flags with Pi last-wins semantics and strips selection args", () => {
@@ -79,6 +82,51 @@ describe("resolveEffectivePiSelection", () => {
 		assert.throws(() => resolveEffectivePiSelection({ args: ["--provider"] }), /expected a non-empty value/);
 		assert.throws(() => resolveEffectivePiSelection({ args: ["--model", "--tools"] }), /expected a non-empty value/);
 		assert.throws(() => resolveEffectivePiSelection({ args: ["--thinking", "turbo"] }), /unknown level/);
+	});
+});
+
+describe("RpcBridge Pi entrypoint selection", () => {
+	it("spawns the declared Pi 0.85 bundled CLI inside Docker", async () => {
+		let capturedCommand = "";
+		let capturedArgs: string[] = [];
+		const child = new EventEmitter() as ChildProcess;
+		Object.assign(child, {
+			pid: 123,
+			stdin: new PassThrough(),
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+			kill: () => true,
+		});
+		const bridge = new RpcBridge({
+			containerId: "container-123",
+			sessionId: "session-123",
+			env: { BOBBIT_SESSION_ID: "session-123" },
+			args: ["--no-extensions"],
+			clock: {
+				now: () => 0,
+				setTimeout: (callback: () => void) => { callback(); return 0 as any; },
+				setInterval: () => 0 as any,
+				clearTimeout: () => undefined,
+				clearInterval: () => undefined,
+			},
+		}, {
+			spawnDocker: ((command: string, args: readonly string[] = []) => {
+				capturedCommand = command;
+				capturedArgs = [...args];
+				return child;
+			}) as typeof import("node:child_process").spawn,
+		});
+
+		await bridge.start();
+
+		assert.equal(capturedCommand, "docker");
+		const containerIndex = capturedArgs.indexOf("container-123");
+		assert.deepEqual(capturedArgs.slice(containerIndex, containerIndex + 4), [
+			"container-123",
+			"node",
+			"--disable-warning=DEP0123",
+			"/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+		]);
 	});
 });
 
@@ -244,7 +292,7 @@ describe("buildAgentArgs", () => {
 	});
 
 	it("does not retain the initial provider for Pi's qualified model-only raw override", () => {
-		// Pi 0.84.1 parses the supported spelling `--model <provider>/<id>` and
+		// Pi 0.85.1 parses the supported spelling `--model <provider>/<id>` and
 		// infers the provider only when no explicit --provider remains. Retaining
 		// the injected Anthropic provider would instead select the synthetic model
 		// anthropic/openai/gpt-4.1.
