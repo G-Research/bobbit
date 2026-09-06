@@ -7,7 +7,7 @@ import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { PiAssistantStreamNormalizer } from "../../../src/shared/assistant-stream-delta.ts";
 
-const SELECTED_PI_VERSION = "0.84.1";
+const SELECTED_PI_VERSION = "0.85.1";
 const PI_PACKAGES = [
 	"@earendil-works/pi-ai",
 	"@earendil-works/pi-agent-core",
@@ -41,11 +41,14 @@ function installedPackageRoot(packageName: string): string {
 	}
 }
 
-function installedVersion(packageName: string): string {
-	const metadata = JSON.parse(
+function installedPackageMetadata(packageName: string): any {
+	return JSON.parse(
 		fs.readFileSync(path.join(installedPackageRoot(packageName), "package.json"), "utf8"),
-	) as { version: string };
-	return metadata.version;
+	);
+}
+
+function installedVersion(packageName: string): string {
+	return installedPackageMetadata(packageName).version;
 }
 
 function userMessage(text: string): any {
@@ -68,20 +71,40 @@ async function loadInstalledJsonEventAdapter(): Promise<{ toJsonEvent(event: any
 }
 
 describe("installed Pi runtime contract for reliable agent turns", () => {
-	it("keeps the installed Pi trio on the selected common compatible release", () => {
+	it("keeps the installed Pi trio on the selected common compatible release and Node floor", () => {
 		const versions = Object.fromEntries(PI_PACKAGES.map((name) => [name, installedVersion(name)]));
 		expect(versions, "PI_CONTRACT_VERSION_MISMATCH: upgrade the Pi trio together").toEqual({
 			"@earendil-works/pi-ai": SELECTED_PI_VERSION,
 			"@earendil-works/pi-agent-core": SELECTED_PI_VERSION,
 			"@earendil-works/pi-coding-agent": SELECTED_PI_VERSION,
 		});
+		for (const packageName of PI_PACKAGES) {
+			expect(installedPackageMetadata(packageName).engines?.node).toBe(">=22.19.0");
+		}
+		const bobbitPackage = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
+		expect(bobbitPackage.engines?.node).toBe(">=22.19.0");
+
+		const codingAgent = installedPackageMetadata("@earendil-works/pi-coding-agent");
+		expect(codingAgent.bin?.pi).toBe("dist/bundle/cli.js");
+		expect(codingAgent.exports?.["./rpc-entry"]?.import).toBe("./dist/bundle/rpc-entry.js");
+		expect(fs.existsSync(path.join(installedPackageRoot("@earendil-works/pi-coding-agent"), codingAgent.bin.pi))).toBe(true);
+		expect(fs.existsSync(path.join(installedPackageRoot("@earendil-works/pi-coding-agent"), codingAgent.exports["./rpc-entry"].import))).toBe(true);
 	});
 
 	it("emits delta-only JSON message_update frames and preserves exact terminal authority", async () => {
 		const { toJsonEvent } = await loadInstalledJsonEventAdapter();
+		const cumulativeUsage = {
+			input: 12,
+			output: 3,
+			cacheRead: 2,
+			cacheWrite: 0,
+			totalTokens: 17,
+			cost: { input: 0.12, output: 0.15, cacheRead: 0.002, cacheWrite: 0, total: 0.272 },
+		};
 		const cumulativePartial = {
 			role: "assistant",
 			content: [{ type: "text", text: "cumulative text that must stay off the wire" }],
+			usage: cumulativeUsage,
 		};
 		const update = toJsonEvent({
 			type: "message_update",
@@ -96,10 +119,29 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 
 		expect(update, "PI_CONTRACT_MESSAGE_UPDATE_NOT_DELTA_ONLY").toEqual({
 			type: "message_update",
+			usage: cumulativeUsage,
 			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "delta only" },
 		});
 		expect(update).not.toHaveProperty("message");
 		expect(update.assistantMessageEvent).not.toHaveProperty("partial");
+
+		const toolCall = { type: "toolCall", id: "contract-call-1", name: "read", arguments: {} };
+		const toolPartial = { ...cumulativePartial, content: [toolCall] };
+		const toolStart = toJsonEvent({
+			type: "message_update",
+			message: toolPartial,
+			assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial: toolPartial },
+		});
+		expect(toolStart, "PI_CONTRACT_TOOLCALL_START_IDENTITY_MISSING").toEqual({
+			type: "message_update",
+			usage: cumulativeUsage,
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				id: "contract-call-1",
+				toolName: "read",
+			},
+		});
 
 		const exactTerminal = {
 			type: "message_end",
@@ -179,6 +221,7 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 		const receiver: any = Object.create(AgentSession.prototype);
 		Object.assign(receiver, {
 			_isAgentRunActive: false,
+			_pendingCustomMessages: [],
 			_eventListeners: [
 				(event: any) => observations.push({
 					observer: "session",
@@ -217,15 +260,21 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 		expect(receiver.isIdle).toBe(true);
 	});
 
-	it("orders manual compaction events and releases its controller before compaction_end", async () => {
+	it("orders manual compaction events, reports the 0.85 failure hook, and releases its controller", async () => {
 		const observations: Array<{ event: any; controllerReleased: boolean }> = [];
-		const receiver: any = {
+		const extensionEvents: any[] = [];
+		const receiver: any = Object.create(AgentSession.prototype);
+		Object.assign(receiver, {
 			abort: vi.fn(async () => undefined),
-			model: undefined,
+			agent: { state: { model: undefined } },
+			_extensionRunner: {
+				hasHandlers: (name: string) => name === "session_compact_failed",
+				emit: vi.fn(async (event: any) => extensionEvents.push(event)),
+			},
 			_emit(event: any) {
 				observations.push({ event, controllerReleased: receiver._compactionAbortController === undefined });
 			},
-		};
+		});
 
 		await expect((AgentSession.prototype as any).compact.call(receiver)).rejects.toThrow(/model/i);
 
@@ -238,6 +287,14 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 			controllerReleased: true,
 			event: { reason: "manual", aborted: false, willRetry: false },
 		});
+		expect(extensionEvents).toEqual([{
+			type: "session_compact_failed",
+			reason: "manual",
+			errorMessage: expect.stringContaining("No model selected"),
+			aborted: false,
+			willRetry: false,
+			fromExtension: false,
+		}]);
 	});
 
 	it("rejects direct prompt submission while manual compaction is active", async () => {
@@ -269,16 +326,26 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 		};
 		const priorUser = userMessage("original interrupted input");
 		const events: any[] = [];
+		const extensionEvents: any[] = [];
 		const runAutoCompaction = vi.fn(async (_reason: string, _willRetry: boolean) => true);
-		const receiver: any = {
+		const receiver: any = Object.create(AgentSession.prototype);
+		Object.assign(receiver, {
 			settingsManager: { getCompactionSettings: () => ({ enabled: true }) },
-			model: { provider: "faux", id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 },
+			_extensionRunner: {
+				hasHandlers: (name: string) => name === "session_compact_failed",
+				emit: vi.fn(async (event: any) => extensionEvents.push(event)),
+			},
 			sessionManager: { getBranch: () => [] },
-			agent: { state: { messages: [priorUser, firstTail] } },
+			agent: {
+				state: {
+					messages: [priorUser, firstTail],
+					model: { provider: "faux", id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 },
+				},
+			},
 			_overflowRecoveryAttempted: false,
 			_runAutoCompaction: runAutoCompaction,
 			_emit: (event: any) => events.push(event),
-		};
+		});
 		const checkCompaction = (AgentSession.prototype as any)._checkCompaction;
 
 		await expect(checkCompaction.call(receiver, firstTail)).resolves.toBe(true);
@@ -300,6 +367,12 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 			willRetry: false,
 			errorMessage: expect.stringContaining("failed after one compact-and-retry attempt"),
 		}));
+		expect(extensionEvents).toEqual([expect.objectContaining({
+			type: "session_compact_failed",
+			reason: "overflow",
+			willRetry: false,
+			fromExtension: false,
+		})]);
 	});
 
 	it("emits overflow compaction start/end with willRetry and removes a restored truncated tail", async () => {
@@ -334,9 +407,8 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 			},
 		];
 		const events: any[] = [];
-		const receiver: any = {
-			model: { provider: "faux", id: "faux-1", contextWindow: 8_192, maxTokens: 100 },
-			thinkingLevel: "off",
+		const receiver: any = Object.create(AgentSession.prototype);
+		Object.assign(receiver, {
 			settingsManager: {
 				getCompactionSettings: () => ({ enabled: true, reserveTokens: 0, keepRecentTokens: 1 }),
 			},
@@ -369,12 +441,16 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 				} : undefined),
 			},
 			agent: {
-				state: { messages: [priorUser] },
+				state: {
+					messages: [priorUser],
+					model: { provider: "faux", id: "faux-1", contextWindow: 8_192, maxTokens: 100 },
+					thinkingLevel: "off",
+				},
 				streamFunction: vi.fn(),
 				hasQueuedMessages: () => false,
 			},
 			_emit: (event: any) => events.push(event),
-		};
+		});
 
 		await expect(
 			(AgentSession.prototype as any)._runAutoCompaction.call(receiver, "overflow", true),

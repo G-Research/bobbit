@@ -207,6 +207,10 @@ function contentOf(message: JsonObject): unknown[] | undefined {
 	return Array.isArray(message.content) ? message.content : undefined;
 }
 
+function applyAuthoritativeUsage(message: JsonObject, event: JsonObject): void {
+	if (isObject(event.usage)) message.usage = clone(event.usage);
+}
+
 function blockWithout(block: JsonObject, field: string): JsonObject {
 	return Object.fromEntries(Object.entries(block).filter(([key]) => key !== field && key !== "partialJson"));
 }
@@ -317,12 +321,14 @@ function applyDelta(message: JsonObject, assistantEvent: JsonObject, checkpoint?
 }
 
 /**
- * Reconstruct a cumulative update from Pi 0.84's JSON/RPC delta-only frame.
+ * Reconstruct a cumulative update from Pi's JSON/RPC delta-only frame.
  *
  * Pi deliberately removes both `message` and `assistantMessageEvent.partial`
  * from `message_update` on the wire. The preceding assistant
- * `message_start.message` is therefore required. Exact `message_end.message`
- * frames do not pass through this helper and remain terminal authority.
+ * `message_start.message` is therefore required. Pi 0.85 adds authoritative
+ * cumulative `usage` to the outer update and tool identity to tool-call starts.
+ * Exact `message_end.message` frames do not pass through this helper and remain
+ * terminal authority.
  */
 export function reconstructPiAssistantMessageUpdate(event: unknown, previousMessage: unknown): unknown {
 	if (!isObject(event) || event.type !== "message_update" || "message" in event
@@ -348,7 +354,13 @@ export function reconstructPiAssistantMessageUpdate(event: unknown, previousMess
 			? { type: "text", text: "" }
 			: eventType === "thinking_start"
 				? { type: "thinking", thinking: "" }
-				: { type: "toolCall", id: "", name: "", arguments: {}, partialJson: "" };
+				: {
+					type: "toolCall",
+					id: typeof assistantEvent.id === "string" ? assistantEvent.id : "",
+					name: typeof assistantEvent.toolName === "string" ? assistantEvent.toolName : "",
+					arguments: {},
+					partialJson: "",
+				};
 	} else if (at >= 0 && (eventType === "text_end" || eventType === "thinking_end")) {
 		const block = content[at];
 		if (isObject(block)) checkpoint = blockWithout(block, eventType === "text_end" ? "text" : "thinking");
@@ -366,6 +378,7 @@ export function reconstructPiAssistantMessageUpdate(event: unknown, previousMess
 
 	const message = applyDelta(baseline, assistantEvent, checkpoint);
 	if (!message) return event;
+	applyAuthoritativeUsage(message, event);
 	return {
 		...event,
 		message,
@@ -469,6 +482,7 @@ export function reconstructAssistantStreamDelta(event: unknown, previousMessage?
 	const checkpoint = isObject(event.assistantBlockCheckpoint) ? event.assistantBlockCheckpoint : undefined;
 	const message = applyDelta(base, event.assistantMessageEvent, checkpoint);
 	if (!message) return event;
+	applyAuthoritativeUsage(message, event);
 	const {
 		assistantStreamDelta: _version,
 		assistantMessageBaseline: _baseline,
