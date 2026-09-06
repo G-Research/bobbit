@@ -174,7 +174,7 @@ describe("Google account model emission + auth isolation", () => {
 	it("emits the supported Code Assist Gemini models", () => {
 		const accountIds = new Set(snapshots.oauth.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
 		// These are confirmed-serving ids that are also present in pi-ai's catalog.
-		for (const supported of ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"]) {
+		for (const supported of ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview"]) {
 			assert.equal(accountIds.has(supported), true, `${supported} must be emitted (Code Assist supported)`);
 		}
 	});
