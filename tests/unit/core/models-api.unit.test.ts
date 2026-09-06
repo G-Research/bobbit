@@ -8,23 +8,50 @@
  * Validates model structure from built-in providers without needing
  * a full gateway. Replaces the slower E2E version in tests/e2e/models-api.spec.ts.
  */
-import { describe, it } from "vitest";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+guardProcessEnv();
+
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { getBuiltinModel, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../../tests/helpers/agent-dir.js";
 
 const memfs = createMemFs();
 const stateDir = path.resolve("/memfs/models-test");
+const agentDir = mkdtempSync(path.join(tmpdir(), "bobbit-models-api-"));
+process.env.BOBBIT_AGENT_DIR = agentDir;
+pinAgentDirForTest(agentDir);
+writeFileSync(
+	path.join(agentDir, "auth.json"),
+	JSON.stringify({ "openai-codex": { type: "oauth", access: "fake-test-token" } }),
+	"utf-8",
+);
 
-// Import after setup
+// Import after the isolated fake account state is installed.
 const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
-const { findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");
+const {
+	clearOAuthCache,
+	findSessionSelectableModel,
+	getAvailableModels,
+	getBuiltInProviderIds,
+	invalidateModelCache,
+} = await import("../../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
+clearOAuthCache();
 
-// Fetch models once — all tests validate the same snapshot
+// Fetch models once — all tests validate the same snapshot.
 const models = await getAvailableModels(prefs);
+
+afterAll(() => {
+	clearOAuthCache();
+	resetAgentDirForTest();
+	rmSync(agentDir, { recursive: true, force: true });
+});
 
 // ── Structure tests ─────────────────────────────────────────────────
 
@@ -82,7 +109,59 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("preserves exact Pi 0.84.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
+	it("exposes Pi's exact authenticated and session-selectable OpenAI Codex Astra row", () => {
+		const pi = getBuiltinModel("openai-codex", "gpt-6-astra");
+		assert.ok(pi, "Pi should contain openai-codex/gpt-6-astra");
+		const matches = models.filter(model => model.provider === "openai-codex" && model.id === "gpt-6-astra");
+		assert.equal(matches.length, 1, "Astra should occur exactly once");
+		const model = matches[0];
+		assert.equal(model.authenticated, true, "isolated Codex OAuth state should authenticate Astra");
+		assert.equal(findSessionSelectableModel(models, "openai-codex", "gpt-6-astra"), model);
+		assert.equal(model.modelCapacity, 1_050_000);
+
+		const { authenticated, modelCapacity, ...authoritativeFields } = model;
+		assert.equal(authenticated, true);
+		assert.equal(modelCapacity, 1_050_000);
+		assert.deepEqual(authoritativeFields, pi, "Bobbit must preserve Pi's Astra row without an overlay");
+		assert.deepEqual(authoritativeFields, {
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 10,
+				output: 50,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+				tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+			},
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			thinkingLevelMap: {
+				off: null,
+				minimal: "low",
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "xhigh",
+				max: "max",
+			},
+			compat: {
+				supportsOpenAIGrammarTools: true,
+				supportsAdditionalTools: true,
+				supportsToolSearch: true,
+			},
+		});
+
+		const direct = models.filter(model => model.provider === "openai" && model.id === "gpt-6-astra");
+		assert.equal(direct.length, 1, "direct OpenAI Astra should also occur exactly once");
+		assert.equal(direct[0].modelCapacity, 1_050_000);
+	});
+
+	it("preserves exact Pi 0.85.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
 		const cases = [
 			{ provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
 			{ provider: "amazon-bedrock", id: "au.anthropic.claude-opus-5", name: "Claude Opus 5 (AU)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
@@ -104,7 +183,12 @@ describe("Model registry", () => {
 			assert.equal(model.reasoning, true);
 			assert.deepEqual(model.input, ["text", "image"]);
 			assert.deepEqual(model.cost, expected.cost);
-			assert.deepEqual(model.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+			assert.deepEqual(
+				model.thinkingLevelMap,
+				expected.provider === "anthropic"
+					? { off: null, xhigh: "xhigh", max: "max" }
+					: { xhigh: "xhigh", max: "max" },
+			);
 			assert.notEqual(model.sessionSelectable, false);
 			if (expected.provider === "amazon-bedrock") {
 				assert.equal(model.compat, undefined, "Bedrock rows must not gain invented compat metadata");
@@ -113,6 +197,7 @@ describe("Model registry", () => {
 
 		const anthropic = models.find((model) => model.provider === "anthropic" && model.id === "claude-opus-5")!;
 		assert.deepEqual(anthropic.compat, {
+			supportsMidConvoEffort: true,
 			forceAdaptiveThinking: true,
 			supportsTemperature: false,
 			supportsStrictTools: true,
@@ -143,7 +228,7 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 
-	it("retains Pi 0.84.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
+	it("retains Pi 0.85.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -181,7 +266,7 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("retains supported Pi 0.84.1 catalog and routing fixes through the synchronous registry", () => {
+	it("retains supported Pi 0.85.1 catalog and routing fixes through the synchronous registry", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -202,9 +287,9 @@ describe("Model registry", () => {
 			assert.equal(compat(provider, "kimi-k3")?.supportsReasoningEffort, true);
 		}
 
-		const openCodeGo = requireModel("opencode-go", "grok-4.5");
+		const openCodeGo = requireModel("opencode-go", "grok-4.6");
 		assert.equal(openCodeGo.api, "openai-responses");
-		assert.equal(compat("opencode-go", "grok-4.5")?.sessionAffinityFormat, "openai-nosession");
+		assert.equal(compat("opencode-go", "grok-4.6")?.sessionAffinityFormat, "openai-nosession");
 
 		const xai = requireModel("xai", "grok-4.5");
 		assert.equal(xai.api, "openai-responses");
