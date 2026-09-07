@@ -1,8 +1,18 @@
-# E2E Speed Buffer Report
+# E2E test plan and performance record
 
-This is the point-in-time report for the `goal/e2e-speed--6d1ec0ec` follow-up. The goal was to create runtime headroom for the full E2E suite without weakening product-owner story coverage.
+The E2E suite protects integration boundaries that cheaper tiers cannot reproduce: real gateways and subprocesses, Git/worktrees, Docker capability handling, installed packages and native assets, Chromium, restarts, persistence, and cleanup.
 
-## Strategy
+## Current safe-gains close-out
+
+The [2026-09-03 safe-gains close-out](e2e-performance/speed-up-e2e-332a47cc/close-out.md) is the current performance and coverage record. It documents the final Linux, macOS, and Windows measurements; unchanged discovery, worker, retry, isolation, Docker, and cleanup invariants; every accepted consolidation or re-tiering; retained real integration anchors; and rejected experiments.
+
+The original less-than-300-second cross-platform target and the required three alternating cold/warm pairs remain **unmet** under the user-approved amended scope. Do not interpret the close-out as a passing performance qualification.
+
+## Historical speed-buffer report
+
+The remainder of this page preserves the earlier `goal/e2e-speed--6d1ec0ec` point-in-time report. Its paths, counts, worker layout, and 270-second target describe that historical suite, not the current discovery contract. Use the current close-out for new changes.
+
+### Strategy
 
 `npm run test:e2e` spans three Playwright projects:
 
@@ -12,15 +22,15 @@ This is the point-in-time report for the `goal/e2e-speed--6d1ec0ec` follow-up. T
 
 The bottleneck remains browser-tier setup, not raw worker count. Browser workers are expensive because each owns a spawned gateway and Chromium process, and higher worker counts previously increased Windows filesystem and CPU contention. The safe speed lever was therefore: keep conservative workers, fold duplicated browser setup, move static assertions to cheaper tiers where equivalent, and retain browser smokes for real user journeys.
 
-## Measurement sources
+### Measurement sources
 
-The current cross-platform cold/warm profiling and qualification procedure is documented in [`e2e-performance/speed-up-e2e-332a47cc/profiling.md`](e2e-performance/speed-up-e2e-332a47cc/profiling.md). Raw B/C profiles belong under `docs/e2e-performance/speed-up-e2e-332a47cc/profiles/<os>/<cold|warm>/`; final paired samples and the aggregate qualification manifest are linked here once collected.
+The current cross-platform cold/warm profiling and qualification procedure is documented in [`e2e-performance/speed-up-e2e-332a47cc/profiling.md`](e2e-performance/speed-up-e2e-332a47cc/profiling.md). Raw B/C profiles belong under `docs/e2e-performance/speed-up-e2e-332a47cc/profiles/<os>/<cold|warm>/`. The required paired samples and aggregate qualification manifest were not completed; the close-out records that gap explicitly.
 
 Measurements from the earlier speed-buffer work came from persisted, uncommitted artifacts under `.bobbit/tmp/e2e-speed-buffer/` in the test worktrees, plus the final verification task for `3ae181cd`.
 
 All exact-command timings below include the build step from `npm run test:e2e`. The Playwright duration is reported separately when available so build/global-setup time is not confused with test execution time.
 
-## Baseline versus accepted final
+### Baseline versus accepted final
 
 | Metric | Fresh baseline at `b8863eda` | Accepted final at `3ae181cd` |
 |---|---:|---:|
@@ -44,7 +54,7 @@ Final verification also recorded:
 
 Baseline slowest targets were `dynamic-chat-tabs.spec.ts`, `repro-h3-snapshot-live-interleave.spec.ts`, `sidebar-keyboard-nav.spec.ts`, `session-recovery.spec.ts`, and `project-assistant-saved-state.spec.ts`. No test files were added between prior head `17f80bccbc52821e27dcc206125ce8823dfb0723` and the fresh baseline. The final file-count reduction came from folding `add-project-preflight-directory-picker.spec.ts` into `add-project-preflight.spec.ts`.
 
-## Worker configuration
+### Worker configuration
 
 The worker layout stayed on the measured stable configuration:
 
@@ -55,7 +65,7 @@ The worker layout stayed on the measured stable configuration:
 
 Do not increase workers to chase the remaining runtime gap. The prior `--workers=5` experiment was slower and flakier; future speed work should continue reducing browser setup cost or cold-cache contention.
 
-## Implemented reductions and coverage mapping
+### Implemented reductions and coverage mapping
 
 | Area reduced | Browser coverage retained | Replacement or folded coverage | Equivalence rationale |
 |---|---|---|---|
@@ -71,24 +81,11 @@ Do not increase workers to chase the remaining runtime gap. The prior `--workers
 | Add-project preflight picker | `tests/e2e/ui/add-project-preflight.spec.ts` now covers Browse -> Select triggering preflight, ready checks, enabled Continue, and archive CTA behavior. | Deleted `tests/e2e/ui/add-project-preflight-directory-picker.spec.ts`; its directory-picker regression assertion moved into the preflight happy path. | The picker and typed-path flows exercise the same preflight panel. The folded browser journey still proves Browse -> Select starts preflight without an extra spawned gateway. |
 | Proposal tools | `tests/e2e/ui/proposal-tools.spec.ts` keeps goal proposal card rendering, completed `Open proposal` button, persistence after navigation, and panel reopen. | Four proposal-tool browser tests were folded into one smoke. | The visible product contract is one proposal card lifecycle; the folded journey preserves render, persistence, and reopen assertions with one setup. |
 
-## Retained browser smokes
+### Historical retained browser smokes
 
-Keep these browser journeys intact when making future reductions:
+The entries in the historical reduction table describe the coverage owners at that revision. The test layout has since changed, so their old paths are not a current allowlist. Protect the current real-integration owners in the close-out's [protected integration anchors](e2e-performance/speed-up-e2e-332a47cc/close-out.md#protected-real-integration-anchors), and require a before/after production-boundary map before removing, folding, or re-tiering any of them.
 
-- Project assistant registration/promote — `tests/e2e/ui/project-assistant.spec.ts` covers add-project, provisional assistant session, proposal acceptance, project promotion with config, sidebar transition, and cleanup.
-- Project assistant saved-state — `tests/e2e/ui/project-assistant-saved-state.spec.ts` covers panel-scoped Apply Changes, Changes Saved, reload persistence, replacement by a new proposal, Terminate, and navigation cleanup.
-- Dynamic preview/chat — `tests/e2e/ui/dynamic-chat-tabs.spec.ts` covers real preview mount, legacy preview snapshots, content-hash dedupe, reload, and tab accessibility.
-- Sidebar keyboard/navigation — `tests/e2e/ui/sidebar-keyboard-nav.spec.ts` covers real gateway keyboard navigation, search filtering, collapse/expand, goal auto-open, and the archived Show Archived cycle.
-- Review annotations — `tests/e2e/ui/review-annotations-persistence.spec.ts` retains RP-05/RP-16/RP-18 visible hydration, reload, cross-context/session isolation, and cleanup.
-- Staff/sidebar behavior — `tests/e2e/ui/staff-sub-section.spec.ts` retains SB-31 visible sidebar behavior; API tests cover staff reassignment data paths.
-- Proposal opening/parity — browser proposal smokes retain normal-session opening while `tests/ui-fixtures/proposal-review-fixture.spec.ts` owns per-type renderer persistence.
-- `ask_user_choices` — `tests/e2e/ui/ask-user-choices-ui.spec.ts` retains interactive pending state, Other handling, submitted read-only restore, keyboard submission, and cross-client finalization.
-- Base-ref settings — `tests/e2e/ui/base-ref-settings.spec.ts` retains persistence and user-visible validation errors.
-- Add Project UX — `tests/e2e/ui/add-project-typeahead.spec.ts`, `add-project-browse-modal.spec.ts`, `add-project-flow.spec.ts`, `add-project-preflight.spec.ts`, and `add-project-symlink.spec.ts` retain typeahead intent gating, completed-path suppression, trailing-separator child suggestions, Browse focus behavior, directory creation, preflight panel, symlink cancel, canonical storage, and reload persistence. API coverage for create-directory errors and browse prefix/limit lives in `tests/e2e/project-detect-browse.spec.ts`.
-- Project drag reorder — `tests/e2e/ui/project-drag-reorder.spec.ts` retains desktop/mobile reorder, persistence, sync, cancel, and collapsed-sidebar order.
-- Proposal tools — `tests/e2e/ui/proposal-tools.spec.ts` retains the completed tool-card lifecycle and reopen path.
-
-## Flake status
+### Flake status
 
 Accepted final verification at `3ae181cd` had 0 failures, 0 flaky tests, and 0 retries.
 
@@ -105,7 +102,7 @@ Remaining risk:
 - The final margin is 7s. This meets the target, but future test additions should prefer API/UI-fixture coverage or folded browser setup before adding new spawned-gateway journeys.
 - Search persistence is worker-owned. A fresh journal/snapshot write failure or `ENOENT` during teardown is a **close-ordering regression**, not generic filesystem contention: await gateway/project closure before removing test state. The durable mirror is `index/__docs__.json` plus `index/__docs__.journal`; legacy FlexSearch exports and their temporary files are disposable cache and are removed on worker startup. Do not delete the mirror as E2E cleanup or recovery. Regression coverage must retain mirror restart equivalence, interrupted-journal replay, legacy-cache cleanup without mirror loss, lazy worker ownership, and the explicit `503 { error: "search-unavailable", reason, state }` busy/degraded response. See [Search worker and persistence](search-worker-persistence.md#mirror-only-persistence) and [Search index](debugging.md#search-index).
 
-## Coverage and story audit
+### Coverage and story audit
 
 Latest recorded aggregate coverage for this goal remained non-regressive after the broad reductions:
 
@@ -123,9 +120,9 @@ Restored coverage blockers from the prior speed pass remain covered:
 
 Known pre-existing story-matrix ambiguities remain unchanged and should not be counted as regressions from this goal: CT-02-b, CT-15, and SB-15.
 
-## Follow-up risks
+### Follow-up risks
 
 1. Keep worker counts at the measured stable layout unless a new controlled experiment proves otherwise.
-2. Protect the retained browser smokes listed above; fold setup or move static assertions before deleting any user-journey coverage.
+2. Treat the historical mappings above as evidence for that revision; protect the current integration anchors linked at the top of this page.
 3. Improve cold-cache/runtime margin further. The final accepted run is under target, but only by 7s.
 4. Keep `tests/e2e/ui/screenshots/verification-progress-indicator.png` restored after E2E runs; it mutated during final verification and was reset.
