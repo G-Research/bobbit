@@ -1650,9 +1650,54 @@ interface AgentDirApiState {
 
 `GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, `contextWindow` as the runtime-authoritative context target, output limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `modelCapacity`, `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`. When present, `modelCapacity` is the provider-published hard request capacity for display only. Bobbit emits it only from exact catalog metadata matching the provider, model ID, and `contextWindow`; a mismatch omits it rather than inferring a capacity, and it never changes `contextWindow` compaction behavior. See [Context target and model capacity](internals.md#context-target-and-model-capacity) for ownership and fallback semantics.
 
-#### Pi 0.84.1 Claude Opus 5 catalog
+#### Pi 0.85.1 GPT-6 Astra catalog
 
-Pi's published `0.84.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
+Pi's published row is the authority for `openai-codex/gpt-6-astra`. After OpenAI account authentication, `/api/models` returns that row once with `authenticated: true` and the existing selection rules make it session-selectable:
+
+```ts
+{
+  id: "gpt-6-astra",
+  name: "GPT-6 Astra",
+  provider: "openai-codex",
+  api: "openai-codex-responses",
+  baseUrl: "https://chatgpt.com/backend-api",
+  reasoning: true,
+  input: ["text", "image"],
+  contextWindow: 272_000,
+  maxTokens: 128_000,
+  cost: {
+    input: 10,
+    output: 50,
+    cacheRead: 1,
+    cacheWrite: 12.5,
+    tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+  },
+  thinkingLevelMap: {
+    off: null,
+    minimal: "low",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  },
+  compat: {
+    supportsOpenAIGrammarTools: true,
+    supportsAdditionalTools: true,
+    supportsToolSearch: true,
+  },
+  authenticated: true,
+  modelCapacity: 1_050_000,
+}
+```
+
+All fields except `authenticated` and `modelCapacity` come directly from Pi and remain unmodified. Authentication uses the existing provider-scoped Codex OAuth row. `modelCapacity` is an exact, display-only fact from [OpenAI's Astra documentation](https://developers.openai.com/api/docs/models/gpt-6-astra.md); Bobbit emits it only while the exact provider/model row still has Pi's 272,000-token context target. The capacity does not change selection, pricing, compaction, or Pi's operating context. Because Pi explicitly maps `off` to `null`, Off is not selectable for Astra and a requested Off level clamps to Minimal; Max remains available.
+
+Selection and persistence remain generic: `set_model` validates and applies the exact row, verifies provider/model/thinking read-back, and only then persists `{ modelProvider, modelId, effectiveThinkingLevel }`. Reload, reconnect, and restart reuse that verified tuple rather than choosing an Astra-specific fallback. See [Pi `0.85.1` Astra compatibility](pi-runtime-compatibility.md#pi-0851-astra-and-reliable-turn-compatibility).
+
+#### Pi 0.85.1 Claude Opus 5 catalog
+
+Pi's published `0.85.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
 
 | Exact provider/model | Published name | API | Base URL | Cost `{input, output, cacheRead, cacheWrite}` |
 |---|---|---|---|---|
@@ -1663,7 +1708,7 @@ Pi's published `0.84.1` catalog is authoritative for the direct Anthropic row an
 | `amazon-bedrock/jp.anthropic.claude-opus-5` | Claude Opus 5 (JP) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
 | `amazon-bedrock/us.anthropic.claude-opus-5` | Claude Opus 5 (US) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
 
-All six rows have a 1,000,000-token context window, 128,000-token output limit, `reasoning: true`, `input: ["text", "image"]`, and `thinkingLevelMap: { xhigh: "xhigh", max: "max" }`. Combined with the ordinary provider defaults, this exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the effective level is clamped against the exact selected row. Only the direct Anthropic row publishes `compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true }`. The Bedrock rows have no model-level `compat`, so Bobbit does not invent one; Pi's Bedrock adapter owns their adaptive-thinking behavior. See [Pi `0.84.1` reliable-turn compatibility](pi-runtime-compatibility.md#pi-0841-reliable-turn-compatibility) for the selected runtime contract.
+All six rows have a 1,000,000-token context window, 128,000-token output limit, `reasoning: true`, and `input: ["text", "image"]`. The direct Anthropic row publishes `thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" }`, so its supported ladder starts at Minimal, and `compat: { supportsMidConvoEffort: true, forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true }`. The Bedrock rows publish `thinkingLevelMap: { xhigh: "xhigh", max: "max" }` and no model-level `compat`; Bobbit preserves those exact upstream differences rather than inventing common metadata.
 
 Bobbit omits the exact deferred provider `kimi-coding` from `/api/models` and `/api/pi-ai/providers`, and Bobbit-owned default, role, and session-selection paths reject that provider without changing durable state. This is an exact provider-identity boundary, not a model-ID filter: Kimi-named IDs remain valid under a session-selectable AIGW, custom/local, Moonshot, or legacy gateway provider.
 
@@ -1756,9 +1801,11 @@ validation, token exchange, and refresh contract. Google OAuth is implemented na
 with PKCE and feeds the Code Assist provider extension; authenticated account models are
 available for normal session selection. OpenAI Codex constructs Pi's `Models` service with
 `builtinModels()` and calls `Models.login("openai-codex", "oauth", interaction)` using an
-`AuthInteraction`. Bobbit does not use Pi's removed `getOAuthProvider` or
-`OAuthLoginCallbacks` contracts. See [Anthropic OAuth](anthropic-oauth.md) and
-[Pi runtime compatibility](pi-runtime-compatibility.md#openai-codex-oauth-migration).
+`AuthInteraction`. The resulting provider-scoped `auth.json` row authenticates Pi's exact Codex
+catalog, including `openai-codex/gpt-6-astra`; Bobbit does not create a separate Astra credential
+or provider. Bobbit does not use Pi's removed `getOAuthProvider` or `OAuthLoginCallbacks`
+contracts. See [Anthropic OAuth](anthropic-oauth.md) and
+[Pi runtime compatibility](pi-runtime-compatibility.md#codex-oauth-selection-and-persistence).
 
 **`GET /api/oauth/status?provider=<id>`** responses:
 

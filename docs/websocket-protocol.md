@@ -68,7 +68,7 @@ Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` fr
 
 ## Cumulative assistant stream compaction
 
-Pi `0.84.1` JSON/RPC emits delta-only assistant `message_update` frames. `RpcBridge` first reconstructs Bobbit's cumulative internal event from the preceding assistant start, while preserving `message_end.message` as terminal authority. Repeating those growing cumulative copies to every browser would make WebSocket serialization and wire traffic grow with transcript length, so Bobbit compacts only the live browser projection for clients that negotiate it. Replay and snapshots remain cumulative and authoritative.
+Pi `0.85.1` JSON/RPC emits delta-only assistant `message_update` frames. Each update also carries authoritative cumulative top-level `usage`; `toolcall_start` includes its exact `id` and `toolName`. `RpcBridge` reconstructs Bobbit's cumulative internal event from the preceding assistant start, copies that usage into reconstructed message state, and seeds progressive tool identity at the start event, while preserving `message_end.message` as terminal authority. Repeating growing cumulative copies to every browser would make WebSocket serialization and wire traffic grow with transcript length, so Bobbit compacts only the live browser projection for clients that negotiate it. Replay and snapshots remain cumulative and authoritative.
 
 ### Negotiation and compatibility
 
@@ -92,7 +92,9 @@ Compatibility is fail-safe:
 - Equivalent capable recipients share compact-frame construction and serialization. Legacy and baseline-needing recipients remain separate output classes.
 - Updates are emitted immediately. There is no process-global timer that coalesces, replaces, or defers `message_update` delivery.
 
-The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It keeps reconstruction state only for the active assistant stream and clears it on an explicit client reset, snapshot application, reconstruction failure, `process_exit`, `agent_end`, and `message_end`. Normal socket teardown does not clear that state: reconnect may continue the same logical stream through cumulative replay. Progressive tool JSON is rebuilt from fragments while preserving the useful parseable prefix. A replacement socket independently starts its compact live projection with a self-contained baseline. If exact reconstruction cannot be proven, the client clears the invalid state, discards the compact frame, and reconnects; cumulative replay or a snapshot remains the authoritative recovery path.
+The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It applies the outer cumulative `usage` to both reconstructed objects and retains the `toolcall_start` identity while rebuilding progressive tool JSON from fragments. This keeps compact and cumulative clients convergent and prevents a stale start baseline from under-reporting usage or displaying a blank tool identity. Older/custom frames without those additive fields keep their conservative baseline behavior.
+
+The client keeps reconstruction state only for the active assistant stream and clears it on an explicit client reset, snapshot application, reconstruction failure, `process_exit`, `agent_end`, and `message_end`. Normal socket teardown does not clear that state: reconnect may continue the same logical stream through cumulative replay. A replacement socket independently starts its compact live projection with a self-contained baseline. If exact reconstruction cannot be proven, the client clears the invalid state, discards the compact frame, and reconnects; cumulative replay or a snapshot remains the authoritative recovery path.
 
 ### Sources of truth and replay
 
@@ -294,13 +296,16 @@ The optional field preserves compatibility with older clients. When it is
 absent, the gateway reuses the previous durable effective level when available,
 otherwise the current authoritative level, and clamps it against the exact new
 model. It does not infer `max`: that level is selectable only when the model's
-`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.84.1`'s
-direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
-`{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary
-`off` through `high` levels retained by the map rules—are available for those
-exact rows. Opus 4.8 publishes `xhigh` only. `max` is unavailable without an
-explicit map entry; `xhigh` may additionally come from the narrow map-less
-family fallbacks documented in the thinking-level guide.
+`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.85.1`'s
+`openai-codex/gpt-6-astra` row publishes `{ off: null, minimal: "low",
+low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" }`.
+Astra therefore exposes Minimal through Max; an Off request clamps upward to
+Minimal and Max remains Max. The direct Anthropic Opus 5 row likewise now marks
+Off unsupported and adds `supportsMidConvoEffort` to its Pi-owned compatibility
+metadata. Supported Bedrock Opus 5 rows retain their exact upstream maps. Opus
+4.8 publishes `xhigh` only. `max` is unavailable without an explicit map entry;
+`xhigh` may additionally come from the narrow map-less family fallbacks
+documented in the thinking-level guide.
 
 On success, the gateway:
 

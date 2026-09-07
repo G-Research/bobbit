@@ -9,14 +9,17 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import type {
-	BranchBounds,
-	BranchSummaryEntry as HarnessBranchSummaryEntry,
-	CompactionEntry as HarnessCompactionEntry,
-	EntryCursor,
-	EntryQuery,
-	HarnessSpanStartAttributes,
-	SessionStorage,
+import {
+	TODO_CONTEXT,
+	type Branch,
+	type BranchScan,
+	type BranchSummaryEntry as HarnessBranchSummaryEntry,
+	type CompactionEntry as HarnessCompactionEntry,
+	type Context,
+	type EntryCursor,
+	type EntryQuery,
+	type HarnessSpanStartAttributes,
+	type Session,
 } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
@@ -111,8 +114,8 @@ describe("compaction-types", () => {
 	});
 });
 
-describe("Pi 0.84 compaction contracts", () => {
-	it("accepts retained-tail checkpoints, summary usage, and the current SessionStorage query API", async () => {
+describe("Pi 0.85 compaction contracts", () => {
+	it("accepts retained-tail checkpoints, summary usage, and the current Session query API", async () => {
 		const compaction: HarnessCompactionEntry = {
 			type: "compaction",
 			id: "compact",
@@ -124,6 +127,7 @@ describe("Pi 0.84 compaction contracts", () => {
 			retainedTail: [{ role: "user", content: "kept", timestamp: 1 }],
 			usage: RICH_USAGE,
 			details: { additive: true },
+			fromHook: false,
 		};
 		const branchSummary: HarnessBranchSummaryEntry = {
 			type: "branch_summary",
@@ -134,38 +138,36 @@ describe("Pi 0.84 compaction contracts", () => {
 			fromId: "abandoned",
 			summary: "branch summary",
 			usage: RICH_USAGE,
+			fromHook: false,
 		};
-		const cursor = { afterSeq: 4 } satisfies EntryCursor;
-		const entryQuery = { cursor, limit: 2, order: "oldestFirst" } satisfies EntryQuery;
+		const cursor = { seq: 4 } satisfies EntryCursor;
+		const entryQuery = { cursor, limit: 2, order: "asc" } satisfies EntryQuery;
 		const branchQuery = {
 			start: "branch",
 			stopAtType: "compaction",
 			order: "oldestFirst",
-		} satisfies EntryQuery & BranchBounds & { start: string };
-		const storage = {
-			getName: async () => "fixture",
-			getStats: async () => ({
+		} satisfies BranchScan;
+		const findBranchEntries: Branch["findEntries"] = async (_query, _context) => [
+			compaction,
+			branchSummary,
+		];
+		const session = {
+			getName: async (_context: Context) => "fixture",
+			getStats: async (_context: Context) => ({
 				messageCount: 1,
-				cachedTokens: 3,
-				uncachedTokens: 13,
-				totalTokens: 23,
-				costTotal: 0.33,
+				usage: RICH_USAGE,
 			}),
-			findEntriesOnBranch: async (_query: EntryQuery & BranchBounds & { start: string }) => [
-				compaction,
-				branchSummary,
-			],
-			findEntries: async (_query?: EntryQuery) => [compaction, branchSummary],
-		} satisfies Pick<SessionStorage, "getName" | "getStats" | "findEntriesOnBranch" | "findEntries">;
+			findEntries: async (_query: EntryQuery | undefined, _context: Context) => [compaction, branchSummary],
+		} satisfies Pick<Session, "getName" | "getStats" | "findEntries">;
 
 		assert.equal("firstKeptEntryId" in compaction, false, "retainedTail replaces the legacy boundary");
 		assert.equal(compaction.retainedTail[0].role, "user");
 		assert.equal(branchSummary.usage?.reasoning, 4);
-		assert.deepEqual(entryQuery, { cursor: { afterSeq: 4 }, limit: 2, order: "oldestFirst" });
-		assert.equal(await storage.getName(), "fixture");
-		assert.equal((await storage.getStats()).totalTokens, 23);
-		assert.deepEqual(await storage.findEntriesOnBranch(branchQuery), [compaction, branchSummary]);
-		assert.deepEqual(await storage.findEntries(entryQuery), [compaction, branchSummary]);
+		assert.deepEqual(entryQuery, { cursor: { seq: 4 }, limit: 2, order: "asc" });
+		assert.equal(await session.getName(TODO_CONTEXT), "fixture");
+		assert.equal((await session.getStats(TODO_CONTEXT)).usage.totalTokens, 23);
+		assert.deepEqual(await findBranchEntries(branchQuery, TODO_CONTEXT), [compaction, branchSummary]);
+		assert.deepEqual(await session.findEntries(entryQuery, TODO_CONTEXT), [compaction, branchSummary]);
 	});
 
 	it("accepts compaction and branch-summary retry lifecycle events without dropping terminal usage", () => {

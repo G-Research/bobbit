@@ -1020,15 +1020,15 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 				liveThinking: thinkingLevel,
 				durableThinking: store.get(sessionId)?.effectiveThinkingLevel,
 				lateXhighMutation: setThinkingLevel.mock.calls
-					.slice(setThinkingLevel.mock.calls.findIndex(([level]) => level === "off") + 1)
+					.slice(setThinkingLevel.mock.calls.findIndex(([level]) => level === "minimal") + 1)
 					.some(([level]) => level === "xhigh"),
 			},
 			{
-				liveThinking: "off",
-				durableThinking: "off",
+				liveThinking: "minimal",
+				durableThinking: "minimal",
 				lateXhighMutation: false,
 			},
-			"STARTUP_THINKING_STALE_WRITE: a detached startup xhigh verification must not mutate live or durable state after a newer runtime off selection commits",
+			"STARTUP_THINKING_STALE_WRITE: a detached startup xhigh verification must not mutate live or durable state after a newer runtime off request commits as verified minimal",
 		);
 	});
 });

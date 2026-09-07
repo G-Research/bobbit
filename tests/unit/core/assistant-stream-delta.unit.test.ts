@@ -69,6 +69,71 @@ function roundTrip(events: AnyObject[]): AnyObject[] {
 }
 
 describe("assistant stream delta compaction", () => {
+	it("applies Pi 0.85 cumulative usage without mutating old-frame fallback state", () => {
+		const normalizer = new PiAssistantStreamNormalizer();
+		const baseline = message([]);
+		normalizer.normalize({ type: "message_start", message: baseline });
+
+		const oldFrame = normalizer.normalize({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+		}) as AnyObject;
+		assert.deepEqual(oldFrame.message.usage, usage);
+
+		const cumulativeUsage = {
+			input: 8,
+			output: 2,
+			cacheRead: 1,
+			cacheWrite: 0,
+			totalTokens: 11,
+			cost: { input: 0.08, output: 0.04, cacheRead: 0.001, cacheWrite: 0, total: 0.121 },
+		};
+		const updateFrame: AnyObject = {
+			type: "message_update",
+			usage: cumulativeUsage,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "new" },
+		};
+		const normalized = normalizer.normalize(updateFrame) as AnyObject;
+		assert.strictEqual(normalized.usage, cumulativeUsage, "outer Pi usage remains on the event");
+		assert.deepEqual(normalized.message.usage, cumulativeUsage);
+		assert.deepEqual(normalized.assistantMessageEvent.partial.usage, cumulativeUsage);
+		assert.notStrictEqual(normalized.message.usage, cumulativeUsage, "reconstructed state clones Pi-owned usage");
+
+		cumulativeUsage.output = 99;
+		assert.equal(normalized.message.usage.output, 2);
+	});
+
+	it("seeds Pi 0.85 tool identity while retaining conservative old-frame fallbacks", () => {
+		const normalizer = new PiAssistantStreamNormalizer();
+		normalizer.normalize({ type: "message_start", message: message([]) });
+
+		const identified = normalizer.normalize({
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				id: "call-astra-1",
+				toolName: "read",
+			},
+		}) as AnyObject;
+		assert.deepEqual(identified.message.content[0], {
+			type: "toolCall",
+			id: "call-astra-1",
+			name: "read",
+			arguments: {},
+			partialJson: "",
+		});
+
+		const legacy = new PiAssistantStreamNormalizer();
+		legacy.normalize({ type: "message_start", message: message([]) });
+		const fallback = legacy.normalize({
+			type: "message_update",
+			assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: 7, toolName: null },
+		}) as AnyObject;
+		assert.equal(fallback.message.content[0].id, "");
+		assert.equal(fallback.message.content[0].name, "");
+	});
+
 	it("reconstructs Pi delta-only text and defers final content to terminal authority", () => {
 		const normalizer = new PiAssistantStreamNormalizer();
 		const baseline = message([]);
@@ -125,6 +190,32 @@ describe("assistant stream delta compaction", () => {
 		assert.equal(compact[0].assistantMessageBaseline.timestamp, 1_735_000_000_000);
 	});
 
+	it("round-trips authoritative cumulative usage through compact frames", () => {
+		const previous = message([{ type: "text", text: "old" }]);
+		const current = message([{ type: "text", text: "old plus" }]);
+		const cumulativeUsage = {
+			input: 50,
+			output: 8,
+			cacheRead: 4,
+			cacheWrite: 0,
+			totalTokens: 62,
+			cost: { input: 0.5, output: 0.4, cacheRead: 0.004, cacheWrite: 0, total: 0.904 },
+		};
+		current.usage = cumulativeUsage;
+		const original: AnyObject = {
+			...update(current, { type: "text_delta", contentIndex: 0, delta: " plus" }),
+			usage: structuredClone(cumulativeUsage),
+		};
+
+		const compact = compactAssistantStreamDelta(original, previous) as AnyObject;
+		assert.equal(compact.assistantStreamDelta, 1);
+		assert.deepEqual(compact.usage, cumulativeUsage);
+		const reconstructed = reconstructAssistantStreamDelta(compact, previous) as AnyObject;
+		assert.deepEqual(reconstructed, original);
+		assert.deepEqual(reconstructed.message.usage, cumulativeUsage);
+		assert.deepEqual(reconstructed.assistantMessageEvent.partial.usage, cumulativeUsage);
+	});
+
 	it("round-trips thinking blocks including end-only metadata", () => {
 		const current = message([{ type: "thinking", thinking: "" }]);
 		const events = [update(current, { type: "thinking_start", contentIndex: 0 })];
@@ -148,7 +239,12 @@ describe("assistant stream delta compaction", () => {
 
 		const tool: AnyObject = { type: "toolCall", id: "call-1", name: "edit", arguments: {} };
 		const current = message([tool]);
-		const events = [update(current, { type: "toolcall_start", contentIndex: 0 })];
+		const events = [update(current, {
+			type: "toolcall_start",
+			contentIndex: 0,
+			id: "call-1",
+			toolName: "edit",
+		})];
 		let json = "";
 		for (const delta of ['{"path":"src/assi', 'stant-stream.ts","flags":[tru', 'e,2],"nested":{"ok":"yes"}}']) {
 			json += delta;
@@ -163,7 +259,9 @@ describe("assistant stream delta compaction", () => {
 			toolCall: structuredClone(tool),
 		}));
 
-		roundTrip(events);
+		const compact = roundTrip(events);
+		assert.equal(compact[0].assistantMessageEvent.id, "call-1");
+		assert.equal(compact[0].assistantMessageEvent.toolName, "edit");
 	});
 
 	it("forces a self-contained progressive tool baseline from reconstructed session state", () => {

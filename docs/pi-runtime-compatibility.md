@@ -4,31 +4,91 @@ Bobbit depends on Pi for provider metadata, browser-side first-message streaming
 
 This page records the durable Bobbit-side contracts added or reaffirmed across Pi runtime upgrades. The current runtime line pins these packages exactly and together:
 
-- `@earendil-works/pi-agent-core@0.84.1`
-- `@earendil-works/pi-ai@0.84.1`
-- `@earendil-works/pi-coding-agent@0.84.1`
+- `@earendil-works/pi-agent-core@0.85.1`
+- `@earendil-works/pi-ai@0.85.1`
+- `@earendil-works/pi-coding-agent@0.85.1`
 
-A mixed Pi line can compile while still breaking the spawned-agent runtime contract.
+A mixed Pi line can compile while still breaking the spawned-agent runtime contract. Pi `0.85.1` also requires Node.js `>=22.19.0`; Bobbit declares that same floor, uses compliant CI and packed-consumer runtimes, and pins the sandbox image to Node `22.19.0` so an older runtime fails before an agent session starts.
 
-## Pi `0.84.1` reliable-turn compatibility
+The coding-agent package declares its CLI at `dist/bundle/cli.js` and its RPC entry at `dist/bundle/rpc-entry.js`. Automatic direct-host resolution and Docker execution use that declared bundled layout. An explicit `--agent-cli` or `cliPath` remains authoritative and bypasses automatic package resolution, which preserves custom runtime testing and recovery.
 
-Bobbit upgraded the trio together from `0.82.1` to the newest compatible stable release containing Pi `0.84.0`'s reliable-turn fixes. The source/release audit covered the upstream changes that:
+<!-- Compatibility anchor retained for historical design links. -->
+<a id="pi-0841-reliable-turn-compatibility"></a>
 
-- flush prompts accepted while compaction is active;
-- serialize manual and automatic compaction and preserve events across compaction;
-- reject direct prompt submission inside Pi core while manual compaction is active;
-- classify recoverable `length` stops as overflow, remove the truncated assistant tail, compact, and retry once; and
-- change JSON/RPC `message_update` to delta-only payloads.
+## Pi `0.85.1` Astra and reliable-turn compatibility
 
-Bobbit adopts those Pi contracts rather than recreating Pi's internal retry or compaction queues. Bobbit's own responsibility is the durable browser/server outbox above the Pi boundary: it accepts and persists user intent while Pi cannot accept direct input, then releases it at the correct lifecycle boundary.
+Pi `0.85.1` retains the reliable-turn contracts introduced on the `0.84.x` line and adds GPT-6 Astra plus additive JSON/RPC fields. Bobbit adopts those Pi contracts rather than recreating Pi's model catalog, transport, retry, or compaction queues. Bobbit's responsibility is the durable browser/server boundary above Pi: select and persist exact model tuples, normalize Pi's delta stream, and accept user intent while Pi cannot accept direct input.
+
+### Catalog authority and GPT-6 Astra
+
+Pi's built-in catalog is authoritative for `openai-codex/gpt-6-astra`. Bobbit spreads that row unchanged into `/api/models`; it does not add an Astra provider, duplicate the row, infer capabilities from the name, or override Pi's route. The exact Pi `0.85.1` row is:
+
+```ts
+{
+  id: "gpt-6-astra",
+  name: "GPT-6 Astra",
+  provider: "openai-codex",
+  api: "openai-codex-responses",
+  baseUrl: "https://chatgpt.com/backend-api",
+  reasoning: true,
+  input: ["text", "image"],
+  contextWindow: 272_000,
+  maxTokens: 128_000,
+  cost: {
+    input: 10,
+    output: 50,
+    cacheRead: 1,
+    cacheWrite: 12.5,
+    tiers: [{
+      inputTokensAbove: 272_000,
+      input: 20,
+      output: 75,
+      cacheRead: 2,
+      cacheWrite: 25,
+    }],
+  },
+  thinkingLevelMap: {
+    off: null,
+    minimal: "low",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  },
+  compat: {
+    supportsOpenAIGrammarTools: true,
+    supportsAdditionalTools: true,
+    supportsToolSearch: true,
+  },
+}
+```
+
+Bobbit adds only its existing presentation fields. `authenticated` reflects the existing OpenAI Codex credential path. `modelCapacity: 1_050_000` is a display-only fact from [OpenAI's exact Astra model page](https://developers.openai.com/api/docs/models/gpt-6-astra.md). It is emitted only for the exact provider/model tuple when Pi still reports `contextWindow: 272_000`; if that guard becomes stale, Bobbit omits the capacity instead of guessing. Pi's 272,000-token value remains the operating, pricing-tier, and compaction target, while the 1,050,000-token value only lets the UI distinguish physical capacity from that target.
+
+Astra's explicit `off: null` means Off is unsupported. Bobbit's upward-first clamp turns an Off request into effective Minimal, while Max remains Max. Tool compatibility flags remain metadata; they do not add asynchronous tool calling or another Bobbit tool lifecycle.
+
+### Codex OAuth, selection, and persistence
+
+Astra uses the existing account-backed Codex flow:
+
+1. `POST /api/oauth/start` with `provider: "openai-codex"` delegates login to Pi's built-in `Models.login("openai-codex", "oauth", interaction)` contract.
+2. Pi writes the provider-scoped credential to the active agent directory's `auth.json`; Bobbit clears its OAuth/model caches without exposing token material.
+3. `/api/models` marks Pi's Astra row authenticated and the existing catalog filters make it session-selectable.
+4. `set_model` validates the exact provider/model, clamps thinking, applies both settings, and verifies runtime read-back.
+5. Only the verified `{ modelProvider, modelId, effectiveThinkingLevel }` tuple is persisted. Reconnect, browser reload, gateway restart, and process respawn revalidate and reuse it.
+
+This is why Astra needs no special session state or auth cache. Requested Off is never persisted as though it succeeded; the verified Minimal result is. See [REST API — Models](rest-api.md#models), [REST API — OAuth](rest-api.md#oauth), and [WebSocket protocol — Model and thinking selection](websocket-protocol.md#model-and-thinking-selection).
 
 ### Delta-only RPC and terminal authority
 
-Pi `0.84.1` JSON/RPC `message_update` frames contain `assistantMessageEvent` deltas but no cumulative `message` and no `assistantMessageEvent.partial`. `RpcBridge` scopes one `PiAssistantStreamNormalizer` to each Pi process and reconstructs Bobbit's cumulative internal update stream from the preceding assistant `message_start.message`.
+Pi `0.85.1` JSON/RPC `message_update` frames remain delta-only: they contain `assistantMessageEvent` but no cumulative `message` or `assistantMessageEvent.partial`. They now also carry cumulative `usage` at the top level, and `toolcall_start` carries the exact `id` and `toolName`.
+
+`RpcBridge` scopes one `PiAssistantStreamNormalizer` to each Pi process and reconstructs Bobbit's cumulative internal update stream from the preceding assistant `message_start.message`. The normalizer copies authoritative object-valued usage into reconstructed `message.usage`, seeds progressive tool blocks from the start event's identity, and retains conservative empty identity fallbacks for older or custom frames. The same usage rule applies when the browser expands a negotiated compact frame, so legacy cumulative clients and compact clients converge on the same message.
 
 The adapter handles text, thinking, and progressive tool-call JSON. It tolerates a delta arriving without its matching start only when an authoritative message-start baseline exists. It resets on a new assistant start, `message_end`, final `agent_end`, process exit, or process failure.
 
-`message_end.message` is terminal authority. Bobbit passes that provider/Pi terminal through the normal metadata projection; it never synthesizes the final answer from accumulated deltas. After a terminal reset, a stray delta cannot inherit the previous stream.
+`message_end.message` remains terminal authority. Bobbit passes that provider/Pi terminal through the normal metadata projection; it never synthesizes the final answer from accumulated deltas. After a terminal reset, a stray delta cannot inherit the previous stream.
 
 The Pi bridge normalization and browser transport compaction are separate layers:
 
@@ -42,9 +102,11 @@ A failed browser reconstruction closes/reconnects instead of presenting a plausi
 
 Pi emits `compaction_start` before compaction and `compaction_end` after releasing its compaction controller. Direct prompt submission during manual compaction is expected to reject inside Pi; Bobbit therefore queues above that boundary and does not call Pi while `session.isCompacting`.
 
+Pi `0.85.1` additionally emits the extension hook `session_compact_failed` with the reason, error message, abort/retry state, and whether an extension initiated the attempt. Bobbit pins that installed-runtime seam but does not introduce a second public compaction lifecycle: `compaction_end` and the existing settlement rules remain the gateway/browser boundary.
+
 `compaction_end.willRetry` describes the interrupted agent turn, not another compaction operation. Bobbit completes the compaction boundary and preserves continuation affinity while waiting for the final non-retry `agent_end`.
 
-Pi `0.84.1` emits that final `agent_end` before clearing its active-run guard. The event completes Bobbit's terminal turn bookkeeping, but it does not admit a fresh prompt. Pi may still compact or process queued continuation work before `_emitAgentSettled()` clears the guard and emits `agent_settled`; Bobbit drains next-turn work only at that later boundary. Graceful Stop waits for and replays settlement, while hard Stop synthesizes it after killing the old process and marks interrupted compaction aborted. See [Context compaction](compaction.md#reliable-turn-fence-and-release).
+Pi emits that final `agent_end` before clearing its active-run guard. The event completes Bobbit's terminal turn bookkeeping, but it does not admit a fresh prompt. Pi may still compact or process queued continuation work before `_emitAgentSettled()` clears the guard and emits `agent_settled`; Bobbit drains next-turn work only at that later boundary. Graceful Stop waits for and replays settlement, while hard Stop synthesizes it after killing the old process and marks interrupted compaction aborted. See [Context compaction](compaction.md#reliable-turn-fence-and-release).
 
 For a recoverable assistant `stopReason: "length"`, Pi removes the first truncated tail, performs overflow compaction, and retries the input at most once. Bobbit assigns `assistantStreamId` values and emits `assistant_stream_invalidated` before retry output so the browser and snapshots mirror Pi's rewritten branch. Only the retry's final non-retrying terminal is canonical. See [Context compaction](compaction.md#recoverable-length-overflow).
 
@@ -54,11 +116,31 @@ Pi's `Agent.steer()` acknowledgement means the steer entered Pi's pending queue;
 
 ### TypeBox v1 boundary
 
-Pi `0.84.1` uses TypeBox v1. Bobbit pins `typebox@1.3.7` and migrates Pi-facing tool schemas and generated extension templates to `Type`/`Static` from `typebox`, avoiding incompatible v0/v1 `TSchema` values. `@sinclair/typebox` remains installed for unrelated legacy consumers; do not pass its schema objects into Pi v1 APIs.
+Pi `0.85.1` uses TypeBox v1. Bobbit pins `typebox@1.3.7` and uses `Type`/`Static` from `typebox` for Pi-facing tool schemas and generated extension templates, avoiding incompatible v0/v1 `TSchema` values. `@sinclair/typebox` remains installed for unrelated legacy consumers; do not pass its schema objects into Pi v1 APIs.
 
 ### Pinning coverage
 
-`tests2/core/pi-installed-contract.test.ts` executes the installed runtime to pin the aligned trio, delta-only event shape, terminal authority, manual-compaction ordering and prompt rejection, recoverable-length removal and one-retry cap, overflow `willRetry`, and steer queue acknowledgement boundary. `tests2/core/assistant-stream-delta.test.ts`, `assistant-stream-session-broadcast.test.ts`, and `tests2/dom/remote-agent-assistant-stream-delta.test.ts` pin bridge reconstruction and browser live/replay behavior.
+Credential-free tests use isolated fake Codex account state and never inspect or require a real token:
+
+- `tests/unit/core/pi-installed-contract.unit.test.ts` executes the installed runtime to pin the aligned trio, Node floor, declared bundle entries, 0.85 stream fields, compaction failure hook, terminal authority, manual-compaction rejection, recoverable-length retry, settlement, and steer acknowledgement.
+- `tests/unit/core/models-api.unit.test.ts`, `model-utils.unit.test.ts`, and `thinking-levels.unit.test.ts` pin the exact Astra row, presentation-only capacity, selectability, Off-to-Minimal clamp, and Max support.
+- `tests/unit/core/assistant-stream-delta.unit.test.ts` and `assistant-stream-session-broadcast.unit.test.ts` pin cumulative usage, tool-start identity, old-frame fallback, and compact/cumulative convergence.
+- `tests/integration/gateway/agent/astra-session-persistence.gateway.test.ts` pins the verified effective tuple through reconnect.
+- `tests/browser/journeys/astra-session-selection.journey.spec.ts` selects authenticated Astra, proves Off is absent and Max is present, then verifies reload and gateway-restart persistence.
+- `tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts` verifies the packed consumer's Node floor and declared `dist/bundle/cli.js` entry.
+
+### Live Astra canary
+
+Automated qualification is intentionally credential-free and does not prove account entitlement. **The live Astra check is blocked in a credential-free environment until an operator supplies an existing Codex OAuth login with Astra entitlement; no credential or entitlement was inspected for this documentation update.** When suitable access is available, run the opt-in bash-tool canary against the isolated manual harness:
+
+```bash
+BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1 \
+MANUAL_TEST_MODEL=openai-codex/gpt-6-astra \
+MANUAL_TEST_THINKING_LEVEL=max \
+npm run test:manual -- --grep "1\\. bash tool"
+```
+
+The canary must select the exact provider/model, complete a turn at Max, and execute the bash tool. Do not copy, print, inspect, or add credentials to fixtures. If the current agent directory has no usable Codex credential, the account lacks Astra entitlement, or the environment cannot reach the provider, record the live check as **blocked** with only the non-secret reason and the command above; do not treat a skip or a different model as Astra evidence. When available, also run a representative authenticated Anthropic or Google turn to confirm the upgrade did not disturb a non-OpenAI provider.
 
 ## Historical Pi `0.82.1` compatibility outcome
 
@@ -184,7 +266,7 @@ The PR #1057 focused canaries covered:
 
 The PR #1057 browser journey selected `anthropic/claude-opus-5`, verified its authoritative limits, image/reasoning flags and complete thinking ladder, sent the combined `xhigh` tuple through a mock-backed session, reloaded and re-verified authoritative state, then deleted the session and restored preferences.
 
-## Pi `0.82.1` dependency-only Phase 0 baseline
+## Historical Pi `0.82.1` dependency-only Phase 0 baseline
 
 The dependency-only baseline was measured on 2026-07-27 before any feature production or test change.
 
@@ -490,9 +572,11 @@ Worktree setup commands are non-fatal, but timeout handling must still wait unti
 
 The reason is operational rather than cosmetic: a worktree that appears claimable while setup children still hold handles can fail later move, cleanup, or reuse operations. The regression is pinned by the worktree-pool tests.
 
-## Real-model context-pressure smoke
+## Historical Pi `0.82.1` real-model context-pressure smoke
 
-`tests/manual-integration/reliable-agent-context-pressure.spec.ts` is an opt-in real Pi/real-model test of exact-once prompt and steer delivery through genuine automatic context pressure. Deterministic mock-Pi coverage remains the CI gate; this smoke validates the installed provider/runtime path when credentials and budget are available.
+> Historical procedure: the test path and command below record the `0.82.1` qualification layout and are not the current Astra canary. Use [Live Astra canary](#live-astra-canary) for the selected runtime.
+
+`tests/manual-integration/reliable-agent-context-pressure.spec.ts` was an opt-in real Pi/real-model test of exact-once prompt and steer delivery through genuine automatic context pressure. Deterministic mock-Pi coverage remained the CI gate; this smoke validated the installed provider/runtime path when credentials and budget were available.
 
 ### Credentials and model selection
 
@@ -549,9 +633,11 @@ The test observes a real threshold or overflow compaction start, then submits on
 
 Failure output contains bounded IDs, counters, state, and lifecycle summaries, not prompt or provider bodies. The `finally` path aborts the turn, purges the session best-effort, stops the isolated gateway, and removes the temporary fixture even on budget failure.
 
-## Upgrade verification
+## Historical Pi `0.82.1` upgrade verification
 
-Run focused contract coverage before the broad gates:
+> Historical procedure: these paths and commands preserve the `0.82.1` qualification record. They are not current test entrypoints; current `0.85.1` coverage is listed under [Pinning coverage](#pinning-coverage).
+
+The `0.82.1` delivery ran focused contract coverage before the broad gates:
 
 ```bash
 npx vitest run --config vitest.config.ts --project v2-core \

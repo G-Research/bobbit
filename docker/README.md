@@ -14,7 +14,7 @@ The default image name `bobbit-agent` matches Bobbit's default `sandbox_image` c
 
 ## What's Included
 
-- **Node.js 20** (slim base) — runtime for the agent process
+- **Node.js 22.19.0** (slim base) — pinned to Pi's minimum supported runtime
 - **git** — version control operations
 - **curl** — HTTP requests
 - **gh CLI** — GitHub CLI for PR creation, issue management, etc.
@@ -53,7 +53,7 @@ docker volume rm bobbit-nm-cache-<hash> bobbit-npm-cache-<hash>
 The agent CLI (`@earendil-works/pi-coding-agent`) is installed **inside** the image — bind-mounting `node_modules` from a Windows/macOS host into a Linux container is ~20× slower than a native layer. The version is pinned to a build-arg and stamped onto the image as a `bobbit.pi-agent-version` label:
 
 ```dockerfile
-ARG PI_AGENT_VERSION=0.74.0
+ARG PI_AGENT_VERSION=0.85.1
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} ...
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 ```
@@ -94,7 +94,7 @@ USER node
 To use a different base image (e.g. for a different Node.js version):
 
 ```dockerfile
-FROM node:22-slim
+FROM node:22.19.0-slim
 
 # Copy the same setup from the original Dockerfile...
 RUN apt-get update && apt-get install -y --no-install-recommends \
