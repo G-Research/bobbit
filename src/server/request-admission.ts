@@ -279,11 +279,30 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 			fetchValues[name] = value.value;
 		}
 	}
-	if (fetchCount !== 0 && fetchCount !== FETCH_HEADER_NAMES.length) {
+	const hasFetchSite = fetchValues["sec-fetch-site"] !== undefined;
+	const hasFetchMode = fetchValues["sec-fetch-mode"] !== undefined;
+	const hasFetchDest = fetchValues["sec-fetch-dest"] !== undefined;
+	const isModeOnly = !hasFetchSite && hasFetchMode && !hasFetchDest;
+	const isBrowserShape = hasFetchSite && hasFetchMode;
+	if (fetchCount !== 0 && !isModeOnly && !isBrowserShape) {
 		return deny("partial-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
 	}
-	const fetch = fetchCount === 0 ? undefined : parseFetchMetadata(fetchValues);
-	if (fetchCount !== 0 && !fetch) return deny("invalid-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
+	let fetch: FetchMetadata | undefined;
+	if (isModeOnly) {
+		const mode = parseHeaderToken(fetchValues["sec-fetch-mode"]);
+		if (!mode || !VALID_FETCH_MODES.has(mode)) {
+			return deny("invalid-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
+		}
+		// Node's fetch (undici) adds this lone header. Treat only its exact
+		// originless API shape as a non-browser request; authorization remains
+		// the inner boundary.
+		if (mode !== "cors" || origin || preliminaryContext !== "api") {
+			return deny("partial-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
+		}
+	} else if (isBrowserShape) {
+		fetch = parseFetchMetadata(fetchValues);
+		if (!fetch) return deny("invalid-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
+	}
 	const context = classifyContext(policy.basePath, metadata, fetch?.dest);
 
 	const requestedMethodHeader = readRawHeader(metadata.rawHeaders, "access-control-request-method");
@@ -328,7 +347,7 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 interface FetchMetadata {
 	site: string;
 	mode: string;
-	dest: string;
+	dest?: string;
 }
 
 type RawHeaderResult = { kind: "missing" } | { kind: "duplicate" } | { kind: "value"; value: string };
@@ -410,9 +429,9 @@ function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: Fe
 }
 
 function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetadata): boolean {
-	if (context === "websocket") return fetch.mode === "websocket" && fetch.dest === "empty";
-	if (context === "preflight") return fetch.mode === "cors" && fetch.dest === "empty";
-	if (context === "api") return fetch.dest === "empty" && (fetch.mode === "cors" || fetch.mode === "same-origin");
+	if (context === "websocket") return fetch.mode === "websocket" && (fetch.dest === undefined || fetch.dest === "empty");
+	if (context === "preflight") return fetch.mode === "cors" && (fetch.dest === undefined || fetch.dest === "empty");
+	if (context === "api") return (fetch.dest === undefined || fetch.dest === "empty") && (fetch.mode === "cors" || fetch.mode === "same-origin");
 	if (context === "preview-iframe") return fetch.mode === "navigate" && fetch.dest === "iframe";
 	if (context === "ui-document" || context === "preview-document") return fetch.mode === "navigate" && fetch.dest === "document";
 	return fetch.mode !== "navigate" && fetch.mode !== "nested-navigate" && fetch.mode !== "websocket";
@@ -527,9 +546,11 @@ function countRawHeader(rawHeaders: readonly string[], wantedName: string): numb
 function parseFetchMetadata(values: Partial<Record<(typeof FETCH_HEADER_NAMES)[number], string>>): FetchMetadata | undefined {
 	const site = parseHeaderToken(values["sec-fetch-site"]);
 	const mode = parseHeaderToken(values["sec-fetch-mode"]);
-	const dest = parseHeaderToken(values["sec-fetch-dest"]);
-	if (!site || !mode || !dest || !VALID_FETCH_SITES.has(site) || !VALID_FETCH_MODES.has(mode) || !VALID_FETCH_DESTINATIONS.has(dest)) return undefined;
-	return { site, mode, dest };
+	const rawDest = values["sec-fetch-dest"];
+	const dest = rawDest === undefined ? undefined : parseHeaderToken(rawDest);
+	if (!site || !mode || !VALID_FETCH_SITES.has(site) || !VALID_FETCH_MODES.has(mode)
+		|| (rawDest !== undefined && (!dest || !VALID_FETCH_DESTINATIONS.has(dest)))) return undefined;
+	return { site, mode, ...(dest ? { dest } : {}) };
 }
 
 function parseHeaderToken(value: string | undefined): string | undefined {
