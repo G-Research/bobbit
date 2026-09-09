@@ -199,7 +199,7 @@ describe("request Host and Origin admission", () => {
 		});
 	});
 
-	it("uses exact trusted origins and never guesses an ambiguous Vite gateway", () => {
+	it("uses exact trusted origins and never guesses an ambiguous gateway", () => {
 		const exact = decide({
 			rawHeaders: rawHeaders({ Host: "bobbit.example", Origin: "https://bobbit.example" }),
 			isTls: false,
@@ -212,7 +212,18 @@ describe("request Host and Origin admission", () => {
 			isTls: false,
 		});
 		assert.equal(originlessProxy.allowed, true);
-		if (originlessProxy.allowed) assert.equal(originlessProxy.gatewayOrigin, undefined);
+		if (originlessProxy.allowed) assert.equal(originlessProxy.gatewayOrigin, "https://bobbit.example");
+
+		const ambiguousProxy = decide({
+			rawHeaders: rawHeaders({ Host: "gateway.example" }),
+			isTls: false,
+		}, {
+			bindHost: "localhost",
+			actualPort: 4242,
+			publicOrigins: ["http://gateway.example", "https://gateway.example"],
+		});
+		assert.equal(ambiguousProxy.allowed, true);
+		if (ambiguousProxy.allowed) assert.equal(ambiguousProxy.gatewayOrigin, undefined);
 
 		const ambiguousVite = decide({
 			rawHeaders: rawHeaders({

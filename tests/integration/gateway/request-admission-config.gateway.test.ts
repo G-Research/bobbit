@@ -505,6 +505,44 @@ describe.sequential("public authority provenance on a loopback backend", () => {
 		expect(preview.body).toContain("cookie preview");
 	});
 
+	it("mints a Secure cookie for an originless browser API request through the configured HTTPS origin", async () => {
+		const bootstrap = await plainRequest(port, "/api/health", {
+			Host: "public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+			...authorization(),
+		});
+		expect(bootstrap.status, bootstrap.body).toBe(200);
+		const setCookie = bootstrap.headers["set-cookie"]?.[0];
+		expect(setCookie).toContain("bobbit_session=");
+		expect(setCookie).toMatch(/; Secure(?:;|$)/);
+		const cookie = setCookie!.split(";", 1)[0]!;
+
+		const sessionId = randomUUID();
+		const body = JSON.stringify({ html: "<!doctype html><body>originless cookie preview</body>", workspaceTab: false });
+		const mount = await plainRequest(port, `/api/preview/mount?sessionId=${sessionId}`, {
+			Host: "public.example",
+			Origin: "https://public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+			"Content-Type": "application/json",
+			"Content-Length": String(Buffer.byteLength(body)),
+			...authorization(),
+		}, "POST", body);
+		expect(mount.status, mount.body).toBe(200);
+		const previewPath = (JSON.parse(mount.body) as { url: string }).url;
+		const preview = await plainRequest(port, previewPath, {
+			Host: "public.example",
+			Cookie: cookie,
+			Origin: "https://public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Dest": "iframe",
+		});
+		expect(preview.status, preview.body).toBe(200);
+		expect(preview.body).toContain("originless cookie preview");
+	});
+
 	it("retains the credential-free bypass for a genuinely all-loopback policy", async () => {
 		const localGateway = createGateway({ ...gatewayConfig, publicOrigins: undefined }, gatewayDeps);
 		try {

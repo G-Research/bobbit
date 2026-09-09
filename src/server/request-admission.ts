@@ -514,10 +514,15 @@ function selectGatewayOrigin(
 		return uniqueValue(pairedGateways);
 	}
 
+	// An omitted Host port can match both HTTP and HTTPS defaults. The physical
+	// socket scheme must not resolve that configured browser-origin ambiguity.
+	const compiledOrigin = uniqueValue(matchingOrigins.map((candidate) => candidate.serialized));
+	if (!compiledOrigin) return undefined;
+
 	const physicalProtocol = isTls ? "https:" : "http:";
 	return uniqueValue(matchingOrigins
 		.filter((candidate) => candidate.protocol === physicalProtocol)
-		.map((candidate) => candidate.serialized));
+		.map((candidate) => candidate.serialized)) ?? compiledOrigin;
 }
 
 function uniqueValue(values: readonly string[]): string | undefined {
