@@ -1,10 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import type { IncomingHttpHeaders } from "node:http";
+import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
 import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { createCA, createCert } from "mkcert";
+import { WebSocket } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -118,6 +120,58 @@ function request(port: number, path: string, headers: Record<string, string>): P
 		});
 		outgoing.once("error", rejectRequest);
 		outgoing.end();
+	});
+}
+
+function plainRequest(
+	port: number,
+	path: string,
+	headers: Record<string, string>,
+	method = "GET",
+	body?: string,
+): Promise<RawResponse> {
+	return new Promise((resolveRequest, rejectRequest) => {
+		const outgoing = http.request({
+			hostname: "127.0.0.1",
+			port,
+			path,
+			method,
+			headers: { Connection: "close", ...headers },
+		}, (response) => {
+			const chunks: Buffer[] = [];
+			response.on("data", (chunk: Buffer) => chunks.push(chunk));
+			response.once("end", () => resolveRequest({
+				status: response.statusCode ?? 0,
+				body: Buffer.concat(chunks).toString("utf8"),
+				headers: response.headers,
+			}));
+		});
+		outgoing.once("error", rejectRequest);
+		outgoing.end(body);
+	});
+}
+
+function webSocketAuthResult(port: number, token: string): Promise<"auth_ok" | "auth_failed"> {
+	return new Promise((resolveResult, rejectResult) => {
+		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/viewer`, {
+			headers: { Host: "public.example" },
+		});
+		const timer = setTimeout(() => finish(undefined, new Error("WebSocket authentication timed out")), 5_000);
+		const finish = (result?: "auth_ok" | "auth_failed", error?: Error): void => {
+			clearTimeout(timer);
+			ws.removeAllListeners();
+			ws.close();
+			if (error) rejectResult(error);
+			else resolveResult(result!);
+		};
+		ws.once("open", () => ws.send(JSON.stringify({ type: "auth", token, clientKind: "app" })));
+		ws.on("message", (raw) => {
+			try {
+				const frame = JSON.parse(String(raw)) as { type?: string };
+				if (frame.type === "auth_ok" || frame.type === "auth_failed") finish(frame.type);
+			} catch { /* ignore unrelated frames */ }
+		});
+		ws.once("error", (error) => finish(undefined, error));
 	});
 }
 
@@ -314,5 +368,152 @@ describe.sequential("configured request-admission authorities", () => {
 			...authorization(),
 		});
 		expect(ignoredHostileForwarding.status, ignoredHostileForwarding.body).toBe(200);
+	});
+});
+
+describe.sequential("public authority provenance on a loopback backend", () => {
+	let processState: ProcessStateSnapshot;
+	let root: string;
+	let port: number;
+	let gateway: ReturnType<typeof createGateway>;
+	let gatewayConfig: Parameters<typeof createGateway>[0];
+
+	beforeAll(async () => {
+		processState = captureProcessState();
+		root = createRunChild("request-admission-public-provenance");
+		const stateDir = join(root, "state");
+		const secretsDir = join(root, "secrets");
+		const agentDir = join(root, "agent");
+		for (const directory of [stateDir, secretsDir, agentDir, join(stateDir, "session-prompts")]) {
+			mkdirSync(directory, { recursive: true });
+		}
+		writeFileSync(join(stateDir, "projects.json"), "[]");
+		writeFileSync(join(stateDir, "setup-complete"), "test\n");
+
+		process.env.BOBBIT_DIR = root;
+		process.env.BOBBIT_SECRETS_DIR = secretsDir;
+		process.env.BOBBIT_AGENT_DIR = agentDir;
+		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+		process.env.NODE_ENV = "test";
+		setProjectRoot(root);
+		resetAgentDirStateForTests();
+		scaffoldBobbitDir(root);
+
+		gatewayConfig = {
+			host: "127.0.0.1",
+			port: 0,
+			portExplicit: true,
+			authToken: TOKEN,
+			defaultCwd: root,
+			forceAuth: false,
+			staticDir: join(REPO_ROOT, "public"),
+			publicOrigins: ["https://public.example"],
+			skipMcp: true,
+			skipWorktreePool: true,
+			skipTitleGeneration: true,
+			skipRemotePush: true,
+			skipNonLocalRemoteGit: true,
+			builtinsDir: join(REPO_ROOT, "defaults"),
+			builtinPacksDir: join(REPO_ROOT, "market-packs"),
+		} as Parameters<typeof createGateway>[0] & { publicOrigins: string[] };
+		gateway = createGateway(gatewayConfig, gatewayDeps);
+		port = await gateway.start();
+	}, 60_000);
+
+	afterAll(async () => {
+		try { await gateway?.shutdown(); }
+		finally {
+			if (processState) restoreProcessState(processState);
+			if (root) removeOwnedRunChild(root);
+		}
+	}, 60_000);
+
+	it("requires credentials for public Host API, preview, and WebSocket traffic", async () => {
+		const rebinding = await plainRequest(port, "/api/health", {
+			Host: "attacker.example",
+			Origin: "http://attacker.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+			...authorization(),
+		});
+		expect(rebinding.status).toBe(403);
+
+		const unauthenticatedApi = await plainRequest(port, "/api/health", { Host: "public.example" });
+		expect(unauthenticatedApi.status).toBe(401);
+
+		const authenticatedApi = await plainRequest(port, "/api/health", {
+			Host: "public.example",
+			...authorization(),
+		});
+		expect(authenticatedApi.status, authenticatedApi.body).toBe(200);
+		expect(JSON.parse(authenticatedApi.body)).toMatchObject({ localhost: false });
+
+		const sessionId = randomUUID();
+		const body = JSON.stringify({ html: "<!doctype html><body>public preview</body>", workspaceTab: false });
+		const mount = await plainRequest(port, `/api/preview/mount?sessionId=${sessionId}`, {
+			Host: "public.example",
+			"Content-Type": "application/json",
+			"Content-Length": String(Buffer.byteLength(body)),
+			...authorization(),
+		}, "POST", body);
+		expect(mount.status, mount.body).toBe(200);
+		const previewPath = (JSON.parse(mount.body) as { url: string }).url;
+		const unauthenticatedPreview = await plainRequest(port, previewPath, { Host: "public.example" });
+		expect(unauthenticatedPreview.status).toBe(401);
+
+		expect(await webSocketAuthResult(port, "arbitrary-token")).toBe("auth_failed");
+		expect(await webSocketAuthResult(port, TOKEN)).toBe("auth_ok");
+	});
+
+	it("mints a Secure cookie from the exact admitted HTTPS origin and uses it for preview", async () => {
+		const bootstrap = await plainRequest(port, "/api/health", {
+			Host: "public.example",
+			Origin: "https://public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+			...authorization(),
+		});
+		expect(bootstrap.status, bootstrap.body).toBe(200);
+		const setCookie = bootstrap.headers["set-cookie"]?.[0];
+		expect(setCookie).toContain("bobbit_session=");
+		expect(setCookie).toMatch(/; Secure(?:;|$)/);
+		const cookie = setCookie!.split(";", 1)[0]!;
+
+		const sessionId = randomUUID();
+		const body = JSON.stringify({ html: "<!doctype html><body>cookie preview</body>", workspaceTab: false });
+		const mount = await plainRequest(port, `/api/preview/mount?sessionId=${sessionId}`, {
+			Host: "public.example",
+			Origin: "https://public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+			"Content-Type": "application/json",
+			"Content-Length": String(Buffer.byteLength(body)),
+			...authorization(),
+		}, "POST", body);
+		expect(mount.status, mount.body).toBe(200);
+		const previewPath = (JSON.parse(mount.body) as { url: string }).url;
+		const preview = await plainRequest(port, previewPath, {
+			Host: "public.example",
+			Cookie: cookie,
+			Origin: "https://public.example",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Dest": "iframe",
+		});
+		expect(preview.status, preview.body).toBe(200);
+		expect(preview.body).toContain("cookie preview");
+	});
+
+	it("retains the credential-free bypass for a genuinely all-loopback policy", async () => {
+		const localGateway = createGateway({ ...gatewayConfig, publicOrigins: undefined }, gatewayDeps);
+		try {
+			const localPort = await localGateway.start();
+			const response = await plainRequest(localPort, "/api/health", { Host: `127.0.0.1:${localPort}` });
+			expect(response.status, response.body).toBe(200);
+			expect(JSON.parse(response.body)).toMatchObject({ localhost: true });
+		} finally {
+			await localGateway.shutdown();
+		}
 	});
 });

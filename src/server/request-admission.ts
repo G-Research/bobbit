@@ -93,7 +93,16 @@ export interface RequestAdmissionAllowed {
 	reason: "allowed";
 	context: RequestRouteContext;
 	normalizedHost: string;
+	/** Canonical browser Origin, when the request supplied one. */
 	normalizedOrigin?: string;
+	/**
+	 * Canonical browser-facing gateway origin selected only from the compiled
+	 * policy. This intentionally differs from normalizedOrigin for Vite proxying.
+	 * It is omitted when the request does not identify one unambiguously.
+	 */
+	gatewayOrigin?: string;
+	/** Whether this policy contains only loopback gateway authorities. */
+	trustedLocal: boolean;
 	cors?: CorsProjection;
 }
 
@@ -130,6 +139,12 @@ export interface RequestAdmissionPolicy {
 	readonly basePath: string;
 	readonly trustedOrigins: readonly string[];
 	readonly viteOriginPairs: readonly Readonly<ViteOriginPairInput>[];
+	/**
+	 * True only when the listener and every admitted browser/gateway origin in the
+	 * complete compiled policy are loopback. Wildcard/non-loopback listeners and any
+	 * non-loopback authority disable the local auth bypass for the whole policy.
+	 */
+	readonly allAuthoritiesLoopback: boolean;
 	/** @internal Immutable-by-convention data consumed by admitRequest. */
 	readonly _compiled: {
 		readonly origins: readonly ParsedOrigin[];
@@ -228,6 +243,10 @@ export function compileRequestAdmissionPolicy(input: RequestAdmissionPolicyInput
 		origin: pair.origin.serialized,
 		gatewayOrigin: pair.gateway.serialized,
 	}));
+	const allAuthoritiesLoopback = isLoopbackHostname(bindHost)
+		&& origins.every((origin) => isLoopbackHostname(origin.hostname))
+		&& vitePairs.every((pair) => isLoopbackHostname(pair.origin.hostname)
+			&& isLoopbackHostname(pair.gateway.hostname));
 	const compiled = Object.freeze({
 		origins: Object.freeze(origins.map((origin) => Object.freeze(origin))),
 		vitePairs: Object.freeze(vitePairs.map((pair) => Object.freeze({
@@ -242,6 +261,7 @@ export function compileRequestAdmissionPolicy(input: RequestAdmissionPolicyInput
 		basePath,
 		trustedOrigins: Object.freeze(origins.map((origin) => origin.serialized)),
 		viteOriginPairs: Object.freeze(publicPairs),
+		allAuthoritiesLoopback,
 		_compiled: compiled,
 	});
 }
@@ -326,7 +346,9 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 		}
 	}
 	if (fetch && !origin) {
-		if (isSafeTopLevelNavigation(context, metadata.method, undefined, fetch)) return allow(context, host, undefined);
+		if (isSafeTopLevelNavigation(context, metadata.method, undefined, fetch)) {
+			return allow(policy, context, host, matchingOrigins, undefined, metadata.isTls);
+		}
 		if (context === "websocket") {
 			return deny("origin-required", context, host.serialized);
 		}
@@ -338,7 +360,7 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 		return deny("unsafe-navigation-method", context, host.serialized, origin?.serialized);
 	}
 
-	return allow(context, host, origin, origin ? simpleCors(origin) : undefined);
+	return allow(policy, context, host, matchingOrigins, origin, metadata.isTls, origin ? simpleCors(origin) : undefined);
 }
 
 interface FetchMetadata {
@@ -386,7 +408,7 @@ function admitPreflight(
 		if (!configured) return deny("preflight-header-denied", context, host.serialized, origin.serialized);
 		projectedHeaders.push(configured);
 	}
-	return allow("preflight", host, origin, {
+	return allow(policy, "preflight", host, matchingOrigins, origin, metadata.isTls, {
 		...simpleCors(origin),
 		allowMethod: requestedMethod,
 		allowHeaders: Object.freeze(projectedHeaders),
@@ -453,19 +475,54 @@ function simpleCors(origin: ParsedOrigin): CorsProjection {
 }
 
 function allow(
+	policy: RequestAdmissionPolicy,
 	context: RequestRouteContext,
 	host: ParsedHost,
-	origin?: ParsedOrigin,
+	matchingOrigins: readonly ParsedOrigin[],
+	origin: ParsedOrigin | undefined,
+	isTls: boolean,
 	cors?: CorsProjection,
 ): RequestAdmissionAllowed {
+	const gatewayOrigin = selectGatewayOrigin(policy, matchingOrigins, origin, isTls);
 	return {
 		allowed: true,
 		reason: "allowed",
 		context,
 		normalizedHost: host.serialized,
 		...(origin ? { normalizedOrigin: origin.serialized } : {}),
+		...(gatewayOrigin ? { gatewayOrigin } : {}),
+		trustedLocal: policy.allAuthoritiesLoopback,
 		...(cors ? { cors } : {}),
 	};
+}
+
+function selectGatewayOrigin(
+	policy: RequestAdmissionPolicy,
+	matchingOrigins: readonly ParsedOrigin[],
+	browserOrigin: ParsedOrigin | undefined,
+	isTls: boolean,
+): string | undefined {
+	if (browserOrigin && matchingOrigins.some((candidate) => candidate.serialized === browserOrigin.serialized)) {
+		return browserOrigin.serialized;
+	}
+
+	if (browserOrigin) {
+		const pairedGateways = policy._compiled.vitePairs
+			.filter((pair) => pair.origin.serialized === browserOrigin.serialized
+				&& matchingOrigins.some((candidate) => candidate.serialized === pair.gateway.serialized))
+			.map((pair) => pair.gateway.serialized);
+		return uniqueValue(pairedGateways);
+	}
+
+	const physicalProtocol = isTls ? "https:" : "http:";
+	return uniqueValue(matchingOrigins
+		.filter((candidate) => candidate.protocol === physicalProtocol)
+		.map((candidate) => candidate.serialized));
+}
+
+function uniqueValue(values: readonly string[]): string | undefined {
+	const unique = new Set(values);
+	return unique.size === 1 ? unique.values().next().value : undefined;
 }
 
 function deny(
@@ -742,6 +799,10 @@ function defaultPort(protocol: string): number {
 
 function isWildcardListener(hostname: string): boolean {
 	return hostname === "0.0.0.0" || hostname === "::";
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+	return (LOOPBACK_HOSTS as readonly string[]).includes(hostname);
 }
 
 function isCleanScalar(raw: string): boolean {

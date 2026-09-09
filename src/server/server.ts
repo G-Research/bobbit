@@ -669,7 +669,7 @@ import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
-import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
+import { loopbackForBind } from "./cli-loopback.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { isTrustedExternalHost, normalizeTrustedHost, normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -4136,7 +4136,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.end("Gateway starting");
 			return;
 		}
-		const isLocalhostMode = !config.forceAuth && isLoopbackHost(config.host);
+		// Local credential bypass is a property of the complete admitted authority
+		// policy, not of the physical bind address. A loopback backend that publishes
+		// any non-loopback authority must retain the normal auth boundary everywhere.
+		const isLocalhostMode = !config.forceAuth && admission.trustedLocal;
 
 		// Content-origin preview route — served before API auth so iframe loads
 		// can authenticate via the bobbit_session cookie instead of the bearer
@@ -4270,6 +4273,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					isTls,
 					admittedHost: admission.normalizedHost,
 					admittedOrigin: admission.normalizedOrigin,
+					admittedGatewayOrigin: admission.gatewayOrigin ?? null,
 				}, {
 					deployment: config.staticDir ? "direct" : "vite",
 					configuredHost: config.host,
@@ -4277,7 +4281,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
+					const isLoopbackHttpOrigin = isLocalhostMode
+						&& (admission.gatewayOrigin
+							? admission.gatewayOrigin.startsWith("http://")
+							: !isTls);
+					issueCookie(res, cookieStore, { localhost: isLoopbackHttpOrigin, basePath });
 				}
 			}
 
@@ -4299,7 +4307,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -5135,8 +5143,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 	});
 
-	const isLocalhostServer = !config.forceAuth && isLoopbackHost(config.host);
-
 	const rejectWebSocketAdmission = (
 		socket: import("node:stream").Duplex,
 		status: 403 | 503,
@@ -5175,7 +5181,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 		const ip = req.socket.remoteAddress || "unknown";
-		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
+		const isLocalhostRequest = !config.forceAuth && admission.trustedLocal;
+		if (!isLocalhostRequest && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
@@ -5187,7 +5194,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostRequest, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
@@ -6065,6 +6072,7 @@ async function handleApiRoute(
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
 	hostInterceptorRouter?: HostInterceptorRouter,
+	trustedLocalRequest = false,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -6849,13 +6857,14 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/health — unauthenticated so the client can probe localhost mode
+	// GET /api/health — reports the admission-derived local trust mode. A
+	// loopback backend serving a public authority must not tell that browser to
+	// rely on the credential-free localhost transport.
 	if (url.pathname === "/api/health" && req.method === "GET") {
-		const isLocalhost = !config.forceAuth && isLoopbackHost(config.host);
 		json({
 			status: "ok",
 			sessions: sessionManager.listSessions().length,
-			localhost: isLocalhost,
+			localhost: trustedLocalRequest,
 			aigw: !!getAigwUrl(preferencesStore),
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,

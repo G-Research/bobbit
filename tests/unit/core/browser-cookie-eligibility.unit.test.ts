@@ -108,6 +108,48 @@ describe("browser cookie eligibility", () => {
 		}).mayBootstrap, true);
 	});
 
+	it("uses an admitted HTTPS gateway origin across TLS termination", () => {
+		assert.deepEqual(classify({
+			isTls: false,
+			admittedHost: "bobbit.example",
+			admittedOrigin: "https://bobbit.example",
+			admittedGatewayOrigin: "https://bobbit.example",
+		}, {
+			authentication: { source: "admin-bearer" },
+		}), {
+			mayBootstrap: true,
+			mayRenew: false,
+			reason: "eligible-bootstrap",
+		});
+	});
+
+	it("fails closed when admission cannot select an unambiguous gateway origin", () => {
+		assertDenied("invalid-request-host", {
+			admittedHost: "gateway.example",
+			admittedOrigin: "https://dev.example",
+			admittedGatewayOrigin: null,
+			headers: {
+				host: "gateway.example",
+				origin: "https://dev.example",
+			},
+		});
+	});
+
+	it("accepts an exact admission-approved Vite pair with distinct origins", () => {
+		assert.equal(classify({
+			admittedHost: "gateway.example",
+			admittedOrigin: "https://dev.example",
+			admittedGatewayOrigin: "https://gateway.example",
+			headers: {
+				host: "gateway.example",
+				origin: "https://dev.example",
+			},
+		}, {
+			deployment: "vite",
+			configuredHost: "localhost",
+		}).mayBootstrap, true);
+	});
+
 	it("accepts Vite's rewritten Host with a localhost dev Origin", () => {
 		assert.equal(classify({
 			isTls: false,
