@@ -209,16 +209,33 @@ describe("browser route/context matrix", () => {
 		assert.equal(decide({ transport: "websocket", url: "/ws/session" }).allowed, true);
 	});
 
-	it("accepts undici's lone cors mode only for originless API requests", () => {
-		const undici = decide({
-			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "cors" }),
-		});
-		assert.equal(undici.allowed, true);
-		assert.equal(undici.context, "api");
+	it("accepts undici's lone cors mode as non-browser traffic across HTTP routes only", () => {
+		const cases = [
+			{ url: "/api/health", context: "api" },
+			{ url: "/", context: "ui-static" },
+			{ url: "/app.js", context: "ui-static" },
+			{ url: "/preview/session/index.html", context: "preview-resource" },
+			{ url: "/preview/session/style.css", context: "preview-resource" },
+		] as const;
+		for (const testCase of cases) {
+			const undici = decide({
+				url: testCase.url,
+				rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "cors" }),
+			});
+			assert.equal(undici.allowed, true, testCase.url);
+			assert.equal(undici.context, testCase.context, testCase.url);
+			assert.equal(undici.normalizedOrigin, undefined, testCase.url);
+			assert.equal(undici.cors, undefined, testCase.url);
+		}
 
 		assertDenied("partial-fetch-metadata", {
-			url: "/app.js",
+			transport: "websocket",
+			url: "/ws/session",
 			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "cors" }),
+		});
+		assertDenied("partial-fetch-metadata", {
+			url: "/app.js",
+			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "no-cors" }),
 		});
 		assertDenied("partial-fetch-metadata", {
 			rawHeaders: rawHeaders({
