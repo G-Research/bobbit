@@ -310,38 +310,36 @@ test("CORS inventory includes methods from imported req-receiving delegates", ()
 	}
 });
 
-test("CORS preflight advertises every routed API method and required request metadata", async () => {
+test("CORS preflight exposes only requested allowlisted API capabilities", async () => {
 	const origin = "http://127.0.0.1:5173";
+	const requestedHeaders = ["authorization", "content-type", "if-match", "x-bobbit-session-id", "x-bobbit-session-secret"];
 	const res = await fetch(`${base()}/api/ext/route/run`, {
 		method: "OPTIONS",
 		headers: {
 			Origin: origin,
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
 			"Access-Control-Request-Method": "POST",
-			"Access-Control-Request-Headers": "authorization,content-type,if-match,x-bobbit-session-id,x-bobbit-session-secret",
+			"Access-Control-Request-Headers": requestedHeaders.join(","),
 		},
 	});
 	expect(res.status).toBe(204);
 	expect(headerList(res.headers.get("access-control-allow-methods")).map(method => method.toUpperCase()))
-		.toEqual([...API_CORS_ALLOWED_METHODS]);
+		.toEqual(["POST"]);
 	expect(routedApiMethods()).toEqual([...API_CORS_ALLOWED_METHODS].sort());
+	expect(requestedHeaders.every(header => API_CORS_ALLOWED_HEADERS.map(item => item.toLowerCase()).includes(header))).toBe(true);
 	expect(headerList(res.headers.get("access-control-allow-headers")).map(header => header.toLowerCase()).sort())
-		.toEqual([...API_CORS_ALLOWED_HEADERS].map(header => header.toLowerCase()).sort());
+		.toEqual(requestedHeaders.sort());
 	expect(Number(res.headers.get("access-control-max-age"))).toBe(API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 	expect(API_CORS_PREFLIGHT_MAX_AGE_SECONDS).toBeGreaterThan(0);
 	expect(API_CORS_PREFLIGHT_MAX_AGE_SECONDS).toBeLessThanOrEqual(86_400);
 	expect(res.headers.get("access-control-allow-credentials")).toBeNull();
-
-	// Preserve the existing wildcard/reflection decision and pair Vary only with reflection.
-	const allowedOrigin = res.headers.get("access-control-allow-origin");
-	if (allowedOrigin === "*") {
-		expect(res.headers.get("vary")?.toLowerCase() ?? "").not.toContain("origin");
-	} else {
-		expect(allowedOrigin).toBe(origin);
-		expect(res.headers.get("vary")?.toLowerCase()).toContain("origin");
-	}
+	expect(res.headers.get("access-control-allow-private-network")).toBeNull();
+	expect(res.headers.get("access-control-allow-origin")).toBe(origin);
+	expect(res.headers.get("vary")?.toLowerCase()).toContain("origin");
 });
 
-test("authenticated cross-origin side-panel workspace PATCH persists after its preflight", async () => {
+test("authenticated configured-Vite-origin side-panel workspace PATCH persists after its preflight", async () => {
 	const sessionId = await createSession();
 	try {
 		const tabId = "proposal:goal";
@@ -362,11 +360,13 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 		expect(opened.status).toBe(200);
 		const workspace = await opened.json();
 
-		const origin = "https://remote-ui.example.test";
+		const origin = "http://127.0.0.1:5173";
 		const preflight = await fetch(`${base()}${tabPath}`, {
 			method: "OPTIONS",
 			headers: {
 				Origin: origin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
 				"Access-Control-Request-Method": "PATCH",
 				"Access-Control-Request-Headers": "authorization,content-type,if-match,x-bobbit-session-id,x-bobbit-session-secret",
 			},
@@ -378,13 +378,15 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			method: "PATCH",
 			headers: {
 				Origin: origin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
 				Authorization: `Bearer ${readE2EToken()}`,
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({
 				baseRevision: workspace.revision,
 				patch: {
-					title: "Persisted cross-origin update",
+					title: "Persisted configured Vite update",
 					state: { selectedSection: "details" },
 				},
 			}),
@@ -396,7 +398,7 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 		expect(refetched.status).toBe(200);
 		const persisted = await refetched.json();
 		expect(persisted.tabs.find((tab: any) => tab.id === tabId)).toMatchObject({
-			title: "Persisted cross-origin update",
+			title: "Persisted configured Vite update",
 			state: { selectedSection: "details" },
 		});
 
@@ -404,6 +406,8 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			method: "OPTIONS",
 			headers: {
 				Origin: origin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
 				"Access-Control-Request-Method": "DELETE",
 				"Access-Control-Request-Headers": "authorization,if-match",
 			},
@@ -416,6 +420,8 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			method: "DELETE",
 			headers: {
 				Origin: origin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
 				Authorization: `Bearer ${readE2EToken()}`,
 				"If-Match": `"${persisted.revision}"`,
 			},
