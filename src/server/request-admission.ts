@@ -290,10 +290,11 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 		if (!mode || !VALID_FETCH_MODES.has(mode)) {
 			return deny("invalid-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
 		}
-		// Node's fetch (undici) adds this lone header. Treat only its exact
-		// originless API shape as a non-browser request; authorization remains
-		// the inner boundary.
-		if (mode !== "cors" || origin || preliminaryContext !== "api") {
+		// Node's fetch (undici) adds this lone header. Treat its exact originless
+		// HTTP shape as non-browser traffic on every route; route authorization
+		// (including preview authorization) remains the inner boundary. WebSocket
+		// upgrades do not share undici's HTTP request shape.
+		if (mode !== "cors" || origin || (metadata.transport ?? "http") === "websocket") {
 			return deny("partial-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
 		}
 	} else if (isBrowserShape) {
