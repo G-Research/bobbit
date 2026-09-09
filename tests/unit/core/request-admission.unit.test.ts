@@ -112,6 +112,11 @@ describe("request Host and Origin admission", () => {
 		assert.equal(allowed.allowed, true);
 		assert.equal(allowed.normalizedHost, "localhost:4242");
 		assert.equal(allowed.normalizedOrigin, "http://localhost:4242");
+		assert.deepEqual(allowed.cors, {
+			allowOrigin: "http://localhost:4242",
+			varyOrigin: true,
+			allowCredentials: false,
+		});
 		assertDenied("duplicate-origin", {
 			rawHeaders: ["Host", "localhost:4242", "Origin", "http://localhost:4242", "origin", "http://localhost:4242"],
 		});
@@ -313,7 +318,7 @@ describe("CORS preflight projection", () => {
 		assert.deepEqual(result.cors, {
 			allowOrigin: "http://localhost:4242",
 			varyOrigin: true,
-			allowCredentials: true,
+			allowCredentials: false,
 			allowMethod: "POST",
 			allowHeaders: ["Authorization", "Content-Type"],
 			maxAgeSeconds: 600,

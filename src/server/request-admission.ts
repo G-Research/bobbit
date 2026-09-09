@@ -67,7 +67,6 @@ export interface RequestAdmissionPolicyInput {
 		allowedMethods?: readonly string[];
 		allowedHeaders?: readonly string[];
 		maxAgeSeconds?: number;
-		allowCredentials?: boolean;
 	};
 }
 
@@ -138,7 +137,6 @@ export interface RequestAdmissionPolicy {
 		readonly corsMethods: readonly string[];
 		readonly corsHeaders: Readonly<Record<string, string>>;
 		readonly corsMaxAgeSeconds: number;
-		readonly corsAllowCredentials: boolean;
 	};
 }
 
@@ -238,7 +236,6 @@ export function compileRequestAdmissionPolicy(input: RequestAdmissionPolicyInput
 		corsMethods,
 		corsHeaders,
 		corsMaxAgeSeconds: maxAge,
-		corsAllowCredentials: input.cors?.allowCredentials ?? true,
 	});
 	return Object.freeze({
 		basePath,
@@ -341,7 +338,7 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 		return deny("unsafe-navigation-method", context, host.serialized, origin?.serialized);
 	}
 
-	return allow(context, host, origin, origin ? simpleCors(policy, origin) : undefined);
+	return allow(context, host, origin, origin ? simpleCors(origin) : undefined);
 }
 
 interface FetchMetadata {
@@ -389,7 +386,7 @@ function admitPreflight(
 		projectedHeaders.push(configured);
 	}
 	return allow("preflight", host, origin, {
-		...simpleCors(policy, origin),
+		...simpleCors(origin),
 		allowMethod: requestedMethod,
 		allowHeaders: Object.freeze(projectedHeaders),
 		maxAgeSeconds: policy._compiled.corsMaxAgeSeconds,
@@ -437,11 +434,13 @@ function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetada
 	return fetch.mode !== "navigate" && fetch.mode !== "nested-navigate" && fetch.mode !== "websocket";
 }
 
-function simpleCors(policy: RequestAdmissionPolicy, origin: ParsedOrigin): CorsProjection {
+function simpleCors(origin: ParsedOrigin): CorsProjection {
 	return Object.freeze({
 		allowOrigin: origin.serialized,
 		varyOrigin: true,
-		allowCredentials: policy._compiled.corsAllowCredentials,
+		// Gateway browser transports authenticate with bearer tokens. Do not
+		// advertise ambient credential access across the configured Vite origin.
+		allowCredentials: false,
 	});
 }
 
