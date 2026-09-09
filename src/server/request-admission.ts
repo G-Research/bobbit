@@ -432,7 +432,11 @@ function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetada
 	if (context === "api") return (fetch.dest === undefined || fetch.dest === "empty") && (fetch.mode === "cors" || fetch.mode === "same-origin");
 	if (context === "preview-iframe") return fetch.mode === "navigate" && fetch.dest === "iframe";
 	if (context === "ui-document" || context === "preview-document") return fetch.mode === "navigate" && fetch.dest === "document";
-	return fetch.mode !== "navigate" && fetch.mode !== "nested-navigate" && fetch.mode !== "websocket";
+	// Chromium can emit navigate/empty for same-origin iframe loads. Keep these
+	// in the non-top-level resource context so they never inherit the cross-site
+	// document-navigation exception.
+	if (fetch.mode === "navigate") return fetch.dest === "empty";
+	return fetch.mode !== "nested-navigate" && fetch.mode !== "websocket";
 }
 
 function simpleCors(origin: ParsedOrigin): CorsProjection {

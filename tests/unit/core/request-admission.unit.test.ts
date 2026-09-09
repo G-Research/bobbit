@@ -297,6 +297,25 @@ describe("browser route/context matrix", () => {
 		});
 	});
 
+	it("accepts Chromium same-origin navigate/empty requests without treating them as top-level navigations", () => {
+		for (const [url, context] of [
+			["/assets/app.js", "ui-static"],
+			["/preview/session/_artifact/artifact/index.html?mtime=1", "preview-resource"],
+		] as const) {
+			const result = decide({
+				url,
+				rawHeaders: fetchHeaders("same-origin", "navigate", "empty"),
+			});
+			assert.equal(result.allowed, true, url);
+			assert.equal(result.context, context, url);
+		}
+
+		assertDenied("cross-site-browser-request", {
+			url: "/preview/session/_artifact/artifact/index.html?mtime=1",
+			rawHeaders: fetchHeaders("cross-site", "navigate", "empty"),
+		});
+	});
+
 	it("permits same-origin embedded previews/resources and rejects same-site siblings and opaque origins", () => {
 		assert.equal(decide({
 			url: "/preview/session/index.html",
