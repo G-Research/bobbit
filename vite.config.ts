@@ -88,6 +88,7 @@ const nordMode = process.env.BOBBIT_NORD === "1";
 const host = process.env.VITE_HOST || (nordMode ? findNordLynxIp() || "localhost" : "localhost");
 const proto = host === "localhost" ? "http" : "https";
 const publicViteHosts = configuredPublicViteHosts();
+export const DEFAULT_VITE_PORT = 5173;
 
 /**
  * Read the gateway URL from .bobbit/state/gateway-url. Called on every
@@ -884,6 +885,10 @@ export default defineConfig(({ command, mode }) => ({
 	},
 	server: {
 		host,
+		// The gateway admission policy receives this exact development origin from
+		// the dev scripts. Never drift to an unconfigured port when 5173 is busy.
+		port: DEFAULT_VITE_PORT,
+		strictPort: true,
 		// IP literals and localhost are allowed by Vite automatically. DNS-mounted
 		// mobile clients need the configured public hostname explicitly allowed so
 		// the HMR WebSocket upgrade is not rejected with HTTP 400.
