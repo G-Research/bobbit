@@ -16,6 +16,10 @@ export interface BrowserCookieRequestMetadata {
 	headers: BrowserCookieHeaders;
 	/** Whether the gateway request arrived over TLS. Forwarded headers are not trusted. */
 	isTls: boolean;
+	/** Canonical authority already approved by the outer request-admission policy. */
+	admittedHost?: string;
+	/** Canonical browser Origin already approved by request admission, when present. */
+	admittedOrigin?: string;
 }
 
 /**
@@ -114,7 +118,9 @@ export function classifyBrowserCookieEligibility(
 		return deny("invalid-fetch-mode");
 	}
 
-	const requestOrigin = parseRequestOrigin(request.headers, request.isTls);
+	const requestOrigin = request.admittedHost
+		? parseOrigin(`${request.isTls ? "https" : "http"}://${request.admittedHost}`)
+		: parseRequestOrigin(request.headers, request.isTls);
 	if (!requestOrigin) return deny("invalid-request-host");
 	if (requestOrigin.protocol === "http:" && !isLoopbackHostname(requestOrigin.hostname)) {
 		return deny("insecure-non-loopback-origin");
@@ -127,7 +133,9 @@ export function classifyBrowserCookieEligibility(
 		// it so the production or Vite origin tuple can be classified.
 		if (normalizeMethod(request.method) !== "GET") return deny("origin-required");
 	} else {
-		const browserOrigin = parseOriginHeader(originHeader.value!);
+		const browserOrigin = request.admittedOrigin
+			? parseOrigin(request.admittedOrigin)
+			: parseOriginHeader(originHeader.value!);
 		if (!browserOrigin) return deny("invalid-origin");
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");

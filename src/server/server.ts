@@ -40,7 +40,8 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
-import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "./cors.js";
+import { applyApprovedCorsHeaders } from "./cors.js";
+import { admitRequest, compileRequestAdmissionPolicy } from "./request-admission.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
@@ -2501,6 +2502,12 @@ export interface GatewayConfig {
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
+	/** Additional externally reachable HTTP(S) origins trusted for Host validation. */
+	publicOrigins?: readonly string[];
+	/** Finite browser development origins allowed to proxy to this gateway. */
+	viteOrigins?: readonly string[];
+	/** Finite DNS/IP names covered by the configured direct-TLS certificate. */
+	tlsHostnames?: readonly string[];
 	/** Canonical runtime mount; omitted/empty means root-mounted. */
 	basePath?: string;
 	/**
@@ -4061,11 +4068,57 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let sandboxManager: SandboxManager | null = null;
 	// The listener binds before session restoration so the actual port can be
 	// published. Mounted routing remains active during that window, but in-mount
-	// traffic is held behind a 503 readiness gate.
+	// traffic is held behind a 503 readiness gate. Admission is compiled only
+	// after the actual listener port and published origin are known; until then,
+	// every transport fails closed without reaching readiness or route handling.
 	let gatewayReady = false;
+	let requestAdmissionPolicy: ReturnType<typeof compileRequestAdmissionPolicy> | undefined;
+
+	const admissionMetadata = (req: http.IncomingMessage, transport: "http" | "websocket") => ({
+		rawHeaders: req.rawHeaders,
+		method: req.method,
+		url: req.url,
+		isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+		transport,
+	} as const);
+	const boundedDiagnosticValue = (value: string | undefined, fallback: string): string => {
+		if (!value) return fallback;
+		const normalized = value.replace(/[^A-Za-z0-9_.:%-]/g, "_");
+		return normalized.slice(0, 64) || fallback;
+	};
+	const logAdmissionRejection = (
+		req: http.IncomingMessage,
+		transport: "http" | "websocket",
+		reason: string,
+		context: string,
+	): void => {
+		const method = boundedDiagnosticValue(req.method, "UNKNOWN");
+		const remote = boundedDiagnosticValue(req.socket.remoteAddress, "unknown");
+		const safeReason = boundedDiagnosticValue(reason, "unknown");
+		const safeContext = boundedDiagnosticValue(context, "unknown");
+		console.warn(`[security] request rejected reason=${safeReason} transport=${transport} method=${method} context=${safeContext} remote=${remote}`);
+	};
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		const policy = requestAdmissionPolicy;
+		if (!policy) {
+			logAdmissionRejection(req, "http", "policy-unavailable", "unknown");
+			res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "1" });
+			res.end("Gateway starting");
+			return;
+		}
+		const admission = admitRequest(policy, admissionMetadata(req, "http"));
+		if (!admission.allowed) {
+			logAdmissionRejection(req, "http", admission.reason, admission.context);
+			res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Forbidden");
+			return;
+		}
+		if (admission.cors) applyApprovedCorsHeaders(res, admission.cors);
+
+		// Admission validates the raw request target and authority first. Routing
+		// then parses only the origin-form target against a fixed sentinel.
+		const url = new URL(req.url || "/", "http://gateway.invalid");
 		if (basePath && url.pathname === basePath) {
 			res.writeHead(301, { Location: `${basePath}/${url.search}` });
 			res.end();
@@ -4110,15 +4163,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				});
 			}
 
-			// When serving the UI (same-origin), reflect the request origin; otherwise allow any.
-			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
-			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
-			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
-			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
-
 			if (req.method === "OPTIONS") {
-				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
@@ -4223,6 +4268,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					pathname: url.pathname,
 					headers: req.headers,
 					isTls,
+					admittedHost: admission.normalizedHost,
+					admittedOrigin: admission.normalizedOrigin,
 				}, {
 					deployment: config.staticDir ? "direct" : "vite",
 					configuredHost: config.host,
@@ -5090,8 +5137,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	const isLocalhostServer = !config.forceAuth && isLoopbackHost(config.host);
 
+	const rejectWebSocketAdmission = (
+		socket: import("node:stream").Duplex,
+		status: 403 | 503,
+	): void => {
+		socket.once("error", () => {});
+		const label = status === 403 ? "Forbidden" : "Service Unavailable";
+		const retryAfter = status === 503 ? "Retry-After: 1\r\n" : "";
+		socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\n${retryAfter}Content-Length: 0\r\n\r\n`);
+	};
+
 	server.on("upgrade", (req, socket, head) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		const policy = requestAdmissionPolicy;
+		if (!policy) {
+			logAdmissionRejection(req, "websocket", "policy-unavailable", "websocket");
+			rejectWebSocketAdmission(socket, 503);
+			return;
+		}
+		const admission = admitRequest(policy, admissionMetadata(req, "websocket"));
+		if (!admission.allowed) {
+			logAdmissionRejection(req, "websocket", admission.reason, admission.context);
+			rejectWebSocketAdmission(socket, 403);
+			return;
+		}
+		const url = new URL(req.url || "/", "http://gateway.invalid");
 		const wsPathname = stripBasePath(url.pathname, basePath);
 		if (wsPathname === null) {
 			socket.destroy();
@@ -5128,6 +5197,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	const closeBoundServer = async (): Promise<void> => {
 		gatewayReady = false;
+		requestAdmissionPolicy = undefined;
 		if (!server.listening) return;
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	};
@@ -5381,6 +5451,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (callbackUrl !== undefined) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
+				const publishedOrigin = new URL(publishedGatewayUrl).origin;
+				const listenerScheme = config.tls ? "https" : "http";
+				const listenerOrigin = (host: string): string =>
+					new URL(`${listenerScheme}://${publishedUrlHost(host)}:${actualPort}`).origin;
+				const viteGatewayOrigins = new Set<string>([
+					publishedOrigin,
+					listenerOrigin("localhost"),
+					listenerOrigin("127.0.0.1"),
+					listenerOrigin("::1"),
+					...(config.publicOrigins ?? []),
+					...(config.tls ? (config.tlsHostnames ?? []).map(listenerOrigin) : []),
+				]);
+				const normalizedBindHost = config.host.trim().replace(/^\[|\]$/g, "");
+				if (normalizedBindHost && normalizedBindHost !== "0.0.0.0" && normalizedBindHost !== "::") {
+					viteGatewayOrigins.add(listenerOrigin(normalizedBindHost));
+				}
+				requestAdmissionPolicy = compileRequestAdmissionPolicy({
+					bindHost: config.host,
+					port: actualPort,
+					isTls: Boolean(config.tls),
+					basePath,
+					tlsCertificateNames: config.tls ? config.tlsHostnames : undefined,
+					publicOrigins: config.publicOrigins,
+					publishedOrigin,
+					viteOriginPairs: config.viteOrigins?.flatMap((origin) =>
+						[...viteGatewayOrigins].map((gatewayOrigin) => ({ origin, gatewayOrigin }))),
+				});
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
 			// Resolve any cross-store staff-fork publication interrupted after the
