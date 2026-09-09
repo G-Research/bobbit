@@ -52,6 +52,7 @@ export interface SourceGatewayOptions {
 	workspaceDir: string;
 	agentPath: string;
 	port: number;
+	viteOrigin: string;
 }
 
 export interface SourceViteOptions {
@@ -251,6 +252,7 @@ export function startIsolatedSourceGateway(options: SourceGatewayOptions): Runni
 		"--port", String(options.port),
 		"--no-tls",
 		"--no-ui",
+		"--vite-origin", options.viteOrigin,
 		"--agent-cli", options.agentPath,
 	], {
 		cwd: options.repoRoot,

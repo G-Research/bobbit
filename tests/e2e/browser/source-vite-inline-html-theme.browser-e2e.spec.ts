@@ -176,6 +176,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				workspaceDir,
 				agentPath,
 				port: gatewayPort,
+				viteOrigin: viteBaseUrl,
 			});
 			await waitForSourceGateway(gatewayBaseUrl, gateway);
 			const token = await readToken(join(tempRoot, "secrets"));
