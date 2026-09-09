@@ -33,19 +33,57 @@ describe("request-admission CLI configuration", () => {
 		assert.deepEqual(args.publicOrigins, ["https://gateway.example", "http://[::1]:8080"]);
 	});
 
-	it("deduplicates normalized explicit Vite origins without accepting arbitrary ports", () => {
+	it("derives the finite effective origin for standard Vite development", () => {
 		assert.deepEqual(
-			parseArgs([], { BOBBIT_VITE_ORIGINS: "https://Mesh.Example.:5173/" }).viteOrigins,
+			parseArgs([], { npm_lifecycle_event: "dev:harness", VITE_HOST: "127.0.0.1" }).viteOrigins,
+			["https://127.0.0.1:5173"],
+		);
+		assert.deepEqual(
+			parseArgs([], { npm_lifecycle_event: "dev:watchdog", VITE_HOST: "Dev.Example." }).viteOrigins,
+			["https://dev.example:5173"],
+		);
+		assert.deepEqual(
+			parseArgs([], { npm_lifecycle_event: "dev" }).viteOrigins,
+			["http://localhost:5173"],
+		);
+		assert.deepEqual(parseArgs([], {}).viteOrigins, []);
+		assert.deepEqual(
+			parseArgs([], { npm_lifecycle_event: "dev:nord", BOBBIT_NORD: "1" }).viteOrigins,
+			[],
+		);
+		assert.equal(DEFAULT_VITE_PORT, 5173);
+	});
+
+	it("keeps explicit Vite origin precedence over VITE_HOST fallback", () => {
+		assert.deepEqual(
+			parseArgs([], {
+				npm_lifecycle_event: "dev:harness",
+				VITE_HOST: "0.0.0.0",
+				BOBBIT_VITE_ORIGINS: "https://Mesh.Example.:5173/",
+			}).viteOrigins,
 			["https://mesh.example:5173"],
 		);
 		const args = parseArgs([
 			"--vite-origin", "http://LOCALHOST:5173/",
 			"--vite-origin", "http://localhost:5173",
-		], { BOBBIT_VITE_ORIGINS: "not an origin" });
+		], {
+			npm_lifecycle_event: "dev",
+			VITE_HOST: "0.0.0.0",
+			BOBBIT_VITE_ORIGINS: "not an origin",
+		});
 
 		assert.deepEqual(args.viteOrigins, ["http://localhost:5173"]);
-		assert.equal(DEFAULT_VITE_PORT, 5173);
 	});
+
+	it.each(["0.0.0.0", "::", "bad host", " dev.example", "user@example.test", "example.test/path"])(
+		"rejects an unsafe VITE_HOST fallback %j",
+		(viteHost) => {
+			assert.throws(
+				() => parseArgs([], { npm_lifecycle_event: "dev", VITE_HOST: viteHost }),
+				/invalid Vite hostname/i,
+			);
+		},
+	);
 
 	it.each([
 		"ftp://gateway.example",
@@ -98,13 +136,13 @@ describe("request-admission CLI configuration", () => {
 		);
 	});
 
-	it("pins local dev scripts to the finite configured Vite origin", () => {
+	it("lets local dev scripts derive the configured finite Vite origin", () => {
 		const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 		const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as {
 			scripts: Record<string, string>;
 		};
 		for (const name of ["dev", "dev:harness", "dev:watchdog"]) {
-			assert.match(pkg.scripts[name]!, /--vite-origin http:\/\/localhost:5173/);
+			assert.doesNotMatch(pkg.scripts[name]!, /--vite-origin/);
 			assert.match(pkg.scripts[name]!, /dev-vite\.mjs --port 5173 --strictPort/);
 		}
 	});

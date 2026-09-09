@@ -214,6 +214,29 @@ function unique(values: readonly string[]): string[] {
 	return [...new Set(values)];
 }
 
+const STANDARD_VITE_PORT = 5173;
+const STANDARD_VITE_LIFECYCLES = new Set(["dev", "dev:harness", "dev:watchdog"]);
+
+/** Derive the one finite browser origin used by the standard Vite development launcher. */
+function standardViteOrigin(env: NodeJS.ProcessEnv): string[] {
+	const configuredHost = env.VITE_HOST;
+	const standardLauncher = STANDARD_VITE_LIFECYCLES.has(env.npm_lifecycle_event ?? "");
+	if ((configuredHost === undefined || configuredHost === "") && (!standardLauncher || env.BOBBIT_NORD === "1")) {
+		return [];
+	}
+	const rawHost = configuredHost || "localhost";
+	if (rawHost !== rawHost.trim()) throw new Error(`Invalid Vite hostname: ${JSON.stringify(rawHost)}`);
+	const hostname = normalizeConfiguredHostname(rawHost, "Vite");
+	if (hostname === "0.0.0.0" || hostname === "::") {
+		throw new Error(`Invalid Vite hostname: wildcard listener ${JSON.stringify(rawHost)}`);
+	}
+	const authorityHost = net.isIP(hostname) === 6 ? `[${hostname}]` : hostname;
+	// Keep this scheme rule aligned with vite.config.ts: only its exact default
+	// host uses HTTP; every explicit non-default host uses the configured TLS path.
+	const protocol = rawHost === "localhost" ? "http" : "https";
+	return [normalizeConfiguredOrigin(`${protocol}://${authorityHost}:${STANDARD_VITE_PORT}`, "Vite origin")];
+}
+
 /** Build the finite admission inputs that correspond to CLI and TLS configuration. */
 export function buildRequestAdmissionCliConfig(input: {
 	publicOrigins?: readonly string[];
@@ -346,9 +369,14 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 	result.publicOrigins = unique(publicOriginFlagPresent
 		? result.publicOrigins
 		: configuredOriginList(env.BOBBIT_PUBLIC_ORIGINS, "public origin"));
-	result.viteOrigins = unique(viteOriginFlagPresent
-		? result.viteOrigins
-		: configuredOriginList(env.BOBBIT_VITE_ORIGINS, "Vite origin"));
+	if (viteOriginFlagPresent) {
+		result.viteOrigins = unique(result.viteOrigins);
+	} else {
+		const configuredViteOrigins = configuredOriginList(env.BOBBIT_VITE_ORIGINS, "Vite origin");
+		result.viteOrigins = unique(configuredViteOrigins.length > 0
+			? configuredViteOrigins
+			: standardViteOrigin(env));
+	}
 
 	// Auto-detect embedded UI (dist/ui/) unless --no-ui or explicit --static
 	if (!result.noUi && !result.staticDir) {
