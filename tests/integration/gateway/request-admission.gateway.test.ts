@@ -435,7 +435,7 @@ test.describe.serial("central gateway request admission", () => {
 		expectNoCorsCapability(deniedActual);
 	});
 
-	test("allows originless authenticated CLI and sandbox clients while preserving inner authorization", async ({ gateway, scope }) => {
+	test("allows originless authenticated CLI, sandbox, and same-origin browser clients while preserving inner authorization", async ({ gateway, scope }) => {
 		const unauthenticated = await request(gateway.baseURL, "/api/sessions", {
 			headers: { Host: trustedAuthority(gateway.baseURL) },
 		});
@@ -476,7 +476,7 @@ test.describe.serial("central gateway request admission", () => {
 				"Sec-Fetch-Mode": "cors",
 			},
 		});
-		expect(browserShapedOriginless.status).toBe(403);
+		expect(browserShapedOriginless.status, browserShapedOriginless.body).toBe(200);
 	});
 
 	test("rejects hostile browser upgrades before both viewer and session WebSocket handlers", async ({ gateway, scope }) => {
