@@ -159,16 +159,54 @@ describe("browser route/context matrix", () => {
 		"Sec-Fetch-Dest": dest,
 	});
 
-	it("permits safe originless top-level UI and preview navigation, including external links", () => {
+	it("permits safe originless top-level UI and preview navigation, including Chromium user-activated popups", () => {
 		for (const url of ["/", "/preview/session/index.html"]) {
-			const result = decide({ url, rawHeaders: fetchHeaders("cross-site", "navigate", "document") });
-			assert.equal(result.allowed, true);
-			assert.match(result.context, /^(ui|preview)-document$/);
+			const documentNavigation = decide({ url, rawHeaders: fetchHeaders("cross-site", "navigate", "document") });
+			assert.equal(documentNavigation.allowed, true);
+			assert.match(documentNavigation.context, /^(ui|preview)-document$/);
+
+			// Chromium sends this exact shape for a user-clicked target=_blank
+			// navigation from localhost to 127.0.0.1: no Origin or Sec-Fetch-User,
+			// and destination `empty` rather than `document`.
+			const popupNavigation = decide({
+				url,
+				rawHeaders: rawHeaders({
+					Host: "localhost:4242",
+					"Sec-Fetch-Site": "cross-site",
+					"Sec-Fetch-Mode": "navigate",
+					"Sec-Fetch-Dest": "empty",
+				}),
+			});
+			assert.equal(popupNavigation.allowed, true);
+			assert.match(popupNavigation.context, /^(ui|preview)-document$/);
 		}
 		assertDenied("unsafe-navigation-method", {
 			method: "POST",
 			url: "/",
 			rawHeaders: fetchHeaders("same-origin", "navigate", "document", "http://localhost:4242"),
+		});
+	});
+
+	it("does not extend the Chromium popup exception to APIs, iframes, resources, or WebSockets", () => {
+		const popupHeaders = {
+			Host: "localhost:4242",
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Dest": "empty",
+		};
+		assertDenied("invalid-fetch-metadata", { url: "/api/health", rawHeaders: rawHeaders(popupHeaders) });
+		assertDenied("cross-site-browser-request", {
+			url: "/preview/session/index.html",
+			rawHeaders: fetchHeaders("same-site", "navigate", "iframe"),
+		});
+		assertDenied("cross-site-browser-request", {
+			url: "/app.js",
+			rawHeaders: fetchHeaders("same-site", "no-cors", "script"),
+		});
+		assertDenied("invalid-fetch-metadata", {
+			transport: "websocket",
+			url: "/ws/session",
+			rawHeaders: rawHeaders(popupHeaders),
 		});
 	});
 
@@ -297,7 +335,7 @@ describe("browser route/context matrix", () => {
 		});
 	});
 
-	it("accepts Chromium same-origin navigate/empty requests without treating them as top-level navigations", () => {
+	it("keeps Chromium same-origin navigate/empty resources in resource contexts", () => {
 		for (const [url, context] of [
 			["/assets/app.js", "ui-static"],
 			["/preview/session/_artifact/artifact/index.html?mtime=1", "preview-resource"],
@@ -309,11 +347,6 @@ describe("browser route/context matrix", () => {
 			assert.equal(result.allowed, true, url);
 			assert.equal(result.context, context, url);
 		}
-
-		assertDenied("cross-site-browser-request", {
-			url: "/preview/session/_artifact/artifact/index.html?mtime=1",
-			rawHeaders: fetchHeaders("cross-site", "navigate", "empty"),
-		});
 	});
 
 	it("permits same-origin embedded previews/resources and rejects same-site siblings and opaque origins", () => {
@@ -339,14 +372,33 @@ describe("browser route/context matrix", () => {
 		assertDenied("partial-fetch-metadata", {
 			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Site": "same-origin" }),
 		});
+		assertDenied("partial-fetch-metadata", {
+			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-User": "?1" }),
+		});
 		assertDenied("duplicate-fetch-metadata", {
 			rawHeaders: [
 				...fetchHeaders("same-origin", "cors", "empty", "http://localhost:4242"),
 				"Sec-Fetch-Site", "same-origin",
 			],
 		});
+		assertDenied("duplicate-fetch-metadata", {
+			rawHeaders: [
+				...fetchHeaders("same-origin", "navigate", "document"),
+				"Sec-Fetch-User", "?1",
+				"sec-fetch-user", "?1",
+			],
+		});
 		assertDenied("invalid-fetch-metadata", {
 			rawHeaders: fetchHeaders("same-origin, cross-site", "cors", "empty", "http://localhost:4242"),
+		});
+		assertDenied("invalid-fetch-metadata", {
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				"Sec-Fetch-Site": "same-site",
+				"Sec-Fetch-Mode": "navigate",
+				"Sec-Fetch-Dest": "empty",
+				"Sec-Fetch-User": "?0",
+			}),
 		});
 	});
 });

@@ -162,7 +162,8 @@ export class RequestAdmissionConfigError extends Error {
 }
 
 const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"] as const;
-const FETCH_HEADER_NAMES = ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] as const;
+const FETCH_HEADER_NAMES = ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user"] as const;
+const CORE_FETCH_HEADER_NAMES = ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] as const;
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 const VALID_FETCH_SITES = new Set(["same-origin", "same-site", "cross-site", "none"]);
@@ -267,21 +268,19 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 	}
 
 	const fetchValues: Partial<Record<(typeof FETCH_HEADER_NAMES)[number], string>> = {};
-	let fetchCount = 0;
 	for (const name of FETCH_HEADER_NAMES) {
 		const value = readRawHeader(metadata.rawHeaders, name);
 		if (value.kind === "duplicate") return deny("duplicate-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
-		if (value.kind === "value") {
-			fetchCount++;
-			fetchValues[name] = value.value;
-		}
+		if (value.kind === "value") fetchValues[name] = value.value;
 	}
+	const coreFetchCount = CORE_FETCH_HEADER_NAMES.filter(name => fetchValues[name] !== undefined).length;
 	const hasFetchSite = fetchValues["sec-fetch-site"] !== undefined;
 	const hasFetchMode = fetchValues["sec-fetch-mode"] !== undefined;
 	const hasFetchDest = fetchValues["sec-fetch-dest"] !== undefined;
-	const isModeOnly = !hasFetchSite && hasFetchMode && !hasFetchDest;
+	const hasFetchUser = fetchValues["sec-fetch-user"] !== undefined;
+	const isModeOnly = !hasFetchSite && hasFetchMode && !hasFetchDest && !hasFetchUser;
 	const isBrowserShape = hasFetchSite && hasFetchMode;
-	if (fetchCount !== 0 && !isModeOnly && !isBrowserShape) {
+	if ((coreFetchCount !== 0 || hasFetchUser) && !isModeOnly && !isBrowserShape) {
 		return deny("partial-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
 	}
 	let fetch: FetchMetadata | undefined;
@@ -301,7 +300,7 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 		fetch = parseFetchMetadata(fetchValues);
 		if (!fetch) return deny("invalid-fetch-metadata", preliminaryContext, host.serialized, origin?.serialized);
 	}
-	const context = classifyContext(policy.basePath, metadata, fetch?.dest);
+	const context = classifyContext(policy.basePath, metadata, fetch);
 
 	const requestedMethodHeader = readRawHeader(metadata.rawHeaders, "access-control-request-method");
 	const requestedHeadersHeader = readRawHeader(metadata.rawHeaders, "access-control-request-headers");
@@ -346,6 +345,7 @@ interface FetchMetadata {
 	site: string;
 	mode: string;
 	dest?: string;
+	user?: "?1";
 }
 
 type RawHeaderResult = { kind: "missing" } | { kind: "duplicate" } | { kind: "value"; value: string };
@@ -418,7 +418,7 @@ function isSafeTopLevelNavigation(
 		&& (context === "ui-document" || context === "preview-document")
 		&& SAFE_METHODS.has(normalizeMethod(method))
 		&& fetch.mode === "navigate"
-		&& fetch.dest === "document";
+		&& (fetch.dest === "document" || (fetch.dest === "empty" && fetch.site !== "same-origin"));
 }
 
 function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: FetchMetadata): boolean {
@@ -431,7 +431,10 @@ function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetada
 	if (context === "preflight") return fetch.mode === "cors" && (fetch.dest === undefined || fetch.dest === "empty");
 	if (context === "api") return (fetch.dest === undefined || fetch.dest === "empty") && (fetch.mode === "cors" || fetch.mode === "same-origin");
 	if (context === "preview-iframe") return fetch.mode === "navigate" && fetch.dest === "iframe";
-	if (context === "ui-document" || context === "preview-document") return fetch.mode === "navigate" && fetch.dest === "document";
+	if (context === "ui-document" || context === "preview-document") {
+		return fetch.mode === "navigate"
+			&& (fetch.dest === "document" || (fetch.dest === "empty" && fetch.site !== "same-origin"));
+	}
 	// Chromium can emit navigate/empty for same-origin iframe loads. Keep these
 	// in the non-top-level resource context so they never inherit the cross-site
 	// document-navigation exception.
@@ -480,7 +483,7 @@ function deny(
 	};
 }
 
-function classifyContext(basePath: string, metadata: RequestAdmissionMetadata, fetchDest: string | undefined): RequestRouteContext {
+function classifyContext(basePath: string, metadata: RequestAdmissionMetadata, fetch: FetchMetadata | undefined): RequestRouteContext {
 	if ((metadata.transport ?? "http") === "websocket") return "websocket";
 	const requestMethod = normalizeMethod(metadata.method);
 	const hasPreflightMethod = countRawHeader(metadata.rawHeaders, "access-control-request-method") > 0;
@@ -489,12 +492,14 @@ function classifyContext(basePath: string, metadata: RequestAdmissionMetadata, f
 	if (pathname === undefined) return "ui-static";
 	const path = stripBasePath(pathname, basePath);
 	if (path === "/api" || path.startsWith("/api/")) return "api";
+	const isTopLevelDocument = fetch?.dest === "document"
+		|| (fetch?.mode === "navigate" && fetch.dest === "empty" && fetch.site !== "same-origin");
 	if (path === "/preview" || path.startsWith("/preview/")) {
-		if (fetchDest === "document") return "preview-document";
-		if (fetchDest === "iframe") return "preview-iframe";
+		if (isTopLevelDocument) return "preview-document";
+		if (fetch?.dest === "iframe") return "preview-iframe";
 		return "preview-resource";
 	}
-	if (fetchDest === "document") return "ui-document";
+	if (isTopLevelDocument) return "ui-document";
 	return "ui-static";
 }
 
@@ -552,9 +557,11 @@ function parseFetchMetadata(values: Partial<Record<(typeof FETCH_HEADER_NAMES)[n
 	const mode = parseHeaderToken(values["sec-fetch-mode"]);
 	const rawDest = values["sec-fetch-dest"];
 	const dest = rawDest === undefined ? undefined : parseHeaderToken(rawDest);
+	const rawUser = values["sec-fetch-user"];
 	if (!site || !mode || !VALID_FETCH_SITES.has(site) || !VALID_FETCH_MODES.has(mode)
-		|| (rawDest !== undefined && (!dest || !VALID_FETCH_DESTINATIONS.has(dest)))) return undefined;
-	return { site, mode, ...(dest ? { dest } : {}) };
+		|| (rawDest !== undefined && (!dest || !VALID_FETCH_DESTINATIONS.has(dest)))
+		|| (rawUser !== undefined && rawUser !== "?1")) return undefined;
+	return { site, mode, ...(dest ? { dest } : {}), ...(rawUser ? { user: rawUser } : {}) };
 }
 
 function parseHeaderToken(value: string | undefined): string | undefined {

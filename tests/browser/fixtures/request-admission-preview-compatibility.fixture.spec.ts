@@ -249,7 +249,7 @@ test.afterAll(async () => {
 
 test.describe("Request admission preview compatibility", () => {
 	test("admits trusted top-level, iframe, asset, redirect, SSE, popout, and restart preview flows while rejecting cross-site embedding", async ({ page, gateway }) => {
-		test.setTimeout(120_000);
+		test.setTimeout(55_000);
 		const fixtureDir = mkdtempSync(join(nonGitCwd(), "request-admission-preview-"));
 		const assetsDir = join(fixtureDir, "assets");
 		const htmlPath = join(fixtureDir, ENTRY);
@@ -319,18 +319,20 @@ test.describe("Request admission preview compatibility", () => {
 			expect([401, 403], "cross-site iframe navigation must be rejected before preview bytes render").toContain(embeddedResponse.status());
 			await expect(attacker.frameLocator("#cross-site-preview").locator("body")).not.toContainText(INITIAL_MARKER);
 
-			// The route matrix deliberately permits external top-level UI and preview
-			// navigations. The preview link also exercises both canonical redirects:
+			// The route matrix deliberately permits Chromium's proven originless,
+			// cross-site navigate/empty popup shape only for safe top-level UI and
+			// preview routes. Iframe, resource, API, and WebSocket shapes remain denied.
+			// The preview link also exercises both canonical redirects:
 			// /preview/<session> -> trailing slash -> current entry.
 			await addExternalLink(attacker, "external-ui", `${gateway.baseURL}/`);
 			popup = await openExternalLink(attacker, "external-ui");
-			await expect(popup.locator("button").filter({ hasText: "Settings" }).first(), "external top-level UI navigation should be admitted").toBeVisible({ timeout: 20_000 });
+			await expect(popup.locator("button").filter({ hasText: "Settings" }).first(), "external top-level UI navigation should be admitted").toBeVisible({ timeout: 15_000 });
 			await popup.close();
 			popup = undefined;
 
 			await addExternalLink(attacker, "external-preview", `${gateway.baseURL}/preview/${encodeURIComponent(sessionId)}`);
 			popup = await openExternalLink(attacker, "external-preview");
-			await expect(popup.locator("#preview-marker"), "external top-level preview redirect chain should be admitted").toHaveText(INITIAL_MARKER, { timeout: 20_000 });
+			await expect(popup.locator("#preview-marker"), "external top-level preview redirect chain should be admitted").toHaveText(INITIAL_MARKER, { timeout: 15_000 });
 			expect(await popup.evaluate(() => (window as any).__previewAdmissionState)).toEqual({ marker: INITIAL_MARKER, parentReadable: true, parentIsSelf: true });
 			await popup.close();
 			popup = undefined;
