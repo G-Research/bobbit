@@ -231,10 +231,9 @@ function standardViteOrigin(env: NodeJS.ProcessEnv): string[] {
 		throw new Error(`Invalid Vite hostname: wildcard listener ${JSON.stringify(rawHost)}`);
 	}
 	const authorityHost = net.isIP(hostname) === 6 ? `[${hostname}]` : hostname;
-	// Keep this scheme rule aligned with vite.config.ts: only its exact default
-	// host uses HTTP; every explicit non-default host uses the configured TLS path.
-	const protocol = rawHost === "localhost" ? "http" : "https";
-	return [normalizeConfiguredOrigin(`${protocol}://${authorityHost}:${STANDARD_VITE_PORT}`, "Vite origin")];
+	// Standard launchers serve Vite over deterministic HTTP regardless of host.
+	// Nord is the separate, pre-provisioned HTTPS path handled by nordViteOrigins().
+	return [normalizeConfiguredOrigin(`http://${authorityHost}:${STANDARD_VITE_PORT}`, "Vite origin")];
 }
 
 /** Build the finite admission inputs that correspond to CLI and TLS configuration. */

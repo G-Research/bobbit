@@ -27,7 +27,7 @@ import { createRunChild, removeOwnedRunChild } from "../../../tests/support/harn
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const TOKEN = `request-admission-config-${"x".repeat(64)}`;
 const MOUNT = "/team/bobbit";
-const VITE_ORIGIN = "https://localhost:43123";
+const VITE_ORIGIN = "http://127.0.0.1:5173";
 const ENV_KEYS = [
 	"BOBBIT_DIR",
 	"BOBBIT_SECRETS_DIR",
@@ -314,14 +314,17 @@ describe.sequential("configured request-admission authorities", () => {
 		}
 	});
 
-	it("allows only the finite configured Vite origin for the trusted gateway target", async () => {
+	it("allows the finite standard Vite HTTP origin and rejects its opposite scheme", async () => {
 		const targetAuthority = `127.0.0.1:${port}`;
 		const allowed = await request(port, `${MOUNT}/api/health`, browserHeaders(targetAuthority, VITE_ORIGIN));
 		expect(allowed.status, allowed.body).toBe(200);
 		expect(allowed.headers["access-control-allow-origin"]).toBe(VITE_ORIGIN);
 
-		const unlistedOrigin = "https://localhost:43124";
-		const rejected = await request(port, `${MOUNT}/api/health`, browserHeaders(targetAuthority, unlistedOrigin));
+		const rejected = await request(
+			port,
+			`${MOUNT}/api/health`,
+			browserHeaders(targetAuthority, "https://127.0.0.1:5173"),
+		);
 		expect(rejected.status).toBe(403);
 		expect(rejected.headers["access-control-allow-origin"]).toBeUndefined();
 	});

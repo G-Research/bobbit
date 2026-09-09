@@ -10,7 +10,7 @@ import {
 	normalizeConfiguredOrigin,
 	parseArgs,
 } from "../../../src/server/cli.ts";
-import { DEFAULT_VITE_PORT } from "../../../vite.config.ts";
+import { DEFAULT_VITE_PORT, STANDARD_VITE_PROTOCOL } from "../../../vite.config.ts";
 
 describe("request-admission CLI configuration", () => {
 	it("reads and canonicalizes the comma-separated public-origin environment list", () => {
@@ -33,14 +33,14 @@ describe("request-admission CLI configuration", () => {
 		assert.deepEqual(args.publicOrigins, ["https://gateway.example", "http://[::1]:8080"]);
 	});
 
-	it("derives the finite effective origin for standard Vite development", () => {
+	it("derives the finite HTTP origin used by standard Vite development", () => {
 		assert.deepEqual(
 			parseArgs([], { npm_lifecycle_event: "dev:harness", VITE_HOST: "127.0.0.1" }).viteOrigins,
-			["https://127.0.0.1:5173"],
+			["http://127.0.0.1:5173"],
 		);
 		assert.deepEqual(
 			parseArgs([], { npm_lifecycle_event: "dev:watchdog", VITE_HOST: "Dev.Example." }).viteOrigins,
-			["https://dev.example:5173"],
+			["http://dev.example:5173"],
 		);
 		assert.deepEqual(
 			parseArgs([], { npm_lifecycle_event: "dev" }).viteOrigins,
@@ -51,6 +51,7 @@ describe("request-admission CLI configuration", () => {
 			parseArgs([], { npm_lifecycle_event: "dev:nord", BOBBIT_NORD: "1" }).viteOrigins,
 			[],
 		);
+		assert.equal(STANDARD_VITE_PROTOCOL, "http");
 		assert.equal(DEFAULT_VITE_PORT, 5173);
 	});
 
