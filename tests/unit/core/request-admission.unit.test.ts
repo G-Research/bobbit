@@ -182,6 +182,77 @@ describe("browser route/context matrix", () => {
 		assert.equal(decide({ transport: "websocket", url: "/ws/session" }).allowed, true);
 	});
 
+	it("accepts undici's lone cors mode only for originless API requests", () => {
+		const undici = decide({
+			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "cors" }),
+		});
+		assert.equal(undici.allowed, true);
+		assert.equal(undici.context, "api");
+
+		assertDenied("partial-fetch-metadata", {
+			url: "/app.js",
+			rawHeaders: rawHeaders({ Host: "localhost:4242", "Sec-Fetch-Mode": "cors" }),
+		});
+		assertDenied("partial-fetch-metadata", {
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Mode": "cors",
+			}),
+		});
+	});
+
+	it("accepts route-coherent browser metadata without a destination", () => {
+		const api = decide({
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			}),
+		});
+		assert.equal(api.allowed, true);
+		assert.equal(api.context, "api");
+
+		const websocket = decide({
+			transport: "websocket",
+			url: "/ws/session",
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "websocket",
+			}),
+		});
+		assert.equal(websocket.allowed, true);
+
+		assertDenied("origin-mismatch", {
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "https://attacker.example",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			}),
+		});
+		assertDenied("cross-site-browser-request", {
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "cross-site",
+				"Sec-Fetch-Mode": "cors",
+			}),
+		});
+		assertDenied("invalid-fetch-metadata", {
+			url: "/preview/session/index.html",
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "navigate",
+			}),
+		});
+	});
+
 	it("permits same-origin embedded previews/resources and rejects same-site siblings and opaque origins", () => {
 		assert.equal(decide({
 			url: "/preview/session/index.html",
@@ -247,6 +318,20 @@ describe("CORS preflight projection", () => {
 			allowHeaders: ["Authorization", "Content-Type"],
 			maxAgeSeconds: 600,
 		});
+
+		const withoutDest = decide({
+			method: "OPTIONS",
+			url: "/api/sessions",
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Access-Control-Request-Method": "POST",
+			}),
+		});
+		assert.equal(withoutDest.allowed, true);
+		assert.equal(withoutDest.context, "preflight");
 	});
 
 	it("denies disallowed methods, headers, hostile origins, and private-network requests", () => {
