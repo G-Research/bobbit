@@ -139,6 +139,26 @@ async function closeServer(server: Server | undefined): Promise<void> {
 	});
 }
 
+async function getFreeLoopbackPort(): Promise<number> {
+	const server = createServer();
+	server.unref();
+	await new Promise<void>((resolveListen, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			server.off("error", reject);
+			resolveListen();
+		});
+	});
+	const address = server.address();
+	if (!address || typeof address === "string") {
+		await closeServer(server);
+		throw new Error("failed to allocate a finite Vite test origin");
+	}
+	const port = address.port;
+	await closeServer(server);
+	return port;
+}
+
 function createAsyncSpawnErrorChild(code: "ENOENT"): ChildProcess {
 	const child = new EventEmitter() as ChildProcess;
 	Object.assign(child, { pid: undefined, unref: () => undefined });
@@ -170,6 +190,8 @@ export interface GatewayInfo {
 	wsOrigin: string;
 	/** Browser UI base. Differs from baseURL only for explicit-gateway journeys. */
 	uiBaseURL: string;
+	/** Finite development origin declared before admission policy compilation. */
+	viteOrigin?: { port: number; originURL: string };
 	/** Headquarters directory. In default browser harness mode this is also the server run directory. */
 	bobbitDir: string;
 	/** Server run directory passed to setProjectRoot(). Split-mode specs use this for same-root project coverage. */
@@ -303,6 +325,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableMcp: boolean;
 	enableWorktreePool: boolean;
 	enableDevHarnessRestart: boolean;
+	enableViteOrigin: boolean;
 	/**
 	 * Scheduler-only discriminator for specs that must not inherit durable state
 	 * from other files assigned to the same Playwright worker.
@@ -353,6 +376,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
 	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
 
+	// Worker-scoped option for journeys served by a real source Vite process.
+	// The harness allocates one finite origin before the gateway compiles its
+	// admission policy, then exposes that exact port to the source process.
+	enableViteOrigin: [false, { scope: "worker", option: true }],
+
 	// Worker-scoped scheduler discriminator. Most specs deliberately share the
 	// default fixture pool; a spec that validates durable restart state can choose
 	// a unique value to force Playwright to give it a fresh worker gateway. The
@@ -378,7 +406,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// that falls back to the UI origin fail loudly.
 	separateUiOrigin: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, gatewayStateGroup, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, enableViteOrigin, gatewayStateGroup, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
 		// Depend on browserRenderLease purely for ordering: the global browser-render
 		// slot must be held BEFORE this worker boots a gateway, so a queued worker
 		// holds no gateway while it waits. The value itself is void. Likewise,
@@ -572,9 +600,15 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
 
+		// Allocate a finite development origin before the gateway starts and its
+		// request-admission policy is compiled. The opted-in journey must bind its
+		// Vite process to this exact port rather than discovering another port later.
+		const vitePort = enableViteOrigin ? await getFreeLoopbackPort() : undefined;
+		const viteOriginURL = vitePort === undefined ? undefined : `http://127.0.0.1:${vitePort}`;
+
 		// Reusable gateway-construction args. Captured once on first boot,
 		// reused verbatim on restart() so the second instance is anchored
-		// at the same on-disk state and behaves identically.
+		// at the same on-disk state and retains the same finite Vite origin.
 		let bgProcessSpawnErrorArm: { command: string; token: symbol } | undefined;
 		const gatewayConfig = {
 			host: "127.0.0.1",
@@ -584,6 +618,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			agentCliPath: MOCK_AGENT,
 			staticDir: STATIC_DIR,
 			basePath,
+			viteOrigins: viteOriginURL ? [viteOriginURL] : undefined,
 			bgProcessSpawnFn: (command: string, cwd: string, containerId: string | undefined, paths: any) => {
 				const armed = bgProcessSpawnErrorArm;
 				if (!armed || armed.command !== command) {
@@ -688,6 +723,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			wsBase: gatewayWsUrl,
 			wsOrigin: gatewayWsOrigin,
 			uiBaseURL,
+			viteOrigin: vitePort === undefined || viteOriginURL === undefined
+				? undefined
+				: { port: vitePort, originURL: viteOriginURL },
 			bobbitDir,
 			serverRoot,
 			sessionManager: gw.sessionManager,

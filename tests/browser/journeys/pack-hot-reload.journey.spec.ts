@@ -13,7 +13,6 @@ import {
 	waitForSessionStatus,
 } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import { readE2EToken } from "../../support/harnesses/browser/e2e-setup.js";
-import { getFreePort } from "../../support/helpers/browser/e2e/packaged-runtime-helpers.js";
 import {
 	startSourceVite,
 	stopSourceProcess,
@@ -27,6 +26,8 @@ const PACK_NAME = "pack-hot-reload-fixture";
 const TOOL_NAME = "pack_hot_reload_probe";
 const PANEL_ID = "hot-reload-fixture.detail";
 const RELOAD_TOKEN = 42;
+
+test.use({ enableViteOrigin: true });
 
 function rendererBundle(version: "v2"): string {
 	return `export default function createRenderer({ html }) {
@@ -217,8 +218,8 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 			await waitForSessionStatus(sessionId, "idle", 30_000);
 			seedToolTranscript(gateway, sessionId);
 
-			const vitePort = await getFreePort();
-			const viteBaseUrl = `http://127.0.0.1:${vitePort}`;
+			if (!gateway.viteOrigin) throw new Error("hot-reload journey requires the harness-declared Vite origin");
+			const { port: vitePort, originURL: viteBaseUrl } = gateway.viteOrigin;
 			vite = startSourceVite({
 				repoRoot: REPO_ROOT,
 				tempRoot: projectRoot,
