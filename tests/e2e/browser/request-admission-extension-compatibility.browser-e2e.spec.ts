@@ -230,27 +230,23 @@ test.describe("request admission — extension compatibility", () => {
 		await expect(page.locator('[data-testid="artifact-viewer-console-entry"]').filter({ hasText: firstPostMessage })).toBeVisible({ timeout: 10_000 });
 
 		const healthUrl = `${gateway.baseURL}/api/health`;
-		const deniedResponsePromise = page.waitForResponse(
-			(response) => response.url() === healthUrl,
-			{ timeout: 10_000 },
-		);
-		const directFetchPromise = artifactFrame!.evaluate(async (url) => {
+		const directFetch = await artifactFrame!.evaluate(async (url) => {
 			try {
 				const response = await fetch(url);
 				return { readable: true, status: response.status };
 			} catch {
+				// PNA or CORS may reject before Chromium emits a response event.
 				return { readable: false, status: null };
 			}
 		}, healthUrl);
-		const [deniedResponse, directFetch] = await Promise.all([
-			deniedResponsePromise,
-			directFetchPromise,
-		]);
-		expect(deniedResponse.status(), "opaque-origin direct gateway access must not succeed").toBeGreaterThanOrEqual(400);
-		expect(
-			directFetch.status === null || directFetch.status >= 400,
-			"the opaque artifact must never receive a successful gateway response",
-		).toBe(true);
+		if (directFetch.readable) {
+			expect(
+				directFetch.status,
+				"the opaque artifact must never receive a successful readable gateway response",
+			).toBeGreaterThanOrEqual(400);
+		} else {
+			expect(directFetch.status, "browser-level denial should expose no response status").toBeNull();
+		}
 
 		const secondPostMessage = "opaque-artifact-postmessage-after-denial";
 		await artifactFrame!.evaluate((message) => console.log(message), secondPostMessage);
