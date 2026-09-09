@@ -4096,7 +4096,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const remote = boundedDiagnosticValue(req.socket.remoteAddress, "unknown");
 		const safeReason = boundedDiagnosticValue(reason, "unknown");
 		const safeContext = boundedDiagnosticValue(context, "unknown");
-		console.warn(`[security] request rejected reason=${safeReason} transport=${transport} method=${method} context=${safeContext} remote=${remote}`);
+		console.warn(`[security] request admission rejected reason=${safeReason} transport=${transport} method=${method} context=${safeContext} remote=${remote}`);
 	};
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -5469,10 +5469,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				requestAdmissionPolicy = compileRequestAdmissionPolicy({
 					bindHost: config.host,
-					port: actualPort,
+					actualPort,
 					isTls: Boolean(config.tls),
 					basePath,
-					tlsCertificateNames: config.tls ? config.tlsHostnames : undefined,
+					tlsHostnames: config.tls ? config.tlsHostnames : undefined,
 					publicOrigins: config.publicOrigins,
 					publishedOrigin,
 					viteOriginPairs: config.viteOrigins?.flatMap((origin) =>
