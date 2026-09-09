@@ -20,6 +20,14 @@ export interface BrowserCookieRequestMetadata {
 	admittedHost?: string;
 	/** Canonical browser Origin already approved by request admission, when present. */
 	admittedOrigin?: string;
+	/**
+	 * Canonical browser-facing gateway origin selected by request admission.
+	 * Unlike the physical socket scheme, this can represent explicit TLS
+	 * termination, and unlike admittedOrigin it remains the gateway side of Vite.
+	 * Null records that admission could not select one unambiguously; undefined is
+	 * reserved for legacy callers without admission context.
+	 */
+	admittedGatewayOrigin?: string | null;
 }
 
 /**
@@ -118,9 +126,13 @@ export function classifyBrowserCookieEligibility(
 		return deny("invalid-fetch-mode");
 	}
 
-	const requestOrigin = request.admittedHost
-		? parseOrigin(`${request.isTls ? "https" : "http"}://${request.admittedHost}`)
-		: parseRequestOrigin(request.headers, request.isTls);
+	const requestOrigin = request.admittedGatewayOrigin !== undefined
+		? request.admittedGatewayOrigin === null
+			? undefined
+			: parseOrigin(request.admittedGatewayOrigin)
+		: request.admittedHost
+			? parseOrigin(`${request.isTls ? "https" : "http"}://${request.admittedHost}`)
+			: parseRequestOrigin(request.headers, request.isTls);
 	if (!requestOrigin) return deny("invalid-request-host");
 	if (requestOrigin.protocol === "http:" && !isLoopbackHostname(requestOrigin.hostname)) {
 		return deny("insecure-non-loopback-origin");
@@ -140,7 +152,12 @@ export function classifyBrowserCookieEligibility(
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");
 		}
-		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
+		// When both sides come from request admission, their exact same-origin or
+		// finite Vite pairing has already been proven against the compiled policy.
+		// Callers without that provenance retain the legacy direct/Vite classifier.
+		const relationApprovedByAdmission = typeof request.admittedGatewayOrigin === "string"
+			&& request.admittedOrigin !== undefined;
+		if (!relationApprovedByAdmission && !isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
 			return deny("origin-mismatch");
 		}
 	}

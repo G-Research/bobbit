@@ -53,8 +53,59 @@ describe("request admission policy compilation", () => {
 			"https://bobbit.example",
 		]);
 		assert.equal(policy.trustedOrigins.some((origin) => origin.includes("0.0.0.0")), false);
+		assert.equal(policy.allAuthoritiesLoopback, false);
 		assert.equal(Object.isFrozen(policy), true);
 		assert.equal(Object.isFrozen(policy.trustedOrigins), true);
+	});
+
+	it("retains trusted-local provenance only for an all-loopback authority policy", () => {
+		const localPolicy = compileRequestAdmissionPolicy({
+			bindHost: "localhost",
+			actualPort: 4242,
+		});
+		assert.equal(localPolicy.allAuthoritiesLoopback, true);
+		const local = decide({}, { bindHost: "localhost", actualPort: 4242 });
+		assert.equal(local.allowed, true);
+		if (local.allowed) assert.equal(local.trustedLocal, true);
+
+		const wildcardPolicy = compileRequestAdmissionPolicy({
+			bindHost: "0.0.0.0",
+			actualPort: 4242,
+		});
+		assert.equal(wildcardPolicy.allAuthoritiesLoopback, false);
+		const wildcardLoopbackHost = admitRequest(wildcardPolicy, {
+			rawHeaders: rawHeaders({ Host: "localhost:4242" }),
+			method: "GET",
+			url: "/api/health",
+			isTls: false,
+		});
+		assert.equal(wildcardLoopbackHost.allowed, true);
+		if (wildcardLoopbackHost.allowed) assert.equal(wildcardLoopbackHost.trustedLocal, false);
+
+		const nonLoopbackVitePolicy = compileRequestAdmissionPolicy({
+			bindHost: "localhost",
+			actualPort: 4242,
+			viteOriginPairs: [{
+				origin: "https://dev.example",
+				gatewayOrigin: "http://localhost:4242",
+			}],
+		});
+		assert.equal(nonLoopbackVitePolicy.allAuthoritiesLoopback, false);
+
+		const publicPolicy = compileRequestAdmissionPolicy({
+			bindHost: "localhost",
+			actualPort: 4242,
+			publicOrigins: ["https://public.example"],
+		});
+		assert.equal(publicPolicy.allAuthoritiesLoopback, false);
+		const publicRequest = admitRequest(publicPolicy, {
+			rawHeaders: rawHeaders({ Host: "localhost:4242" }),
+			method: "GET",
+			url: "/api/health",
+			isTls: false,
+		});
+		assert.equal(publicRequest.allowed, true);
+		if (publicRequest.allowed) assert.equal(publicRequest.trustedLocal, false);
 	});
 
 	it("canonicalizes DNS, trailing dots, IPv4, IPv6, and default ports", () => {
@@ -128,7 +179,7 @@ describe("request Host and Origin admission", () => {
 		});
 	});
 
-	it("allows only explicitly paired Vite origins", () => {
+	it("keeps the exact paired Vite gateway distinct from the browser origin", () => {
 		const vite = decide({
 			rawHeaders: rawHeaders({
 				Host: "localhost:4242",
@@ -139,9 +190,48 @@ describe("request Host and Origin admission", () => {
 			}),
 		});
 		assert.equal(vite.allowed, true);
+		if (vite.allowed) {
+			assert.equal(vite.normalizedOrigin, "http://localhost:5173");
+			assert.equal(vite.gatewayOrigin, "http://localhost:4242");
+		}
 		assertDenied("origin-mismatch", {
 			rawHeaders: rawHeaders({ Host: "localhost:4242", Origin: "http://localhost:5174" }),
 		});
+	});
+
+	it("uses exact trusted origins and never guesses an ambiguous Vite gateway", () => {
+		const exact = decide({
+			rawHeaders: rawHeaders({ Host: "bobbit.example", Origin: "https://bobbit.example" }),
+			isTls: false,
+		});
+		assert.equal(exact.allowed, true);
+		if (exact.allowed) assert.equal(exact.gatewayOrigin, "https://bobbit.example");
+
+		const originlessProxy = decide({
+			rawHeaders: rawHeaders({ Host: "bobbit.example" }),
+			isTls: false,
+		});
+		assert.equal(originlessProxy.allowed, true);
+		if (originlessProxy.allowed) assert.equal(originlessProxy.gatewayOrigin, undefined);
+
+		const ambiguousVite = decide({
+			rawHeaders: rawHeaders({
+				Host: "gateway.example",
+				Origin: "https://dev.example",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			}),
+		}, {
+			bindHost: "localhost",
+			actualPort: 4242,
+			publicOrigins: ["http://gateway.example", "https://gateway.example"],
+			viteOriginPairs: [
+				{ origin: "https://dev.example", gatewayOrigin: "http://gateway.example" },
+				{ origin: "https://dev.example", gatewayOrigin: "https://gateway.example" },
+			],
+		});
+		assert.equal(ambiguousVite.allowed, true);
+		if (ambiguousVite.allowed) assert.equal(ambiguousVite.gatewayOrigin, undefined);
 	});
 
 	it("validates the raw request target independently of Host", () => {
