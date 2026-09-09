@@ -166,6 +166,10 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 					headers: browserHeaders(gateway),
 				},
 				{
+					label: "coherent same-origin GET without Origin",
+					headers: browserHeaders(gateway, { Origin: undefined }),
+				},
+				{
 					label: "localhost direct request",
 					headers: browserHeaders(gateway, {
 						Host: `localhost:${target.port}`,
@@ -200,7 +204,6 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 
 			const origin = new URL(gateway.baseURL).origin;
 			const cases: Array<{ label: string; headers: Record<string, string> }> = [
-				{ label: "browser-shaped originless request", headers: browserHeaders(gateway, { Origin: undefined }) },
 				{ label: "cross-site", headers: browserHeaders(gateway, { "Sec-Fetch-Site": "cross-site" }) },
 				{ label: "same-site", headers: browserHeaders(gateway, { "Sec-Fetch-Site": "same-site" }) },
 				{ label: "navigation mode", headers: browserHeaders(gateway, { "Sec-Fetch-Mode": "navigate" }) },
