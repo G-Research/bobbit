@@ -172,8 +172,30 @@ describe("browser route/context matrix", () => {
 		});
 	});
 
-	it("denies cross-site/API/browser sockets while preserving metadata-absent non-browser paths", () => {
-		assertDenied("origin-required", { url: "/api/health", rawHeaders: fetchHeaders("same-origin", "cors", "empty") });
+	it("allows coherent originless same-origin API metadata while denying other browser contexts", () => {
+		for (const mode of ["cors", "same-origin"]) {
+			for (const includeEmptyDestination of [false, true]) {
+				const result = decide({
+					url: "/api/health",
+					rawHeaders: rawHeaders({
+						Host: "localhost:4242",
+						"Sec-Fetch-Site": "same-origin",
+						"Sec-Fetch-Mode": mode,
+						...(includeEmptyDestination ? { "Sec-Fetch-Dest": "empty" } : {}),
+					}),
+				});
+				assert.equal(result.allowed, true);
+				assert.equal(result.context, "api");
+				assert.equal(result.normalizedOrigin, undefined);
+				assert.equal(result.cors, undefined);
+			}
+		}
+		for (const site of ["same-site", "cross-site", "none"]) {
+			assertDenied("cross-site-browser-request", {
+				url: "/api/health",
+				rawHeaders: fetchHeaders(site, "cors", "empty"),
+			});
+		}
 		assertDenied("cross-site-browser-request", {
 			url: "/app.js",
 			rawHeaders: fetchHeaders("cross-site", "no-cors", "script"),

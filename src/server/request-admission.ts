@@ -327,7 +327,7 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 	}
 	if (fetch && !origin) {
 		if (isSafeTopLevelNavigation(context, metadata.method, undefined, fetch)) return allow(context, host, undefined);
-		if (context === "api" || context === "websocket") {
+		if (context === "websocket") {
 			return deny("origin-required", context, host.serialized);
 		}
 		if (!isCoherentOriginlessSubresource(context, fetch)) {
@@ -422,7 +422,7 @@ function isSafeTopLevelNavigation(
 
 function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: FetchMetadata): boolean {
 	if (fetch.site !== "same-origin") return false;
-	return context !== "api" && context !== "websocket" && context !== "preflight" && isCoherentFetchContext(context, fetch);
+	return context !== "websocket" && context !== "preflight" && isCoherentFetchContext(context, fetch);
 }
 
 function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetadata): boolean {
