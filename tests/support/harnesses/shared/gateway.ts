@@ -340,6 +340,10 @@ async function boot(): Promise<BootedGateway> {
 		port: 0,
 		portExplicit: true,
 		authToken: token,
+		// Shared integration specs exercise the two finite origins used by the
+		// repository's Vite development proxy. Keep this explicit rather than
+		// broadening production admission or trusting arbitrary localhost ports.
+		viteOrigins: ["http://localhost:5173", "http://127.0.0.1:5173"],
 		defaultCwd: bobbitDir,
 		forceAuth: true,
 		agentCliPath: MOCK_AGENT,

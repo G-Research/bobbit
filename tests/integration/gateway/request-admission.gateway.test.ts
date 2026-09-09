@@ -111,26 +111,25 @@ function rejectedWebSocketStatus(url: string, options: WebSocket.ClientOptions):
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(url, options);
 		let settled = false;
-		const timer = setTimeout(() => finishReject(new Error("WebSocket admission did not settle")), 5_000);
-		const cleanup = () => {
-			clearTimeout(timer);
-			ws.removeAllListeners();
-		};
 		const finishReject = (error: Error) => {
 			if (settled) return;
 			settled = true;
-			cleanup();
-			ws.terminate();
+			clearTimeout(timer);
+			if (ws.readyState === WebSocket.OPEN) ws.terminate();
 			reject(error);
 		};
+		const timer = setTimeout(() => finishReject(new Error("WebSocket admission did not settle")), 5_000);
 		ws.once("open", () => finishReject(new Error("rejected WebSocket unexpectedly upgraded")));
 		ws.once("unexpected-response", (_req, response) => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(timer);
 			const status = response.statusCode ?? 0;
+			// Consuming the expected HTTP rejection closes the pre-upgrade request.
+			// Calling terminate() while ws is still CONNECTING schedules an error;
+			// removing its listeners first turns that expected error into an uncaught
+			// exception that can fail a later assertion or test file.
 			response.resume();
-			cleanup();
-			ws.terminate();
 			resolve(status);
 		});
 		ws.once("error", (error) => {
