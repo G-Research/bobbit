@@ -110,7 +110,9 @@ The protocol has 9 steps:
 
 ## Verification submission trust boundary
 
-A verifier `sessionId` is routing metadata, not authority. The `verification_result` extension automatically adds the process-local `X-Bobbit-Session-Secret`; the gateway resolves that secret to an authentic session identity and requires it to equal the submitted `sessionId` and remain within any active sandbox scope. A missing or unknown secret, another session's secret, an admin bearer token, a browser cookie, or knowledge of the public session ID cannot resolve the pending verification. Identity and scope mismatches return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`.
+A verifier `sessionId` is routing metadata, not authority. The `verification_result` extension automatically adds the process-local `X-Bobbit-Session-Secret`; the gateway resolves that secret to an authentic session identity and requires it to equal the submitted `sessionId` and belong to the sandbox scope that admitted the request. A missing or unknown secret, another session's secret, an admin bearer token, a browser cookie, or knowledge of the public session ID cannot resolve the pending verification. Identity and scope mismatches return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`.
+
+An admitted result may finish while its verifier is being torn down: the exact-session credential and pending result remain valid until that in-flight window closes, preventing a genuine late verdict from being lost. Pending cleanup then revokes the credential, so teardown does not create an ongoing submission capability.
 
 The gateway also accepts only the exact verdict strings `pass` and `fail`. Agents should call the tool rather than POSTing the internal endpoint: the extension owns local report reads and image transformation, while the gateway owns identity binding, validation, and pending-result resolution. Keeping these responsibilities separate prevents a forged verdict and prevents a report path from becoming a host filesystem read primitive.
 

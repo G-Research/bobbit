@@ -32,7 +32,7 @@ Contrast: `ask_user_choices` used to use this pattern but was moved to a non-blo
       │ optional HTML artifact    │                     │                       │
 ```
 
-The verifier's public session ID selects the pending entry but grants no authority. The gateway requires `X-Bobbit-Session-Secret` to resolve to that exact session and to pass the existing sandbox scope. Missing, unknown, or foreign secrets return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`; an admin bearer, browser cookie, or guessed session ID cannot substitute. Verdicts are accepted only as exact `pass` or `fail` strings.
+The verifier's public session ID selects the pending entry but grants no authority. The gateway requires `X-Bobbit-Session-Secret` to resolve to that exact session and to belong to the sandbox scope captured when the request is admitted. Missing, unknown, or foreign secrets return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`; an admin bearer, browser cookie, or guessed session ID cannot substitute. Verdicts are accepted only as exact `pass` or `fail` strings.
 
 This boundary also keeps local paths on the correct side of the API. `report_html_file` is opened only by the extension inside the verifier runtime. The gateway rejects that field and does not rewrite `file://` URLs in uploaded `report_html`. The extension rejects non-regular, oversized, or final-symlink report paths, bounds the read at 10 MiB, and performs canonical, identity-checked image containment before upload. See [QA testing — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports) for image and final-report budgets.
 
@@ -74,7 +74,7 @@ A blocking harness needs three lifecycle operations, even when their concrete na
 
 ## Session termination and replay behavior
 
-- **Termination.** Reviewer and QA runners own pending-result cleanup. They keep the resolver installed while terminating the verifier so a just-submitted verdict is not lost, then remove it in `finally` after late-result handling.
+- **Termination.** Reviewer and QA runners own pending-result cleanup. They keep both the resolver and exact-session credential valid while terminating the verifier so an admitted result can finish without losing a genuine late verdict. Cleanup then removes the pending result and revokes the credential; later submissions cannot reuse it.
 - **Server restart.** In-flight gate verifications are persisted and resumed. The resume path reinstalls a pending resolver for the same verifier session before prompting it to submit or retry. Purely transient waits need their own persistence design if they must survive a severed HTTP connection.
 
 ## Adding your own blocking tool
