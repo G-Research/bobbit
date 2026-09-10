@@ -4,7 +4,7 @@ Some builtin tools need to pause the agent turn and wait for something another s
 
 The canonical example is:
 
-- `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result. When a QA agent submits a report via `report_html_file`, the server automatically rewrites `<img src="file://...">` references under the session cwd (including the `.bobbit-qa/` subtree) to inline base64 data URIs, with a 20 MB cumulative cap. See [docs/qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
+- `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result. When a QA agent submits a report via `report_html_file`, the verifier-side tool reads it and rewrites `<img src="file://...">` references under the session cwd (including the `.bobbit-qa/` subtree) to inline base64 data URIs, with a 20 MB cumulative cap. Only report bytes cross the API boundary; the gateway never dereferences the supplied path. See [docs/qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
 
 Blocking is the right shape here because **another agent is actively doing work** (running reviews, executing QA steps) while the requesting agent waits. The requesting agent genuinely cannot make progress until the verdict lands.
 

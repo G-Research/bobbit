@@ -643,7 +643,6 @@ function copyHistoryForkSidecar(
 ): boolean {
 	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
 }
-import { inlineFileImages } from "./agent/inline-file-images.js";
 import { readSessionMarkdownImage, SessionMarkdownImageError } from "./agent/session-markdown-image.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -4179,7 +4178,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// streaming cap inside readBody().
 			const reviewPayloadUpload = req.method === "POST"
 				&& /^\/api\/sessions\/[^/]+\/review-payloads$/.test(url.pathname);
-			const requestBodyLimit = reviewPayloadUpload ? MAX_REVIEW_PAYLOAD_REQUEST_BYTES : MAX_REQUEST_BODY_BYTES;
+			const verificationResultUpload = req.method === "POST"
+				&& url.pathname === "/api/internal/verification-result";
+			const requestBodyLimit = reviewPayloadUpload
+				? MAX_REVIEW_PAYLOAD_REQUEST_BYTES
+				: verificationResultUpload
+					? MAX_VERIFICATION_RESULT_REQUEST_BYTES
+					: MAX_REQUEST_BODY_BYTES;
 			if (bodyLimitExceeded(req.headers["content-length"], requestBodyLimit)) {
 				res.writeHead(413, { "Content-Type": "application/json" });
 				res.end(JSON.stringify(reviewPayloadUpload ? {
@@ -20974,65 +20979,47 @@ async function handleApiRoute(
 
 	// POST /api/internal/verification-result
 	if (url.pathname === "/api/internal/verification-result" && req.method === "POST") {
-		const body = await readBody(req);
+		const body = await readBody(req, MAX_VERIFICATION_RESULT_REQUEST_BYTES);
 		if (!body?.sessionId || !body?.verdict || !body?.summary || typeof body.sessionId !== "string" || typeof body.verdict !== "string" || typeof body.summary !== "string") {
 			json({ error: "Missing required fields: sessionId, verdict, summary" }, 400);
 			return;
 		}
-		const resolver = verificationHarness.pendingResults.get(body.sessionId);
+		if (body.verdict !== "pass" && body.verdict !== "fail") {
+			json({ error: "Invalid verdict: expected 'pass' or 'fail'" }, 400);
+			return;
+		}
+
+		// A session id is public routing metadata, not authority. Bind this callback
+		// to the unforgeable secret injected only into the verifier's own process.
+		const rawSecret = req.headers["x-bobbit-session-secret"];
+		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		const authenticSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret);
+		if (authenticSessionId !== body.sessionId
+			|| (sandboxScope && !sandboxScope.sessionIds.has(authenticSessionId))) {
+			json({ error: "Valid verifier session secret is required", code: "VERIFIER_SESSION_SECRET_REQUIRED" }, 403);
+			return;
+		}
+
+		const resolver = verificationHarness.pendingResults.get(authenticSessionId);
 		if (!resolver) {
-			console.warn(`[verification][reviewer-lifecycle] verification_result POST 404-dropped for session ${body.sessionId} (verdict=${body.verdict}) — no pending resolver (teardown already ran / unknown session).`);
+			console.warn(`[verification][reviewer-lifecycle] verification_result POST 404-dropped for session ${authenticSessionId} (verdict=${body.verdict}) — no pending resolver (teardown already ran / unknown session).`);
 			json({ error: "No pending verification for this session" }, 404);
 			return;
 		}
-		console.log(`[verification][reviewer-lifecycle] verification_result POST accepted for session ${body.sessionId} (verdict=${body.verdict}).`);
-		// Support report_html_file: server reads file directly (avoids tool output limits for large reports)
-		if (typeof body.report_html === "string" && typeof body.report_html_file === "string") {
-			json({ error: "Provide either report_html or report_html_file, not both" }, 400);
+		if (body.report_html_file !== undefined) {
+			// File paths are resolved by the verifier-side extension. The gateway must
+			// never dereference a path supplied over HTTP: doing so crosses the sandbox
+			// boundary and turns this callback into a host filesystem read primitive.
+			json({ error: "report_html_file is not accepted by the gateway; upload its contents as report_html" }, 400);
 			return;
 		}
-		let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
-		if (!reportHtml && typeof body.report_html_file === "string") {
-			try {
-				let filePath = body.report_html_file;
-				// Resolve relative paths against the session's CWD
-				if (!path.isAbsolute(filePath)) {
-					const session = sessionManager.getSession(body.sessionId);
-					if (session) filePath = path.resolve(session.cwd, filePath);
-				}
-				// On Windows, POSIX paths from Git Bash (/tmp/...) resolve to C:\tmp\... which doesn't exist.
-				// Fall back to the system TEMP directory for /tmp/ paths.
-				if (process.platform === "win32" && !fs.existsSync(filePath) && body.report_html_file.startsWith("/tmp/")) {
-					const tempDir = process.env.TEMP || process.env.TMP || "C:\\Windows\\Temp";
-					const tempResolved = path.join(tempDir, body.report_html_file.slice(5));
-					if (fs.existsSync(tempResolved)) filePath = tempResolved;
-				}
-				const stat = fs.statSync(filePath);
-				const MAX_REPORT_SIZE = 10 * 1024 * 1024; // 10 MB
-				if (stat.size > MAX_REPORT_SIZE) {
-					json({ error: `Report file too large (${stat.size} bytes, max ${MAX_REPORT_SIZE})` }, 400);
-					return;
-				}
-				reportHtml = fs.readFileSync(filePath, "utf-8");
-			} catch (e: any) {
-				json({ error: `Failed to read report file: ${e.message}` }, 400);
-				return;
-			}
+		const reportHtml = typeof body.report_html === "string" ? body.report_html : undefined;
+		if (reportHtml && Buffer.byteLength(reportHtml, "utf8") > MAX_VERIFICATION_REPORT_BYTES) {
+			json({ error: `HTML report too large (max ${MAX_VERIFICATION_REPORT_BYTES} bytes)` }, 400);
+			return;
 		}
-		// Inline any <img src="file://..."> references so the report renders from
-		// the browser's blob origin (cross-origin file:// loads are blocked).
-		if (reportHtml) {
-			const session = sessionManager.getSession(body.sessionId);
-			if (session?.cwd) {
-				try {
-					reportHtml = inlineFileImages(reportHtml, session.cwd, {
-						logger: (msg) => console.warn(msg),
-					});
-				} catch (err: any) {
-					console.warn(`[verification] inlineFileImages failed: ${err?.message || err}`);
-				}
-			}
-		}
+
+		console.log(`[verification][reviewer-lifecycle] verification_result POST accepted for session ${authenticSessionId} (verdict=${body.verdict}).`);
 		resolver({
 			verdict: body.verdict === "pass",
 			summary: body.summary,
@@ -21540,6 +21527,10 @@ function hasTransitiveDep(workflow: import("./agent/workflow-store.js").Workflow
  * body from being buffered/parsed at all (Sec-2 defence-in-depth).
  */
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+export const MAX_VERIFICATION_REPORT_BYTES = 10 * 1024 * 1024;
+// JSON escaping can almost double an HTML string containing many quotes or
+// backslashes. Keep the transport cap bounded while allowing a full 10 MiB report.
+export const MAX_VERIFICATION_RESULT_REQUEST_BYTES = (MAX_VERIFICATION_REPORT_BYTES * 2) + (64 * 1024);
 
 /**
  * True when a request's declared Content-Length exceeds `maxBytes`. Pure +

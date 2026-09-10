@@ -8,11 +8,17 @@
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
+function verifierHeaders(gateway: any, sessionId: string): Record<string, string> {
+	return { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId) };
+}
+
 test.describe("POST /api/internal/verification-result", () => {
-	test("returns 404 for unknown sessionId", async () => {
+	test("returns 404 for an authenticated session with no pending verification", async ({ gateway }) => {
+		const sessionId = "unknown-session-id";
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "unknown-session-id", verdict: "pass", summary: "All good" }),
+			headers: verifierHeaders(gateway, sessionId),
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "All good" }),
 		});
 		expect(res.status).toBe(404);
 		const body = await res.json();
@@ -69,21 +75,42 @@ test.describe("POST /api/internal/verification-result", () => {
 		expect(res.status).toBe(400);
 	});
 
+	test("rejects a missing or foreign verifier session secret", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const target = "test-session-auth-target";
+		harness.pendingResults.set(target, () => {});
+		try {
+			for (const headers of [undefined, verifierHeaders(gateway, "test-session-auth-foreign")]) {
+				const res = await apiFetch("/api/internal/verification-result", {
+					method: "POST",
+					headers,
+					body: JSON.stringify({ sessionId: target, verdict: "pass", summary: "forged" }),
+				});
+				expect(res.status).toBe(403);
+				expect(await res.json()).toMatchObject({ code: "VERIFIER_SESSION_SECRET_REQUIRED" });
+			}
+		} finally {
+			harness.pendingResults.delete(target);
+		}
+	});
+
 	test("resolves pending verification result with pass verdict", async ({ gateway }) => {
 		// Access verificationHarness through sessionManager (private but accessible via any)
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 		expect(harness).toBeTruthy();
+		const sessionId = "test-session-pass";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-pass", (result: any) => {
+			harness.pendingResults.set(sessionId, (result: any) => {
 				resolve(result);
 			});
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-pass",
+				sessionId,
 				verdict: "pass",
 				summary: "All tests passed successfully",
 			}),
@@ -105,17 +132,19 @@ test.describe("POST /api/internal/verification-result", () => {
 
 	test("resolves pending verification result with fail verdict", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-fail";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-fail", (result: any) => {
+			harness.pendingResults.set(sessionId, (result: any) => {
 				resolve(result);
 			});
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-fail",
+				sessionId,
 				verdict: "fail",
 				summary: "3 critical failures found",
 			}),
@@ -133,16 +162,18 @@ test.describe("POST /api/internal/verification-result", () => {
 
 	test("passes report_html through when provided", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-html";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-html", resolve);
+			harness.pendingResults.set(sessionId, resolve);
 		});
 
 		const htmlReport = "<html><body><h1>QA Report</h1><p>All good</p></body></html>";
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-html",
+				sessionId,
 				verdict: "pass",
 				summary: "QA passed",
 				report_html: htmlReport,
@@ -159,136 +190,87 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-html");
 	});
 
-	test("reads report_html_file from disk when provided", async ({ gateway }) => {
+	test("rejects report_html_file without dereferencing the supplied host path", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-		const fs = await import("node:fs");
-		const path = await import("node:path");
-		const os = await import("node:os");
-
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-verification-result-"));
-		const tmpFile = path.join(tmpDir, "qa-report.html");
-		const htmlContent = "<html><body><h1>Report from file</h1><img src='data:image/png;base64,abc123'></body></html>";
-
+		const sessionId = "test-session-file";
+		let resolved = false;
+		harness.pendingResults.set(sessionId, () => { resolved = true; });
 		try {
-			fs.writeFileSync(tmpFile, htmlContent);
-
-			const promise = new Promise<any>((resolve) => {
-				harness.pendingResults.set("test-session-file", resolve);
-			});
-
 			const res = await apiFetch("/api/internal/verification-result", {
 				method: "POST",
+				headers: verifierHeaders(gateway, sessionId),
 				body: JSON.stringify({
-					sessionId: "test-session-file",
+					sessionId,
 					verdict: "pass",
-					summary: "QA passed via file",
-					report_html_file: tmpFile,
+					summary: "attempted host read",
+					report_html_file: process.platform === "win32" ? "C:\\Windows\\win.ini" : "/etc/passwd",
 				}),
 			});
 
-			expect(res.status).toBe(200);
-
-			const result = await promise;
-			expect(result.verdict).toBe(true);
-			expect(result.reportHtml).toBe(htmlContent);
+			expect(res.status).toBe(400);
+			expect(await res.json()).toMatchObject({
+				error: expect.stringContaining("not accepted by the gateway"),
+			});
+			expect(resolved).toBe(false);
 		} finally {
-			harness.pendingResults.delete("test-session-file");
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			harness.pendingResults.delete(sessionId);
 		}
 	});
 
-	test("report_html_file returns 400 for nonexistent file", async ({ gateway }) => {
+	test("does not dereference file URLs embedded in inline HTML", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-		harness.pendingResults.set("test-session-nofile", () => {});
+		const sessionId = "test-session-file-url";
+		const htmlReport = `<img src="file://${process.platform === "win32" ? "C:/Windows/win.ini" : "/etc/passwd"}">`;
+		const promise = new Promise<any>((resolve) => harness.pendingResults.set(sessionId, resolve));
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-nofile",
-				verdict: "pass",
-				summary: "ok",
-				report_html_file: "/tmp/nonexistent-qa-report-12345.html",
-			}),
+			headers: verifierHeaders(gateway, sessionId),
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "inline", report_html: htmlReport }),
 		});
 
-		expect(res.status).toBe(400);
-		const body = await res.json();
-		expect(body.error).toContain("Failed to read report file");
-
-		harness.pendingResults.delete("test-session-nofile");
-	});
-
-	test("rejects when both report_html and report_html_file are provided", async ({ gateway }) => {
-		const harness = (gateway.sessionManager as any)._verificationHarness;
-		harness.pendingResults.set("test-session-both", () => {});
-
-		const res = await apiFetch("/api/internal/verification-result", {
-			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-both",
-				verdict: "pass",
-				summary: "ok",
-				report_html: "<h1>Inline</h1>",
-				report_html_file: "/tmp/should-not-be-read.html",
-			}),
-		});
-
-		expect(res.status).toBe(400);
-		const body = await res.json();
-		expect(body.error).toContain("not both");
-
-		harness.pendingResults.delete("test-session-both");
+		expect(res.status).toBe(200);
+		expect((await promise).reportHtml).toBe(htmlReport);
+		harness.pendingResults.delete(sessionId);
 	});
 
 	test("ignores non-string report_html", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-
+		const sessionId = "test-session-bad-html";
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-bad-html", resolve);
+			harness.pendingResults.set(sessionId, resolve);
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-bad-html",
-				verdict: "pass",
-				summary: "ok",
-				report_html: 12345,
-			}),
+			headers: verifierHeaders(gateway, sessionId),
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "ok", report_html: 12345 }),
 		});
 
 		expect(res.status).toBe(200);
-
-		const result = await promise;
-		expect(result.reportHtml).toBeUndefined();
-
-		harness.pendingResults.delete("test-session-bad-html");
+		expect((await promise).reportHtml).toBeUndefined();
+		harness.pendingResults.delete(sessionId);
 	});
 
-	test("resolver is removed from map after call (endpoint returns 404 on second call)", async ({ gateway }) => {
+	test("accepts repeat delivery only from the same authenticated verifier", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-once";
+		const headers = verifierHeaders(gateway, sessionId);
+		harness.pendingResults.set(sessionId, () => {});
 
-		harness.pendingResults.set("test-session-once", () => {});
-
-		// First call succeeds
 		const res1 = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "test-session-once", verdict: "pass", summary: "ok" }),
+			headers,
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "ok" }),
 		});
 		expect(res1.status).toBe(200);
 
-		// The endpoint calls the resolver but doesn't delete from the map itself —
-		// that's the harness's responsibility. Verify the resolver was called (map still has it).
-		// But calling again should still work since the entry is still there.
-		// The harness race/finally logic handles cleanup — the endpoint just calls the resolver.
-		// So a second POST to the same sessionId will call the resolver again.
-		// This test verifies the endpoint doesn't crash on re-call.
 		const res2 = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "test-session-once", verdict: "fail", summary: "re-call" }),
+			headers,
+			body: JSON.stringify({ sessionId, verdict: "fail", summary: "re-call" }),
 		});
 		expect(res2.status).toBe(200);
-
-		harness.pendingResults.delete("test-session-once");
+		harness.pendingResults.delete(sessionId);
 	});
 });

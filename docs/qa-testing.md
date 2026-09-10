@@ -102,7 +102,7 @@ The protocol has 9 steps:
 
 6. **Drive browser scenarios** — Navigate to `qa_browser_entry` (with `$PORT` and `$TOKEN` substituted). For each scenario from the task prompt, take before/after screenshots and record a PASS/FAIL verdict. Respect `qa_max_scenarios` and `qa_max_duration_minutes`.
 
-7. **Produce HTML report** — Write an HTML report that references screenshots via `<img src="file:///<path>">` using the paths returned in `[screenshot_file]` blocks from `browser_screenshot(includeBase64: true)`. The server inlines those references to base64 data URIs when the report is submitted via `report_html_file` (see Screenshots in QA reports below).
+7. **Produce HTML report** — Write an HTML report that references screenshots via `<img src="file:///<path>">` using the paths returned in `[screenshot_file]` blocks from `browser_screenshot(includeBase64: true)`. The verifier-side tool inlines those references to base64 data URIs when the report is submitted via `report_html_file` (see Screenshots in QA reports below).
 
 8. **Submit results** — Call the `verification_result` tool with `verdict` ("pass" or "fail"), `summary` (concise findings), and `report_html` (self-contained HTML report). The verification harness receives results through this tool and handles gate signaling automatically.
 
@@ -155,16 +155,16 @@ Reference the file in the HTML report via a `file://` URL:
 
 On Windows, use forward slashes in the path (e.g. `file:///C:/Users/.../abc123.png`).
 
-### Server-side inlining
+### Verifier-side inlining
 
-When the agent submits the report via `verification_result`'s `report_html_file` parameter, the server reads the file, finds every `<img src="file://...">` reference, and rewrites it to an inline `data:image/...;base64,...` URI. This makes the final report self-contained for viewing in the blob-URL report viewer and for long-term gate-artifact storage.
+When the agent submits the report via `verification_result`'s `report_html_file` parameter, the tool extension running inside the verifier reads the file, finds every `<img src="file://...">` reference, and rewrites eligible images to an inline `data:image/...;base64,...` URI before uploading the HTML bytes. This makes the final report self-contained for viewing in the blob-URL report viewer and for long-term gate-artifact storage without giving the gateway a caller-controlled filesystem path.
 
 Constraints:
 
-- Only `file://` srcs resolving under the session's cwd (including the `.bobbit-qa/` subtree) are inlined. Paths outside the session tree are left unchanged.
+- Only `file://` srcs whose canonical paths resolve under the verifier's cwd (including the `.bobbit-qa/` subtree) are inlined. Paths outside the session tree and symlink escapes are left unchanged.
 - Cumulative cap: **20 MB** of inlined image data per report. References beyond the cap are left as `file://` URLs.
 - Missing files, non-image MIME types, and unresolvable paths are left as-is — they do not fail the submission.
-- The `report_html` inline-string parameter is not rewritten; use `report_html_file` to get automatic inlining.
+- The `report_html` inline-string parameter is not rewritten; use `report_html_file` to get automatic verifier-side inlining.
 
 ### Screenshots in chat responses
 

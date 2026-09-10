@@ -13,6 +13,70 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
+const MAX_VERIFICATION_REPORT_BYTES = 10 * 1024 * 1024;
+const MAX_INLINED_IMAGE_BYTES = 20 * 1024 * 1024;
+const FILE_IMAGE_RE = /<img\s[^>]*src=["']file:\/\/([^"']+)["'][^>]*>/gi;
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+};
+
+function readBoundedRegularFile(filePath: string, maxBytes: number, label: string): Buffer {
+	const fd = fs.openSync(filePath, "r");
+	try {
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
+		if (stat.size > maxBytes) throw new Error(`${label} is too large (${stat.size} bytes, max ${maxBytes})`);
+		const content = fs.readFileSync(fd);
+		// Re-check the bytes actually read in case the file grew after fstat().
+		if (content.byteLength > maxBytes) throw new Error(`${label} is too large (${content.byteLength} bytes, max ${maxBytes})`);
+		return content;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function isUnderRoot(candidate: string, root: string): boolean {
+	const rel = path.relative(root, candidate);
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/** Inline workspace screenshots before upload, inside the verifier's own runtime. */
+function inlineWorkspaceFileImages(html: string): string {
+	let root: string;
+	try { root = fs.realpathSync(process.cwd()); } catch { return html; }
+	let total = 0;
+	return html.replace(FILE_IMAGE_RE, (tag, captured: string) => {
+		try {
+			let decoded: string;
+			try { decoded = decodeURIComponent(captured); } catch { decoded = captured; }
+			if (/^\/[A-Za-z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
+			const requested = path.normalize(decoded);
+			const ext = path.extname(requested).toLowerCase();
+			const mime = IMAGE_MIME_BY_EXT[ext];
+			if (!mime) return tag;
+			const real = fs.realpathSync(requested);
+			if (!isUnderRoot(real, root)) return tag;
+			const remaining = MAX_INLINED_IMAGE_BYTES - total;
+			if (remaining <= 0) return tag;
+			const content = readBoundedRegularFile(real, remaining, "Report image");
+			total += content.byteLength;
+			return tag.replace(/src=["']file:\/\/[^"']+["']/i, `src="data:${mime};base64,${content.toString("base64")}"`);
+		} catch {
+			return tag;
+		}
+	});
+}
+
+function loadReportHtml(filePath: string): string {
+	return inlineWorkspaceFileImages(
+		readBoundedRegularFile(filePath, MAX_VERIFICATION_REPORT_BYTES, "HTML report").toString("utf8"),
+	);
+}
+
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
@@ -261,7 +325,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const body: Record<string, unknown> = { sessionId, verdict: params.verdict, summary: params.summary };
 				if (params.report_html) body.report_html = params.report_html;
-				if (params.report_html_file) body.report_html_file = params.report_html_file;
+				// Resolve file paths here, inside the verifier runtime. The gateway only
+				// receives bytes and therefore cannot be used as a host file-read oracle.
+				if (params.report_html_file) body.report_html = loadReportHtml(params.report_html_file);
 				return ok(await api("POST", "/api/internal/verification-result", body));
 			} catch (e: any) { return err(e.message); }
 		},
