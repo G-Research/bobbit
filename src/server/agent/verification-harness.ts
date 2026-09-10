@@ -5793,7 +5793,6 @@ export class VerificationHarness {
 		// pass (server.ts verification-result handler → pendingResults.get()).
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		let capturedVerdict: VerificationResult | null = null;
-		let hardFailureNoResult = false;
 		const capturingResolver = (r: VerificationResult) => {
 			if (!capturedVerdict) capturedVerdict = r;
 			resultResolver(r);
@@ -6066,9 +6065,6 @@ export class VerificationHarness {
 			}
 
 			// Hard failure — reviewer never produced a verdict after fair reminders.
-			// Flag it so the `finally` can still honor a verdict that lands during
-			// teardown (the delete-vs-late-POST race) instead of dropping it.
-			hardFailureNoResult = true;
 			console.log(`[verification][reviewer-lifecycle] termination reason=reminder-exhausted for ${sessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
 		} catch (err: any) {
@@ -6129,12 +6125,11 @@ export class VerificationHarness {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
 					} catch { /* ignore */ }
 				}
-				// If the reviewer's verdict landed during teardown and we were about
-				// to return the "did not call verification_result" hard failure,
-				// honor the late verdict instead of dropping it.
-				if (hardFailureNoResult && capturedVerdict) {
+				// An exact verifier result accepted before pending cleanup is authoritative,
+				// including one already in flight when any no-result exit starts teardown.
+				if (capturedVerdict) {
 					const v: VerificationResult = capturedVerdict;
-					console.log(`[verification][reviewer-lifecycle] late verification_result for ${sessionId} ("${step.name}") arrived during teardown — honoring verdict=${v.verdict ? "pass" : "fail"} instead of the 'did not call' hard failure.`);
+					console.log(`[verification][reviewer-lifecycle] verification_result for ${sessionId} ("${step.name}") was accepted before pending cleanup — honoring verdict=${v.verdict ? "pass" : "fail"}.`);
 					// eslint-disable-next-line no-unsafe-finally
 					return { passed: v.verdict, output: v.summary, sessionId };
 				}
@@ -6259,7 +6254,6 @@ export class VerificationHarness {
 		let qaSessionId: string | undefined = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		let qaCapturedVerdict: VerificationResult | null = null;
-		let qaHardFailureNoResult = false;
 		const qaCapturingResolver = (r: VerificationResult) => {
 			if (!qaCapturedVerdict) qaCapturedVerdict = r;
 			resultResolver(r);
@@ -6531,7 +6525,6 @@ export class VerificationHarness {
 
 			// Hard failure — keep the resolver alive through teardown so a verdict
 			// racing terminateSession is captured and honored in finally.
-			qaHardFailureNoResult = true;
 			console.log(`[verification][verifier-lifecycle] termination reason=reminder-exhausted for QA ${qaSessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: qaSessionId };
 		} catch (err: any) {
@@ -6584,12 +6577,12 @@ export class VerificationHarness {
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
 				}
-				if (qaHardFailureNoResult && qaCapturedVerdict) {
+				if (qaCapturedVerdict) {
 					const v: VerificationResult = qaCapturedVerdict;
 					const artifact = v.reportHtml
 						? { content: v.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
 						: undefined;
-					console.log(`[verification][verifier-lifecycle] late verification_result for QA ${qaSessionId} ("${step.name}") arrived during teardown — honoring verdict=${v.verdict ? "pass" : "fail"} instead of the 'did not call' hard failure.`);
+					console.log(`[verification][verifier-lifecycle] verification_result for QA ${qaSessionId} ("${step.name}") was accepted before pending cleanup — honoring verdict=${v.verdict ? "pass" : "fail"}.`);
 					// eslint-disable-next-line no-unsafe-finally
 					return { passed: v.verdict, output: v.summary, sessionId: qaSessionId, artifact };
 				}
