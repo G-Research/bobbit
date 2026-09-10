@@ -745,11 +745,20 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 					{ question: "Team size?", selected: "small", other_text: null },
 				];
 
+				const eventCursor = conn.messageCount();
 				const [submit, dismiss] = await Promise.all([
 					postSubmit(sessionId, toolUseId, answers),
 					postDismiss(sessionId, toolUseId),
 				]);
 				expect([submit.status, dismiss.status].sort((a, b) => a - b)).toEqual([200, 409]);
+				if (submit.status === 200) {
+					await conn.waitForFrom(
+						eventCursor,
+						(m) => messageEndPredicate("user")(m)
+							&& messageText(m.data?.message)?.startsWith(`[ask_user_choices_response tool_use_id=${toolUseId}]`) === true,
+						10_000,
+					);
+				}
 
 				const dismissalState = await getDismissals(sessionId).then(response => response.json());
 				const transcript = await gatewaySync().sessionManager.getSession(sessionId)!.rpcClient.getMessages();
