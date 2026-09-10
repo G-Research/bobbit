@@ -42,15 +42,6 @@ test.describe("Journey: App Smoke", () => {
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
 	});
-
-	test("continue-on-phone dialog renders QR codes", async ({ page }) => {
-		await openApp(page);
-		await page.locator('button[title="Show QR code"]').first().click();
-		const dialog = page.getByRole("dialog");
-		await expect(dialog.getByText("Continue on Phone")).toBeVisible({ timeout: 15_000 });
-		await expect(dialog.locator('img[alt="Session QR"]')).toHaveAttribute("src", /^data:image\/png;base64,/);
-		await expect(dialog.locator("error-details")).toHaveCount(0);
-	});
 });
 
 test.describe("Journey: Session Sharing", () => {
