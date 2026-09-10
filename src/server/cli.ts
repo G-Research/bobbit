@@ -219,12 +219,11 @@ const STANDARD_VITE_LIFECYCLES = new Set(["dev", "dev:harness", "dev:watchdog"])
 
 /** Derive the one finite browser origin used by the standard Vite development launcher. */
 function standardViteOrigin(env: NodeJS.ProcessEnv): string[] {
-	const configuredHost = env.VITE_HOST;
+	// npm's lifecycle marker survives the standard scripts' launcher chain;
+	// BOBBIT_NORD separately identifies the dedicated Nord launcher.
 	const standardLauncher = STANDARD_VITE_LIFECYCLES.has(env.npm_lifecycle_event ?? "");
-	if ((configuredHost === undefined || configuredHost === "") && (!standardLauncher || env.BOBBIT_NORD === "1")) {
-		return [];
-	}
-	const rawHost = configuredHost || "localhost";
+	if (!standardLauncher || env.BOBBIT_NORD === "1") return [];
+	const rawHost = env.VITE_HOST || "localhost";
 	if (rawHost !== rawHost.trim()) throw new Error(`Invalid Vite hostname: ${JSON.stringify(rawHost)}`);
 	const hostname = normalizeConfiguredHostname(rawHost, "Vite");
 	if (hostname === "0.0.0.0" || hostname === "::") {

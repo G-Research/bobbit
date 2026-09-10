@@ -47,8 +47,21 @@ describe("request-admission CLI configuration", () => {
 			["http://localhost:5173"],
 		);
 		assert.deepEqual(parseArgs([], {}).viteOrigins, []);
+		assert.deepEqual(parseArgs([], { VITE_HOST: "dev.example" }).viteOrigins, []);
 		assert.deepEqual(
-			parseArgs([], { npm_lifecycle_event: "dev:nord", BOBBIT_NORD: "1" }).viteOrigins,
+			parseArgs([], {
+				npm_lifecycle_event: "dev:nord",
+				BOBBIT_NORD: "1",
+				VITE_HOST: "dev.example",
+			}).viteOrigins,
+			[],
+		);
+		assert.deepEqual(
+			parseArgs([], {
+				npm_lifecycle_event: "dev:harness",
+				BOBBIT_NORD: "1",
+				VITE_HOST: "dev.example",
+			}).viteOrigins,
 			[],
 		);
 		assert.equal(STANDARD_VITE_PROTOCOL, "http");
@@ -59,6 +72,15 @@ describe("request-admission CLI configuration", () => {
 		assert.deepEqual(
 			parseArgs([], {
 				npm_lifecycle_event: "dev:harness",
+				VITE_HOST: "0.0.0.0",
+				BOBBIT_VITE_ORIGINS: "https://Mesh.Example.:5173/",
+			}).viteOrigins,
+			["https://mesh.example:5173"],
+		);
+		assert.deepEqual(
+			parseArgs([], {
+				npm_lifecycle_event: "dev:nord",
+				BOBBIT_NORD: "1",
 				VITE_HOST: "0.0.0.0",
 				BOBBIT_VITE_ORIGINS: "https://Mesh.Example.:5173/",
 			}).viteOrigins,
