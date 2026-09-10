@@ -4,7 +4,6 @@ import { buildBundle } from "../../support/helpers/browser/fixtures/build-bundle
 import {
 	apiFetch,
 	createSession,
-	deleteSession,
 	nonGitCwd,
 	readE2ETokenAsync,
 } from "../../support/harnesses/browser/e2e-setup.js";
@@ -382,8 +381,14 @@ test.describe("Request admission preview compatibility", () => {
 		} finally {
 			if (popup && !popup.isClosed()) await popup.close().catch(() => {});
 			if (attacker && !attacker.isClosed()) await attacker.close().catch(() => {});
-			if (sessionId) await deleteSession(sessionId).catch(() => {});
-			rmSync(fixtureDir, { recursive: true, force: true });
+			// Release the iframe, relative assets, EventSource, and app WebSocket before
+			// asking Windows to remove the directory they were consuming.
+			await page.goto("about:blank", { waitUntil: "load" });
+			if (sessionId) {
+				const response = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				expect(response.status, `session cleanup failed: ${await response.text()}`).toBe(200);
+			}
+			rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
 	});
 
