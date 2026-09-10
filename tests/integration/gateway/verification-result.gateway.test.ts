@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { vi } from "vitest";
@@ -33,6 +34,49 @@ async function postVerification(
 		headers: { "Content-Type": "application/json", ...headers },
 		body: JSON.stringify(body),
 	});
+}
+
+function rawChunkedVerification(
+	gateway: any,
+	secret: string,
+): {
+	request: http.ClientRequest;
+	started: Promise<void>;
+	response: Promise<{ status: number; body: string; complete: boolean }>;
+} {
+	let markStarted!: () => void;
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	let resolveResponse!: (value: { status: number; body: string; complete: boolean }) => void;
+	let rejectResponse!: (error: Error) => void;
+	const response = new Promise<{ status: number; body: string; complete: boolean }>((resolve, reject) => {
+		resolveResponse = resolve;
+		rejectResponse = reject;
+	});
+	const request = http.request(new URL("/api/internal/verification-result", gateway.baseURL), {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${gateway.token}`,
+			"Content-Type": "application/json",
+			"Transfer-Encoding": "chunked",
+			"X-Bobbit-Session-Secret": secret,
+		},
+	});
+	request.once("socket", markStarted);
+	request.once("response", (incoming) => {
+		const chunks: Buffer[] = [];
+		incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+		incoming.once("end", () => resolveResponse({
+			status: incoming.statusCode ?? 0,
+			body: Buffer.concat(chunks).toString("utf8"),
+			complete: incoming.complete,
+		}));
+	});
+	request.once("error", rejectResponse);
+	return { request, started, response };
+}
+
+async function writeRequestChunk(request: http.ClientRequest, chunk: string): Promise<void> {
+	await new Promise<void>((resolve, reject) => request.write(chunk, (error) => error ? reject(error) : resolve()));
 }
 
 async function authenticatedBrowserCookie(gateway: any): Promise<string> {
@@ -322,13 +366,29 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-html");
 	});
 
-	test("persists authenticated report_html through the verifier lifecycle for the operator gate view", async ({ gateway }) => {
+	test("accepts an in-flight exact-secret report through verifier teardown, persists it, then revokes the secret", async ({ gateway, scope }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 		const workflowId = `verification-artifact-${process.pid}-${Date.now()}`;
 		const gateId = "operator-report";
 		const stepName = "Operator report QA";
 		const htmlReport = "<!doctype html><html><body><h1>Exact operator report</h1><p>quotes: &quot; and unicode: ✓</p></body></html>";
 		let goalId: string | undefined;
+		let lateRequest: http.ClientRequest | undefined;
+		let terminateSpy: { mockRestore(): void } | undefined;
+		let dispatchSpy: { mockRestore(): void } | undefined;
+		let waitTurnSpy: { mockRestore(): void } | undefined;
+		let recoverySpy: { mockRestore(): void } | undefined;
+		let retrySleepSpy: { mockRestore(): void } | undefined;
+		let graceTimerSpy: { mockRestore(): void } | undefined;
+		let observation: {
+			verifierSessionId: string;
+			verifierSecret: string;
+			pendingDuringTeardown: boolean;
+			secretOwnerDuringTeardown: string | undefined;
+			exact: { status: number; body: string; complete: boolean };
+			missing: { status: number; body: unknown };
+			foreign: { status: number; body: unknown };
+		} | undefined;
 		const priorReviewSkip = process.env.BOBBIT_LLM_REVIEW_SKIP;
 		const priorHarnessSkip = harness.skipLlmReview;
 		delete process.env.BOBBIT_LLM_REVIEW_SKIP;
@@ -363,6 +423,8 @@ test.describe("POST /api/internal/verification-result", () => {
 				worktree: false,
 			});
 			goalId = goal.id as string;
+			const foreignSession = await scope.createSession({});
+			const foreignSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(foreignSession.id);
 
 			const contextManager = gateway.sessionManager.getProjectContextManager?.()
 				?? gateway.sessionManager.projectContextManager;
@@ -393,7 +455,71 @@ test.describe("POST /api/internal/verification-result", () => {
 			signal.verification.steps = harness.beginVerification(signal, runtimeGate);
 			context.gateStore.recordSignal(signal);
 
-			const pendingBefore = new Set<string>(harness.pendingResults.keys());
+			// Drive the QA reviewer to its existing late-verdict teardown branch without
+			// waiting on a model. Runtime creation, termination, endpoint auth, and gate
+			// persistence remain real; only the review turns themselves are hermetic.
+			dispatchSpy = vi.spyOn(harness, "dispatchVerifierPrompt").mockResolvedValue({ type: "dispatched" });
+			waitTurnSpy = vi.spyOn(harness, "waitForReviewTurn").mockResolvedValue({ type: "idle" });
+			recoverySpy = vi.spyOn(harness, "waitForReviewerErroredTurnRecovery").mockResolvedValue({ type: "idle" });
+			retrySleepSpy = vi.spyOn(harness, "_sleepCancellable").mockResolvedValue(undefined);
+			const originalSetTimeout = harness.clock.setTimeout.bind(harness.clock);
+			graceTimerSpy = vi.spyOn(harness.clock, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+				if (delay === 20_000) {
+					queueMicrotask(callback);
+					return undefined;
+				}
+				return originalSetTimeout(callback, delay);
+			}) as any);
+
+			const originalTerminate = gateway.sessionManager.terminateSession.bind(gateway.sessionManager);
+			terminateSpy = vi.spyOn(gateway.sessionManager, "terminateSession").mockImplementation((async (sessionId: string, ...args: unknown[]) => {
+				if (observation || !sessionId.startsWith("agent-qa-") || !harness.pendingResults.has(sessionId)) {
+					return originalTerminate(sessionId, ...args);
+				}
+
+				const verifierSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+				const serialized = JSON.stringify({
+					sessionId,
+					verdict: "pass",
+					summary: "QA report persisted",
+					report_html: htmlReport,
+				});
+				const upload = rawChunkedVerification(gateway, verifierSecret);
+				lateRequest = upload.request;
+				await upload.started;
+				await writeRequestChunk(upload.request, serialized.slice(0, -1));
+				await new Promise<void>(resolve => setImmediate(resolve));
+
+				// The request is already in flight but readBody cannot authenticate it
+				// until the final byte arrives. Complete real runtime teardown first,
+				// while the harness deliberately retains the pending result resolver.
+				const terminated = await originalTerminate(sessionId, ...args);
+				const pendingDuringTeardown = harness.pendingResults.has(sessionId);
+				const secretOwnerDuringTeardown = gateway.sessionManager.sessionSecretStore.resolveSessionIdBySecret(verifierSecret);
+				const missingResponse = await postVerification(
+					gateway,
+					{ sessionId, verdict: "pass", summary: "missing" },
+					{ Authorization: `Bearer ${gateway.token}` },
+				);
+				const foreignResponse = await postVerification(
+					gateway,
+					{ sessionId, verdict: "pass", summary: "foreign" },
+					{ Authorization: `Bearer ${gateway.token}`, "X-Bobbit-Session-Secret": foreignSecret },
+				);
+				upload.request.end(serialized.slice(-1));
+				const exact = await upload.response;
+				observation = {
+					verifierSessionId: sessionId,
+					verifierSecret,
+					pendingDuringTeardown,
+					secretOwnerDuringTeardown,
+					exact,
+					missing: { status: missingResponse.status, body: await missingResponse.json() },
+					foreign: { status: foreignResponse.status, body: await foreignResponse.json() },
+				};
+				return terminated;
+			}) as any);
+
 			const verification = harness.verifyGateSignal(
 				signal,
 				runtimeGate,
@@ -403,36 +529,33 @@ test.describe("POST /api/internal/verification-result", () => {
 				new Map(),
 				persistedGoal.spec,
 			);
-			const verifierSessionId = await eventually(
-				() => [...harness.pendingResults.keys()].find((id: string) =>
-					!pendingBefore.has(id) && id.startsWith("agent-qa-") && gateway.sessionManager.getSession(id)),
-				(value): value is string => typeof value === "string",
-				"agent-qa lifecycle must create a live verifier session with a pending result channel",
-			);
-			const verifierSession = gateway.sessionManager.getSession(verifierSessionId);
-			expect(verifierSession?.id).toBe(verifierSessionId);
-
-			const resultResponse = await postVerification(
-				gateway,
-				{
-					sessionId: verifierSessionId,
-					verdict: "pass",
-					summary: "QA report persisted",
-					report_html: htmlReport,
-				},
-				{ Authorization: `Bearer ${gateway.token}`, ...verifierHeaders(gateway, verifierSessionId) },
-			);
-			expect(resultResponse.status, await resultResponse.text()).toBe(200);
 			await verification;
+
+			expect(observation, "teardown must overlap the stalled verifier result request").toBeDefined();
+			expect(observation!.pendingDuringTeardown).toBe(true);
+			expect(observation!.missing).toEqual({ status: 403, body: VERIFIER_AUTH_ERROR });
+			expect(observation!.foreign).toEqual({ status: 403, body: VERIFIER_AUTH_ERROR });
+			expect(observation!.exact.status, observation!.exact.body).toBe(200);
+			expect(observation!.exact.complete).toBe(true);
+			expect(JSON.parse(observation!.exact.body)).toEqual({ ok: true });
+			expect(observation!.secretOwnerDuringTeardown).toBe(observation!.verifierSessionId);
 
 			await eventually(
 				() => ({
-					pending: harness.pendingResults.has(verifierSessionId),
+					pending: harness.pendingResults.has(observation!.verifierSessionId),
 					active: harness.getActiveVerification(signalId),
 				}),
 				state => !state.pending && !state.active,
 				"verification must complete and leave no transient verifier state",
 			);
+			expect(gateway.sessionManager.sessionSecretStore.resolveSessionIdBySecret(observation!.verifierSecret)).toBeUndefined();
+			const revoked = await postVerification(
+				gateway,
+				{ sessionId: observation!.verifierSessionId, verdict: "pass", summary: "too late" },
+				{ Authorization: `Bearer ${gateway.token}`, "X-Bobbit-Session-Secret": observation!.verifierSecret },
+			);
+			expect(revoked.status).toBe(403);
+			expect(await revoked.json()).toEqual(VERIFIER_AUTH_ERROR);
 
 			const persistedGate = await eventually(
 				async () => {
@@ -440,11 +563,11 @@ test.describe("POST /api/internal/verification-result", () => {
 					expect(response.status, await response.clone().text()).toBe(200);
 					return response.json();
 				},
-				(gate: any) => gate.signals?.some((signal: any) =>
-					signal.id === signalId && signal.verification?.status === "passed"),
+				(gate: any) => gate.signals?.some((candidate: any) =>
+					candidate.id === signalId && candidate.verification?.status === "passed"),
 				"operator gate-detail path must expose the completed verification",
 			);
-			const persistedSignal = persistedGate.signals.find((signal: any) => signal.id === signalId);
+			const persistedSignal = persistedGate.signals.find((candidate: any) => candidate.id === signalId);
 			expect(persistedSignal.verification.steps).toHaveLength(1);
 			expect(persistedSignal.verification.steps[0]).toMatchObject({
 				name: stepName,
@@ -456,6 +579,13 @@ test.describe("POST /api/internal/verification-result", () => {
 			});
 			expect(persistedSignal.verification.steps[0].artifact.content).toBe(htmlReport);
 		} finally {
+			lateRequest?.destroy();
+			terminateSpy?.mockRestore();
+			dispatchSpy?.mockRestore();
+			waitTurnSpy?.mockRestore();
+			recoverySpy?.mockRestore();
+			retrySleepSpy?.mockRestore();
+			graceTimerSpy?.mockRestore();
 			harness.skipLlmReview = priorHarnessSkip;
 			if (priorReviewSkip === undefined) delete process.env.BOBBIT_LLM_REVIEW_SKIP;
 			else process.env.BOBBIT_LLM_REVIEW_SKIP = priorReviewSkip;
