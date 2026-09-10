@@ -275,4 +275,54 @@ describe("verification result file upload", () => {
 			openSpy.mock.calls.some(([candidate]) => typeof candidate === "string" && path.resolve(candidate) === outsideImage),
 		).toBe(false);
 	});
+
+	it("does not inline an outside screenshot when an ancestor directory is swapped after canonicalization", async (context) => {
+		const root = temporaryDirectory("bobbit-verification-upload-swap-root-");
+		const outside = temporaryDirectory("bobbit-verification-upload-swap-outside-");
+		process.chdir(root);
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		const probeTarget = path.join(root, "probe-target");
+		const probeLink = path.join(root, "probe-link");
+		fs.mkdirSync(probeTarget);
+		try {
+			fs.symlinkSync(probeTarget, probeLink, linkType);
+			fs.rmSync(probeLink, { recursive: true, force: true });
+		} catch {
+			context.skip("directory symlinks or junctions are unavailable on this platform");
+			return;
+		}
+
+		const imageDirectory = path.join(root, "screenshots");
+		const parkedDirectory = path.join(root, "screenshots-original");
+		fs.mkdirSync(imageDirectory);
+		const imagePath = path.join(imageDirectory, "race.png");
+		fs.writeFileSync(imagePath, "inside image");
+		const outsideSentinel = "outside ancestor-swap sentinel";
+		fs.writeFileSync(path.join(outside, "race.png"), outsideSentinel);
+		const fileUrl = pathToFileURL(imagePath).href;
+		const reportHtml = `<img src="${fileUrl}" alt="race">`;
+		const reportPath = path.join(root, "report.html");
+		fs.writeFileSync(reportPath, reportHtml);
+		const capture = captureRequestBody();
+
+		const originalRealpathSync = fs.realpathSync;
+		let swapped = false;
+		vi.spyOn(fs, "realpathSync").mockImplementation(((candidate: fs.PathLike) => {
+			const real = originalRealpathSync(candidate);
+			if (!swapped && path.resolve(String(candidate)) === imagePath) {
+				fs.renameSync(imageDirectory, parkedDirectory);
+				fs.symlinkSync(outside, imageDirectory, linkType);
+				swapped = true;
+			}
+			return real;
+		}) as typeof fs.realpathSync);
+
+		const result = await submitReport(reportPath, "ancestor-swap");
+
+		expect(result.isError).not.toBe(true);
+		expect(swapped).toBe(true);
+		expect(capture.body().report_html).toBe(reportHtml);
+		expect(capture.body().report_html).toContain(fileUrl);
+		expect(capture.body().report_html).not.toContain(Buffer.from(outsideSentinel).toString("base64"));
+	});
 });
