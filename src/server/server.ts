@@ -20979,6 +20979,11 @@ async function handleApiRoute(
 
 	// POST /api/internal/verification-result
 	if (url.pathname === "/api/internal/verification-result" && req.method === "POST") {
+		// Sandbox membership is request-admission authority. Snapshot it before
+		// body streaming so teardown cannot revoke an already admitted callback.
+		const admittedSandboxSessionIds: ReadonlySet<string> | undefined = sandboxScope
+			? new Set(sandboxScope.sessionIds)
+			: undefined;
 		const body = await readBody(req, MAX_VERIFICATION_RESULT_REQUEST_BYTES);
 		if (!body?.sessionId || !body?.verdict || !body?.summary || typeof body.sessionId !== "string" || typeof body.verdict !== "string" || typeof body.summary !== "string") {
 			json({ error: "Missing required fields: sessionId, verdict, summary" }, 400);
@@ -20996,7 +21001,7 @@ async function handleApiRoute(
 		const authenticSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret);
 		if (!authenticSessionId
 			|| authenticSessionId !== body.sessionId
-			|| (sandboxScope && !sandboxScope.sessionIds.has(authenticSessionId))) {
+			|| (admittedSandboxSessionIds && !admittedSandboxSessionIds.has(authenticSessionId))) {
 			json({ error: "Valid verifier session secret is required", code: "VERIFIER_SESSION_SECRET_REQUIRED" }, 403);
 			return;
 		}
