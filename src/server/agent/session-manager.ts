@@ -18160,7 +18160,7 @@ export class SessionManager {
 		return true;
 	}
 
-	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean; worktreeOwnerLifecycleHeld?: string } = {}): Promise<boolean> {
+	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean; worktreeOwnerLifecycleHeld?: string; deferSessionSecretRevocation?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
 		// never a caller boolean — is the only authority for promoted teardown.
@@ -18212,7 +18212,7 @@ export class SessionManager {
 			: this.withWorktreeOwnerLifecycle(lifecycleOwnerId, terminate);
 	}
 
-	private async _terminateSessionOwned(id: string, token: SessionReplacementToken, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> }): Promise<boolean> {
+	private async _terminateSessionOwned(id: string, token: SessionReplacementToken, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; deferSessionSecretRevocation?: boolean }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (!this._replacementTokenIsCurrent(id, token)) {
@@ -18224,8 +18224,13 @@ export class SessionManager {
 		// and extension channels have completed their existing teardown steps.
 		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 
-		// Cascade-reap this owner's child agents (extracted seam — §6).
-		await this.cascadeReapOwner(id, options);
+		// Cascade-reap this owner's child agents (extracted seam — §6). Secret
+		// revocation deferral is exact-session state for verifier teardown and must
+		// never be inherited by children terminated through this cascade. Preserve
+		// every other existing lifecycle option exactly as before.
+		const cascadeOptions = { ...options };
+		delete cascadeOptions.deferSessionSecretRevocation;
+		await this.cascadeReapOwner(id, cascadeOptions);
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
@@ -18283,8 +18288,10 @@ export class SessionManager {
 		}
 
 		// S1: drop the per-session capability secret so a terminated session's
-		// secret can no longer resolve to an authentic caller.
-		this.sessionSecretStore.remove(id);
+		// secret can no longer resolve to an authentic caller. Verification teardown
+		// may defer this only while its existing pending-result resolver remains live;
+		// that caller owns unconditional revocation immediately after removing it.
+		if (!options.deferSessionSecretRevocation) this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
 		// Skip sessions that share another owner's worktree: delegates, read-only

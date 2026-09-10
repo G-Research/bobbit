@@ -2229,6 +2229,20 @@ export class VerificationHarness {
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
 	/**
+	 * Stop one verifier while preserving only its already-open late-verdict
+	 * window. Resolver removal and exact-secret revocation are coupled in one
+	 * finally block, including when termination itself fails.
+	 */
+	private async terminateVerifierAfterPendingResult(sessionId: string): Promise<void> {
+		try {
+			await this.sessionManager!.terminateSession(sessionId, { deferSessionSecretRevocation: true });
+		} catch { /* session may already be terminated */ } finally {
+			this.pendingResults.delete(sessionId);
+			this.sessionManager!.sessionSecretStore?.remove(sessionId);
+		}
+	}
+
+	/**
 	 * Pending human-signoff resolvers keyed by `${signalId}::${stepName}`.
 	 * Populated when a `human-signoff` step parks and `await`s the user;
 	 * drained by `resolveSignoff()` (user decision) or `cancelStaleVerifications()`
@@ -3251,11 +3265,9 @@ export class VerificationHarness {
 			};
 		} finally {
 			try { errListenerUnsub(); } catch { /* ignore */ }
-			// Terminate BEFORE deleting the pending resolver so a verdict POST
-			// racing teardown is still captured, not 404-dropped (see the
-			// delete-vs-late-POST fix in runLlmReviewViaSession).
-			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
-			this.pendingResults.delete(step.sessionId);
+			// Preserve exact-secret authentication only until the pending resolver
+			// closes, so a verdict already racing teardown can still be accepted.
+			await this.terminateVerifierAfterPendingResult(step.sessionId);
 			if (this.teamManager) {
 				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
 			}
@@ -6111,10 +6123,7 @@ export class VerificationHarness {
 			// across terminateSession, a late verdict is still captured
 			// (capturingResolver) and honored below.
 			if (sessionId) {
-				try {
-					await this.sessionManager!.terminateSession(sessionId);
-				} catch { /* ignore — session may already be terminated */ }
-				this.pendingResults.delete(sessionId);
+				await this.terminateVerifierAfterPendingResult(sessionId);
 				if (this.teamManager) {
 					try {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
@@ -6569,11 +6578,9 @@ export class VerificationHarness {
 		} finally {
 			try { qaErrListenerUnsub?.(); } catch { /* ignore */ }
 			if (qaSessionId) {
-				// Terminate BEFORE deleting the pending resolver so a verdict POST
-				// racing teardown is still captured, not 404-dropped (see the
-				// delete-vs-late-POST fix in runLlmReviewViaSession).
-				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
-				this.pendingResults.delete(qaSessionId);
+				// Keep exact-secret auth live through the same pending-result window as
+				// the LLM reviewer path, then revoke it unconditionally.
+				await this.terminateVerifierAfterPendingResult(qaSessionId);
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
 				}
