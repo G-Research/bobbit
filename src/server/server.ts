@@ -20994,7 +20994,8 @@ async function handleApiRoute(
 		const rawSecret = req.headers["x-bobbit-session-secret"];
 		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
 		const authenticSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret);
-		if (authenticSessionId !== body.sessionId
+		if (!authenticSessionId
+			|| authenticSessionId !== body.sessionId
 			|| (sandboxScope && !sandboxScope.sessionIds.has(authenticSessionId))) {
 			json({ error: "Valid verifier session secret is required", code: "VERIFIER_SESSION_SECRET_REQUIRED" }, 403);
 			return;
