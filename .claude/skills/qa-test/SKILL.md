@@ -119,7 +119,7 @@ Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `
 
 **Available browser tools:**
 - `browser_navigate(url=...)` — navigate to your ephemeral server
-- `browser_screenshot(savePath=...)` — take screenshots and save to disk (ALWAYS use `savePath` — see below)
+- `browser_screenshot(includeBase64=true, ...)` — capture evidence and receive a verifier-workspace `[screenshot_file]` path (always set `includeBase64` for report evidence)
 - `browser_snapshot()` — get ARIA accessibility tree (best for understanding page structure and finding elements)
 - `browser_click(selector=...)` — click elements
 - `browser_type(selector=..., text=...)` — type into inputs
@@ -147,108 +147,44 @@ If the URL doesn't match your ephemeral server (check the port), re-navigate.
 
 ### Screenshot capture — CRITICAL
 
-**You CANNOT extract base64 data from `browser_screenshot()` tool responses.** The tool returns images as visual content blocks — you see the picture but cannot copy the underlying binary data. Therefore:
+Call `browser_screenshot` with `includeBase64=true`. The browser tool spills the image under the verifier workspace and returns a short `[screenshot_file]<absolute-path>[/screenshot_file]` marker instead of a copyable base64 text block.
 
-**ALWAYS save screenshots to disk** using the `savePath` parameter:
 ```
-browser_screenshot(savePath="$WORK_DIR/screenshots/scenario1-before.png")
-```
-
-Create the screenshots directory at the start of testing:
-```bash
-mkdir -p "$WORK_DIR/screenshots"
+browser_screenshot(includeBase64=true, format="jpeg", quality=75)
 ```
 
-Use descriptive filenames: `scenario1-before.png`, `scenario1-after.png`, `scenario2-browse.png`, etc.
+Keep every returned path. Use PNG when lossless detail matters; prefer JPEG or a smaller viewport when it keeps the final report comfortably below the upload limit. Do not move screenshots outside the verifier workspace or replace them with symlinks.
 
 ### Per-scenario flow
 
 For each scenario from your task prompt (respecting `qa_max_scenarios`):
 
-1. **Before**: Take a screenshot with `savePath` documenting the starting state
+1. **Before**: Capture a screenshot with `includeBase64=true` and record its `[screenshot_file]` path
 2. **Action**: Perform the user interaction (click, type, navigate, etc.)
-3. **After**: Take a screenshot with `savePath` documenting the result
+3. **After**: Capture another screenshot and record its path
 4. **Verdict**: Record PASS, FAIL, or SKIPPED with a clear explanation
 
 Track elapsed time. If `qa_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
 
 ## Step 7: Produce HTML Report
 
-### Embedding screenshots
+Write `$WORK_DIR/validation-report.html` as a regular file, not a symlink, directory, device, or pipe. Reference each returned screenshot path with a `file://` URL; on Windows, use forward slashes:
 
-After all scenarios are complete, convert saved screenshots to base64 and build the report. Use this bash script to generate base64 data URIs from saved PNG files:
-
-```bash
-# Convert a screenshot to a base64 data URI (works on both Linux and macOS/Windows with Node)
-node -e "const fs=require('fs'); const b=fs.readFileSync('$WORK_DIR/screenshots/scenario1-before.png'); console.log('data:image/png;base64,'+b.toString('base64'))"
+```html
+<img class="screenshot" src="file:///absolute/path/to/.bobbit-qa/screenshots/example.jpg" alt="Scenario 1 after">
 ```
 
-For each screenshot file, run this command and embed the output as the `src` attribute of an `<img>` tag. The output will be a single long string starting with `data:image/png;base64,...`.
+Do **not** read, print, or manually embed base64 screenshot data. On submission, the `verification_result` extension runs inside this verifier process. It reads the report with a bounded descriptor, inlines eligible workspace images, and uploads only the resulting HTML bytes. The gateway never receives or dereferences the file path.
 
-**IMPORTANT**: The base64 output is very long (100KB+). Do NOT try to manually type or copy it. Instead, build the HTML report using a script that reads screenshots and generates the HTML:
+The generated report should contain:
 
-```bash
-node -e "
-const fs = require('fs');
-const path = require('path');
-const dir = '$WORK_DIR/screenshots';
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.png')).sort();
-const imgs = {};
-for (const f of files) {
-  const data = fs.readFileSync(path.join(dir, f));
-  imgs[f] = 'data:image/png;base64,' + data.toString('base64');
-}
-fs.writeFileSync('$WORK_DIR/screenshot-data.json', JSON.stringify(imgs));
-console.log('Processed', Object.keys(imgs).length, 'screenshots');
-"
-```
+- Inline CSS and no external dependencies
+- Environment details: branch, commit, server URL, and temp directory
+- One scenario section with numbered steps, before/after evidence, and PASS/FAIL/SKIPPED rationale
+- Automated test coverage gaps
+- Pass/fail/skip totals and budget consumed
 
-Then use the generated `screenshot-data.json` to build your HTML report. Read the JSON, and for each scenario, reference the correct screenshot filename to get its data URI.
-
-A complete approach — write a Node script that generates the final HTML:
-
-```bash
-node -e "
-const fs = require('fs');
-const path = require('path');
-const dir = '$WORK_DIR/screenshots';
-
-// Build base64 map
-const imgs = {};
-if (fs.existsSync(dir)) {
-  for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.png'))) {
-    imgs[f] = 'data:image/png;base64,' + fs.readFileSync(path.join(dir, f)).toString('base64');
-  }
-}
-
-// Read the scenario data you'll write earlier
-// (write a scenarios.json with your test results before this step)
-const scenarios = JSON.parse(fs.readFileSync('$WORK_DIR/scenarios.json', 'utf8'));
-
-// Build HTML...
-let html = '<!DOCTYPE html>...'; // construct your report HTML here using imgs[filename] for src attributes
-fs.writeFileSync('$WORK_DIR/validation-report.html', html);
-"
-```
-
-**Recommended workflow:**
-1. During testing, save all screenshots to `$WORK_DIR/screenshots/` with descriptive names
-2. After all scenarios, write a `$WORK_DIR/scenarios.json` with your test results (verdict, steps, screenshot filenames per scenario)
-3. Write a Node script that reads both the screenshots and scenario data, generates the complete HTML report with embedded base64 images, and saves it to `$WORK_DIR/validation-report.html`
-
-This ensures screenshots are properly embedded without you needing to handle base64 strings directly.
-
-The generated report should follow this structure (your Node script produces this):
-
-- HTML with inline CSS (self-contained, no external dependencies)
-- Environment table (branch, commit, server, working dir)
-- One `<div class="scenario pass|fail|skip">` per scenario containing:
-  - Steps as an ordered list with `<img class="screenshot" src="data:image/png;base64,...">` tags
-  - A verdict paragraph with PASS/FAIL/SKIPPED and explanation
-- Automated test coverage gaps section
-- Summary with pass/fail/skip counts
-
-Save the report to `$WORK_DIR/validation-report.html`.
+Keep the source report at or below **10 MiB**. The extension rejects an oversized or non-regular report before upload, including a report path that is itself a symlink. Screenshot inlining is limited to 20 MiB of source image bytes, and each rewrite must also keep the final UTF-8 HTML at or below 10 MiB. Ineligible, escaped, changed, or over-budget image references remain unchanged, so keep the report compact enough for every required screenshot to be inlined before cleanup.
 
 ## Step 8: Submit Results
 
@@ -260,9 +196,9 @@ Call the `verification_result` tool to deliver your findings:
 
 2. **summary** (REQUIRED): Concise summary of what you tested and what you found.
 
-3. **report_html_file** (REQUIRED): Absolute path to your HTML report file (e.g. `$WORK_DIR/validation-report.html`). The verifier-side tool reads and uploads it — this handles large reports with embedded base64 screenshots without hitting tool output limits, while the gateway never dereferences the path. Do NOT use `report_html` (inline string) — always use `report_html_file`.
+3. **report_html_file** (REQUIRED): Absolute path to the regular HTML report file (for example, `$WORK_DIR/validation-report.html`). The verifier-side extension reads, bounds, and transforms it into `report_html`; the gateway accepts only those uploaded bytes. Do NOT use `report_html` for this QA flow and do not POST the endpoint directly.
 
-This tool call is how the verification system receives your results. Without it, your testing work is lost.
+Call the tool from the verifier session that performed the QA. It automatically sends that process's `X-Bobbit-Session-Secret`; an admin token, browser login, public session ID, missing secret, or another session's secret cannot submit this verifier's result. This tool call is how the verification system receives your results. Without it, your testing work is lost.
 
 Do NOT emit `<verdict>` or `<qa_report>` XML tags — use the `verification_result` tool exclusively.
 
@@ -281,7 +217,7 @@ Do NOT emit `<verdict>` or `<qa_report>` XML tags — use the `verification_resu
 - **NEVER** run unit tests, integration tests, or `npm test`. You are a QA tester driving a real browser, not a developer. If you cannot get the ephemeral server running, submit a FAIL verdict explaining the infrastructure issue and stop. Do not fall back to running the project's test suite.
 - **NEVER** read source code (`.ts`, `.js`, `.tsx`, `.jsx` files). You are testing the product as a user. The only files you may read are config files needed for server setup.
 - **ALWAYS** clean up, even on failure
-- **ALWAYS** save screenshots to disk with `savePath` and embed as base64 in the report via Node script (self-contained)
-- **NEVER** try to manually type base64 data — always use a script to read PNG files and generate the HTML
+- **ALWAYS** capture report screenshots with `includeBase64=true` and reference the returned `[screenshot_file]` path from the HTML
+- **NEVER** read or paste base64 image data — verifier-side inlining makes the uploaded gate artifact self-contained
 - **RESPECT** the time and scenario budgets — partial results are better than no results
 - If $ARGUMENTS were provided, use them as scenario descriptions to validate

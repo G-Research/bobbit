@@ -102,15 +102,23 @@ The protocol has 9 steps:
 
 6. **Drive browser scenarios** — Navigate to `qa_browser_entry` (with `$PORT` and `$TOKEN` substituted). For each scenario from the task prompt, take before/after screenshots and record a PASS/FAIL verdict. Respect `qa_max_scenarios` and `qa_max_duration_minutes`.
 
-7. **Produce HTML report** — Write an HTML report that references screenshots via `<img src="file:///<path>">` using the paths returned in `[screenshot_file]` blocks from `browser_screenshot(includeBase64: true)`. The verifier-side tool inlines those references to base64 data URIs when the report is submitted via `report_html_file` (see Screenshots in QA reports below).
+7. **Produce HTML report** — Write a regular HTML report file that references screenshots via `<img src="file:///<path>">` using the paths returned in `[screenshot_file]` blocks from `browser_screenshot(includeBase64: true)`. The verifier-side tool inlines eligible references when the file is submitted through `report_html_file` (see Screenshots in QA reports below).
 
-8. **Submit results** — Call the `verification_result` tool with `verdict` ("pass" or "fail"), `summary` (concise findings), and `report_html` (self-contained HTML report). The verification harness receives results through this tool and handles gate signaling automatically.
+8. **Submit results** — From the verifier session, call `verification_result` with `verdict` (exactly `"pass"` or `"fail"`), `summary` (concise findings), and `report_html_file` (the absolute report path). The extension reads and transforms the local file, then uploads `report_html` bytes; the verification harness handles gate signaling automatically.
 
 9. **Cleanup** — Kill the background server via `bash_bg`, delete the temp directory. Always runs, even on failure.
 
+## Verification submission trust boundary
+
+A verifier `sessionId` is routing metadata, not authority. The `verification_result` extension automatically adds the process-local `X-Bobbit-Session-Secret`; the gateway resolves that secret to an authentic session identity and requires it to equal the submitted `sessionId` and remain within any active sandbox scope. A missing or unknown secret, another session's secret, an admin bearer token, a browser cookie, or knowledge of the public session ID cannot resolve the pending verification. Identity and scope mismatches return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`.
+
+The gateway also accepts only the exact verdict strings `pass` and `fail`. Agents should call the tool rather than POSTing the internal endpoint: the extension owns local report reads and image transformation, while the gateway owns identity binding, validation, and pending-result resolution. Keeping these responsibilities separate prevents a forged verdict and prevents a report path from becoming a host filesystem read primitive.
+
+This hardening does not change what operators see. The submitted `summary` remains the verification step's text output. If HTML is present, the harness stores the uploaded bytes as the same `text/html` gate artifact, and the goal dashboard continues to expose it through **View Report**.
+
 ## Report format
 
-The validation report is a self-contained HTML file. Screenshots are embedded as base64 data URIs so the report works offline without external dependencies.
+The stored validation report is self-contained HTML. Before upload, the verifier-side extension replaces eligible local screenshot references with base64 data URIs so the operator artifact works without the verifier workspace or a running QA server.
 
 ### Sections
 
@@ -132,7 +140,7 @@ The report is the gate artifact — it's stored as gate content and must be read
 
 ## Screenshots in QA reports
 
-QA reports embed screenshots as evidence. To keep the agent's own transcript small (base64 image payloads balloon cache-read token costs on every subsequent turn), screenshots taken with `includeBase64: true` are **spilled to disk** rather than returned inline as text. The server then inlines them to base64 data URIs only when the final report is submitted — so the report stays self-contained while the agent's turns stay cheap.
+QA reports embed screenshots as evidence. To keep the agent's own transcript small (base64 image payloads balloon cache-read token costs on every subsequent turn), screenshots taken with `includeBase64: true` are **spilled to disk** rather than returned inline as text. The `verification_result` extension later inlines them inside the verifier runtime — so the uploaded report stays self-contained while the agent's turns stay cheap and the gateway receives no caller-controlled path.
 
 ### How to take a screenshot for the report
 
@@ -157,14 +165,16 @@ On Windows, use forward slashes in the path (e.g. `file:///C:/Users/.../abc123.p
 
 ### Verifier-side inlining
 
-When the agent submits the report via `verification_result`'s `report_html_file` parameter, the tool extension running inside the verifier reads the file, finds every `<img src="file://...">` reference, and rewrites eligible images to an inline `data:image/...;base64,...` URI before uploading the HTML bytes. This makes the final report self-contained for viewing in the blob-URL report viewer and for long-term gate-artifact storage without giving the gateway a caller-controlled filesystem path.
+When the agent supplies `report_html_file`, the tool extension running inside that verifier reads the report and rewrites eligible `<img src="file://...">` references to `data:image/...;base64,...` URIs. It then POSTs only the resulting `report_html` string. The gateway rejects a direct `report_html_file` field and never stats, resolves, opens, or reads that path. A directly submitted `report_html` string is treated as bytes: any `file://` references remain unchanged.
 
 Constraints:
 
-- Only `file://` srcs whose canonical paths resolve under the verifier's cwd (including the `.bobbit-qa/` subtree) are inlined. Paths outside the session tree and symlink escapes are left unchanged.
-- Cumulative cap: **20 MB** of inlined image data per report. References beyond the cap are left as `file://` URLs.
-- Missing files, non-image MIME types, and unresolvable paths are left as-is — they do not fail the submission.
-- The `report_html` inline-string parameter is not rewritten; use `report_html_file` to get automatic verifier-side inlining.
+- The report path must identify a regular file and must not itself be a symlink. The extension checks before and after opening, reads through the descriptor, and rejects reports over **10 MiB**, including a file that grows during the bounded read.
+- Eligible image extensions are PNG, JPEG, GIF, and WebP. Each image's canonical path must be under the verifier's canonical cwd (including `.bobbit-qa/`).
+- Containment is revalidated after the image is opened. The descriptor, pathname, canonical target, and workspace root must retain their identities, so a file symlink escape or an ancestor symlink/junction swap cannot redirect the read outside the workspace.
+- Inlining has a cumulative **20 MiB** source-image budget. Independently, each replacement must keep the final UTF-8 HTML at or below the **10 MiB** report limit.
+- Outside, missing, unsupported, changed, or over-budget image references are left unchanged rather than failing the submission. Keep required evidence within both budgets because an unchanged local reference will not survive verifier cleanup.
+- The `report_html` inline-string parameter is not rewritten; use `report_html_file` for verifier-side inlining.
 
 ### Screenshots in chat responses
 
@@ -185,7 +195,7 @@ The `.bobbit-qa/` directory is gitignored and scoped per session. It is deleted 
 
 ### Why not paste base64 directly into the report?
 
-Earlier versions of the tool returned the full `data:image/png;base64,...` URI as a text block so the agent could copy-paste it into the report. That payload then stayed in the agent transcript and was re-cached on every subsequent turn, costing tens of thousands of tokens per screenshot. The file-spill + server-inline flow replaces that path — agents should never embed base64 image data as literal text in their HTML or in their chat output.
+Earlier versions of the tool returned the full `data:image/png;base64,...` URI as a text block so the agent could copy-paste it into the report. That payload then stayed in the agent transcript and was re-cached on every subsequent turn, costing tens of thousands of tokens per screenshot. The file-spill plus verifier-side inline flow replaces that path — agents should never embed base64 image data as literal text in their HTML or in their chat output.
 
 ## Browser automation
 
@@ -246,7 +256,9 @@ The production dev server is completely unaffected throughout the validation pro
 
 - **"No QA testing configured"** — No component in the project's `project.yaml` has `config.qa_start_command` set. Add `qa_*` keys to the relevant component's `config:` map as described above.
 - **Health check never passes** — Verify `qa_health_check` URL uses `$PORT` placeholder. Check `bash_bg` logs for server startup errors.
-- **Screenshots missing from report** — The agent drives the browser via the native `browser_*` tools, not `mcp__playwright__*`. Check that the session's role allows the `browser` tool group (the `qa-tester` role does by default) and that the agent called `browser_screenshot({ includeBase64: true })`. Spilled files live under `<session-cwd>/.bobbit-qa/screenshots/` and must be referenced in the report as `<img src="file:///<absolute-path>">` so the server can inline them on submit via `report_html_file`.
+- **Screenshots missing from report** — The agent drives the browser via the native `browser_*` tools, not `mcp__playwright__*`. Check that the session's role allows the `browser` tool group (the `qa-tester` role does by default) and that the agent called `browser_screenshot({ includeBase64: true })`. Spilled files must remain canonically under `<session-cwd>` and use a supported extension. Reference their returned absolute paths as `<img src="file:///<path>">`; the verifier-side extension, not the gateway, inlines eligible images when `report_html_file` is submitted. An unchanged reference indicates a containment, identity, type, source-image budget, or final-report budget check failed.
+- **`verification_result` returns `VERIFIER_SESSION_SECRET_REQUIRED`** — Submit from the exact verifier session created for the pending step. Retrying with an admin token, browser cookie, copied session ID, or another session will still return `403`; those credentials do not replace the verifier's process-local secret. A scoped gateway also requires that resolved verifier identity to be in scope.
+- **Report file rejected before upload** — Use a regular file no larger than 10 MiB. Do not pass a directory, device, pipe, or symlink. Pass `report_html_file` only to the tool; sending that field directly to the gateway is rejected by design.
 - **QA step skipped unexpectedly** — Check that the goal has QA testing enabled (`enabledOptionalSteps` includes `agent-qa`). Check `gate_status` for the implementation gate verification results.
 - **Temp directory not cleaned up** — If the agent crashes mid-protocol, the temp dir may remain. These are in the system temp directory (`$TMPDIR`) and can be manually cleaned.
 

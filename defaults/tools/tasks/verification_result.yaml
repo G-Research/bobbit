@@ -8,7 +8,7 @@ provider:
 group: Gates
 docs: |
   Submit verdict, summary, and optional HTML report. Required params: `verdict` ("pass"/"fail"), `summary` (detailed markdown).
-  For HTML reports with screenshots: use `report_html_file` (absolute path, read and uploaded by the verifier-side tool, up to 10MB) OR `report_html` (inline string for small reports). Never both.
+  For HTML reports with screenshots: use `report_html_file` (absolute regular-file path, read and uploaded by this verifier-side tool, up to 10 MiB) OR `report_html` (inline string for small reports). Never both.
 detail_docs: |
   ## Summary Format
 
@@ -48,15 +48,18 @@ detail_docs: |
 
   ## HTML Report (QA agents)
 
-  QA agents can attach a self-contained HTML report with embedded screenshots. Two mutually exclusive options:
+  QA agents can attach a self-contained HTML report with screenshots. Two mutually exclusive options:
 
-  - **`report_html`** — inline HTML string. Use for small reports without screenshots.
-  - **`report_html_file`** — absolute path to an HTML file on disk. The server reads it directly (up to 10 MB). **Preferred for reports with embedded base64 screenshots**, which are too large for inline parameters.
+  - **`report_html`** — inline HTML string. Use for small reports. Its `file://` references are uploaded unchanged; no filesystem paths are resolved.
+  - **`report_html_file`** — absolute path to a report in the verifier runtime. The extension rejects paths that are not regular files (including a final symlink), reads at most 10 MiB through an opened descriptor, and uploads the result as `report_html`. The gateway never receives or dereferences this path.
 
-  Provide one or the other, never both — the tool will reject the call if both are set.
+  For `report_html_file`, eligible `<img src="file://...">` files with PNG, JPEG, GIF, or WebP extensions are inlined inside the verifier runtime. A candidate must remain canonically contained by the verifier workspace and retain the same file and workspace-root identities through open and read, so symlink/junction escapes and ancestor-swap races are not followed. Image source bytes have a 20 MiB cumulative budget, and a rewrite is kept only when the final UTF-8 report remains at or below 10 MiB. An ineligible or over-budget reference is left unchanged.
 
-  The report appears as a "View Report" button on the goal dashboard, opening in a new tab.
+  Provide one report field, never both. The extension sends its process-local `X-Bobbit-Session-Secret`; only the exact secret resolving to the submitted verifier `sessionId` can resolve that session's pending verification. Bearer credentials, cookies, public session IDs, and other session secrets do not substitute for it.
+
+  The existing operator flow is unchanged: `summary` becomes the verification step's text output, while uploaded HTML is stored as a `text/html` gate artifact and appears through the goal dashboard's "View Report" action.
 
   ### Notes
+  - `verdict` accepts only the exact values `pass` or `fail`
   - Most reviewers only need `summary` — the HTML report fields are primarily for QA agents
   - Use headings, bullet lists, and code blocks in `summary` for readability
