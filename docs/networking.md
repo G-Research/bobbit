@@ -12,7 +12,8 @@ Use a public origin whenever browsers address the gateway through a scheme, host
 
 ```bash
 # TLS is terminated by a reverse proxy at https://bobbit.example.
-# --auth makes the CLI print a tokenized bootstrap URL as well as enforcing auth.
+# The public authority already enforces auth and tokenizes the CLI launch URL;
+# --auth is retained here as optional defense-in-depth.
 bobbit --host 127.0.0.1 --port 3001 --no-tls --auth \
   --public-origin https://bobbit.example
 
@@ -96,9 +97,9 @@ The production gateway stamps the active mount into the SPA shell before loading
 
 The canonical mount is retained across every gateway URL boundary:
 
-- **Startup and auto-open:** the listening URL, connectable peer URL, tokenized launch URL when authentication is enforced, and browser auto-open URL include the mount and actual bound port. The peer used for local callbacks translates wildcard listener addresses to connectable loopback addresses instead of using `0.0.0.0` or `::`.
-- **Agents and extensions:** the gateway atomically replaces `state/gateway-url` with the published HTTP(S) base, including the mount, before restoring persisted sessions. Stale root-mounted values are not reused.
-- **Programmatic gateways:** `GatewayConfig.onBound` may return an authoritative public HTTP(S) base with a different scheme, host, or port. Its normalized path must exactly match `GatewayConfig.basePath`. For example, a `/team/bobbit` gateway may publish `https://bobbit.example/team/bobbit/`, which is stored without the trailing slash; it may not publish `/other`. Invalid callbacks fail before agents or extensions resume.
+- **Startup and auto-open:** the listening URL, connectable peer URL, launch URL, and browser auto-open URL include the mount and actual bound port. After request admission compiles, the CLI tokenizes the launch and auto-open URLs whenever the trusted authority set contains any non-loopback authority—even when the listener itself binds to loopback. The peer used for local callbacks translates wildcard listener addresses to connectable loopback addresses instead of using `0.0.0.0` or `::`.
+- **Agents and extensions:** the gateway atomically replaces `state/gateway-url` with the published, query-free HTTP(S) base, including the mount, before restoring persisted sessions. Authentication tokens belong only in user-facing bootstrap URLs; the callback and persisted peer URL remain token-free. Stale root-mounted values are not reused.
+- **Programmatic gateways:** `GatewayConfig.onBound` may return an authoritative public HTTP(S) base with a different scheme, host, or port. Its normalized path must exactly match `GatewayConfig.basePath`, and it must not contain a query or fragment. For example, a `/team/bobbit` gateway may publish `https://bobbit.example/team/bobbit/`, which is stored without the trailing slash; it may not publish `/other`. Invalid callbacks fail before agents or extensions resume.
 - **Browser fallback:** when no gateway is stored, the UI uses its own origin plus the runtime mount. A successful local bootstrap persists that mounted base rather than dropping the prefix.
 - **Explicit browser connection:** a URL entered in **Connect to Gateway** and stored as `gateway.url` is authoritative, including any existing prefix. Bobbit appends routes to it exactly once; it does not also add the UI's mount. Explicit bases must be absolute `http://` or `https://` URLs without credentials, query, or fragment, and their path follows the same safe segment grammar.
 - **Links and QR codes:** UI session links and icons retain the runtime UI mount. Preview URLs and the session QR retain the selected gateway base and its prefix. Real Bobbit tokens are included where needed; the `localhost` sentinel is omitted from QR links.
@@ -163,7 +164,7 @@ Forwarded headers do not change the configured mount, participate in request adm
 
 ### Authentication, cookies, and OAuth proxies
 
-A genuinely all-loopback policy does not enforce Bobbit token authentication unless `--auth` is set. The unauthenticated startup banner does not print the generated token or secrecy warning. `--auth`, a non-loopback bind, or any declared non-loopback public/published/TLS/Vite authority disables that bypass. For a loopback backend exposed by a proxy, pass `--auth` explicitly so the banner and launch URL make the effective token requirement clear.
+A genuinely all-loopback policy does not enforce Bobbit token authentication unless `--auth` is set. The unauthenticated startup banner does not print the generated token or secrecy warning. After startup, the CLI derives this decision from the complete trusted-authority policy: `--auth` or any non-loopback bind, public, published, TLS, or Vite authority disables the bypass. Consequently, declaring a non-loopback public origin for a loopback proxy backend automatically produces a tokenized launch URL and the matching secrecy warning. Keeping `--auth` in deployment commands remains useful as optional defense-in-depth and an explicit statement of operator intent, but it is not required for that policy-derived behavior.
 
 The browser may store `localhost` as a local-connection sentinel. It is never emitted as `Authorization: Bearer localhost`. A public deployment cannot use that sentinel or a proxy cookie as a substitute for Bobbit authorization: bootstrap the browser through the public mounted URL with the real Bobbit token. HTTP requests then send real Bobbit bearer credentials unchanged, while Bobbit's signed cookie supports eligible same-origin browser and preview flows.
 
