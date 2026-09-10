@@ -99,6 +99,9 @@ describe("gateway URL publication", () => {
 	it("leaves the CLI callback as a URL provider rather than a second state-file publisher", () => {
 		const source = readFileSync(new URL("../../../src/server/cli.ts", import.meta.url), "utf8");
 		assert.doesNotMatch(source, /writeFileAtomic|gatewayUrlPath/u);
-		assert.match(source, /onBound: \(actualPort\) => \{[\s\S]*?return startupUrls\.peerUrl;[\s\S]*?\},\n\t\tagentCliPath:/u);
+		assert.match(
+			source,
+			/onBound: \(actualPort\) => buildStartupPeerUrl\(\{\n\t\t\tprotocol,\n\t\t\thost: args\.host,\n\t\t\tport: actualPort,\n\t\t\tbasePath: args\.basePath,\n\t\t\}\),\n\t\tagentCliPath:/u,
+		);
 	});
 });
