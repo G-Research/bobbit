@@ -1,6 +1,17 @@
 {
   "name": "@gresearch/bobbit",
   "version": "0.20.0",
+  "description": "A command centre for AI coding agents, running locally and controlled from your browser.",
+  "author": "G-Research",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "developer-tools",
+    "multi-agent",
+    "mcp",
+    "automation"
+  ],
   "type": "module",
   "repository": {
     "type": "git",

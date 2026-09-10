@@ -9,7 +9,7 @@ Bobbit is a command centre for AI coding agents. Spin up teams — leads that pl
 ## Quick start
 
 ```bash
-npx bobbit
+npx @gresearch/bobbit
 ```
 
 That's it. Bobbit scaffolds its `.bobbit/` state/config directory, creates the built-in **Headquarters** workspace for the server run directory, starts a gateway on `http://localhost:3001`, and opens your browser. Send your first prompt and watch it work.
@@ -78,7 +78,7 @@ The UI build enforces bundle budgets via `tests/bundle-size.test.ts`: the main `
 ### From global install
 
 ```bash
-npm install -g bobbit
+npm install -g @gresearch/bobbit
 bobbit
 ```
 
@@ -90,8 +90,8 @@ Most AI coding tools are either locked inside an IDE or limited to a terminal. B
 - **Full agent power** — The agent has real shell access. It reads your codebase, edits files, runs builds and tests, searches the web, and automates browsers. No copy-pasting code snippets.
 - **Watch everything happen** — Every file read, shell command, and edit streams to your browser in real time with rich tool-call renderers. You see exactly what the agent is doing and can steer it at any point.
 - **Sessions survive everything** — Sessions persist to disk. Restart the server, close your browser, lose your connection — pick up right where you left off.
-- **Zero config** — `npx bobbit` and you're running. No API keys to configure (uses your existing `~/.pi/` credentials), no Docker, no cloud setup.
-- **Runs anywhere, even offline** — `npm install bobbit` uses only the npm registry, with no compile step and no postinstall network fetches. The `fd` and `rg` search binaries ship as a small (~3–5 MB) per-platform optional npm sub-package so search works out of the box without runtime downloads; airgapped machines and corporate networks are first-class. A startup connectivity probe wires `PI_OFFLINE=1` through to agent subprocesses when the network is unreachable, so search tools fail fast with a clear error instead of stalling on doomed downloads.
+- **Zero config** — `npx @gresearch/bobbit` and you're running. No API keys to configure (uses your existing `~/.pi/` credentials), no Docker, no cloud setup.
+- **Runs anywhere, even offline** — `npm install @gresearch/bobbit` uses only the npm registry, with no compile step and no postinstall network fetches. The `fd` and `rg` search binaries ship as a small (~3–5 MB) per-platform optional npm sub-package so search works out of the box without runtime downloads; airgapped machines and corporate networks are first-class. A startup connectivity probe wires `PI_OFFLINE=1` through to agent subprocesses when the network is unreachable, so search tools fail fast with a clear error instead of stalling on doomed downloads.
 
 ## Features
 
