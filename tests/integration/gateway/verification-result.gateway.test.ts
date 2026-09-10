@@ -270,7 +270,7 @@ test.describe("POST /api/internal/verification-result", () => {
 		let markAdmitted!: () => void;
 		const admitted = new Promise<void>((resolve) => { markAdmitted = resolve; });
 		const originalLookup = sandboxStore.lookup.bind(sandboxStore);
-		const lookupSpy = vi.spyOn(sandboxStore, "lookup").mockImplementation((token: string) => {
+		const lookupSpy = vi.spyOn(sandboxStore, "lookup").mockImplementation((token) => {
 			const result = originalLookup(token);
 			if (token === sandboxToken && result) markAdmitted();
 			return result;
