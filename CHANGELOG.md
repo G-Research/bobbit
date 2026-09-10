@@ -3,6 +3,34 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.20.0
+
+Upgrading from v0.19.0. This release adds autonomous performance optimisation, GPT-6 Astra support, richer extension-pack capabilities, and resizable persistent side panels, while strengthening gateway security, responsiveness, tool resolution, and worktree recovery.
+
+### ✨ New Features
+
+* ⚡ **Autonomous performance optimisation**: Install an opt-in optimisation programme with persistent Scanner and Director staff, disposable Ideators, deterministic code coverage, benchmark evidence, structured hypotheses, measured outcomes, and a live control panel for the full improvement loop.
+
+* 🤖 **GPT-6 Astra and Pi 0.85.1**: Select OpenAI Codex GPT-6 Astra through the existing OAuth flow, with model and thinking settings preserved across reloads and restarts. Streaming and compaction now use Pi 0.85.1 throughout the host and sandbox runtimes.
+
+* 🧩 **More capable extension packs**: Packs can make bounded, authenticated project reads for staff, sessions, goals, tasks, gates, pull requests, and detailed goal metadata. First-party packs can ship target-specific native assets, while `dev:pack` hot-reloads renderers and panels without losing the active workspace.
+
+* ↔️ **Resizable persistent side panels**: Resize side panels on desktop and keep those preferences across reloads. Eligible pack panes remain mounted across collapse, tab changes, and same-project session switches, preserving their live state on desktop and mobile.
+
+### 🐛 Bug Fixes
+
+* 📱 **Reliable Safari and QR connectivity**: Safari and WebKit clients can open authenticated WebSocket sessions without weakening request admission, and Continue on Phone QR codes now load reliably from production bundles.
+
+* 🛡️ **Safer gateway request admission**: A single trusted Host, Origin, Fetch Metadata, CORS, and private-network policy now blocks DNS rebinding and malformed cross-origin requests while preserving authenticated clients, previews, extensions, reverse proxies, base paths, and development flows.
+
+* 🧰 **Consistent tool resolution**: Tool catalogues and running agents now use the same winning configuration for policies, providers, extensions, renderers, actions, and provenance, preventing scope overrides from producing mismatched or partially activated tools.
+
+* ⚡ **More responsive busy gateways**: Role configuration parsing is cached and worktree branch discovery is batched, removing main-thread hot loops that could slow gateways managing many packs, projects, or worktrees.
+
+* 🌳 **Durable worktree pools**: Bobbit-owned ready worktrees survive graceful gateway restarts and are safely re-adopted, while repeated shutdowns and project deletion drain pools without claiming external or live-session worktrees.
+
+* ⚙️ **Immediate base-ref saving**: Editing a project’s base branch now reveals Save on the first change while retaining validation.
+
 ## v0.19.0
 
 Upgrading from v0.18.0. This release adds durable file attachments, searchable transcript navigation, smoother question handling, and broader enterprise Git host support, while strengthening AI Gateway migration and project-scoped tool routing.
