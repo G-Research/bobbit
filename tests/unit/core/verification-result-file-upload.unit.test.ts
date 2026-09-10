@@ -109,6 +109,70 @@ describe("verification result file upload", () => {
 		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
 
+	it("limits a report that grows after fstat to a max-plus-one descriptor read", async () => {
+		const dir = temporaryDirectory("bobbit-verification-upload-growing-");
+		const reportPath = path.join(dir, "report.html");
+		fs.writeFileSync(reportPath, "initial");
+		globalThis.fetch = vi.fn() as typeof fetch;
+
+		const originalFstatSync = fs.fstatSync;
+		let grewFile = false;
+		vi.spyOn(fs, "fstatSync").mockImplementation(((fd: number) => {
+			const stat = originalFstatSync(fd);
+			if (!grewFile) {
+				grewFile = true;
+				// Grow the same file through its path because Windows rejects ftruncate on a read-only descriptor.
+				fs.truncateSync(reportPath, MAX_REPORT_BYTES + 1024);
+			}
+			return stat;
+		}) as typeof fs.fstatSync);
+		const originalReadSync = fs.readSync;
+		const requestedLengths: number[] = [];
+		const returnedLengths: number[] = [];
+		const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+		vi.spyOn(fs, "readSync").mockImplementation(((
+			fd: number,
+			buffer: NodeJS.ArrayBufferView,
+			offset: number,
+			length: number,
+			position: number | null,
+		) => {
+			requestedLengths.push(length);
+			const bytesRead = originalReadSync(fd, buffer, offset, length, position);
+			returnedLengths.push(bytesRead);
+			return bytesRead;
+		}) as typeof fs.readSync);
+
+		const result = await submitReport(reportPath, "growing-file");
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain(`max ${MAX_REPORT_BYTES}`);
+		expect(requestedLengths.length).toBeGreaterThan(0);
+		expect(sum(requestedLengths)).toBeLessThanOrEqual(MAX_REPORT_BYTES + 1);
+		expect(sum(returnedLengths)).toBe(MAX_REPORT_BYTES + 1);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
+	it("rejects a special report path before attempting to open it", async () => {
+		const reportPath = path.join(temporaryDirectory("bobbit-verification-upload-special-"), "report.pipe");
+		globalThis.fetch = vi.fn() as typeof fetch;
+		const originalLstatSync = fs.lstatSync;
+		vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike) => {
+			if (candidate === reportPath) {
+				return { isFile: () => false } as fs.Stats;
+			}
+			return originalLstatSync(candidate);
+		}) as typeof fs.lstatSync);
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		const result = await submitReport(reportPath, "special-file");
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("regular file");
+		expect(openSpy.mock.calls.some(([candidate]) => candidate === reportPath)).toBe(false);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
 	it("rejects non-regular report paths before making a gateway request", async () => {
 		const dir = temporaryDirectory("bobbit-verification-upload-dir-");
 		globalThis.fetch = vi.fn() as typeof fetch;
@@ -118,6 +182,28 @@ describe("verification result file upload", () => {
 		expect(result.isError).toBe(true);
 		expect(result.content[0].text).toContain("regular file");
 		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
+	it("leaves an eligible report image unchanged when base64 inlining would exceed 10 MiB", async () => {
+		const root = temporaryDirectory("bobbit-verification-upload-inline-budget-");
+		process.chdir(root);
+		const imagePath = path.join(root, "budget.png");
+		fs.writeFileSync(imagePath, Buffer.alloc(256, 0x61));
+		const imageTag = `<img src="${pathToFileURL(imagePath).href}" alt="budget">`;
+		const targetBytes = MAX_REPORT_BYTES - 32;
+		const reportHtml = imageTag + "x".repeat(targetBytes - Buffer.byteLength(imageTag));
+		expect(Buffer.byteLength(reportHtml)).toBe(targetBytes);
+		const reportPath = path.join(root, "report.html");
+		fs.writeFileSync(reportPath, reportHtml);
+		const capture = captureRequestBody();
+
+		const result = await submitReport(reportPath, "inline-budget");
+
+		expect(result.isError).not.toBe(true);
+		expect(capture.fetchMock).toHaveBeenCalledTimes(1);
+		expect(capture.body()).not.toHaveProperty("report_html_file");
+		expect(Buffer.byteLength(capture.body().report_html)).toBeLessThanOrEqual(MAX_REPORT_BYTES);
+		expect(capture.body().report_html).toBe(reportHtml);
 	});
 
 	it("inlines a canonical workspace screenshot inside the verifier runtime", async () => {
