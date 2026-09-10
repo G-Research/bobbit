@@ -1075,10 +1075,10 @@ export async function showQrCodeDialog(): Promise<void> {
 	let firstTimeOs: null | "ios" | "android" = null;
 
 	try {
-		const { default: QRCode } = await import("qrcode");
+		const { qrCodeToDataUrl } = await import("./qr-code.js");
 		[sessionQr, certQr] = await Promise.all([
-			QRCode.toDataURL(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
-			QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+			qrCodeToDataUrl(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+			qrCodeToDataUrl(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
 		]);
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);

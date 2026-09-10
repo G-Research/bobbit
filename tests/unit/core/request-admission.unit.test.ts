@@ -436,6 +436,32 @@ describe("browser route/context matrix", () => {
 		});
 	});
 
+	it("accepts WebKit's websocket destination only for an admitted WebSocket handshake", () => {
+		const webkitHeaders = rawHeaders({
+			Host: "localhost:4242",
+			Origin: "http://localhost:4242",
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "websocket",
+			"Sec-Fetch-Dest": "websocket",
+		});
+		const websocket = decide({ transport: "websocket", url: "/ws/session", rawHeaders: webkitHeaders });
+		assert.equal(websocket.allowed, true);
+		assert.equal(websocket.context, "websocket");
+
+		assertDenied("invalid-fetch-metadata", { url: "/api/health", rawHeaders: webkitHeaders });
+		assertDenied("origin-mismatch", {
+			transport: "websocket",
+			url: "/ws/session",
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "https://attacker.example",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "websocket",
+				"Sec-Fetch-Dest": "websocket",
+			}),
+		});
+	});
+
 	it("keeps Chromium same-origin navigate/empty resources in resource contexts", () => {
 		for (const [url, context] of [
 			["/assets/app.js", "ui-static"],

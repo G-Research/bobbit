@@ -186,7 +186,7 @@ const VALID_FETCH_MODES = new Set(["cors", "navigate", "nested-navigate", "no-co
 const VALID_FETCH_DESTINATIONS = new Set([
 	"audio", "audioworklet", "document", "embed", "empty", "fencedframe", "font", "frame", "iframe", "image", "json",
 	"manifest", "object", "paintworklet", "report", "script", "serviceworker", "sharedworker", "style", "track", "video",
-	"webidentity", "worker", "xslt",
+	"webidentity", "websocket", "worker", "xslt",
 ]);
 
 export function compileRequestAdmissionPolicy(input: RequestAdmissionPolicyInput): RequestAdmissionPolicy {
@@ -449,7 +449,11 @@ function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: Fe
 }
 
 function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetadata): boolean {
-	if (context === "websocket") return fetch.mode === "websocket" && (fetch.dest === undefined || fetch.dest === "empty");
+	// WebKit identifies WebSocket handshakes with `Sec-Fetch-Dest: websocket`,
+	// while Chromium/Firefox may omit the header or send `empty`. The transport,
+	// exact admitted Origin, same-origin site, and websocket mode remain required.
+	if (context === "websocket") return fetch.mode === "websocket"
+		&& (fetch.dest === undefined || fetch.dest === "empty" || fetch.dest === "websocket");
 	if (context === "preflight") return fetch.mode === "cors" && (fetch.dest === undefined || fetch.dest === "empty");
 	if (context === "api") return (fetch.dest === undefined || fetch.dest === "empty") && (fetch.mode === "cors" || fetch.mode === "same-origin");
 	if (context === "preview-iframe") return fetch.mode === "navigate" && fetch.dest === "iframe";
