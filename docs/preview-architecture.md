@@ -18,10 +18,11 @@ Five pieces, one mount, one URL shape:
 2. **Content origin** — the gateway serves the mount at `/preview/<sid>/<path>`.
    Same shape for the iframe `src`, the "Open in new tab" button, and any link
    the user clicks inside the preview.
-3. **Cookie auth** — stateless signed `bobbit_session` HttpOnly cookie issued
-   only by a qualifying browser-signaled API bootstrap or seven-day renewal.
-   iframe loads, link navigation, and new-tab opens all carry the cookie
-   automatically; no token-in-URL hacks.
+3. **Cookie auth** — after request admission accepts the authority and browser
+   context, a stateless signed `bobbit_session` HttpOnly cookie authenticates
+   the content request. It is issued only by a qualifying browser-signaled API
+   bootstrap or seven-day renewal. iframe loads, link navigation, and new-tab
+   opens below the gateway mount carry it automatically; no token-in-URL hacks.
 4. **SSE hot reload** — `GET /api/sessions/:sid/preview-events` streams a
    `preview-changed` event whenever the gateway repopulates the mount. The panel
    bumps `#mtime=<n>` on the iframe `src` to force a reload.
@@ -290,8 +291,10 @@ an error. Hardlinks where supported, falls back to `copyFile`.
 
 Single source of truth: `src/server/preview/content-route.ts`.
 
-Routing inside the gateway happens before API auth so the iframe — which
-cannot send `Authorization` — can authenticate via the session cookie.
+The gateway's centralized request-admission policy runs before this route. Once
+admitted, preview routing happens before API auth so the iframe — which cannot
+send `Authorization` — can authenticate via the session cookie. A valid cookie
+never bypasses `Host`, `Origin`, or Fetch Metadata admission.
 
 Behaviour by path shape:
 
@@ -342,8 +345,11 @@ key persistence), and `src/server/auth/browser-cookie.ts` (central issuance
 eligibility).
 
 ```
-Set-Cookie: bobbit_session=v1.<iat>.<exp>.<nonce>.<signature>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
+Set-Cookie: bobbit_session=v1.<iat>.<exp>.<nonce>.<signature>; HttpOnly; SameSite=Lax; Path=<gateway-mount>/; Max-Age=2592000
 ```
+
+The root mount uses `Path=/`; a configured mount such as `/bobbit` uses
+`Path=/bobbit/`.
 
 The signed ASCII value has these canonical fields:
 
@@ -383,11 +389,14 @@ signed cookie; the legacy file remains byte-for-byte untouched.
 
 ### Issuance eligibility
 
-Cookie authentication and cookie issuance are separate decisions. A valid
-signed cookie continues to authenticate supported API, preview content, and
-preview SSE requests without Fetch Metadata. Only the decision to emit
+Request admission, cookie authentication, and cookie issuance are separate
+decisions. Every request must first pass the centralized authority and browser
+context policy. After admission, a valid signed cookie can satisfy inner
+authentication for supported API, preview content, and preview SSE routes; the
+cookie itself grants no admission exception. Only the decision to emit
 `Set-Cookie` uses the central browser classifier after credential
-authentication; the classifier neither grants nor changes route authorization.
+authentication, and that classifier neither grants nor changes route
+authorization.
 
 Every issuing request must satisfy all of these metadata rules:
 
@@ -396,13 +405,18 @@ Every issuing request must satisfy all of these metadata rules:
 - A non-`GET` request has exactly one `Origin`. `GET` may omit it. When present,
   it must be one serialized `http:` or `https:` origin with no credentials,
   resource path, query, or fragment.
-- With the built UI served directly, `Origin` must match the request origin
-  derived from the actual TLS socket and validated `Host`, including its port.
-  In Vite development, the preserved browser Origin may use a different port
-  when both sides use the configured host, or when both sides are loopback
-  aliases. Non-loopback HTTP is always rejected.
-- `Forwarded` and `X-Forwarded-*` are not trusted because the gateway has no
-  configured trusted-proxy boundary.
+- Request admission must supply one unambiguous configured browser-facing
+  gateway origin. A present browser `Origin` must either match it exactly or be
+  the Vite origin in an exact configured Vite-origin-to-gateway pair. Similar
+  hostnames, arbitrary loopback aliases or ports, and an unpaired Vite origin
+  are insufficient.
+- The gateway origin comes from admission's compiled configuration, not from
+  the physical socket scheme. This preserves HTTPS public-origin provenance
+  when a reverse proxy terminates TLS in front of a plain-HTTP loopback
+  listener and ensures the resulting cookie is `Secure`.
+- Non-loopback HTTP origins are ineligible. `Forwarded` and
+  `X-Forwarded-*` are not trusted because the gateway has no configured
+  trusted-proxy boundary.
 
 After those rules pass:
 
@@ -911,7 +925,7 @@ back the preview tree sees the same bytes the gateway just wrote.
   live mount, and rolls back on failure.
 - Iframe link clicks navigate inside the preview origin; assets resolve via
   `<base href="/preview/<sid>/">`.
-- "Open in new tab" works because the cookie has `Path=/`.
+- "Open in new tab" works because the cookie path covers the configured gateway mount.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
 - The side-pane tab strip never contains a Chat pill; chat is rendered outside

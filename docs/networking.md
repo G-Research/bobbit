@@ -44,10 +44,14 @@ Do not use `--vite-origin` to expose a production website. The exception allows 
 
 ## Port topology in dev mode
 
-- **Vite** (`:5173`) — User-facing HTTPS, serves UI with HMR, proxies `/api/*` and `/ws/*` to the gateway
-- **Gateway** (`:3001`) — HTTPS, REST API, WebSocket sessions, agent subprocess management
+- **Vite** (`:5173`) — serves the UI with HMR and proxies `/api/*` and `/ws/*` to the gateway.
+- **Gateway** (`:3001`) — serves the REST API and WebSocket sessions and manages agent subprocesses.
 
-In production (`npm start`), the gateway serves the bundled UI directly on `:3001`.
+The standard `npm run dev`, `npm run dev:harness`, and
+`npm run dev:watchdog` paths use HTTP for both processes. `npm run dev:nord`
+pre-provisions the certificate and uses HTTPS for both. In production
+(`npm start`), there is no Vite; the gateway serves the bundled UI directly on
+`:3001`, with the listener's configured HTTP or HTTPS scheme.
 
 ## Production subpath mounting
 
@@ -99,7 +103,14 @@ The canonical mount is retained across every gateway URL boundary:
 - **Explicit browser connection:** a URL entered in **Connect to Gateway** and stored as `gateway.url` is authoritative, including any existing prefix. Bobbit appends routes to it exactly once; it does not also add the UI's mount. Explicit bases must be absolute `http://` or `https://` URLs without credentials, query, or fragment, and their path follows the same safe segment grammar.
 - **Links and QR codes:** UI session links and icons retain the runtime UI mount. Preview URLs and the session QR retain the selected gateway base and its prefix. Real Bobbit tokens are included where needed; the `localhost` sentinel is omitted from QR links.
 
-An explicit cross-origin gateway can use a real token for REST and WebSocket traffic. Cookie-only browser transports—preview iframes, preview popouts, and live preview events—require the UI and gateway to have the exact same scheme, hostname, and port. Put the remote gateway behind the UI's origin when those features are needed.
+An explicit cross-origin gateway can use a real token for REST and WebSocket
+traffic. The browser UI enables native preview transports—iframes, popouts, and
+live preview events—only when its configured gateway URL has the page's exact
+scheme, hostname, and port. This client capability check is separate from
+server request admission. In Vite development, the browser still uses its own
+same-origin proxy URLs while the gateway admits only the configured finite
+Vite-origin-to-upstream pair. For other remote UIs, put the gateway behind the
+UI's origin when preview transports are needed.
 
 ### Reverse proxy configuration
 
