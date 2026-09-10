@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { vi } from "vitest";
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
-import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 const VERIFIER_AUTH_ERROR = {
@@ -58,6 +58,22 @@ function matchingPathCalls(spy: { mock: { calls: unknown[][] } }, expectedPath: 
 
 function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
+}
+
+async function eventually<T>(
+	probe: () => T | Promise<T>,
+	accept: (value: T) => boolean,
+	message: string,
+	timeoutMs = 10_000,
+): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	let value = await probe();
+	while (!accept(value) && Date.now() < deadline) {
+		await new Promise(resolve => setTimeout(resolve, 25));
+		value = await probe();
+	}
+	expect(accept(value), message).toBe(true);
+	return value;
 }
 
 test.describe("POST /api/internal/verification-result", () => {
@@ -304,6 +320,148 @@ test.describe("POST /api/internal/verification-result", () => {
 		expect(result.reportHtml).toBe(htmlReport);
 
 		harness.pendingResults.delete("test-session-html");
+	});
+
+	test("persists authenticated report_html through the verifier lifecycle for the operator gate view", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const workflowId = `verification-artifact-${process.pid}-${Date.now()}`;
+		const gateId = "operator-report";
+		const stepName = "Operator report QA";
+		const htmlReport = "<!doctype html><html><body><h1>Exact operator report</h1><p>quotes: &quot; and unicode: ✓</p></body></html>";
+		let goalId: string | undefined;
+		const priorReviewSkip = process.env.BOBBIT_LLM_REVIEW_SKIP;
+		const priorHarnessSkip = harness.skipLlmReview;
+		delete process.env.BOBBIT_LLM_REVIEW_SKIP;
+		harness.skipLlmReview = false;
+
+		try {
+			const workflowResponse = await apiFetch("/api/workflows", {
+				method: "POST",
+				body: JSON.stringify({
+					id: workflowId,
+					name: "Verification Artifact Lifecycle",
+					description: "Hermetic agent QA artifact persistence fixture.",
+					gates: [{
+						id: gateId,
+						name: "Operator Report",
+						dependsOn: [],
+						verify: [{
+							name: stepName,
+							type: "agent-qa",
+							role: "test-engineer",
+							prompt: "Return the fixture report.",
+							timeout: 30,
+						}],
+					}],
+				}),
+			});
+			expect(workflowResponse.status, await workflowResponse.clone().text()).toBe(201);
+
+			const goal = await createGoal({
+				title: `Verification artifact ${Date.now()}`,
+				workflowId,
+				worktree: false,
+			});
+			goalId = goal.id as string;
+
+			const contextManager = gateway.sessionManager.getProjectContextManager?.()
+				?? gateway.sessionManager.projectContextManager;
+			const context = contextManager.getContextForGoal(goalId);
+			const persistedGoal = context.goalStore.get(goalId);
+			persistedGoal.inlineRoles = {
+				"test-engineer": {
+					name: "test-engineer",
+					label: "Test Engineer",
+					promptTemplate: "Run the requested hermetic QA verification.",
+					accessory: "none",
+				},
+			};
+			context.goalStore.put(persistedGoal);
+			const runtimeGate = persistedGoal.workflow.gates.find((gate: any) => gate.id === gateId);
+			expect(runtimeGate?.verify).toHaveLength(1);
+			const signalId = `verification-artifact-signal-${Date.now()}`;
+			const signal: any = {
+				id: signalId,
+				goalId,
+				gateId,
+				sessionId: "verification-artifact-operator",
+				timestamp: Date.now(),
+				commitSha: "0123456789abcdef0123456789abcdef01234567",
+				content: "Run the report-producing QA verification.",
+				verification: { status: "running", steps: [] },
+			};
+			signal.verification.steps = harness.beginVerification(signal, runtimeGate);
+			context.gateStore.recordSignal(signal);
+
+			const pendingBefore = new Set<string>(harness.pendingResults.keys());
+			const verification = harness.verifyGateSignal(
+				signal,
+				runtimeGate,
+				persistedGoal.cwd,
+				persistedGoal.branch,
+				"main",
+				new Map(),
+				persistedGoal.spec,
+			);
+			const verifierSessionId = await eventually(
+				() => [...harness.pendingResults.keys()].find((id: string) =>
+					!pendingBefore.has(id) && id.startsWith("agent-qa-") && gateway.sessionManager.getSession(id)),
+				(value): value is string => typeof value === "string",
+				"agent-qa lifecycle must create a live verifier session with a pending result channel",
+			);
+			const verifierSession = gateway.sessionManager.getSession(verifierSessionId);
+			expect(verifierSession?.id).toBe(verifierSessionId);
+
+			const resultResponse = await postVerification(
+				gateway,
+				{
+					sessionId: verifierSessionId,
+					verdict: "pass",
+					summary: "QA report persisted",
+					report_html: htmlReport,
+				},
+				{ Authorization: `Bearer ${gateway.token}`, ...verifierHeaders(gateway, verifierSessionId) },
+			);
+			expect(resultResponse.status, await resultResponse.text()).toBe(200);
+			await verification;
+
+			await eventually(
+				() => ({
+					pending: harness.pendingResults.has(verifierSessionId),
+					active: harness.getActiveVerification(signalId),
+				}),
+				state => !state.pending && !state.active,
+				"verification must complete and leave no transient verifier state",
+			);
+
+			const persistedGate = await eventually(
+				async () => {
+					const response = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+					expect(response.status, await response.clone().text()).toBe(200);
+					return response.json();
+				},
+				(gate: any) => gate.signals?.some((signal: any) =>
+					signal.id === signalId && signal.verification?.status === "passed"),
+				"operator gate-detail path must expose the completed verification",
+			);
+			const persistedSignal = persistedGate.signals.find((signal: any) => signal.id === signalId);
+			expect(persistedSignal.verification.steps).toHaveLength(1);
+			expect(persistedSignal.verification.steps[0]).toMatchObject({
+				name: stepName,
+				type: "agent-qa",
+				passed: true,
+				status: "passed",
+				output: "QA report persisted",
+				artifact: { contentType: "text/html", content: htmlReport },
+			});
+			expect(persistedSignal.verification.steps[0].artifact.content).toBe(htmlReport);
+		} finally {
+			harness.skipLlmReview = priorHarnessSkip;
+			if (priorReviewSkip === undefined) delete process.env.BOBBIT_LLM_REVIEW_SKIP;
+			else process.env.BOBBIT_LLM_REVIEW_SKIP = priorReviewSkip;
+			if (goalId) await deleteGoal(goalId).catch(() => {});
+			await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 
 	test("rejects report_html_file without touching the supplied host path", async ({ gateway }) => {
