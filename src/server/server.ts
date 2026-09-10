@@ -21543,8 +21543,9 @@ function hasTransitiveDep(workflow: import("./agent/workflow-store.js").Workflow
  */
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 export const MAX_VERIFICATION_REPORT_BYTES = 10 * 1024 * 1024;
-// JSON escaping can almost double an HTML string containing many quotes or
-// backslashes. Keep the transport cap bounded while allowing a full 10 MiB report.
+// This unauthenticated transport backstop accommodates ordinary escape-heavy
+// HTML, not worst-case C0-control JSON expansion; decoded HTML remains capped
+// at MAX_VERIFICATION_REPORT_BYTES by the route.
 export const MAX_VERIFICATION_RESULT_REQUEST_BYTES = (MAX_VERIFICATION_REPORT_BYTES * 2) + (64 * 1024);
 
 /**

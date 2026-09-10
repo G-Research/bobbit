@@ -24,6 +24,9 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 	".webp": "image/webp",
 };
 
+// Canonical QA may place the final report outside cwd in its isolated work dir.
+// Verifier-local bounded descriptor reads of regular, non-symlink files are the
+// trust boundary; only embedded file:// screenshots are workspace-confined.
 function readBoundedRegularFile(filePath: string, maxBytes: number, label: string): Buffer {
 	const preflight = fs.lstatSync(filePath);
 	if (preflight.isSymbolicLink() || !preflight.isFile()) {
