@@ -387,11 +387,13 @@ If the cert doesn't cover the current host (e.g. the mesh IP changed), it is reg
 
 ```bash
 # Terminal 1: gateway on localhost
-node dist/server/cli.js --host localhost --port 3001 --cwd . --no-ui --no-tls
+node dist/server/cli.js --host localhost --port 3001 --cwd . --no-ui --no-tls --vite-origin http://localhost:5173
 
 # Terminal 2: vite on localhost
 GATEWAY_NO_TLS=1 VITE_HOST=localhost npx vite
 ```
+
+The standard `npm run dev`, `npm run dev:harness`, and `npm run dev:watchdog` lifecycle derives this Vite origin automatically. Direct or custom Vite launches must declare the exact scheme, host, and port with `--vite-origin` or `BOBBIT_VITE_ORIGINS`; see [Vite development origin](networking.md#vite-development-origin).
 
 Or use the E2E test config which does this automatically:
 
