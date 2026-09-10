@@ -19,20 +19,23 @@
 //     an id reuse is observable as a clobbered record. Attempt 1 returns a
 //     transient failure (`ECONNRESET`) so the loop retries; attempt 2 passes.
 //
-//   Invariant 2 — a `verification_result` arriving during teardown is honored,
-//     not 404-dropped. `runLlmReviewViaSession`'s `finally` runs
-//     `pendingResults.delete(sessionId)` BEFORE `terminateSession(sessionId)`
-//     (verification-harness.ts:~4099). A late verdict POST that lands during
-//     teardown therefore finds no resolver and the server returns
-//     404 "No pending verification for this session" (server.ts:~15882),
-//     silently dropping a real pass. The fix must keep the verdict channel
-//     live through teardown so the verdict is honored.
+//   Invariant 2 — an authenticated `verification_result` arriving during
+//     teardown is honored without retaining its capability beyond that narrow
+//     window. The harness must defer SessionManager's normal secret revocation,
+//     keep the pending resolver live through termination, then delete the
+//     resolver and revoke the exact verifier secret in `finally` — including
+//     when termination throws.
 //
-//     We drive the real `runLlmReviewViaSession` with a mock SessionManager
-//     whose reviewer goes idle without calling the tool (so teardown runs),
-//     and reproduce the race by delivering the verdict via the EXACT lookup
-//     server.ts performs (`harness.pendingResults.get(sessionId)`) from inside
-//     `terminateSession` — the teardown moment.
+//     We drive the real `runLlmReviewViaSession` with a mock SessionManager and
+//     a real SessionSecretStore. The reviewer goes idle without calling the
+//     tool, then its exact secret submits during termination. Assertions pin
+//     the capability's validity during teardown and immediate revocation once
+//     pending-result cleanup completes.
+//
+//   Invariant 3 — verifier-only retention never cascades into child teardown.
+//     The real SessionManager cascade seam must strip that one option so child
+//     secrets are revoked normally while the verifier parent's secret remains
+//     temporarily valid.
 //
 // EXPECTED: this file FAILS on current HEAD and PASSES once the reliability
 // fixes land. Every assertion message carries the marker
@@ -47,6 +50,8 @@ import path from "node:path";
 
 const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.js");
 const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../../src/server/agent/verification-logic.js");
+const { SessionSecretStore } = await import("../../../src/server/auth/session-secret.js");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.js");
 
 const MARKER = "LLM_REVIEW_RELIABILITY_REPRO";
 
@@ -182,7 +187,7 @@ test("bounded llm-review retry uses a FRESH session id per attempt and preserves
 	);
 });
 
-test("verification_result arriving during teardown is honored, not 404-dropped", async () => {
+test("verification_result arriving during teardown keeps only the exact verifier secret until pending cleanup", async () => {
 	const GOAL_ID = "goal-review-reliability-2";
 	const stateDir = makeStateDir("verif-review-late-verdict-");
 
@@ -195,6 +200,18 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 		all: () => [ctx],
 	};
 	const roleStore = { get: () => undefined, getAll: () => [] };
+	const reviewerSessionId = "llm-review-latepost1";
+	const foreignSessionId = "llm-review-foreign-session";
+	const sessionSecretStore = new SessionSecretStore();
+	const exactSecret = sessionSecretStore.getOrCreateSecret(reviewerSessionId);
+	const foreignSecret = sessionSecretStore.getOrCreateSecret(foreignSessionId);
+	const secretRemovalWindows: string[] = [];
+	const realRemove = sessionSecretStore.remove.bind(sessionSecretStore);
+	let harness: any;
+	sessionSecretStore.remove = (sessionId: string) => {
+		secretRemovalWindows.push(harness?.pendingResults.has(sessionId) ? "pending" : "closed");
+		realRemove(sessionId);
+	};
 
 	const fakeSession = {
 		cwd: stateDir,
@@ -206,39 +223,42 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 		},
 	};
 
-	let terminateCalled = false;
-	// Mirror the exact server.ts channel: look up the resolver for the session
-	// and 404 when it is gone (server.ts:~15882).
+	let terminateOptions: Record<string, unknown> | undefined;
 	let channelStatus: number | null = null;
 	let lateVerdictHonored = false;
 
 	const sm: any = {
 		isSandboxEnabled: false,
+		sessionSecretStore,
 		createSession: async () => fakeSession,
 		setTitle: () => {},
 		updateSessionMeta: () => {},
 		getSession: () => fakeSession,
 		getMcpManager: () => undefined,
-		// Reviewer goes idle without ever calling verification_result → the
-		// harness proceeds to its single reminder and then teardown.
+		// Reviewer goes idle without ever calling verification_result, so the
+		// harness exhausts reminders and enters its late-verdict teardown window.
 		waitForIdle: async () => {},
-		// Not streaming after the reminder (the bug-reproducing condition).
 		waitForStreaming: async () => { throw new Error("not streaming"); },
-		terminateSession: async (sid: string) => {
-			terminateCalled = true;
-			// Reproduce the delete-vs-late-POST race: the reviewer's
-			// verification_result POST lands DURING teardown. Deliver it via the
-			// same lookup the server performs.
+		terminateSession: async (sid: string, options?: Record<string, unknown>) => {
+			terminateOptions = options;
+			// Model SessionManager's normal revocation. The verifier-only option must
+			// defer it while pendingResults intentionally remains reachable.
+			if (options?.deferSessionSecretRevocation !== true) sessionSecretStore.remove(sid);
+
+			// Mirror server.ts authorization order: resolve the secret first, then
+			// consult pendingResults. A foreign real secret must remain foreign.
+			const authenticSessionId = sessionSecretStore.resolveSessionIdBySecret(exactSecret);
+			assert.equal(sessionSecretStore.resolveSessionIdBySecret(foreignSecret), foreignSessionId);
 			const resolver = harness.pendingResults.get(sid);
-			channelStatus = resolver ? 200 : 404;
-			if (resolver) {
+			channelStatus = authenticSessionId !== sid ? 403 : resolver ? 200 : 404;
+			if (channelStatus === 200) {
 				lateVerdictHonored = true;
 				resolver({ verdict: true, summary: "late pass delivered during teardown" });
 			}
 		},
 	};
 
-	const harness = new VerificationHarness(
+	harness = new VerificationHarness(
 		stateDir,
 		undefined,
 		() => {},
@@ -253,9 +273,7 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 	) as any;
 
 	const role = { promptTemplate: "You are a code reviewer.", name: "reviewer" };
-	const reviewerSessionId = "llm-review-latepost1";
-
-	await harness.runLlmReviewViaSession(
+	const result = await harness.runLlmReviewViaSession(
 		{ name: "Code quality review", prompt: "review the diff", timeout: 600, role: "reviewer" },
 		stateDir,
 		GOAL_ID,
@@ -267,19 +285,149 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 	);
 
 	assert.equal(
-		terminateCalled,
+		terminateOptions?.deferSessionSecretRevocation,
 		true,
-		`${MARKER}: expected reviewer teardown (terminateSession) to run — test precondition not met.`,
-	);
-	assert.notEqual(
-		channelStatus,
-		404,
-		`${MARKER}: a verification_result arriving during teardown was 404-dropped (the pendingResults resolver was deleted before the verdict landed). A late verdict must be honored, not silently lost.`,
+		`${MARKER}: verifier teardown must explicitly defer secret revocation only for the live pending-result window.`,
 	);
 	assert.equal(
-		lateVerdictHonored,
-		true,
-		`${MARKER}: late verification_result was not honored during teardown — the delete-vs-late-POST race silently dropped a real pass.`,
+		channelStatus,
+		200,
+		`${MARKER}: the exact verifier secret did not authorize a verification_result during the intentionally retained teardown window (status=${channelStatus}).`,
+	);
+	assert.equal(lateVerdictHonored, true, `${MARKER}: the authenticated late verdict was not delivered.`);
+	assert.equal(result.passed, true, `${MARKER}: the authenticated late verdict was not honored.`);
+	assert.deepEqual(
+		secretRemovalWindows,
+		["closed"],
+		`${MARKER}: the exact secret must be revoked once, immediately after pendingResults closes, never while it is live.`,
+	);
+	assert.equal(harness.pendingResults.has(reviewerSessionId), false, `${MARKER}: pending resolver leaked after verifier teardown.`);
+	assert.equal(
+		sessionSecretStore.resolveSessionIdBySecret(exactSecret),
+		undefined,
+		`${MARKER}: verifier secret remained valid after pending-result cleanup.`,
+	);
+	assert.equal(
+		sessionSecretStore.resolveSessionIdBySecret(foreignSecret),
+		foreignSessionId,
+		`${MARKER}: verifier cleanup revoked another session's secret.`,
+	);
+});
+
+test("verifier secret is revoked in finally when termination fails", async () => {
+	const GOAL_ID = "goal-review-secret-cleanup-failure";
+	const stateDir = makeStateDir("verif-review-secret-cleanup-failure-");
+	const gateStore = { getGate: () => ({ signals: [] }) };
+	const goalStore = { get: () => ({ id: GOAL_ID }) };
+	const ctx = {
+		project: { id: "p", name: "p" },
+		goalStore,
+		gateStore,
+		projectConfigStore: { get: () => "", getWithDefaults: () => ({}) },
+	};
+	const pcm = { getContextForGoal: (id: string) => (id === GOAL_ID ? ctx : null), all: () => [ctx] };
+	const reviewerSessionId = "llm-review-termination-error";
+	const sessionSecretStore = new SessionSecretStore();
+	const exactSecret = sessionSecretStore.getOrCreateSecret(reviewerSessionId);
+	let harness: any;
+	let terminateOptions: Record<string, unknown> | undefined;
+	let secretOwnerDuringTermination: string | undefined;
+	const removalWindows: string[] = [];
+	const realRemove = sessionSecretStore.remove.bind(sessionSecretStore);
+	sessionSecretStore.remove = (sessionId: string) => {
+		removalWindows.push(harness?.pendingResults.has(sessionId) ? "pending" : "closed");
+		realRemove(sessionId);
+	};
+
+	const fakeSession = {
+		cwd: stateDir,
+		lastTurnErrored: false,
+		rpcClient: { prompt: async () => {}, onEvent: () => () => {}, setThinkingLevel: async () => {} },
+	};
+	const sm: any = {
+		isSandboxEnabled: false,
+		sessionSecretStore,
+		createSession: async () => fakeSession,
+		setTitle: () => {},
+		updateSessionMeta: () => {},
+		getSession: () => fakeSession,
+		getMcpManager: () => undefined,
+		waitForIdle: async () => {},
+		waitForStreaming: async () => { throw new Error("not streaming"); },
+		terminateSession: async (sid: string, options?: Record<string, unknown>) => {
+			terminateOptions = options;
+			if (options?.deferSessionSecretRevocation !== true) sessionSecretStore.remove(sid);
+			secretOwnerDuringTermination = sessionSecretStore.resolveSessionIdBySecret(exactSecret);
+			throw new Error("synthetic teardown failure");
+		},
+	};
+	harness = new VerificationHarness(
+		stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		undefined, sm, undefined, undefined, pcm as any, undefined,
+		{ clock: makeFakeClock() as any },
+	) as any;
+
+	await harness.runLlmReviewViaSession(
+		{ name: "Code quality review", prompt: "review the diff", timeout: 600, role: "reviewer" },
+		stateDir,
+		GOAL_ID,
+		{ promptTemplate: "You are a code reviewer.", name: "reviewer" },
+		"combined prompt",
+		"kickoff message",
+		600_000,
+		reviewerSessionId,
+	);
+
+	assert.equal(terminateOptions?.deferSessionSecretRevocation, true, `${MARKER}: failed termination was not given the verifier-only retention boundary.`);
+	assert.equal(secretOwnerDuringTermination, reviewerSessionId, `${MARKER}: exact secret was revoked before failed termination settled.`);
+	assert.equal(harness.pendingResults.has(reviewerSessionId), false, `${MARKER}: termination failure leaked the pending resolver.`);
+	assert.deepEqual(removalWindows, ["closed"], `${MARKER}: termination failure must revoke once, after pending cleanup.`);
+	assert.equal(
+		sessionSecretStore.resolveSessionIdBySecret(exactSecret),
+		undefined,
+		`${MARKER}: termination failure leaked the verifier secret after pending cleanup.`,
+	);
+});
+
+test("verifier-only secret retention is not inherited by child cascade termination", async () => {
+	const parentSessionId = "llm-review-parent";
+	const childSessionId = "llm-review-child";
+	const sessionSecretStore = new SessionSecretStore();
+	const parentSecret = sessionSecretStore.getOrCreateSecret(parentSessionId);
+	const childSecret = sessionSecretStore.getOrCreateSecret(childSessionId);
+	let childTerminateOptions: Record<string, unknown> | undefined;
+
+	const cascadeOwner: any = {
+		sessions: new Map([[childSessionId, { id: childSessionId, delegateOf: parentSessionId }]]),
+		projectContextManager: undefined,
+		_testStore: { getLive: () => [] },
+		orchestrationCore: undefined,
+		terminateSession: async (sessionId: string, options?: Record<string, unknown>) => {
+			childTerminateOptions = options;
+			if (options?.deferSessionSecretRevocation !== true) sessionSecretStore.remove(sessionId);
+		},
+	};
+
+	await (SessionManager.prototype as any).cascadeReapOwner.call(cascadeOwner, parentSessionId, {
+		preserveEvidence: true,
+		deferSessionSecretRevocation: true,
+	});
+
+	assert.equal(
+		childTerminateOptions?.deferSessionSecretRevocation,
+		undefined,
+		`${MARKER}: verifier-only secret retention leaked into child cascade teardown.`,
+	);
+	assert.equal(childTerminateOptions?.preserveEvidence, true, `${MARKER}: cascade stripped an unrelated teardown option.`);
+	assert.equal(
+		sessionSecretStore.resolveSessionIdBySecret(childSecret),
+		undefined,
+		`${MARKER}: child secret survived because verifier-only retention cascaded to it.`,
+	);
+	assert.equal(
+		sessionSecretStore.resolveSessionIdBySecret(parentSecret),
+		parentSessionId,
+		`${MARKER}: the parent verifier secret should remain valid until its own pending resolver closes.`,
 	);
 });
 
