@@ -25,15 +25,32 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 };
 
 function readBoundedRegularFile(filePath: string, maxBytes: number, label: string): Buffer {
-	const fd = fs.openSync(filePath, "r");
+	const preflight = fs.lstatSync(filePath);
+	if (preflight.isSymbolicLink() || !preflight.isFile()) {
+		throw new Error(`${label} must be a regular file`);
+	}
+
+	let flags = fs.constants.O_RDONLY;
+	if (typeof fs.constants.O_NOFOLLOW === "number") flags |= fs.constants.O_NOFOLLOW;
+	if (process.platform !== "win32" && typeof fs.constants.O_NONBLOCK === "number") {
+		flags |= fs.constants.O_NONBLOCK;
+	}
+
+	const fd = fs.openSync(filePath, flags);
 	try {
 		const stat = fs.fstatSync(fd);
 		if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
 		if (stat.size > maxBytes) throw new Error(`${label} is too large (${stat.size} bytes, max ${maxBytes})`);
-		const content = fs.readFileSync(fd);
-		// Re-check the bytes actually read in case the file grew after fstat().
-		if (content.byteLength > maxBytes) throw new Error(`${label} is too large (${content.byteLength} bytes, max ${maxBytes})`);
-		return content;
+
+		const content = Buffer.allocUnsafe(maxBytes + 1);
+		let bytesRead = 0;
+		while (bytesRead < content.byteLength) {
+			const count = fs.readSync(fd, content, bytesRead, content.byteLength - bytesRead, null);
+			if (count === 0) break;
+			bytesRead += count;
+		}
+		if (bytesRead > maxBytes) throw new Error(`${label} is too large (${bytesRead} bytes, max ${maxBytes})`);
+		return content.subarray(0, bytesRead);
 	} finally {
 		fs.closeSync(fd);
 	}
@@ -49,6 +66,10 @@ function inlineWorkspaceFileImages(html: string): string {
 	let root: string;
 	try { root = fs.realpathSync(process.cwd()); } catch { return html; }
 	let total = 0;
+	let finalHtmlBytes = Buffer.byteLength(html, "utf8");
+	if (finalHtmlBytes > MAX_VERIFICATION_REPORT_BYTES) {
+		throw new Error(`HTML report is too large (${finalHtmlBytes} bytes, max ${MAX_VERIFICATION_REPORT_BYTES})`);
+	}
 	return html.replace(FILE_IMAGE_RE, (tag, captured: string) => {
 		try {
 			let decoded: string;
@@ -63,8 +84,15 @@ function inlineWorkspaceFileImages(html: string): string {
 			const remaining = MAX_INLINED_IMAGE_BYTES - total;
 			if (remaining <= 0) return tag;
 			const content = readBoundedRegularFile(real, remaining, "Report image");
+			const replacement = tag.replace(
+				/src=["']file:\/\/[^"']+["']/i,
+				`src="data:${mime};base64,${content.toString("base64")}"`,
+			);
+			const replacementDelta = Buffer.byteLength(replacement, "utf8") - Buffer.byteLength(tag, "utf8");
+			if (finalHtmlBytes + replacementDelta > MAX_VERIFICATION_REPORT_BYTES) return tag;
 			total += content.byteLength;
-			return tag.replace(/src=["']file:\/\/[^"']+["']/i, `src="data:${mime};base64,${content.toString("base64")}"`);
+			finalHtmlBytes += replacementDelta;
+			return replacement;
 		} catch {
 			return tag;
 		}
