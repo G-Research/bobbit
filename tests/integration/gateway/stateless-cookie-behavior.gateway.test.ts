@@ -156,7 +156,7 @@ async function withRegistryPreserved<T>(gateway: GatewayFixture, action: (file: 
 }
 
 describe.sequential("stateless cookie behavior through the real gateway", () => {
-	it("mints only for accepted direct, originless, localhost, and Vite browser shapes", async () => {
+	it("mints only for accepted direct, localhost, and configured Vite browser shapes", async () => {
 		const gateway = await getGateway();
 		await withRegistryPreserved(gateway, async () => {
 			const target = new URL(gateway.baseURL);
@@ -166,8 +166,8 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 					headers: browserHeaders(gateway),
 				},
 				{
-					label: "originless same-origin GET",
-					headers: browserHeaders(gateway, { Origin: undefined, "Sec-Fetch-Mode": "same-origin" }),
+					label: "coherent same-origin GET without Origin",
+					headers: browserHeaders(gateway, { Origin: undefined }),
 				},
 				{
 					label: "localhost direct request",
@@ -177,7 +177,7 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 					}),
 				},
 				{
-					label: "Vite proxy request with preserved dev-server origin",
+					label: "Vite proxy request with preserved configured dev-server origin",
 					headers: browserHeaders(gateway, {
 						Host: `localhost:${target.port}`,
 						Origin: "http://localhost:5173",
@@ -193,12 +193,17 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 		});
 	});
 
-	it("rejects untrusted or conflicting browser metadata without weakening Bearer auth", async () => {
+	it("admits originless Bearer clients but rejects untrusted or conflicting browser metadata", async () => {
 		const gateway = await getGateway();
 		await withRegistryPreserved(gateway, async () => {
+			const plainBearer = await rawRequest(gateway.baseURL, "/api/health", {
+				headers: { Authorization: `Bearer ${gateway.token}` },
+			});
+			expect(plainBearer.status, plainBearer.body).toBe(200);
+			expect(plainBearer.setCookies, "non-browser Bearer traffic must not mint a browser cookie").toEqual([]);
+
 			const origin = new URL(gateway.baseURL).origin;
 			const cases: Array<{ label: string; headers: Record<string, string> }> = [
-				{ label: "plain Bearer", headers: { Authorization: `Bearer ${gateway.token}` } },
 				{ label: "cross-site", headers: browserHeaders(gateway, { "Sec-Fetch-Site": "cross-site" }) },
 				{ label: "same-site", headers: browserHeaders(gateway, { "Sec-Fetch-Site": "same-site" }) },
 				{ label: "navigation mode", headers: browserHeaders(gateway, { "Sec-Fetch-Mode": "navigate" }) },
@@ -213,7 +218,7 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 
 			for (const testCase of cases) {
 				const response = await rawRequest(gateway.baseURL, "/api/health", { headers: testCase.headers });
-				expect.soft(response.status, `${testCase.label}: Bearer auth must still succeed`).toBe(200);
+				expect.soft(response.status, `${testCase.label}: ${response.body}`).toBe(403);
 				expect.soft(response.setCookies, `${testCase.label} must not emit Set-Cookie`).toEqual([]);
 			}
 		});

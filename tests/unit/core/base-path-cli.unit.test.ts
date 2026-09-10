@@ -7,6 +7,7 @@ interface CliArgs {
 }
 
 interface StartupUrls {
+	authEnforced: boolean;
 	listenUrl: string;
 	peerUrl: string;
 	uiUrl: string;
@@ -23,6 +24,7 @@ interface CliModule {
 		basePath: string;
 		token: string;
 		forceAuth?: boolean;
+		trustedLocal: boolean;
 	}): StartupUrls;
 	formatStartupBanner(options: {
 		version: string;
@@ -113,6 +115,7 @@ describe("mounted startup URLs", () => {
 			port: 43127,
 			basePath: "/team/bobbit",
 			token: "real token",
+			trustedLocal: false,
 		});
 		assert.equal(urls.listenUrl, "http://0.0.0.0:43127/team/bobbit");
 		assert.equal(urls.peerUrl, "http://127.0.0.1:43127/team/bobbit");
@@ -128,7 +131,9 @@ describe("mounted startup URLs", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "generated-but-unused",
+			trustedLocal: true,
 		});
+		assert.equal(urls.authEnforced, false);
 		assert.equal(urls.peerUrl, "http://localhost:3001/bobbit");
 		assert.equal(urls.uiUrl, "http://localhost:3001/bobbit/");
 		assert.equal(urls.openUrl, "http://localhost:3001/bobbit/");
@@ -143,14 +148,55 @@ describe("mounted startup URLs", () => {
 			port: 443,
 			basePath: "",
 			token: "secret",
+			trustedLocal: false,
 		});
 		assert.equal(urls.listenUrl, "https://gateway.example:443");
 		assert.equal(urls.peerUrl, "https://gateway.example:443");
 		assert.equal(urls.uiUrl, "https://gateway.example:443/?token=secret");
 	});
+
+	it("keeps forced authentication on a fully trusted loopback policy", async () => {
+		const { buildStartupUrls } = await cliModule();
+		const urls = buildStartupUrls({
+			protocol: "http",
+			host: "localhost",
+			port: 3001,
+			basePath: "",
+			token: "forced-secret",
+			forceAuth: true,
+			trustedLocal: true,
+		});
+		assert.equal(urls.authEnforced, true);
+		assert.equal(urls.uiUrl, "http://localhost:3001/?token=forced-secret");
+	});
 });
 
 describe("truthful authentication banner", () => {
+	it("uses final non-local policy trust for a loopback bind", async () => {
+		const { buildStartupUrls, formatStartupBanner } = await cliModule();
+		const urls = buildStartupUrls({
+			protocol: "http",
+			host: "localhost",
+			port: 3001,
+			basePath: "/bobbit",
+			token: "bootstrap-secret",
+			trustedLocal: false,
+		});
+		const banner = formatStartupBanner({
+			version: "0.0.0-test",
+			cwd: "/workspace",
+			staticDir: "/dist/ui",
+			token: "bootstrap-secret",
+			urls,
+		});
+		assert.equal(urls.authEnforced, true);
+		assert.equal(urls.uiUrl, "http://localhost:3001/bobbit/?token=bootstrap-secret");
+		assert.equal(urls.openUrl, urls.uiUrl);
+		assert.match(banner, /bootstrap-secret/);
+		assert.match(banner, /keep it secret|grants full shell access/i);
+		assert.doesNotMatch(banner, /authentication is disabled/i);
+	});
+
 	it("does not display a generated token or secrecy warning when auth is disabled", async () => {
 		const { buildStartupUrls, formatStartupBanner } = await cliModule();
 		const urls = buildStartupUrls({
@@ -159,6 +205,7 @@ describe("truthful authentication banner", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "must-not-appear",
+			trustedLocal: true,
 		});
 		const banner = formatStartupBanner({
 			version: "0.0.0-test",
@@ -181,6 +228,7 @@ describe("truthful authentication banner", () => {
 			port: 3001,
 			basePath: "/team/bobbit",
 			token: "real-secret",
+			trustedLocal: false,
 		});
 		const banner = formatStartupBanner({
 			version: "0.0.0-test",

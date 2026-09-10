@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,8 @@ export function hasVersionFlag(argv: string[]): boolean {
 			case "--static":
 			case "--agent-cli":
 			case "--base-path":
+			case "--public-origin":
+			case "--vite-origin":
 				i++;
 				break;
 		}
@@ -56,6 +59,16 @@ export interface CliArgs {
 	staticDir?: string;
 	agentCliPath?: string;
 	basePath: string;
+	/** Explicit externally reachable gateway origins. */
+	publicOrigins: string[];
+	/** Explicit development UI origins allowed to proxy to this gateway. */
+	viteOrigins: string[];
+}
+
+export interface RequestAdmissionCliConfig {
+	publicOrigins: string[];
+	viteOrigins: string[];
+	tlsHostnames: string[];
 }
 
 export interface StartupUrls {
@@ -72,6 +85,15 @@ function urlHost(host: string): string {
 	return normalized.includes(":") && !normalized.startsWith("[") ? `[${normalized}]` : normalized;
 }
 
+function buildStartupPeerUrl(input: {
+	protocol: "http" | "https";
+	host: string;
+	port: number;
+	basePath?: string;
+}): string {
+	return `${input.protocol}://${urlHost(loopbackForBind(input.host))}:${input.port}${normalizeBasePath(input.basePath)}`;
+}
+
 export function buildStartupUrls(input: {
 	protocol: "http" | "https";
 	host: string;
@@ -79,11 +101,13 @@ export function buildStartupUrls(input: {
 	basePath?: string;
 	token: string;
 	forceAuth?: boolean;
+	/** Final coarse trust result exposed by the successfully started gateway. */
+	trustedLocal: boolean;
 }): StartupUrls {
 	const basePath = normalizeBasePath(input.basePath);
-	const authEnforced = Boolean(input.forceAuth) || !isLoopbackHost(input.host);
+	const authEnforced = Boolean(input.forceAuth) || !input.trustedLocal;
 	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
-	const peerUrl = `${input.protocol}://${urlHost(loopbackForBind(input.host))}:${input.port}${basePath}`;
+	const peerUrl = buildStartupPeerUrl(input);
 	const uiUrl = authEnforced
 		? `${peerUrl}/?token=${encodeURIComponent(input.token)}`
 		: `${peerUrl}/`;
@@ -130,6 +154,135 @@ function findNordLynxIp(): string | null {
 	return null;
 }
 
+function normalizeConfiguredHostname(value: unknown, label: string): string {
+	if (typeof value !== "string") throw new Error(`Invalid ${label} hostname: ${JSON.stringify(value)}`);
+	const raw = value.trim();
+	if (!raw || /[\s,/?#\\@]/u.test(raw)) throw new Error(`Invalid ${label} hostname: ${JSON.stringify(value)}`);
+	const bracketed = raw.startsWith("[") && raw.endsWith("]");
+	if (raw.startsWith("[") !== raw.endsWith("]")) throw new Error(`Invalid ${label} hostname: ${JSON.stringify(value)}`);
+	const candidate = bracketed ? raw.slice(1, -1) : raw;
+	if (net.isIP(candidate)) {
+		const parsed = new URL(`http://${net.isIP(candidate) === 6 ? `[${candidate}]` : candidate}`);
+		return parsed.hostname.replace(/^\[|\]$/gu, "");
+	}
+	const hostname = candidate.toLowerCase().replace(/\.$/u, "");
+	if (!hostname || hostname.length > 253 || /^\d+(?:\.\d+)*$/u.test(hostname)) {
+		throw new Error(`Invalid ${label} hostname: ${JSON.stringify(value)}`);
+	}
+	const labels = hostname.split(".");
+	if (labels.some((part) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(part))) {
+		throw new Error(`Invalid ${label} hostname: ${JSON.stringify(value)}`);
+	}
+	return hostname;
+}
+
+/** Validate and canonicalize one configured HTTP(S) origin. */
+export function normalizeConfiguredOrigin(value: string, label = "origin"): string {
+	const raw = value.trim();
+	if (
+		!raw
+		|| /\s/u.test(raw)
+		|| !/^https?:\/\/[^/]+\/?$/iu.test(raw)
+		|| raw.includes("?")
+		|| raw.includes("#")
+	) {
+		throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
+	}
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:")
+		|| parsed.username
+		|| parsed.password
+		|| parsed.pathname !== "/"
+		|| parsed.search
+		|| parsed.hash
+	) {
+		throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
+	}
+	const hostname = normalizeConfiguredHostname(parsed.hostname, label);
+	const authorityHost = net.isIP(hostname) === 6 ? `[${hostname}]` : hostname;
+	return `${parsed.protocol}//${authorityHost}${parsed.port ? `:${parsed.port}` : ""}`;
+}
+
+function configuredOriginList(value: string | undefined, label: string): string[] {
+	if (value === undefined || value.trim() === "") return [];
+	const entries = value.split(",");
+	if (entries.some((entry) => entry.trim() === "")) throw new Error(`Invalid ${label} list: empty entry`);
+	return entries.map((entry) => normalizeConfiguredOrigin(entry, label));
+}
+
+function appendConfiguredOrigin(target: string[], value: string | undefined, label: string): void {
+	if (value === undefined || value.startsWith("--")) throw new Error(`${label} requires a value`);
+	target.push(normalizeConfiguredOrigin(value, label));
+}
+
+function unique(values: readonly string[]): string[] {
+	return [...new Set(values)];
+}
+
+const STANDARD_VITE_PORT = 5173;
+const STANDARD_VITE_LIFECYCLES = new Set(["dev", "dev:harness", "dev:watchdog"]);
+
+/** Derive the one finite browser origin used by the standard Vite development launcher. */
+function standardViteOrigin(env: NodeJS.ProcessEnv): string[] {
+	// npm's lifecycle marker survives the standard scripts' launcher chain;
+	// BOBBIT_NORD separately identifies the dedicated Nord launcher.
+	const standardLauncher = STANDARD_VITE_LIFECYCLES.has(env.npm_lifecycle_event ?? "");
+	if (!standardLauncher || env.BOBBIT_NORD === "1") return [];
+	const rawHost = env.VITE_HOST || "localhost";
+	if (rawHost !== rawHost.trim()) throw new Error(`Invalid Vite hostname: ${JSON.stringify(rawHost)}`);
+	const hostname = normalizeConfiguredHostname(rawHost, "Vite");
+	if (hostname === "0.0.0.0" || hostname === "::") {
+		throw new Error(`Invalid Vite hostname: wildcard listener ${JSON.stringify(rawHost)}`);
+	}
+	const authorityHost = net.isIP(hostname) === 6 ? `[${hostname}]` : hostname;
+	// Standard launchers serve Vite over deterministic HTTP regardless of host.
+	// Nord is the separate, pre-provisioned HTTPS path handled by nordViteOrigins().
+	return [normalizeConfiguredOrigin(`http://${authorityHost}:${STANDARD_VITE_PORT}`, "Vite origin")];
+}
+
+/** Build the finite admission inputs that correspond to CLI and TLS configuration. */
+export function buildRequestAdmissionCliConfig(input: {
+	publicOrigins?: readonly string[];
+	viteOrigins?: readonly string[];
+	bindHost: string;
+	tlsHostnames?: readonly string[];
+}): RequestAdmissionCliConfig {
+	const tlsNames: string[] = [];
+	for (const candidate of [input.bindHost, "127.0.0.1", "localhost", ...(input.tlsHostnames ?? [])]) {
+		const hostname = normalizeConfiguredHostname(candidate, "TLS");
+		if (hostname === "0.0.0.0" || hostname === "::") continue;
+		tlsNames.push(hostname);
+	}
+	return {
+		publicOrigins: unique((input.publicOrigins ?? []).map((origin) => normalizeConfiguredOrigin(origin, "public origin"))),
+		viteOrigins: unique((input.viteOrigins ?? []).map((origin) => normalizeConfiguredOrigin(origin, "Vite origin"))),
+		tlsHostnames: unique(tlsNames),
+	};
+}
+
+/** Known finite origins used by the `dev:nord` workflow. */
+export function nordViteOrigins(input: {
+	bindHost: string;
+	publicHostnames?: readonly string[];
+	port?: number;
+}): string[] {
+	const port = input.port ?? 5173;
+	if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid Vite development port");
+	return unique([input.bindHost, ...(input.publicHostnames ?? [])].map((hostname) => {
+		const normalized = normalizeConfiguredHostname(hostname, "Vite");
+		if (normalized === "0.0.0.0" || normalized === "::") {
+			throw new Error(`Invalid Vite hostname: wildcard listener ${JSON.stringify(hostname)}`);
+		}
+		return normalizeConfiguredOrigin(`https://${net.isIP(normalized) === 6 ? `[${normalized}]` : normalized}:${port}`, "Vite origin");
+	}));
+}
+
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): CliArgs {
 	const envPort = env.PORT ? parseInt(env.PORT, 10) : NaN;
 	const result: CliArgs = {
@@ -144,9 +297,13 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		tlsExplicit: false,
 		forceAuth: false,
 		basePath: "",
+		publicOrigins: [],
+		viteOrigins: [],
 	};
 	let basePathFlagPresent = false;
 	let basePathFlagValue: string | undefined;
+	let publicOriginFlagPresent = false;
+	let viteOriginFlagPresent = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
@@ -179,6 +336,14 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 				}
 				basePathFlagValue = argv[++i]!;
 				break;
+			case "--public-origin":
+				publicOriginFlagPresent = true;
+				appendConfiguredOrigin(result.publicOrigins, argv[++i], "--public-origin");
+				break;
+			case "--vite-origin":
+				viteOriginFlagPresent = true;
+				appendConfiguredOrigin(result.viteOrigins, argv[++i], "--vite-origin");
+				break;
 			case "--no-ui":
 				result.noUi = true;
 				break;
@@ -210,6 +375,17 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		? basePathFlagValue
 		: Object.prototype.hasOwnProperty.call(env, "BOBBIT_BASE_PATH") ? env.BOBBIT_BASE_PATH : undefined;
 	result.basePath = normalizeBasePath(selectedBasePath);
+	result.publicOrigins = unique(publicOriginFlagPresent
+		? result.publicOrigins
+		: configuredOriginList(env.BOBBIT_PUBLIC_ORIGINS, "public origin"));
+	if (viteOriginFlagPresent) {
+		result.viteOrigins = unique(result.viteOrigins);
+	} else {
+		const configuredViteOrigins = configuredOriginList(env.BOBBIT_VITE_ORIGINS, "Vite origin");
+		result.viteOrigins = unique(configuredViteOrigins.length > 0
+			? configuredViteOrigins
+			: standardViteOrigin(env));
+	}
 
 	// Auto-detect embedded UI (dist/ui/) unless --no-ui or explicit --static
 	if (!result.noUi && !result.staticDir) {
@@ -287,7 +463,7 @@ async function main() {
 
 	// Load deSEC config early — domain is needed for TLS cert SAN
 	const desecConfig = loadDesecConfig();
-	const extraDomains = desecConfig ? [desecConfig.domain] : [];
+	const extraDomains = desecConfig ? [normalizeConfiguredHostname(desecConfig.domain, "deSEC")] : [];
 
 	// TLS setup — auto-generate cert (mkcert CA preferred, openssl fallback)
 	const tls = args.tls ? await ensureTlsCert(args.host, extraDomains) : undefined;
@@ -302,9 +478,21 @@ async function main() {
 	bootMark(`BOOT ${new Date().toISOString()}`);
 	bootLog(`[boot] prologue (binaries/token/tls) in ${Date.now() - bootWallT0}ms`);
 	const protocol = args.tls ? "https" as const : "http" as const;
-	let startupUrls: StartupUrls | undefined;
+	const viteOrigins = process.env.BOBBIT_NORD === "1"
+		? unique([...args.viteOrigins, ...nordViteOrigins({
+			bindHost: args.host,
+			publicHostnames: extraDomains,
+		})])
+		: args.viteOrigins;
+	const requestAdmissionConfig = buildRequestAdmissionCliConfig({
+		publicOrigins: args.publicOrigins,
+		viteOrigins,
+		bindHost: args.host,
+		tlsHostnames: extraDomains,
+	});
 	const ctorT0 = Date.now();
 	const gateway = createGateway({
+		...requestAdmissionConfig,
 		host: args.host,
 		port: args.port,
 		portExplicit: args.portExplicit,
@@ -312,17 +500,14 @@ async function main() {
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
 		basePath: args.basePath,
-		onBound: (actualPort) => {
-			startupUrls = buildStartupUrls({
-				protocol,
-				host: args.host,
-				port: actualPort,
-				basePath: args.basePath,
-				token: authToken,
-				forceAuth: args.forceAuth,
-			});
-			return startupUrls.peerUrl;
-		},
+		// Publication participates in policy compilation, so keep this callback
+		// query-free and defer display/open authentication state until start resolves.
+		onBound: (actualPort) => buildStartupPeerUrl({
+			protocol,
+			host: args.host,
+			port: actualPort,
+			basePath: args.basePath,
+		}),
 		agentCliPath: args.agentCliPath,
 		systemPromptPath,
 		tls,
@@ -347,15 +532,16 @@ async function main() {
 		}
 	}
 
-	// createGateway publishes during bind, before persisted sessions resume. Keep a
-	// defensive fallback for custom implementations that do not invoke onBound.
-	const effectiveStartupUrls = startupUrls ?? buildStartupUrls({
+	// Build user-visible and auto-open URLs only after the gateway has compiled its
+	// complete authority policy. The published peer URL above remains query-free.
+	const effectiveStartupUrls = buildStartupUrls({
 		protocol,
 		host: args.host,
 		port: actualPort,
 		basePath: args.basePath,
 		token: authToken,
 		forceAuth: args.forceAuth,
+		trustedLocal: gateway.trustedLocal,
 	});
 
 	const pkgVersion = readPackageVersion();

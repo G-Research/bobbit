@@ -40,7 +40,8 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
-import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "./cors.js";
+import { applyApprovedCorsHeaders } from "./cors.js";
+import { admitRequest, compileRequestAdmissionPolicy } from "./request-admission.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
@@ -668,7 +669,7 @@ import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
-import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
+import { loopbackForBind } from "./cli-loopback.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { isTrustedExternalHost, normalizeTrustedHost, normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -2501,6 +2502,12 @@ export interface GatewayConfig {
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
+	/** Additional externally reachable HTTP(S) origins trusted for Host validation. */
+	publicOrigins?: readonly string[];
+	/** Finite browser development origins allowed to proxy to this gateway. */
+	viteOrigins?: readonly string[];
+	/** Finite DNS/IP names covered by the configured direct-TLS certificate. */
+	tlsHostnames?: readonly string[];
 	/** Canonical runtime mount; omitted/empty means root-mounted. */
 	basePath?: string;
 	/**
@@ -4061,11 +4068,57 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let sandboxManager: SandboxManager | null = null;
 	// The listener binds before session restoration so the actual port can be
 	// published. Mounted routing remains active during that window, but in-mount
-	// traffic is held behind a 503 readiness gate.
+	// traffic is held behind a 503 readiness gate. Admission is compiled only
+	// after the actual listener port and published origin are known; until then,
+	// every transport fails closed without reaching readiness or route handling.
 	let gatewayReady = false;
+	let requestAdmissionPolicy: ReturnType<typeof compileRequestAdmissionPolicy> | undefined;
+
+	const admissionMetadata = (req: http.IncomingMessage, transport: "http" | "websocket") => ({
+		rawHeaders: req.rawHeaders,
+		method: req.method,
+		url: req.url,
+		isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+		transport,
+	} as const);
+	const boundedDiagnosticValue = (value: string | undefined, fallback: string): string => {
+		if (!value) return fallback;
+		const normalized = value.replace(/[^A-Za-z0-9_.:%-]/g, "_");
+		return normalized.slice(0, 64) || fallback;
+	};
+	const logAdmissionRejection = (
+		req: http.IncomingMessage,
+		transport: "http" | "websocket",
+		reason: string,
+		context: string,
+	): void => {
+		const method = boundedDiagnosticValue(req.method, "UNKNOWN");
+		const remote = boundedDiagnosticValue(req.socket.remoteAddress, "unknown");
+		const safeReason = boundedDiagnosticValue(reason, "unknown");
+		const safeContext = boundedDiagnosticValue(context, "unknown");
+		console.warn(`[security] request admission rejected reason=${safeReason} transport=${transport} method=${method} context=${safeContext} remote=${remote}`);
+	};
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		const policy = requestAdmissionPolicy;
+		if (!policy) {
+			logAdmissionRejection(req, "http", "policy-unavailable", "unknown");
+			res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "1" });
+			res.end("Gateway starting");
+			return;
+		}
+		const admission = admitRequest(policy, admissionMetadata(req, "http"));
+		if (!admission.allowed) {
+			logAdmissionRejection(req, "http", admission.reason, admission.context);
+			res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Forbidden");
+			return;
+		}
+		if (admission.cors) applyApprovedCorsHeaders(res, admission.cors);
+
+		// Admission validates the raw request target and authority first. Routing
+		// then parses only the origin-form target against a fixed sentinel.
+		const url = new URL(req.url || "/", "http://gateway.invalid");
 		if (basePath && url.pathname === basePath) {
 			res.writeHead(301, { Location: `${basePath}/${url.search}` });
 			res.end();
@@ -4083,7 +4136,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.end("Gateway starting");
 			return;
 		}
-		const isLocalhostMode = !config.forceAuth && isLoopbackHost(config.host);
+		// Local credential bypass is a property of the complete admitted authority
+		// policy, not of the physical bind address. A loopback backend that publishes
+		// any non-loopback authority must retain the normal auth boundary everywhere.
+		const isLocalhostMode = !config.forceAuth && admission.trustedLocal;
 
 		// Content-origin preview route — served before API auth so iframe loads
 		// can authenticate via the bobbit_session cookie instead of the bearer
@@ -4110,15 +4166,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				});
 			}
 
-			// When serving the UI (same-origin), reflect the request origin; otherwise allow any.
-			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
-			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
-			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
-			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
-
 			if (req.method === "OPTIONS") {
-				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
@@ -4223,6 +4271,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					pathname: url.pathname,
 					headers: req.headers,
 					isTls,
+					admittedHost: admission.normalizedHost,
+					admittedOrigin: admission.normalizedOrigin,
+					admittedGatewayOrigin: admission.gatewayOrigin ?? null,
 				}, {
 					deployment: config.staticDir ? "direct" : "vite",
 					configuredHost: config.host,
@@ -4230,7 +4281,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
+					const isLoopbackHttpOrigin = isLocalhostMode
+						&& (admission.gatewayOrigin
+							? admission.gatewayOrigin.startsWith("http://")
+							: !isTls);
+					issueCookie(res, cookieStore, { localhost: isLoopbackHttpOrigin, basePath });
 				}
 			}
 
@@ -4252,7 +4307,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -5088,10 +5143,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 	});
 
-	const isLocalhostServer = !config.forceAuth && isLoopbackHost(config.host);
+	const rejectWebSocketAdmission = (
+		socket: import("node:stream").Duplex,
+		status: 403 | 503,
+	): void => {
+		socket.once("error", () => {});
+		const label = status === 403 ? "Forbidden" : "Service Unavailable";
+		const retryAfter = status === 503 ? "Retry-After: 1\r\n" : "";
+		socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\n${retryAfter}Content-Length: 0\r\n\r\n`);
+	};
 
 	server.on("upgrade", (req, socket, head) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		const policy = requestAdmissionPolicy;
+		if (!policy) {
+			logAdmissionRejection(req, "websocket", "policy-unavailable", "websocket");
+			rejectWebSocketAdmission(socket, 503);
+			return;
+		}
+		const admission = admitRequest(policy, admissionMetadata(req, "websocket"));
+		if (!admission.allowed) {
+			logAdmissionRejection(req, "websocket", admission.reason, admission.context);
+			rejectWebSocketAdmission(socket, 403);
+			return;
+		}
+		const url = new URL(req.url || "/", "http://gateway.invalid");
 		const wsPathname = stripBasePath(url.pathname, basePath);
 		if (wsPathname === null) {
 			socket.destroy();
@@ -5106,7 +5181,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 		const ip = req.socket.remoteAddress || "unknown";
-		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
+		const isLocalhostRequest = !config.forceAuth && admission.trustedLocal;
+		if (!isLocalhostRequest && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
@@ -5118,7 +5194,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostRequest, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
@@ -5128,6 +5204,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	const closeBoundServer = async (): Promise<void> => {
 		gatewayReady = false;
+		requestAdmissionPolicy = undefined;
 		if (!server.listening) return;
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	};
@@ -5176,6 +5253,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		/** @internal Exposed for integration coverage of production hook wiring. */
 		hostInterceptorRouter,
 		get extensionChannels() { return extensionChannelServices; },
+		/**
+		 * Coarse post-start result used by the CLI to mirror the compiled policy's
+		 * local authentication bypass without exposing trusted authority details.
+		 */
+		get trustedLocal(): boolean {
+			if (!gatewayReady || !requestAdmissionPolicy) {
+				throw new Error("Gateway local trust is unavailable before successful start");
+			}
+			return requestAdmissionPolicy.allAuthoritiesLoopback;
+		},
 		async start(): Promise<number> {
 			// Phase timer for the pre-listen critical path: everything awaited here
 			// blocks `server.listen()`, i.e. delays the UI becoming reachable.
@@ -5381,6 +5468,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (callbackUrl !== undefined) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
+				const publishedOrigin = new URL(publishedGatewayUrl).origin;
+				const listenerScheme = config.tls ? "https" : "http";
+				const listenerOrigin = (host: string): string =>
+					new URL(`${listenerScheme}://${publishedUrlHost(host)}:${actualPort}`).origin;
+				const viteGatewayOrigins = new Set<string>([
+					publishedOrigin,
+					listenerOrigin("localhost"),
+					listenerOrigin("127.0.0.1"),
+					listenerOrigin("::1"),
+					...(config.publicOrigins ?? []),
+					...(config.tls ? (config.tlsHostnames ?? []).map(listenerOrigin) : []),
+				]);
+				const normalizedBindHost = config.host.trim().replace(/^\[|\]$/g, "");
+				if (normalizedBindHost && normalizedBindHost !== "0.0.0.0" && normalizedBindHost !== "::") {
+					viteGatewayOrigins.add(listenerOrigin(normalizedBindHost));
+				}
+				requestAdmissionPolicy = compileRequestAdmissionPolicy({
+					bindHost: config.host,
+					actualPort,
+					isTls: Boolean(config.tls),
+					basePath,
+					tlsHostnames: config.tls ? config.tlsHostnames : undefined,
+					publicOrigins: config.publicOrigins,
+					publishedOrigin,
+					viteOriginPairs: config.viteOrigins?.flatMap((origin) =>
+						[...viteGatewayOrigins].map((gatewayOrigin) => ({ origin, gatewayOrigin }))),
+				});
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
 			// Resolve any cross-store staff-fork publication interrupted after the
@@ -5968,6 +6082,7 @@ async function handleApiRoute(
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
 	hostInterceptorRouter?: HostInterceptorRouter,
+	trustedLocalRequest = false,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -6752,13 +6867,14 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/health — unauthenticated so the client can probe localhost mode
+	// GET /api/health — reports the admission-derived local trust mode. A
+	// loopback backend serving a public authority must not tell that browser to
+	// rely on the credential-free localhost transport.
 	if (url.pathname === "/api/health" && req.method === "GET") {
-		const isLocalhost = !config.forceAuth && isLoopbackHost(config.host);
 		json({
 			status: "ok",
 			sessions: sessionManager.listSessions().length,
-			localhost: isLocalhost,
+			localhost: trustedLocalRequest,
 			aigw: !!getAigwUrl(preferencesStore),
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
@@ -18684,7 +18800,7 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const output = await execGit('git pull', cwd, 30000, cid);
+			const output = await execGit('git pull', cwd, 30000, cid, commandRunner);
 			invalidateGitStatusCache(cwd, cid);
 			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });

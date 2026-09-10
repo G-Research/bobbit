@@ -43,22 +43,26 @@ See **[Run from Checkout](docs/run-from-checkout.md)** for full details, PATH in
 ```
 bobbit [options]
 
---host <addr>       Bind address (default: localhost)
---port <n>          Port (default: 3001)
---base-path <path>  Mount the production UI and API below a URL path (default: /)
---nord              Bind to NordLynx mesh IP (remote access via NordVPN meshnet)
---tls / --no-tls    Override TLS auto-detection
---auth              Require token authentication on a loopback bind
---cwd <dir>         Working directory for agent sessions (default: .)
---agent-cli <path>  Path to pi-coding-agent cli.js
---static <dir>      Serve a custom UI build directory
---no-ui             Gateway-only mode (no UI)
---new-token         Force-generate a new auth token
---show-token        Print the current token and exit
---version           Print the installed Bobbit version and exit
+--host <addr>          Bind address (default: localhost)
+--port <n>             Port (default: 3001)
+--base-path <path>     Mount the production UI and API below a URL path (default: /)
+--public-origin <url>  Trust an externally visible gateway origin (repeatable)
+--vite-origin <url>    Trust a browser-visible Vite development origin (repeatable)
+--nord                 Bind to NordLynx mesh IP (remote access via NordVPN meshnet)
+--tls / --no-tls       Override TLS auto-detection
+--auth                 Require token authentication on a loopback bind
+--cwd <dir>            Working directory for agent sessions (default: .)
+--agent-cli <path>     Path to pi-coding-agent cli.js
+--static <dir>         Serve a custom UI build directory
+--no-ui                Gateway-only mode (no UI)
+--new-token            Force-generate a new auth token
+--show-token           Print the current token and exit
+--version              Print the installed Bobbit version and exit
 ```
 
-See the **[Networking guide](docs/networking.md#production-subpath-mounting)** for base-path normalization and reverse-proxy configuration.
+`BOBBIT_PUBLIC_ORIGINS` and `BOBBIT_VITE_ORIGINS` provide comma-separated environment alternatives to the repeatable flags. Command-line values replace their corresponding environment list. Origins must be absolute `http://` or `https://` origins without credentials, non-root paths, queries, or fragments; invalid values stop startup.
+
+See the **[Networking guide](docs/networking.md#request-admission-configuration)** for trusted-authority, Vite, base-path, and reverse-proxy configuration.
 
 ### From source
 

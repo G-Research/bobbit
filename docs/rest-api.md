@@ -1,10 +1,14 @@
 # REST API
 
-Gateway routes require an authentication source accepted by that surface. Most
-programmatic API calls use `Authorization: Bearer <admin-token>`; routes that
-support it also accept `?token=`. Browser API requests and preview resources may
-instead authenticate with a valid `bobbit_session` cookie. Scoped sandbox and
-session credentials remain limited to their existing route allow-lists.
+Every request first passes the gateway's [request-admission
+policy](security.md#request-admission). Admission validates the authority and
+browser context; it does not authenticate or authorize the route. After
+admission, each gateway surface still requires one of its accepted
+authentication sources. Most programmatic API calls use
+`Authorization: Bearer <admin-token>`; routes that support it also accept
+`?token=`. Browser API requests and preview resources may instead authenticate
+with a valid `bobbit_session` cookie. Scoped sandbox and session credentials
+remain limited to their existing route allow-lists.
 
 `bobbit_session` is a stateless signed value:
 `v1.<iat>.<exp>.<nonce>.<signature>`. The canonical issuance and expiry Unix
@@ -39,20 +43,21 @@ Those browser headers classify issuance only; they do not establish authority
 or prove a human caller. Consequently, a holder of the shared admin token can
 still deliberately make an otherwise eligible browser-shaped request and
 obtain the weak operator cookie. Cookies have
-`HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`, plus `Secure` outside
-localhost HTTP mode. Individual cookies are not independently revocable;
-rotating the signing key invalidates all of them.
+`HttpOnly; SameSite=Lax; Max-Age=2592000`, plus `Secure` outside the
+credential-free all-loopback HTTP mode. Their `Path` is `/` for a root-mounted gateway and
+`<base-path>/` for a mounted gateway. Individual cookies are not independently
+revocable; rotating the signing key invalidates all of them.
 
 ### Cross-origin API preflight
 
-Every `/api/` response advertises the API's complete request-method contract:
-`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. An `OPTIONS` preflight
-returns `204` and additionally caches that approval for 600 seconds via
-`Access-Control-Max-Age`. This lets a UI on a different origin perform every
-supported API mutation, including `PATCH`, rather than having the browser
-reject a valid request before it reaches the gateway.
+Request admission permits cross-origin API access only through an exact
+configured Vite-origin-to-gateway pair. An approved `OPTIONS` preflight returns
+`204`, the exact approved `Access-Control-Allow-Origin`, `Vary: Origin`, and a
+600-second `Access-Control-Max-Age`. It returns only the requested method when
+that method is in the API contract: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, or
+`OPTIONS`.
 
-The preflight allows these non-simple request headers:
+The preflight may approve these requested non-simple headers:
 
 - `Authorization`
 - `Content-Type`
@@ -61,25 +66,27 @@ The preflight allows these non-simple request headers:
 - `X-Bobbit-Spawning-Session`
 - `X-Bobbit-Session-Secret`
 
-These headers are permitted so authenticated, concurrency-aware, and
-session-scoped API calls can cross origins; permission is not authentication.
-In particular, a remote UI normally authenticates with its explicit Bearer
-token. CORS is intentionally non-credentialed: the gateway does not send
-`Access-Control-Allow-Credentials`, so browsers must not rely on cross-origin
-cookie authentication. Same-origin cookie flows remain governed by their
-normal authentication rules.
+Only requested headers from that inventory are returned. This CORS permission
+lets authenticated, concurrency-aware, and session-scoped requests reach their
+existing route checks; it is not authentication. The gateway never emits
+`Access-Control-Allow-Credentials`, so cross-origin cookie authentication is
+not advertised. Vite keeps its browser-facing requests same-origin and proxies
+them through its finite configured pairing; an explicitly cross-origin remote
+UI uses Bearer authentication. Same-origin cookie flows retain their normal
+authentication rules.
 
-This does not broaden the origin policy. A gateway serving its UI reflects the
-request origin (and varies by `Origin`); a gateway not serving the UI continues
-to advertise `*`. The method and header contract is separate from that origin
-decision.
+A rejected origin, method, header, malformed preflight, cross-site Fetch
+Metadata context, or Private Network Access request receives `403` before API
+routing and without CORS capability headers. The gateway never emits
+`Access-Control-Allow-Origin: *` or
+`Access-Control-Allow-Private-Network`.
 
 For example, the side-panel workspace persists a tab edit through
-`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. When the UI and
-gateway use different origins, the browser preflights that `PATCH` before the
-request. Advertising `PATCH`, `Authorization`, and any applicable session or
-concurrency header lets the persistence request reach its existing route, so a
-side-panel edit is retained instead of appearing to be forgotten after reload.
+`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. If a browser served
+from a configured Vite origin addresses its paired gateway directly, the
+gateway admits the preflight and returns the requested `PATCH`,
+`Authorization`, and applicable session or concurrency headers. The existing
+route can then retain the edit instead of appearing to forget it after reload.
 
 ### Driving the gateway from an agent
 
@@ -1994,9 +2001,9 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 ### Preview
 
-The preview side-panel iframe is fed by a per-session content mount served from a cookie-authed origin path. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
+The preview side-panel iframe is fed by a per-session content mount. Central request admission validates every preview document and asset request before the content route applies its signed-cookie authentication. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
 
-**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the signed `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. After admission, the signed `bobbit_session` cookie authenticates the content request. It is HttpOnly, has a 30-day max-age, uses `/` as its path in root mode and `<base-path>/` when mounted, and is `Secure` outside the credential-free all-loopback HTTP mode. iframe loads, link navigation, and "Open in new tab" below the mount carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
 
 #### Historical `preview_open` snapshot markers
 
