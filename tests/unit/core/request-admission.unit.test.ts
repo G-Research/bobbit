@@ -449,6 +449,16 @@ describe("browser route/context matrix", () => {
 		assert.equal(websocket.context, "websocket");
 
 		assertDenied("invalid-fetch-metadata", { url: "/api/health", rawHeaders: webkitHeaders });
+		assertDenied("invalid-fetch-metadata", {
+			url: "/assets/app.js",
+			rawHeaders: rawHeaders({
+				Host: "localhost:4242",
+				Origin: "http://localhost:4242",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Sec-Fetch-Dest": "websocket",
+			}),
+		});
 		assertDenied("origin-mismatch", {
 			transport: "websocket",
 			url: "/ws/session",

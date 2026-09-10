@@ -454,6 +454,7 @@ function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetada
 	// exact admitted Origin, same-origin site, and websocket mode remain required.
 	if (context === "websocket") return fetch.mode === "websocket"
 		&& (fetch.dest === undefined || fetch.dest === "empty" || fetch.dest === "websocket");
+	if (fetch.dest === "websocket") return false;
 	if (context === "preflight") return fetch.mode === "cors" && (fetch.dest === undefined || fetch.dest === "empty");
 	if (context === "api") return (fetch.dest === undefined || fetch.dest === "empty") && (fetch.mode === "cors" || fetch.mode === "same-origin");
 	if (context === "preview-iframe") return fetch.mode === "navigate" && fetch.dest === "iframe";
