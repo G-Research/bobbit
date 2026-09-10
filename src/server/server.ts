@@ -5253,6 +5253,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		/** @internal Exposed for integration coverage of production hook wiring. */
 		hostInterceptorRouter,
 		get extensionChannels() { return extensionChannelServices; },
+		/**
+		 * Coarse post-start result used by the CLI to mirror the compiled policy's
+		 * local authentication bypass without exposing trusted authority details.
+		 */
+		get trustedLocal(): boolean {
+			if (!gatewayReady || !requestAdmissionPolicy) {
+				throw new Error("Gateway local trust is unavailable before successful start");
+			}
+			return requestAdmissionPolicy.allAuthoritiesLoopback;
+		},
 		async start(): Promise<number> {
 			// Phase timer for the pre-listen critical path: everything awaited here
 			// blocks `server.listen()`, i.e. delays the UI becoming reachable.

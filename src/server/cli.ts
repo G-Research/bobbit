@@ -85,6 +85,15 @@ function urlHost(host: string): string {
 	return normalized.includes(":") && !normalized.startsWith("[") ? `[${normalized}]` : normalized;
 }
 
+function buildStartupPeerUrl(input: {
+	protocol: "http" | "https";
+	host: string;
+	port: number;
+	basePath?: string;
+}): string {
+	return `${input.protocol}://${urlHost(loopbackForBind(input.host))}:${input.port}${normalizeBasePath(input.basePath)}`;
+}
+
 export function buildStartupUrls(input: {
 	protocol: "http" | "https";
 	host: string;
@@ -92,11 +101,13 @@ export function buildStartupUrls(input: {
 	basePath?: string;
 	token: string;
 	forceAuth?: boolean;
+	/** Final coarse trust result exposed by the successfully started gateway. */
+	trustedLocal: boolean;
 }): StartupUrls {
 	const basePath = normalizeBasePath(input.basePath);
-	const authEnforced = Boolean(input.forceAuth) || !isLoopbackHost(input.host);
+	const authEnforced = Boolean(input.forceAuth) || !input.trustedLocal;
 	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
-	const peerUrl = `${input.protocol}://${urlHost(loopbackForBind(input.host))}:${input.port}${basePath}`;
+	const peerUrl = buildStartupPeerUrl(input);
 	const uiUrl = authEnforced
 		? `${peerUrl}/?token=${encodeURIComponent(input.token)}`
 		: `${peerUrl}/`;
@@ -479,7 +490,6 @@ async function main() {
 		bindHost: args.host,
 		tlsHostnames: extraDomains,
 	});
-	let startupUrls: StartupUrls | undefined;
 	const ctorT0 = Date.now();
 	const gateway = createGateway({
 		...requestAdmissionConfig,
@@ -490,17 +500,14 @@ async function main() {
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
 		basePath: args.basePath,
-		onBound: (actualPort) => {
-			startupUrls = buildStartupUrls({
-				protocol,
-				host: args.host,
-				port: actualPort,
-				basePath: args.basePath,
-				token: authToken,
-				forceAuth: args.forceAuth,
-			});
-			return startupUrls.peerUrl;
-		},
+		// Publication participates in policy compilation, so keep this callback
+		// query-free and defer display/open authentication state until start resolves.
+		onBound: (actualPort) => buildStartupPeerUrl({
+			protocol,
+			host: args.host,
+			port: actualPort,
+			basePath: args.basePath,
+		}),
 		agentCliPath: args.agentCliPath,
 		systemPromptPath,
 		tls,
@@ -525,15 +532,16 @@ async function main() {
 		}
 	}
 
-	// createGateway publishes during bind, before persisted sessions resume. Keep a
-	// defensive fallback for custom implementations that do not invoke onBound.
-	const effectiveStartupUrls = startupUrls ?? buildStartupUrls({
+	// Build user-visible and auto-open URLs only after the gateway has compiled its
+	// complete authority policy. The published peer URL above remains query-free.
+	const effectiveStartupUrls = buildStartupUrls({
 		protocol,
 		host: args.host,
 		port: actualPort,
 		basePath: args.basePath,
 		token: authToken,
 		forceAuth: args.forceAuth,
+		trustedLocal: gateway.trustedLocal,
 	});
 
 	const pkgVersion = readPackageVersion();

@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
 import { join, resolve } from "node:path";
@@ -21,6 +21,7 @@ import {
 import { initAuthorSidecarDir } from "../../../src/server/agent/author-sidecar.js";
 import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
+import { buildStartupUrls } from "../../../src/server/cli.js";
 import { createGateway } from "../../../src/server/server.js";
 import { createRunChild, removeOwnedRunChild } from "../../../tests/support/harnesses/shared/run-isolation.js";
 
@@ -433,6 +434,20 @@ describe.sequential("public authority provenance on a loopback backend", () => {
 	}, 60_000);
 
 	it("requires credentials for public Host API, preview, and WebSocket traffic", async () => {
+		expect(gateway.trustedLocal).toBe(false);
+		const startupUrls = buildStartupUrls({
+			protocol: "http",
+			host: "127.0.0.1",
+			port,
+			token: TOKEN,
+			trustedLocal: gateway.trustedLocal,
+		});
+		expect(startupUrls.authEnforced).toBe(true);
+		expect(startupUrls.uiUrl).toBe(`http://127.0.0.1:${port}/?token=${TOKEN}`);
+		expect(startupUrls.openUrl).toBe(startupUrls.uiUrl);
+		const publishedUrl = readFileSync(join(root, "state", "gateway-url"), "utf8");
+		expect(new URL(publishedUrl).search).toBe("");
+
 		const rebinding = await plainRequest(port, "/api/health", {
 			Host: "attacker.example",
 			Origin: "http://attacker.example",
@@ -548,8 +563,10 @@ describe.sequential("public authority provenance on a loopback backend", () => {
 
 	it("retains the credential-free bypass for a genuinely all-loopback policy", async () => {
 		const localGateway = createGateway({ ...gatewayConfig, publicOrigins: undefined }, gatewayDeps);
+		expect(() => localGateway.trustedLocal).toThrow(/before successful start/i);
 		try {
 			const localPort = await localGateway.start();
+			expect(localGateway.trustedLocal).toBe(true);
 			const response = await plainRequest(localPort, "/api/health", { Host: `127.0.0.1:${localPort}` });
 			expect(response.status, response.body).toBe(200);
 			expect(JSON.parse(response.body)).toMatchObject({ localhost: true });
