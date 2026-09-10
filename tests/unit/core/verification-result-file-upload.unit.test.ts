@@ -159,7 +159,7 @@ describe("verification result file upload", () => {
 		const originalLstatSync = fs.lstatSync;
 		vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike) => {
 			if (candidate === reportPath) {
-				return { isFile: () => false } as fs.Stats;
+				return { isSymbolicLink: () => false, isFile: () => false } as fs.Stats;
 			}
 			return originalLstatSync(candidate);
 		}) as typeof fs.lstatSync);
