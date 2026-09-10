@@ -105,6 +105,7 @@ test.describe("remote-state coordinator native worktree route", () => {
 		const primarySession = await createRemoteStateSession(gateway, primary);
 		const siblingSession = await createRemoteStateSession(gateway, sibling);
 		let fetches = 0;
+		let pulls = 0;
 		let resolveFetchStarted!: () => void;
 		let releaseFetch!: () => void;
 		const fetchStarted = new Promise<void>(resolve => { resolveFetchStarted = resolve; });
@@ -123,7 +124,10 @@ test.describe("remote-state coordinator native worktree route", () => {
 				await fetchReleased;
 				return { stdout: "", stderr: "" };
 			}
-			if (commandName(file) === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
+			if (commandName(file) === "git" && args[0] === "pull") {
+				pulls += 1;
+				return { stdout: "Already up to date.", stderr: "" };
+			}
 			return originalExecFile.call(runner, file, args, options);
 		};
 
@@ -162,8 +166,13 @@ test.describe("remote-state coordinator native worktree route", () => {
 			// A successful mutation marks retained refs stale without erasing the
 			// canonical 30-second automatic-call budget. Explicit force bypasses it.
 			const beforeMutation = fetches;
+			// This gateway's runner must own the mutation even when a separately created
+			// gateway has replaced the module-global fallback earlier in the worker.
 			const pull = await apiFetch(`/api/sessions/${primarySession}/git-pull`, { method: "POST" });
-			expect(pull.status).toBe(200);
+			const pullBody = await pull.json();
+			expect(pull.status, JSON.stringify(pullBody)).toBe(200);
+			expect(pullBody).toEqual({ ok: true, output: "Already up to date." });
+			expect(pulls).toBe(1);
 			const automatic = await apiFetch(`/api/sessions/${primarySession}/git-status?intent=automatic`);
 			expect((await automatic.json()).stale).toBe(true);
 			await new Promise<void>(resolve => setImmediate(resolve));

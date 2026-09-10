@@ -18790,7 +18790,7 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const output = await execGit('git pull', cwd, 30000, cid);
+			const output = await execGit('git pull', cwd, 30000, cid, commandRunner);
 			invalidateGitStatusCache(cwd, cid);
 			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
