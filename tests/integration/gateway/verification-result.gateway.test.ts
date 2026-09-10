@@ -39,6 +39,7 @@ async function postVerification(
 function rawChunkedVerification(
 	gateway: any,
 	secret: string,
+	bearerToken: string = gateway.token,
 ): {
 	request: http.ClientRequest;
 	started: Promise<void>;
@@ -55,7 +56,7 @@ function rawChunkedVerification(
 	const request = http.request(new URL("/api/internal/verification-result", gateway.baseURL), {
 		method: "POST",
 		headers: {
-			Authorization: `Bearer ${gateway.token}`,
+			Authorization: `Bearer ${bearerToken}`,
 			"Content-Type": "application/json",
 			"Transfer-Encoding": "chunked",
 			"X-Bobbit-Session-Secret": secret,
@@ -245,6 +246,86 @@ test.describe("POST /api/internal/verification-result", () => {
 		} finally {
 			harness.pendingResults.delete(target);
 			sandboxStore.remove(projectId);
+		}
+	});
+
+	test("accepts an admitted sandbox result after scope removal but rejects requests admitted later or by a foreign scope", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = `test-sandbox-late-verdict-${process.pid}-${Date.now()}`;
+		const projectId = `verification-late-scope-${process.pid}-${Date.now()}`;
+		const foreignProjectId = `${projectId}-foreign`;
+		const sandboxStore = gateway.sessionManager.sandboxTokenStore;
+		const sandboxToken = sandboxStore.register(projectId);
+		const foreignSandboxToken = sandboxStore.register(foreignProjectId);
+		const verifierSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const resolver = vi.fn();
+		const htmlReport = "<!doctype html><html><body>late sandbox report</body></html>";
+		const serialized = JSON.stringify({
+			sessionId,
+			verdict: "pass",
+			summary: "accepted after teardown",
+			report_html: htmlReport,
+		});
+		let stalledRequest: http.ClientRequest | undefined;
+		let markAdmitted!: () => void;
+		const admitted = new Promise<void>((resolve) => { markAdmitted = resolve; });
+		const originalLookup = sandboxStore.lookup.bind(sandboxStore);
+		const lookupSpy = vi.spyOn(sandboxStore, "lookup").mockImplementation((token: string) => {
+			const result = originalLookup(token);
+			if (token === sandboxToken && result) markAdmitted();
+			return result;
+		});
+
+		sandboxStore.addSession(projectId, sessionId);
+		harness.pendingResults.set(sessionId, resolver);
+		try {
+			const upload = rawChunkedVerification(gateway, verifierSecret, sandboxToken);
+			stalledRequest = upload.request;
+			await upload.started;
+			await writeRequestChunk(upload.request, serialized.slice(0, -1));
+			await admitted;
+
+			// Admission captured an authentic sandbox scope while the verifier was
+			// still present. Teardown then removes only its live scope membership,
+			// retaining the exact secret and pending resolver for this in-flight body.
+			sandboxStore.removeSession(projectId, sessionId);
+
+			const postRemoval = await postVerification(
+				gateway,
+				{ sessionId, verdict: "pass", summary: "started after removal" },
+				{ Authorization: `Bearer ${sandboxToken}`, "X-Bobbit-Session-Secret": verifierSecret },
+			);
+			expect(postRemoval.status).toBe(403);
+			expect(await postRemoval.json()).toEqual(VERIFIER_AUTH_ERROR);
+			expect(resolver).not.toHaveBeenCalled();
+
+			const foreignScope = await postVerification(
+				gateway,
+				{ sessionId, verdict: "pass", summary: "foreign scope" },
+				{ Authorization: `Bearer ${foreignSandboxToken}`, "X-Bobbit-Session-Secret": verifierSecret },
+			);
+			expect(foreignScope.status).toBe(403);
+			expect(await foreignScope.json()).toEqual(VERIFIER_AUTH_ERROR);
+			expect(resolver).not.toHaveBeenCalled();
+
+			upload.request.end(serialized.slice(-1));
+			const accepted = await upload.response;
+			expect(accepted.status, accepted.body).toBe(200);
+			expect(accepted.complete).toBe(true);
+			expect(JSON.parse(accepted.body)).toEqual({ ok: true });
+			expect(resolver).toHaveBeenCalledTimes(1);
+			expect(resolver).toHaveBeenCalledWith({
+				verdict: true,
+				summary: "accepted after teardown",
+				reportHtml: htmlReport,
+			});
+		} finally {
+			stalledRequest?.destroy();
+			lookupSpy.mockRestore();
+			harness.pendingResults.delete(sessionId);
+			gateway.sessionManager.sessionSecretStore.remove(sessionId);
+			sandboxStore.remove(projectId);
+			sandboxStore.remove(foreignProjectId);
 		}
 	});
 
