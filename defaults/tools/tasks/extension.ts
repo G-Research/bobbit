@@ -61,10 +61,127 @@ function isUnderRoot(candidate: string, root: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
+type FileIdentity = Readonly<{ dev: bigint; ino: bigint }>;
+type WorkspaceRoot = Readonly<{ canonicalPath: string; identity: FileIdentity }>;
+
+function fileIdentity(stat: fs.BigIntStats): FileIdentity | undefined {
+	if (typeof stat.dev !== "bigint" || typeof stat.ino !== "bigint" || stat.dev < 0n || stat.ino <= 0n) {
+		return undefined;
+	}
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+function hasIdentity(stat: fs.BigIntStats, identity: FileIdentity): boolean {
+	const actual = fileIdentity(stat);
+	return actual !== undefined && actual.dev === identity.dev && actual.ino === identity.ino;
+}
+
+function isSamePath(left: string, right: string): boolean {
+	return path.relative(left, right) === "" && path.relative(right, left) === "";
+}
+
+function captureWorkspaceRoot(): WorkspaceRoot | undefined {
+	try {
+		const cwdStat = fs.statSync(".", { bigint: true });
+		const identity = fileIdentity(cwdStat);
+		if (!cwdStat.isDirectory() || !identity) return undefined;
+		const canonicalPath = fs.realpathSync(".");
+		const canonicalStat = fs.lstatSync(canonicalPath, { bigint: true });
+		if (
+			canonicalStat.isSymbolicLink()
+			|| !canonicalStat.isDirectory()
+			|| !hasIdentity(canonicalStat, identity)
+		) return undefined;
+		return { canonicalPath, identity };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read an already-canonical workspace file through a descriptor whose identity is
+ * revalidated against both its pathname and the still-stable workspace root.
+ */
+function readBoundedWorkspaceFile(
+	filePath: string,
+	root: WorkspaceRoot,
+	maxBytes: number,
+	label: string,
+): Buffer {
+	let flags = fs.constants.O_RDONLY;
+	if (typeof fs.constants.O_NOFOLLOW === "number") flags |= fs.constants.O_NOFOLLOW;
+	if (process.platform !== "win32" && typeof fs.constants.O_NONBLOCK === "number") {
+		flags |= fs.constants.O_NONBLOCK;
+	}
+
+	const fd = fs.openSync(filePath, flags);
+	try {
+		const descriptorStat = fs.fstatSync(fd, { bigint: true });
+		const descriptorIdentity = fileIdentity(descriptorStat);
+		if (!descriptorStat.isFile() || !descriptorIdentity) throw new Error(`${label} must be a regular file`);
+		if (descriptorStat.size > BigInt(maxBytes)) {
+			throw new Error(`${label} is too large (${descriptorStat.size} bytes, max ${maxBytes})`);
+		}
+
+		// Re-resolve after open. An ancestor symlink/junction swap either changes
+		// containment or makes the pathname identity differ from this descriptor.
+		const currentRoot = fs.realpathSync(".");
+		const currentRootPath = fs.realpathSync(root.canonicalPath);
+		if (
+			!isSamePath(currentRoot, root.canonicalPath)
+			|| !isSamePath(currentRootPath, root.canonicalPath)
+		) throw new Error(`${label} is outside the workspace`);
+		const cwdStat = fs.statSync(".", { bigint: true });
+		const rootPathStat = fs.lstatSync(root.canonicalPath, { bigint: true });
+		const rootCanonicalStat = fs.lstatSync(currentRoot, { bigint: true });
+		if (
+			!cwdStat.isDirectory()
+			|| !hasIdentity(cwdStat, root.identity)
+			|| rootPathStat.isSymbolicLink()
+			|| !rootPathStat.isDirectory()
+			|| !hasIdentity(rootPathStat, root.identity)
+			|| rootCanonicalStat.isSymbolicLink()
+			|| !rootCanonicalStat.isDirectory()
+			|| !hasIdentity(rootCanonicalStat, root.identity)
+		) {
+			throw new Error("Workspace root changed while reading report image");
+		}
+
+		const currentCanonicalPath = fs.realpathSync(filePath);
+		if (!isUnderRoot(currentCanonicalPath, root.canonicalPath)) {
+			throw new Error(`${label} is outside the workspace`);
+		}
+		const pathnameStat = fs.lstatSync(filePath, { bigint: true });
+		const canonicalStat = fs.lstatSync(currentCanonicalPath, { bigint: true });
+		if (
+			pathnameStat.isSymbolicLink()
+			|| !pathnameStat.isFile()
+			|| !hasIdentity(pathnameStat, descriptorIdentity)
+			|| canonicalStat.isSymbolicLink()
+			|| !canonicalStat.isFile()
+			|| !hasIdentity(canonicalStat, descriptorIdentity)
+		) {
+			throw new Error(`${label} changed while opening`);
+		}
+
+		const content = Buffer.allocUnsafe(maxBytes + 1);
+		let bytesRead = 0;
+		while (bytesRead < content.byteLength) {
+			const count = fs.readSync(fd, content, bytesRead, content.byteLength - bytesRead, null);
+			if (count === 0) break;
+			bytesRead += count;
+		}
+		if (bytesRead > maxBytes) throw new Error(`${label} is too large (${bytesRead} bytes, max ${maxBytes})`);
+		return content.subarray(0, bytesRead);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 /** Inline workspace screenshots before upload, inside the verifier's own runtime. */
 function inlineWorkspaceFileImages(html: string): string {
-	let root: string;
-	try { root = fs.realpathSync(process.cwd()); } catch { return html; }
+	const root = captureWorkspaceRoot();
+	if (!root) return html;
 	let total = 0;
 	let finalHtmlBytes = Buffer.byteLength(html, "utf8");
 	if (finalHtmlBytes > MAX_VERIFICATION_REPORT_BYTES) {
@@ -80,10 +197,10 @@ function inlineWorkspaceFileImages(html: string): string {
 			const mime = IMAGE_MIME_BY_EXT[ext];
 			if (!mime) return tag;
 			const real = fs.realpathSync(requested);
-			if (!isUnderRoot(real, root)) return tag;
+			if (!isUnderRoot(real, root.canonicalPath)) return tag;
 			const remaining = MAX_INLINED_IMAGE_BYTES - total;
 			if (remaining <= 0) return tag;
-			const content = readBoundedRegularFile(real, remaining, "Report image");
+			const content = readBoundedWorkspaceFile(real, root, remaining, "Report image");
 			const replacement = tag.replace(
 				/src=["']file:\/\/[^"']+["']/i,
 				`src="data:${mime};base64,${content.toString("base64")}"`,
