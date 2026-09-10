@@ -17922,7 +17922,12 @@ export class SessionManager {
 	 * dormant/not-live or was archived while the server was down. The boot-reap
 	 * (`shouldReapChildOnBoot`) remains as defense-in-depth.
 	 */
-	private async cascadeReapOwner(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> } = {}): Promise<void> {
+	private async cascadeReapOwner(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; deferSessionSecretRevocation?: boolean } = {}): Promise<void> {
+		// Secret retention belongs only to the verifier whose pending result is
+		// still open. Never propagate that capability lifetime into child teardown.
+		const childOptions = { ...options };
+		delete childOptions.deferSessionSecretRevocation;
+
 		// Cascade: terminate all live child sessions first. Children are linked via
 		// `delegateOf` (delegate kind) OR `parentSessionId`+`childKind` (team /
 		// pr-walkthrough / host-agents / any future kind) — otherwise a child
@@ -17932,7 +17937,7 @@ export class SessionManager {
 			&& (!options.cascadeSessionIds || options.cascadeSessionIds.has(s.id)));
 		for (const child of children) {
 			console.log(`[session ${id}] Cascading terminate to child ${child.id}`);
-			await this.terminateSession(child.id, options);
+			await this.terminateSession(child.id, childOptions);
 		}
 		// Also archive persisted-but-not-in-memory children of any kind.
 		const allLiveForTerminate = this.projectContextManager
@@ -18224,13 +18229,9 @@ export class SessionManager {
 		// and extension channels have completed their existing teardown steps.
 		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 
-		// Cascade-reap this owner's child agents (extracted seam — §6). Secret
-		// revocation deferral is exact-session state for verifier teardown and must
-		// never be inherited by children terminated through this cascade. Preserve
-		// every other existing lifecycle option exactly as before.
-		const cascadeOptions = { ...options };
-		delete cascadeOptions.deferSessionSecretRevocation;
-		await this.cascadeReapOwner(id, cascadeOptions);
+		// Cascade-reap this owner's child agents (extracted seam — §6). The cascade
+		// boundary strips verifier-only secret retention before terminating children.
+		await this.cascadeReapOwner(id, options);
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
