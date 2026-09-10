@@ -6163,7 +6163,7 @@ export class VerificationHarness {
 			"After completing all scenarios, call `verification_result` to submit your results:",
 			'- `verdict`: "pass" or "fail"',
 			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
-			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
+			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the verifier-side tool extension validates that it is a regular file, limits it to 10 MiB, and uploads its bytes as `report_html`; the gateway does not dereference the path). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
 			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
 			"",
 			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
