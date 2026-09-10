@@ -135,7 +135,7 @@ test.describe("POST /api/internal/verification-result", () => {
 		const resolver = vi.fn();
 		harness.pendingResults.set(target, resolver);
 		try {
-			const cases = [
+			const cases: Array<{ label: string; headers: Record<string, string> }> = [
 				{
 					label: "same-scope sandbox bearer with only the guessed public sessionId",
 					headers: { Authorization: `Bearer ${sandboxToken}` },
