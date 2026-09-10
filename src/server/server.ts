@@ -4261,7 +4261,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						res.end(JSON.stringify({ error: "Unauthorized" }));
 						return;
 					}
-					sandboxScope = scope;
+					// Route dispatch performs generic awaited probes before this endpoint
+					// reads its body. Snapshot its mutable scope at request admission so
+					// verifier teardown cannot rewrite the already-made scope decision.
+					sandboxScope = verificationResultUpload
+						? {
+							projectId: scope.projectId,
+							goalIds: new Set(scope.goalIds),
+							sessionIds: new Set(scope.sessionIds),
+						}
+						: scope;
 				} else {
 					authentication = { source: "admin-bearer" };
 				}
