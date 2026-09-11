@@ -23,6 +23,13 @@ const SENTINELS = [
 	"gateway-cookie-sentinel",
 	"gateway-env-sentinel",
 	"gateway-configured-header-sentinel",
+	"gateway-command-private-key-sentinel",
+	"gateway-command-access-key-sentinel",
+	"gateway-command-signing-key-sentinel",
+	"gateway-arg-private-key-sentinel",
+	"gateway-arg-access-key-sentinel",
+	"gateway-arg-signing-key-sentinel",
+	"gateway-header-private-key-sentinel",
 ] as const;
 
 const SERVER_NAME = "mcp-redaction-gateway";
@@ -36,7 +43,7 @@ type ServerStatus = {
 
 function config(generation: string): Record<string, unknown> {
 	return {
-		command: "node relay.js --header \"Authorization: Bearer gateway-command-auth-sentinel\" -H'Cookie: gateway-command-cookie-sentinel' --proxy-header=gateway-command-proxy-sentinel --label prefix-gateway-env-sentinel-suffix",
+		command: "node relay.js --header \"Authorization: Bearer gateway-command-auth-sentinel\" -H'Cookie: gateway-command-cookie-sentinel' --proxy-header=gateway-command-proxy-sentinel --private-key gateway-command-private-key-sentinel --access_key=gateway-command-access-key-sentinel --signing-key gateway-command-signing-key-sentinel --monkey command-visible --label prefix-gateway-env-sentinel-suffix",
 		args: [
 			"--header", "Authorization: Bearer gateway-separated-header-sentinel",
 			"--header=X-Api-Key: gateway-equals-header-sentinel",
@@ -50,10 +57,18 @@ function config(generation: string): Record<string, unknown> {
 			"Cookie: session=gateway-cookie-sentinel",
 			"prefix-gateway-env-sentinel-suffix",
 			"prefix-gateway-configured-header-sentinel-suffix",
+			"--private-key", "gateway-arg-private-key-sentinel",
+			"--access_key=gateway-arg-access-key-sentinel",
+			"--signing-key", "gateway-arg-signing-key-sentinel",
+			"X-Private-Key: gateway-header-private-key-sentinel",
+			"--monkey", "argument-visible",
 			"--generation", generation,
 		],
 		env: { API_TOKEN: "gateway-env-sentinel" },
-		headers: { "X-Configured-Secret": "gateway-configured-header-sentinel" },
+		headers: {
+			"X-Configured-Secret": "gateway-configured-header-sentinel",
+			"X-Private-Key": "gateway-header-private-key-sentinel",
+		},
 	};
 }
 
@@ -70,9 +85,9 @@ function assertSafeDto(value: unknown, generation: string): ServerStatus {
 	const status = statuses.find((entry: ServerStatus) => entry.name === SERVER_NAME) as ServerStatus | undefined;
 	expect(status).toBeDefined();
 	expect(status!.reviewConfig).toMatchObject({
-		command: "node relay.js --header \"Authorization: [redacted]\" -H'[redacted]' --proxy-header=[redacted] --label prefix-[redacted]-suffix",
+		command: "node relay.js --header \"Authorization: [redacted]\" -H'[redacted]' --proxy-header=[redacted] --private-key [redacted] --access_key=[redacted] --signing-key [redacted] --monkey command-visible --label prefix-[redacted]-suffix",
 		env: { API_TOKEN: "[redacted]" },
-		headers: { "X-Configured-Secret": "[redacted]" },
+		headers: { "X-Configured-Secret": "[redacted]", "X-Private-Key": "[redacted]" },
 	});
 	expect(status!.reviewConfig.args).toEqual([
 		"--header", "Authorization: [redacted]",
@@ -87,6 +102,11 @@ function assertSafeDto(value: unknown, generation: string): ServerStatus {
 		"Cookie: [redacted]",
 		"prefix-[redacted]-suffix",
 		"prefix-[redacted]-suffix",
+		"--private-key", "[redacted]",
+		"--access_key=[redacted]",
+		"--signing-key", "[redacted]",
+		"X-Private-Key: [redacted]",
+		"--monkey", "argument-visible",
 		"--generation", generation,
 	]);
 	return status!;
