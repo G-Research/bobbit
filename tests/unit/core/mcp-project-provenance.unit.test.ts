@@ -13,6 +13,14 @@ const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-project-provenanc
 const fixtureHome = path.join(fixtureRoot, "home");
 const fixtureHeadquarters = path.join(fixtureRoot, "headquarters");
 
+// Windows resolves os.homedir() while loading the discovery module graph, so
+// establish the isolated roots before importing it rather than only in beforeEach.
+process.env.HOME = fixtureHome;
+process.env.USERPROFILE = fixtureHome;
+process.env.BOBBIT_DIR = fixtureHeadquarters;
+fs.mkdirSync(fixtureHome, { recursive: true });
+fs.mkdirSync(fixtureHeadquarters, { recursive: true });
+
 const {
 	McpManager,
 	canonicalCustomDirLocator,
@@ -379,7 +387,10 @@ describe("worktree-stable project MCP identity", () => {
 			fingerprint: pending.approval.fingerprint!,
 		}, "approved");
 
-		const equivalent = new McpManager(secondRoot, reader([{ path: `./${declared}`, types: ["mcp"] }]), stateDir, {
+		// path.relative() returns an absolute path when the temp and checkout roots
+		// are on different Windows drives; only relative declarations accept `./`.
+		const equivalentDeclared = path.isAbsolute(declared) ? declared : `./${declared}`;
+		const equivalent = new McpManager(secondRoot, reader([{ path: equivalentDeclared, types: ["mcp"] }]), stateDir, {
 			projectId: "stable-project",
 			approvalStore: store,
 		});
