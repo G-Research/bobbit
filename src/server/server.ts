@@ -7772,11 +7772,45 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const updated = projectRegistry.update(projectGetMatch[1], updates);
+			const projectId = projectGetMatch[1];
+			const current = projectRegistry.get(projectId)!;
+			const rootChanged = updates.rootPath !== undefined && !samePath(current.rootPath, updates.rootPath);
+			if (!rootChanged) {
+				json(projectRegistry.update(projectId, updates));
+				return;
+			}
+
+			const liveSessionIds = new Set([
+				...(projectContextManager.getExisting(projectId)?.sessionStore.getLive().map(session => session.id) ?? []),
+				...sessionManager.getAllSessionsRaw()
+					.filter(session => (sessionManager.getPersistedSession(session.id)?.projectId ?? session.projectId) === projectId)
+					.map(session => session.id),
+			]);
+			if (liveSessionIds.size > 0) {
+				json({
+					error: "Stop the project's active sessions before changing its root.",
+					code: "PROJECT_ROOT_MOVE_ACTIVE_SESSIONS",
+					sessionIds: [...liveSessionIds],
+				}, 409);
+				return;
+			}
+
+			const oldRoot = current.rootPath;
+			const updated = await sessionManager.runMcpProjectRootMutation(projectId, oldRoot, async () => {
+				const next = projectRegistry.update(projectId, updates);
+				const nextCtx = await projectContextManager.refreshAfterProjectRootChange(projectId);
+				if (!nextCtx) throw new Error(`Project context could not be refreshed: ${projectId}`);
+				nextCtx.gateStore.onStatusChange = () => {
+					nextCtx.goalStore.bumpGeneration();
+				};
+				wireGoalManagerResolvers(nextCtx, { sessionManager, projectContextManager, projectRegistry });
+				return next;
+			});
 			json(updated);
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			const status = err?.code === "PROJECT_ROOT_MOVE_IN_PROGRESS" ? 409 : 400;
+			jsonError(status, err);
 		}
 		return;
 	}
