@@ -3608,6 +3608,8 @@ export class SessionManager {
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
+	/** Project sources temporarily withheld while their registered root changes. */
+	private readonly suspendedMcpProjects = new Set<string>();
 	/** One Headquarters-owned ledger shared by every manager in this gateway. */
 	private mcpApprovalStore: McpApprovalStore | undefined;
 	private readonly mcpReconcileIntervalMs: number;
@@ -6924,6 +6926,62 @@ export class SessionManager {
 		for (const key of keys) await this.removeScopedMcpManagerByKey(key);
 	}
 
+	/**
+	 * Remove every runtime view of a project before changing its registered
+	 * root, then publish only definitions discovered from the replacement root.
+	 * The suspension closes the ensure/reconciliation race while the registry
+	 * and path-bound ProjectContext are replaced.
+	 */
+	async runMcpProjectRootMutation<T>(
+		projectId: string,
+		oldRoot: string,
+		mutation: () => Promise<T>,
+		rollback: () => Promise<void>,
+	): Promise<T> {
+		if (this.suspendedMcpProjects.has(projectId)) {
+			throw Object.assign(new Error("The project root is already being changed."), { code: "PROJECT_ROOT_MOVE_IN_PROGRESS" });
+		}
+		this.suspendedMcpProjects.add(projectId);
+		let mutationStarted = false;
+		let safeToResume = true;
+		try {
+			await this.cleanupScopedMcpManagersForProject(projectId, oldRoot);
+			const remaining = this.getActiveMcpManagers();
+			for (const manager of remaining) {
+				manager.setAdditionalProjects(this.additionalMcpProjects(manager.getDiscoveryScope().cwd));
+			}
+			// A server introduced through this project may be running in another
+			// project's manager. Reconcile the exclusion before mutating the root.
+			await this.reloadMcpManagers(remaining, {
+				refreshAlways: true,
+				affectedProjectIds: [projectId],
+			});
+
+			mutationStarted = true;
+			try {
+				return await mutation();
+			} catch (error) {
+				safeToResume = false;
+				try {
+					await rollback();
+					safeToResume = true;
+				} catch (rollbackError) {
+					throw new AggregateError([error, rollbackError], "Project root change and rollback both failed; MCP remains suspended");
+				}
+				throw error;
+			}
+		} finally {
+			// A failed rollback leaves this project excluded for the rest of the
+			// process lifetime. This is deliberately fail-closed: a gateway restart
+			// reconstructs the context from the last durable registry state.
+			if (!mutationStarted || safeToResume) {
+				this.suspendedMcpProjects.delete(projectId);
+				await this.ensureMcpManager({ projectId });
+				await this.reloadMcpAfterProjectMutation(projectId);
+			}
+		}
+	}
+
 	private async cleanupScopedMcpManagersForSessionScope(scope: { projectId?: string; cwd?: string }): Promise<void> {
 		if (!scope.cwd) return;
 		const cwdKey = this.mcpScopeKey({ cwd: scope.cwd });
@@ -6941,6 +6999,7 @@ export class SessionManager {
 		if (!this.projectContextManager) return [];
 		const primaryPath = path.resolve(cwd);
 		return Array.from(this.projectContextManager.all())
+			.filter(ctx => !this.suspendedMcpProjects.has(ctx.project.id))
 			.filter(ctx => path.resolve(ctx.project.rootPath) !== primaryPath)
 			.map(ctx => ({
 				projectId: ctx.project.id,
@@ -6967,6 +7026,7 @@ export class SessionManager {
 	}
 
 	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		if (scope?.projectId && this.suspendedMcpProjects.has(scope.projectId)) return null;
 		const key = this.mcpScopeKey(scope);
 		if (key === "default") return this.mcpManager;
 		const existing = this.scopedMcpManagers.get(key);

@@ -133,15 +133,11 @@ export class ProjectContextManager {
     };
   }
 
-  /** Get or lazily create a ProjectContext. */
-  getOrCreate(projectId: string): ProjectContext | null {
-    let ctx = this.contexts.get(projectId);
-    if (ctx) return ctx;
-
+  private createContext(projectId: string): ProjectContext | null {
     const project = this.registry.get(projectId);
     if (!project) return null;
 
-    ctx = new ProjectContext(project, this.options);
+    const ctx = new ProjectContext(project, this.options);
     ctx.open();
     // Propagate any post-boot dispatcher wiring to lazily-created contexts.
     if (this.goalTriggerDispatcher) {
@@ -157,9 +153,43 @@ export class ProjectContextManager {
     if (this.contextConfigurator) {
       try { this.contextConfigurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
     }
+    return ctx;
+  }
+
+  /** Get or lazily create a ProjectContext. */
+  getOrCreate(projectId: string): ProjectContext | null {
+    const existing = this.contexts.get(projectId);
+    if (existing) return existing;
+
+    const ctx = this.createContext(projectId);
+    if (!ctx) return null;
     this.contexts.set(projectId, ctx);
     this.contextTopologyVersion++;
     return ctx;
+  }
+
+  /**
+   * Rebuild a context after its registered root changes. The replacement is
+   * published synchronously before the old stores are drained, so new lookups
+   * cannot reacquire the stale root while cleanup awaits native handles.
+   */
+  async refreshAfterProjectRootChange(projectId: string): Promise<ProjectContext | null> {
+    const previous = this.contexts.get(projectId);
+    const replacement = this.createContext(projectId);
+    if (!replacement) return null;
+
+    this.contexts.set(projectId, replacement);
+    this.contextTopologyVersion++;
+    if (previous) {
+      try {
+        await previous.close();
+      } catch (error) {
+        // The registry and replacement context are already authoritative. Do
+        // not roll back to stale path-bound stores because an old drain failed.
+        console.warn(`[pcm] old context cleanup failed after root change for ${projectId}:`, error);
+      }
+    }
+    return replacement;
   }
 
   /**
