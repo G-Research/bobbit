@@ -236,6 +236,81 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("a change in the post-reload freshness window disconnects the approved runtime before returning stale", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "post-reload-stale");
+		const approvedServer = await startRecordingMcpServer("post_reload_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		try {
+			const project = await createProject(gateway, isolated, `mcp-post-reload-${randomUUID().slice(0, 8)}`);
+			const serverName = `post-reload-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, {
+				url: approvedServer.url,
+				headers: { Authorization: "Bearer initial-secret" },
+			});
+
+			let current = named(await statuses(project.id), serverName);
+			let response = await decide(project.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
+
+			const sessionManager = gateway.sessionManager as any;
+			const manager = sessionManager.getMcpManager({ projectId: project.id });
+			const approvedClient = manager.clients.get(serverName);
+			expect(approvedClient?.connected).toBe(true);
+			expect(manager.getToolRouteSnapshots().some((tool: any) => tool.runtimeServerKey === serverName)).toBe(true);
+			const externalToolName = `mcp__${serverName}__post_reload_probe`;
+			let tools = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(tools.tools.some((tool: any) => tool.name === externalToolName)).toBe(true);
+
+			// decideApproval performs one freshness read before persistence. Change the
+			// file only on SessionManager's final read, after its first scoped reload,
+			// to deterministically exercise the last stale-decision window.
+			const originalGetEffectiveDefinition = manager.getEffectiveDefinitionForDecision.bind(manager);
+			let decisionReads = 0;
+			manager.getEffectiveDefinitionForDecision = (name: string) => {
+				decisionReads += 1;
+				if (decisionReads === 2) {
+					writeProjectMcpConfig(project.root, serverName, {
+						url: changedServer.url,
+						headers: { Authorization: "Bearer replacement-secret" },
+					});
+				}
+				return originalGetEffectiveDefinition(name);
+			};
+			const approvedRequestCount = approvedServer.requests.length;
+			try {
+				response = await decide(project.id, current, "approved");
+			} finally {
+				manager.getEffectiveDefinitionForDecision = originalGetEffectiveDefinition;
+			}
+
+			expect(decisionReads).toBe(2);
+			expect(response.status).toBe(409);
+			const stale = await response.json();
+			expect(stale).toMatchObject({
+				code: "MCP_APPROVAL_STALE",
+				server: {
+					status: "disconnected",
+					toolCount: 0,
+					approval: { state: "changed" },
+					reviewConfig: { headers: { Authorization: "[redacted]" } },
+				},
+			});
+			expect(JSON.stringify(stale)).not.toContain("replacement-secret");
+			expect(approvedClient.connected).toBe(false);
+			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
+			expect(changedServer.requests).toHaveLength(0);
+			expect(manager.getToolRouteSnapshots().some((tool: any) => tool.runtimeServerKey === serverName)).toBe(false);
+			expect(manager.getToolInfos().some((tool: any) => tool.name === externalToolName)).toBe(false);
+			tools = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(tools.tools.some((tool: any) => tool.name === externalToolName)).toBe(false);
+		} finally {
+			await Promise.allSettled([approvedServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
 	test("remote requests are blocked while pending/rejected/changed and scoped approval is shared across managers", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "http");
 		const introduced = await startRecordingMcpServer("introduced_probe");
