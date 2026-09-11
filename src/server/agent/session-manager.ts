@@ -164,7 +164,8 @@ import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } fro
 
 let sessionManagerModuleClock: Clock = realClock;
 
-import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
+import { McpManager, type MarketplaceMcpResolver, type McpReloadResult, type McpServerStatus } from "../mcp/mcp-manager.js";
+import { McpApprovalStore, type McpApprovalDecision, type McpApprovalIdentity } from "../mcp/mcp-approval-store.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isReviewerBusyError, isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
@@ -3450,6 +3451,10 @@ export interface SessionManagerOptions {
 	hostNotificationPublisher?: HostSessionNotificationPublisher;
 	/** Test-only override for the browser-compatible serialized attachment guard. */
 	uploadedAttachmentSerializedSendLimitBytes?: number;
+	/** Shared Headquarters approval ledger override. Production lazily constructs one from stateDir. */
+	mcpApprovalStore?: McpApprovalStore;
+	/** Bounded reconciliation cadence for external MCP config edits. Set to 0 to disable in focused tests. */
+	mcpReconcileIntervalMs?: number;
 }
 
 type SessionReplacementToken = {
@@ -3603,6 +3608,12 @@ export class SessionManager {
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
+	/** One Headquarters-owned ledger shared by every manager in this gateway. */
+	private mcpApprovalStore: McpApprovalStore | undefined;
+	private readonly mcpReconcileIntervalMs: number;
+	private mcpReconcileTimer: ReturnType<typeof setInterval> | null = null;
+	private mcpReconcileInFlight: Promise<void> | null = null;
+	private onMcpApprovalsChanged?: (event: Extract<ServerMessage, { type: "mcp_approvals_changed" }>) => void;
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	private packLocalDataBindingsResolver: PackLocalDataBindingsResolver | null = null;
@@ -5705,6 +5716,8 @@ export class SessionManager {
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
 		this._extensionChannels = options?.extensionChannels;
+		this.mcpApprovalStore = options?.mcpApprovalStore;
+		this.mcpReconcileIntervalMs = options?.mcpReconcileIntervalMs ?? 5_000;
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -6920,21 +6933,36 @@ export class SessionManager {
 		if (!stillInUse) await this.removeScopedMcpManagerByKey(cwdKey);
 	}
 
-	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
-		const projectConfigStore = opts?.projectId && this.projectContextManager
-			? (this.projectContextManager.getOrCreate(opts.projectId)?.projectConfigStore ?? this.projectConfigStore)
-			: this.projectConfigStore;
-		const mgr = new McpManager(cwd, projectConfigStore, bobbitStateDir(), {
+	private getMcpApprovalStore(): McpApprovalStore {
+		return this.mcpApprovalStore ??= new McpApprovalStore(this.stateDir);
+	}
+
+	private additionalMcpProjects(cwd: string): Array<{ projectId: string; projectName: string; cwd: string; configStore: import("./project-config-store.js").ProjectConfigStore }> {
+		if (!this.projectContextManager) return [];
+		const primaryPath = path.resolve(cwd);
+		return Array.from(this.projectContextManager.all())
+			.filter(ctx => path.resolve(ctx.project.rootPath) !== primaryPath)
+			.map(ctx => ({
+				projectId: ctx.project.id,
+				projectName: ctx.project.name,
+				cwd: ctx.project.rootPath,
+				configStore: ctx.projectConfigStore,
+			}));
+	}
+
+	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string }): McpManager {
+		const projectContext = opts?.projectId && this.projectContextManager
+			? this.projectContextManager.getOrCreate(opts.projectId)
+			: null;
+		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
+		const mgr = new McpManager(cwd, projectConfigStore, this.stateDir, {
 			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
+			approvalStore: this.getMcpApprovalStore(),
 			...(opts?.projectId ? { projectId: opts.projectId } : {}),
+			...(projectContext?.project.name ? { projectName: projectContext.project.name } : {}),
 			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
 		});
-		if (opts?.includeAdditionalProjects && this.projectContextManager) {
-			const additionalProjects = Array.from(this.projectContextManager.all())
-				.filter(ctx => ctx.project.rootPath !== cwd)
-				.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
-			if (additionalProjects.length > 0) mgr.setAdditionalProjects(additionalProjects);
-		}
+		mgr.setAdditionalProjects(this.additionalMcpProjects(cwd));
 		return mgr;
 	}
 
@@ -7010,6 +7038,143 @@ export class SessionManager {
 		return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses };
 	}
 
+	setOnMcpApprovalsChanged(listener: ((event: Extract<ServerMessage, { type: "mcp_approvals_changed" }>) => void) | undefined): void {
+		this.onMcpApprovalsChanged = listener;
+	}
+
+	private mcpStatusSignature(statuses: McpServerStatus[]): string {
+		return JSON.stringify(statuses.map(status => ({
+			name: status.name,
+			status: status.status,
+			error: status.error,
+			approval: status.approval,
+			source: status.source,
+			diagnostics: status.diagnostics,
+			toolCount: status.toolCount,
+		})).sort((left, right) => left.name.localeCompare(right.name)));
+	}
+
+	private mcpAffectedProjectIds(managers: Iterable<McpManager>, extra: Iterable<string> = []): string[] {
+		const projectIds = new Set<string>(extra);
+		for (const mgr of managers) {
+			const scopeProjectId = mgr.getDiscoveryScope().projectId;
+			if (scopeProjectId) projectIds.add(scopeProjectId);
+			for (const status of mgr.getServerStatuses()) {
+				if (status.source?.projectId) projectIds.add(status.source.projectId);
+			}
+		}
+		return [...projectIds];
+	}
+
+	private publishMcpApprovalsChanged(projectIds: Iterable<string>): void {
+		const uniqueProjectIds = [...new Set(projectIds)].filter(Boolean);
+		if (uniqueProjectIds.length === 0 || !this.onMcpApprovalsChanged) return;
+		const pendingCounts: Record<string, number> = {};
+		for (const projectId of uniqueProjectIds) {
+			const manager = this.getMcpManager({ projectId });
+			if (!manager) continue;
+			pendingCounts[projectId] = manager.getServerStatuses().filter(status =>
+				status.approval?.state === "pending" || status.approval?.state === "changed"
+			).length;
+		}
+		try {
+			this.onMcpApprovalsChanged({ type: "mcp_approvals_changed", projectIds: uniqueProjectIds, pendingCounts });
+		} catch (error) {
+			console.warn("[mcp] Could not publish approval invalidation:", error);
+		}
+	}
+
+	private async reloadMcpManagers(
+		managers: Iterable<McpManager>,
+		opts?: { force?: boolean; announce?: boolean; refreshAlways?: boolean; affectedProjectIds?: Iterable<string> },
+	): Promise<McpReloadResult | undefined> {
+		const selected = [...new Set(managers)];
+		if (selected.length === 0) return undefined;
+		const before = new Map(selected.map(manager => [manager, this.mcpStatusSignature(manager.getServerStatuses())]));
+		const results: McpReloadResult[] = [];
+		for (const manager of selected) {
+			try {
+				results.push(await manager.reloadDiscoveredServers({
+					force: opts?.force,
+					queueIfInFlight: true,
+					timeoutMs: 0,
+				}));
+			} catch (error) {
+				results.push({
+					status: "error",
+					connected: [], disconnected: [], unchanged: [], skippedErrored: [],
+					failed: [{ name: manager.getScopeKey(), error: error instanceof Error ? error.message : String(error) }],
+					statuses: manager.getServerStatuses(),
+				});
+			}
+		}
+		const changed = selected.some(manager => before.get(manager) !== this.mcpStatusSignature(manager.getServerStatuses()));
+		if (opts?.refreshAlways || opts?.announce || changed) this.refreshExternalMcpToolRegistrations();
+		if (opts?.announce || changed) {
+			this.publishMcpApprovalsChanged(this.mcpAffectedProjectIds(selected, opts?.affectedProjectIds));
+		}
+		return this.aggregateMcpReloadResults(results);
+	}
+
+	/** Persist an exact current definition decision, then reconcile every active runtime against the shared ledger. */
+	async decideMcpApproval(
+		viewProjectId: string,
+		identity: McpApprovalIdentity,
+		decision: McpApprovalDecision,
+	): Promise<McpServerStatus> {
+		const viewManager = await this.ensureMcpManager({ projectId: viewProjectId });
+		if (!viewManager) {
+			throw Object.assign(new Error("MCP is not initialized for this project."), { code: "MCP_NOT_INITIALIZED" });
+		}
+		// Reload every active manager after the durable decision. Definitions can be
+		// introduced by additional registered projects, and their precedence may
+		// change while persistence is in flight; a process-wide pass closes that race.
+		const managers = new Set(this.getActiveMcpManagers());
+		managers.add(viewManager);
+		try {
+			await viewManager.decideApproval(identity, decision);
+		} catch (error) {
+			// A stale or newly-invalid winner may still have an old runtime. Reconcile
+			// before reporting the decision failure so no API race prolongs access.
+			await this.reloadMcpManagers(managers, {
+				announce: true,
+				affectedProjectIds: [viewProjectId, identity.projectId],
+			});
+			throw error;
+		}
+		await this.reloadMcpManagers(managers, {
+			announce: true,
+			affectedProjectIds: [viewProjectId, identity.projectId],
+		});
+		const current = viewManager.getEffectiveDefinitionForDecision(identity.serverName);
+		const status = viewManager.getServerStatuses().find(entry => entry.name === identity.serverName);
+		if (!current || !status
+			|| current.origin.projectId !== identity.projectId
+			|| current.origin.sourceId !== identity.sourceId
+			|| current.approval.fingerprint !== identity.fingerprint) {
+			throw Object.assign(new Error("The MCP server configuration changed while it was being reviewed."), { code: "MCP_APPROVAL_STALE" });
+		}
+		return status;
+	}
+
+	/** Reconcile one already-created project scope for status reads without touching unrelated managers. */
+	async reconcileMcpProject(projectId: string): Promise<McpReloadResult | undefined> {
+		const manager = this.getMcpManager({ projectId });
+		return manager ? this.reloadMcpManagers([manager], { affectedProjectIds: [projectId] }) : undefined;
+	}
+
+	/** Refresh project-owned sources after registration, removal, or project config mutation. */
+	async reloadMcpAfterProjectMutation(projectId?: string): Promise<McpReloadResult | undefined> {
+		const managers = this.getActiveMcpManagers();
+		for (const manager of managers) {
+			manager.setAdditionalProjects(this.additionalMcpProjects(manager.getDiscoveryScope().cwd));
+		}
+		return this.reloadMcpManagers(managers, {
+			refreshAlways: true,
+			affectedProjectIds: projectId ? [projectId] : undefined,
+		});
+	}
+
 	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
 		const managers = new Set<McpManager>();
 		if (scope === "project") {
@@ -7046,6 +7211,21 @@ export class SessionManager {
 			void Promise.allSettled(pendingRefreshes).then(() => this.refreshExternalMcpToolRegistrations());
 		}
 		return this.aggregateMcpReloadResults(results);
+	}
+
+	private startMcpReconciliation(): void {
+		if (this.mcpReconcileTimer || this.mcpReconcileIntervalMs <= 0) return;
+		let timer!: ReturnType<typeof setInterval>;
+		timer = this.clock.setInterval(() => {
+			if (this.mcpReconcileTimer !== timer || this.mcpReconcileInFlight) return;
+			const managers = this.getActiveMcpManagers();
+			this.mcpReconcileInFlight = this.reloadMcpManagers(managers)
+				.then(() => undefined)
+				.catch(error => console.warn("[mcp] Periodic reconciliation failed:", error))
+				.finally(() => { this.mcpReconcileInFlight = null; });
+		}, this.mcpReconcileIntervalMs);
+		this.mcpReconcileTimer = timer;
+		(timer as any).unref?.();
 	}
 
 	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
@@ -7337,7 +7517,7 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = this.createMcpManager(cwd, { includeAdditionalProjects: true });
+			const mgr = this.createMcpManager(cwd);
 
 			await mgr.connectAll();
 			this.mcpManager = mgr;
@@ -7354,6 +7534,7 @@ export class SessionManager {
 
 			// Register MCP tools with ToolManager across default and scoped managers.
 			this.refreshExternalMcpToolRegistrations();
+			this.startMcpReconciliation();
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
@@ -20560,6 +20741,12 @@ export class SessionManager {
 
 	async shutdown(): Promise<void> {
 		await this.stopPurgeSchedule();
+		if (this.mcpReconcileTimer) {
+			this.clock.clearInterval(this.mcpReconcileTimer);
+			this.mcpReconcileTimer = null;
+		}
+		await this.mcpReconcileInFlight?.catch(() => undefined);
+		this.mcpReconcileInFlight = null;
 		if (this._statusHeartbeatTimer) {
 			this.clock.clearInterval(this._statusHeartbeatTimer);
 			this._statusHeartbeatTimer = null;
