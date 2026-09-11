@@ -7212,6 +7212,13 @@ export class SessionManager {
 			|| current.origin.projectId !== identity.projectId
 			|| current.origin.sourceId !== identity.sourceId
 			|| current.approval.fingerprint !== identity.fingerprint) {
+			// Fresh discovery above can observe a change made after the first reload.
+			// Reconcile that newly discovered winner before returning 409 so the old
+			// approved client, routes, and external registration cannot remain live.
+			await this.reloadMcpManagers(managers, {
+				announce: true,
+				affectedProjectIds: [viewProjectId, identity.projectId],
+			});
 			throw Object.assign(new Error("The MCP server configuration changed while it was being reviewed."), { code: "MCP_APPROVAL_STALE" });
 		}
 		return status;
