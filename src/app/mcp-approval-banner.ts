@@ -114,14 +114,14 @@ async function reviewProjectServers(projectId: string): Promise<void> {
 	setConfigScope(projectId);
 	const alreadyOnTools = getRouteFromHash().view === "tools";
 	setHashRoute("tools");
-	focusFirstReviewRow();
 	// A same-route hash assignment emits no navigation event, so refresh the
-	// existing Tools surface directly. Normal navigation owns its own load.
+	// existing Tools surface directly before starting the single reveal lifecycle.
+	// Normal navigation owns its load, and the observer waits for that render.
 	if (alreadyOnTools) {
 		const { loadToolPageData } = await import("./tool-manager-page.js");
 		await loadToolPageData();
-		focusFirstReviewRow();
 	}
+	focusFirstReviewRow();
 }
 
 /** Invalidate counts after a server decision or configuration reconciliation. */
