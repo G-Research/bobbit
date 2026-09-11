@@ -1,7 +1,7 @@
 import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,8 +13,9 @@ const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-project-provenanc
 const fixtureHome = path.join(fixtureRoot, "home");
 const fixtureHeadquarters = path.join(fixtureRoot, "headquarters");
 
-// Windows resolves os.homedir() while loading the discovery module graph, so
-// establish the isolated roots before importing it rather than only in beforeEach.
+// Establish the isolated environment before loading the discovery module graph.
+// os.homedir() is also pinned per test below because recent Node versions can
+// cache its result before this isolate:false worker collects this file.
 process.env.HOME = fixtureHome;
 process.env.USERPROFILE = fixtureHome;
 process.env.BOBBIT_DIR = fixtureHeadquarters;
@@ -37,10 +38,12 @@ beforeEach(() => {
 	process.env.HOME = fixtureHome;
 	process.env.USERPROFILE = fixtureHome;
 	process.env.BOBBIT_DIR = fixtureHeadquarters;
+	vi.spyOn(os, "homedir").mockReturnValue(fixtureHome);
 	fs.mkdirSync(fixtureHome, { recursive: true });
 	fs.mkdirSync(fixtureHeadquarters, { recursive: true });
 });
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	for (const entry of fs.readdirSync(fixtureHome)) fs.rmSync(path.join(fixtureHome, entry), { recursive: true, force: true });
 	for (const entry of fs.readdirSync(fixtureHeadquarters)) fs.rmSync(path.join(fixtureHeadquarters, entry), { recursive: true, force: true });
@@ -137,9 +140,11 @@ describe("MCP source provenance", () => {
 		}
 
 		for (const name of ["homeClaude", "homeProjectEntry", "homeClaudeMcp", "homeBobbitMcp"]) {
-			assert.equal(statuses[name].source?.authority, "user-home", name);
-			assert.equal(statuses[name].approval?.state, "trusted", name);
-			assert.equal(statuses[name].approval?.required, false, name);
+			const status = statuses[name];
+			assert.ok(status, `missing ${name} discovered from ${fixtureHome}`);
+			assert.equal(status.source?.authority, "user-home", name);
+			assert.equal(status.approval?.state, "trusted", name);
+			assert.equal(status.approval?.required, false, name);
 		}
 		assert.equal(statuses.headquarters.source?.authority, "headquarters");
 		assert.equal(statuses.headquarters.approval?.state, "trusted");
