@@ -236,7 +236,103 @@ function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
 }
 
 const REDACTED = "[redacted]";
-const CREDENTIAL_FLAG = /(?:token|secret|password|passwd|api[-_]?key|authorization|credential|cookie)$/i;
+const CREDENTIAL_FLAG = /(?:token|secret|password|passwd|passphrase|api[-_]?key|authorization|auth|credential|cookie|headers?|bearer|user(?:name)?)$/i;
+const SENSITIVE_HEADER_NAME = /(?:^|[-_])(?:authorization|auth|token|secret|password|passwd|api[-_]?key|credential|cookie)(?:$|[-_])/i;
+const SHELL_ARGUMENT = /(?:[^\s"'`]+|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)+/g;
+
+interface McpArgumentRedactionState {
+  redactNext: boolean;
+}
+
+function quotedParts(value: string): { prefix: string; value: string; suffix: string } {
+  const quote = value[0];
+  if (value.length >= 2 && (quote === '"' || quote === "'" || quote === "`") && value.at(-1) === quote) {
+    return { prefix: quote, value: value.slice(1, -1), suffix: quote };
+  }
+  return { prefix: "", value, suffix: "" };
+}
+
+function redactWholeValue(value: string): string {
+  const quoted = quotedParts(value);
+  return `${quoted.prefix}${REDACTED}${quoted.suffix}`;
+}
+
+function isCredentialFlag(value: string): boolean {
+  if (value === "-H") return true;
+  if (!/^--?[^-]/.test(value)) return false;
+  return CREDENTIAL_FLAG.test(value.replace(/^--?/, ""));
+}
+
+function redactHeaderValue(value: string): string | undefined {
+  const quoted = quotedParts(value);
+  const colon = quoted.value.indexOf(":");
+  if (colon < 1) return undefined;
+  const name = quoted.value.slice(0, colon).trim();
+  if (!SENSITIVE_HEADER_NAME.test(name)) return undefined;
+  const spacing = quoted.value.slice(colon + 1).match(/^\s*/)?.[0] ?? "";
+  return `${quoted.prefix}${quoted.value.slice(0, colon + 1)}${spacing}${REDACTED}${quoted.suffix}`;
+}
+
+function redactConfiguredSecretSubstrings(value: string, secretValues: readonly string[]): string {
+  let cursor = 0;
+  let redacted = "";
+  while (cursor < value.length) {
+    let nextIndex = -1;
+    let nextSecret = "";
+    for (const secret of secretValues) {
+      const index = value.indexOf(secret, cursor);
+      if (index >= 0 && (nextIndex < 0 || index < nextIndex || (index === nextIndex && secret.length > nextSecret.length))) {
+        nextIndex = index;
+        nextSecret = secret;
+      }
+    }
+    if (nextIndex < 0) return redacted + value.slice(cursor);
+    redacted += value.slice(cursor, nextIndex) + REDACTED;
+    cursor = nextIndex + nextSecret.length;
+  }
+  return redacted;
+}
+
+function redactMcpArgument(
+  argument: string,
+  state: McpArgumentRedactionState,
+  secretValues: readonly string[],
+): string {
+  const quoted = quotedParts(argument);
+
+  if (state.redactNext) {
+    state.redactNext = false;
+    return redactHeaderValue(argument) ?? redactWholeValue(argument);
+  }
+
+  const equals = quoted.value.match(/^(--?[^=\s]+)=(.*)$/s);
+  if (equals && isCredentialFlag(equals[1])) {
+    return `${quoted.prefix}${equals[1]}=${redactWholeValue(equals[2])}${quoted.suffix}`;
+  }
+
+  const attachedHeader = quoted.value.match(/^(-H)(.+)$/s);
+  if (attachedHeader) {
+    return `${quoted.prefix}${attachedHeader[1]}${redactWholeValue(attachedHeader[2])}${quoted.suffix}`;
+  }
+
+  if (isCredentialFlag(quoted.value)) {
+    state.redactNext = true;
+    return argument;
+  }
+
+  const redactedHeader = redactHeaderValue(argument);
+  if (redactedHeader !== undefined) return redactedHeader;
+
+  return redactConfiguredSecretSubstrings(argument, secretValues);
+}
+
+function redactMcpCommand(command: string, secretValues: readonly string[]): string {
+  const state: McpArgumentRedactionState = { redactNext: false };
+  const redacted = command.replace(SHELL_ARGUMENT, (argument) => redactMcpArgument(argument, state, secretValues));
+  // A configured value can span shell tokens; apply the same value filter to
+  // the complete command after its credential syntax has been processed.
+  return redactConfiguredSecretSubstrings(redacted, secretValues);
+}
 
 export function redactRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
   if (!record) return undefined;
@@ -261,27 +357,23 @@ export function redactUrl(raw: string): string {
 export function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServerConfig {
   if (!config || typeof config !== "object" || Array.isArray(config)) return { transport: "stdio" };
   const out: RedactedMcpServerConfig = { transport: config.url ? "http" : "stdio" };
-  if (config.command) out.command = config.command;
-  if (config.args) {
-    const secretValues = new Set([
-      ...Object.values(config.env ?? {}),
-      ...Object.values(config.env ? expandEnvRecord(config.env) : {}),
-      ...Object.values(config.headers ?? {}),
-    ].filter(Boolean));
-    let redactNext = false;
-    out.args = config.args.map((arg) => {
-      if (redactNext || secretValues.has(arg)) {
-        redactNext = false;
-        return REDACTED;
-      }
-      const equals = arg.match(/^(--?[^=]+)=(.*)$/);
-      if (equals && CREDENTIAL_FLAG.test(equals[1])) return `${equals[1]}=${REDACTED}`;
-      if (CREDENTIAL_FLAG.test(arg.replace(/^--?/, ""))) redactNext = true;
-      return arg;
-    });
+  const validEnv = config.env && typeof config.env === "object" && !Array.isArray(config.env)
+    ? Object.fromEntries(Object.entries(config.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+    : undefined;
+  const secretValues = [...new Set([
+    ...Object.values(validEnv ?? {}),
+    ...Object.values(validEnv ? expandEnvRecord(validEnv) : {}),
+    ...Object.values(config.headers ?? {}).filter((value): value is string => typeof value === "string"),
+  ].filter((value) => Boolean(value) && value !== REDACTED))].sort((a, b) => b.length - a.length);
+  if (typeof config.command === "string" && config.command) out.command = redactMcpCommand(config.command, secretValues);
+  if (Array.isArray(config.args)) {
+    const state: McpArgumentRedactionState = { redactNext: false };
+    out.args = config.args.map((argument) => typeof argument === "string"
+      ? redactMcpArgument(argument, state, secretValues)
+      : REDACTED);
   }
-  if (config.cwd) out.cwd = config.cwd;
-  if (config.url) out.url = redactUrl(config.url);
+  if (typeof config.cwd === "string" && config.cwd) out.cwd = config.cwd;
+  if (typeof config.url === "string" && config.url) out.url = redactUrl(config.url);
   const env = redactRecord(config.env);
   if (env) out.env = env;
   const headers = redactRecord(config.headers);
