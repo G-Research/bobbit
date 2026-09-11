@@ -296,7 +296,7 @@ exited zero with no invalid, missing, stale, or extraneous edge. Every reported 
 | Extended OAuth, RPC lifecycle, tool normalization, transcript reader, Pi extension, binary, shrinkwrap-fixture, and sandbox-status canaries | 13 files passed; 167 tests passed and 1 platform-specific extension test skipped. |
 | Compaction DOM canary | 1 file passed; 2 tests passed. |
 | Sandbox missing/stale-image coverage | The existing two-test `sandbox-status` Docker-context canary passed. No focused image-version canary exists in `tests2/` or `tests/`; no dependency-only edit to `sandbox-status.ts` is justified. |
-| Packed-consumer graph/binary canary | Reached the unchanged assertion expecting package name `bobbit`, but `npm pack` returns the current manifest name `@gresearch/bobbit`. Both the manifest name and canary are byte-identical to `origin/master`, so this pre-existing failure occurs before any Pi graph or binary assertion and is not a dependency-bump delta. |
+| Packed-consumer graph/binary canary | Reached the unchanged assertion expecting the obsolete unscoped package name, but `npm pack` returns the current manifest name `@gresearch/bobbit`. Both the manifest name and canary are byte-identical to `origin/master`, so this pre-existing failure occurs before any Pi graph or binary assertion and is not a dependency-bump delta. |
 
 ### Deterministic failure ledger
 

@@ -389,7 +389,7 @@ Do not link `/src/ui/app.css` from authored HTML. That source URL is a Vite
 development detail and is not part of the compiled or packaged UI contract.
 The bridge supplies theme variables, not Bobbit's generated utility classes;
 write local CSS that consumes `var(--…)` so the same document works in source,
-built, and `npx bobbit` runtimes.
+built, and `npx @gresearch/bobbit` runtimes.
 
 ## Anti-patterns — do not do these
 

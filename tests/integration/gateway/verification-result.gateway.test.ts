@@ -5,14 +5,129 @@
  * and the happy path where a pending resolver is called with the
  * correct VerificationResult.
  */
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { vi } from "vitest";
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
-import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+
+const MAX_REPORT_BYTES = 10 * 1024 * 1024;
+const VERIFIER_AUTH_ERROR = {
+	error: "Valid verifier session secret is required",
+	code: "VERIFIER_SESSION_SECRET_REQUIRED",
+};
+
+function verifierHeaders(gateway: any, sessionId: string): Record<string, string> {
+	return { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId) };
+}
+
+async function postVerification(
+	gateway: any,
+	body: Record<string, unknown>,
+	headers: Record<string, string>,
+): Promise<Response> {
+	return fetch(`${gateway.baseURL}/api/internal/verification-result`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", ...headers },
+		body: JSON.stringify(body),
+	});
+}
+
+function rawChunkedVerification(
+	gateway: any,
+	secret: string,
+	bearerToken: string = gateway.token,
+): {
+	request: http.ClientRequest;
+	started: Promise<void>;
+	response: Promise<{ status: number; body: string; complete: boolean }>;
+} {
+	let markStarted!: () => void;
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	let resolveResponse!: (value: { status: number; body: string; complete: boolean }) => void;
+	let rejectResponse!: (error: Error) => void;
+	const response = new Promise<{ status: number; body: string; complete: boolean }>((resolve, reject) => {
+		resolveResponse = resolve;
+		rejectResponse = reject;
+	});
+	const request = http.request(new URL("/api/internal/verification-result", gateway.baseURL), {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${bearerToken}`,
+			"Content-Type": "application/json",
+			"Transfer-Encoding": "chunked",
+			"X-Bobbit-Session-Secret": secret,
+		},
+	});
+	request.once("socket", markStarted);
+	request.once("response", (incoming) => {
+		const chunks: Buffer[] = [];
+		incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+		incoming.once("end", () => resolveResponse({
+			status: incoming.statusCode ?? 0,
+			body: Buffer.concat(chunks).toString("utf8"),
+			complete: incoming.complete,
+		}));
+	});
+	request.once("error", rejectResponse);
+	return { request, started, response };
+}
+
+async function writeRequestChunk(request: http.ClientRequest, chunk: string): Promise<void> {
+	await new Promise<void>((resolve, reject) => request.write(chunk, (error) => error ? reject(error) : resolve()));
+}
+
+async function authenticatedBrowserCookie(gateway: any): Promise<string> {
+	const origin = new URL(gateway.baseURL).origin;
+	const response = await fetch(`${gateway.baseURL}/api/health`, {
+		headers: {
+			Authorization: `Bearer ${gateway.token}`,
+			Origin: origin,
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
+	});
+	const setCookie = response.headers.get("set-cookie") ?? "";
+	const cookie = /bobbit_session=[^;,]+/.exec(setCookie)?.[0];
+	if (!cookie) throw new Error(`failed to mint signed browser cookie: ${response.status} ${await response.text()}`);
+	return cookie;
+}
+
+function matchingPathCalls(spy: { mock: { calls: unknown[][] } }, expectedPath: string): number {
+	const canonical = path.resolve(expectedPath);
+	return spy.mock.calls.filter(([candidate]) => typeof candidate === "string" && path.resolve(candidate) === canonical).length;
+}
+
+function sha256(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+async function eventually<T>(
+	probe: () => T | Promise<T>,
+	accept: (value: T) => boolean,
+	message: string,
+	timeoutMs = 10_000,
+): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	let value = await probe();
+	while (!accept(value) && Date.now() < deadline) {
+		await new Promise(resolve => setTimeout(resolve, 25));
+		value = await probe();
+	}
+	expect(accept(value), message).toBe(true);
+	return value;
+}
 
 test.describe("POST /api/internal/verification-result", () => {
-	test("returns 404 for unknown sessionId", async () => {
+	test("returns 404 for an authenticated session with no pending verification", async ({ gateway }) => {
+		const sessionId = "unknown-session-id";
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "unknown-session-id", verdict: "pass", summary: "All good" }),
+			headers: verifierHeaders(gateway, sessionId),
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "All good" }),
 		});
 		expect(res.status).toBe(404);
 		const body = await res.json();
@@ -69,21 +184,190 @@ test.describe("POST /api/internal/verification-result", () => {
 		expect(res.status).toBe(400);
 	});
 
+	test("binds a pending result to the exact verifier secret, not other admitted credentials", async ({ gateway, scope }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const target = "test-session-auth-target";
+		const foreign = (await scope.createSession({})).id as string;
+		const projectId = `verification-auth-${process.pid}-${Date.now()}`;
+		const sandboxStore = gateway.sessionManager.sandboxTokenStore;
+		const sandboxToken = sandboxStore.register(projectId);
+		sandboxStore.addSession(projectId, target);
+		const browserCookie = await authenticatedBrowserCookie(gateway);
+		const resolver = vi.fn();
+		harness.pendingResults.set(target, resolver);
+		try {
+			const cases: Array<{ label: string; headers: Record<string, string> }> = [
+				{
+					label: "same-scope sandbox bearer with only the guessed public sessionId",
+					headers: { Authorization: `Bearer ${sandboxToken}` },
+				},
+				{
+					label: "admin bearer without a verifier secret",
+					headers: { Authorization: `Bearer ${gateway.token}` },
+				},
+				{
+					label: "signed browser cookie without a verifier secret",
+					headers: {
+						Cookie: browserCookie,
+						Origin: new URL(gateway.baseURL).origin,
+						"Sec-Fetch-Site": "same-origin",
+						"Sec-Fetch-Mode": "cors",
+					},
+				},
+				{
+					label: "another real session's secret",
+					headers: {
+						Authorization: `Bearer ${gateway.token}`,
+						...verifierHeaders(gateway, foreign),
+					},
+				},
+			];
+
+			for (const testCase of cases) {
+				const response = await postVerification(
+					gateway,
+					{ sessionId: target, verdict: "pass", summary: "forged" },
+					testCase.headers,
+				);
+				const responseBody = await response.json();
+				expect.soft(response.status, `${testCase.label}: ${JSON.stringify(responseBody)}`).toBe(403);
+				expect.soft(responseBody, `${testCase.label}: stable verifier error`).toEqual(VERIFIER_AUTH_ERROR);
+				expect.soft(resolver, `${testCase.label}: pending resolver must remain untouched`).not.toHaveBeenCalled();
+			}
+
+			const accepted = await postVerification(
+				gateway,
+				{ sessionId: target, verdict: "pass", summary: "authentic" },
+				{ Authorization: `Bearer ${sandboxToken}`, ...verifierHeaders(gateway, target) },
+			);
+			expect(accepted.status, await accepted.text()).toBe(200);
+			expect(resolver).toHaveBeenCalledTimes(1);
+			expect(resolver).toHaveBeenCalledWith({ verdict: true, summary: "authentic", reportHtml: undefined });
+		} finally {
+			harness.pendingResults.delete(target);
+			sandboxStore.remove(projectId);
+		}
+	});
+
+	test("accepts an admitted sandbox result after scope removal but rejects requests admitted later or by a foreign scope", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = `test-sandbox-late-verdict-${process.pid}-${Date.now()}`;
+		const projectId = `verification-late-scope-${process.pid}-${Date.now()}`;
+		const foreignProjectId = `${projectId}-foreign`;
+		const sandboxStore = gateway.sessionManager.sandboxTokenStore;
+		const sandboxToken = sandboxStore.register(projectId);
+		const foreignSandboxToken = sandboxStore.register(foreignProjectId);
+		const verifierSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const resolver = vi.fn();
+		const htmlReport = "<!doctype html><html><body>late sandbox report</body></html>";
+		const serialized = JSON.stringify({
+			sessionId,
+			verdict: "pass",
+			summary: "accepted after teardown",
+			report_html: htmlReport,
+		});
+		let stalledRequest: http.ClientRequest | undefined;
+		let markAdmitted!: () => void;
+		const admitted = new Promise<void>((resolve) => { markAdmitted = resolve; });
+		const originalLookup = sandboxStore.lookup.bind(sandboxStore);
+		const lookupSpy = vi.spyOn(sandboxStore, "lookup").mockImplementation((token) => {
+			const result = originalLookup(token);
+			if (token === sandboxToken && result) markAdmitted();
+			return result;
+		});
+
+		sandboxStore.addSession(projectId, sessionId);
+		harness.pendingResults.set(sessionId, resolver);
+		try {
+			const upload = rawChunkedVerification(gateway, verifierSecret, sandboxToken);
+			stalledRequest = upload.request;
+			await upload.started;
+			await writeRequestChunk(upload.request, serialized.slice(0, -1));
+			await admitted;
+
+			// Admission captured an authentic sandbox scope while the verifier was
+			// still present. Teardown then removes only its live scope membership,
+			// retaining the exact secret and pending resolver for this in-flight body.
+			sandboxStore.removeSession(projectId, sessionId);
+
+			const postRemoval = await postVerification(
+				gateway,
+				{ sessionId, verdict: "pass", summary: "started after removal" },
+				{ Authorization: `Bearer ${sandboxToken}`, "X-Bobbit-Session-Secret": verifierSecret },
+			);
+			expect(postRemoval.status).toBe(403);
+			expect(await postRemoval.json()).toEqual(VERIFIER_AUTH_ERROR);
+			expect(resolver).not.toHaveBeenCalled();
+
+			const foreignScope = await postVerification(
+				gateway,
+				{ sessionId, verdict: "pass", summary: "foreign scope" },
+				{ Authorization: `Bearer ${foreignSandboxToken}`, "X-Bobbit-Session-Secret": verifierSecret },
+			);
+			expect(foreignScope.status).toBe(403);
+			expect(await foreignScope.json()).toEqual(VERIFIER_AUTH_ERROR);
+			expect(resolver).not.toHaveBeenCalled();
+
+			upload.request.end(serialized.slice(-1));
+			const accepted = await upload.response;
+			expect(accepted.status, accepted.body).toBe(200);
+			expect(accepted.complete).toBe(true);
+			expect(JSON.parse(accepted.body)).toEqual({ ok: true });
+			expect(resolver).toHaveBeenCalledTimes(1);
+			expect(resolver).toHaveBeenCalledWith({
+				verdict: true,
+				summary: "accepted after teardown",
+				reportHtml: htmlReport,
+			});
+		} finally {
+			stalledRequest?.destroy();
+			lookupSpy.mockRestore();
+			harness.pendingResults.delete(sessionId);
+			gateway.sessionManager.sessionSecretStore.remove(sessionId);
+			sandboxStore.remove(projectId);
+			sandboxStore.remove(foreignProjectId);
+		}
+	});
+
+	test("rejects verdicts other than exact pass or fail before resolving", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-invalid-verdict";
+		const resolver = vi.fn();
+		harness.pendingResults.set(sessionId, resolver);
+		try {
+			for (const verdict of ["Pass", "PASS", "passed", "failure", "true"]) {
+				const response = await apiFetch("/api/internal/verification-result", {
+					method: "POST",
+					headers: verifierHeaders(gateway, sessionId),
+					body: JSON.stringify({ sessionId, verdict, summary: "must not resolve" }),
+				});
+				const body = await response.json();
+				expect.soft(response.status, `${verdict}: ${JSON.stringify(body)}`).toBe(400);
+				expect.soft(body.error, verdict).toBe("Invalid verdict: expected 'pass' or 'fail'");
+			}
+			expect(resolver).not.toHaveBeenCalled();
+		} finally {
+			harness.pendingResults.delete(sessionId);
+		}
+	});
+
 	test("resolves pending verification result with pass verdict", async ({ gateway }) => {
 		// Access verificationHarness through sessionManager (private but accessible via any)
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 		expect(harness).toBeTruthy();
+		const sessionId = "test-session-pass";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-pass", (result: any) => {
+			harness.pendingResults.set(sessionId, (result: any) => {
 				resolve(result);
 			});
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-pass",
+				sessionId,
 				verdict: "pass",
 				summary: "All tests passed successfully",
 			}),
@@ -105,17 +389,19 @@ test.describe("POST /api/internal/verification-result", () => {
 
 	test("resolves pending verification result with fail verdict", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-fail";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-fail", (result: any) => {
+			harness.pendingResults.set(sessionId, (result: any) => {
 				resolve(result);
 			});
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-fail",
+				sessionId,
 				verdict: "fail",
 				summary: "3 critical failures found",
 			}),
@@ -133,16 +419,18 @@ test.describe("POST /api/internal/verification-result", () => {
 
 	test("passes report_html through when provided", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-html";
 
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-html", resolve);
+			harness.pendingResults.set(sessionId, resolve);
 		});
 
 		const htmlReport = "<html><body><h1>QA Report</h1><p>All good</p></body></html>";
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
+			headers: verifierHeaders(gateway, sessionId),
 			body: JSON.stringify({
-				sessionId: "test-session-html",
+				sessionId,
 				verdict: "pass",
 				summary: "QA passed",
 				report_html: htmlReport,
@@ -159,136 +447,379 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-html");
 	});
 
-	test("reads report_html_file from disk when provided", async ({ gateway }) => {
+	test("accepts an in-flight exact-secret report through verifier teardown, persists it, then revokes the secret", async ({ gateway, scope }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-		const fs = await import("node:fs");
-		const path = await import("node:path");
-		const os = await import("node:os");
-
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-verification-result-"));
-		const tmpFile = path.join(tmpDir, "qa-report.html");
-		const htmlContent = "<html><body><h1>Report from file</h1><img src='data:image/png;base64,abc123'></body></html>";
+		const workflowId = `verification-artifact-${process.pid}-${Date.now()}`;
+		const gateId = "operator-report";
+		const stepName = "Operator report QA";
+		const htmlReport = "<!doctype html><html><body><h1>Exact operator report</h1><p>quotes: &quot; and unicode: ✓</p></body></html>";
+		let goalId: string | undefined;
+		let lateRequest: http.ClientRequest | undefined;
+		let terminateSpy: { mockRestore(): void } | undefined;
+		let dispatchSpy: { mockRestore(): void } | undefined;
+		let waitTurnSpy: { mockRestore(): void } | undefined;
+		let recoverySpy: { mockRestore(): void } | undefined;
+		let retrySleepSpy: { mockRestore(): void } | undefined;
+		let graceTimerSpy: { mockRestore(): void } | undefined;
+		let observation: {
+			verifierSessionId: string;
+			verifierSecret: string;
+			pendingDuringTeardown: boolean;
+			secretOwnerDuringTeardown: string | undefined;
+			exact: { status: number; body: string; complete: boolean };
+			missing: { status: number; body: unknown };
+			foreign: { status: number; body: unknown };
+		} | undefined;
+		const priorReviewSkip = process.env.BOBBIT_LLM_REVIEW_SKIP;
+		const priorHarnessSkip = harness.skipLlmReview;
+		delete process.env.BOBBIT_LLM_REVIEW_SKIP;
+		harness.skipLlmReview = false;
 
 		try {
-			fs.writeFileSync(tmpFile, htmlContent);
-
-			const promise = new Promise<any>((resolve) => {
-				harness.pendingResults.set("test-session-file", resolve);
-			});
-
-			const res = await apiFetch("/api/internal/verification-result", {
+			const workflowResponse = await apiFetch("/api/workflows", {
 				method: "POST",
 				body: JSON.stringify({
-					sessionId: "test-session-file",
-					verdict: "pass",
-					summary: "QA passed via file",
-					report_html_file: tmpFile,
+					id: workflowId,
+					name: "Verification Artifact Lifecycle",
+					description: "Hermetic agent QA artifact persistence fixture.",
+					gates: [{
+						id: gateId,
+						name: "Operator Report",
+						dependsOn: [],
+						verify: [{
+							name: stepName,
+							type: "agent-qa",
+							role: "test-engineer",
+							prompt: "Return the fixture report.",
+							timeout: 30,
+						}],
+					}],
 				}),
 			});
+			expect(workflowResponse.status, await workflowResponse.clone().text()).toBe(201);
 
-			expect(res.status).toBe(200);
+			const goal = await createGoal({
+				title: `Verification artifact ${Date.now()}`,
+				workflowId,
+				worktree: false,
+			});
+			goalId = goal.id as string;
+			const foreignSession = await scope.createSession({});
+			const foreignSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(foreignSession.id);
 
-			const result = await promise;
-			expect(result.verdict).toBe(true);
-			expect(result.reportHtml).toBe(htmlContent);
+			const contextManager = gateway.sessionManager.getProjectContextManager?.()
+				?? gateway.sessionManager.projectContextManager;
+			const context = contextManager.getContextForGoal(goalId);
+			const persistedGoal = context.goalStore.get(goalId);
+			persistedGoal.inlineRoles = {
+				"test-engineer": {
+					name: "test-engineer",
+					label: "Test Engineer",
+					promptTemplate: "Run the requested hermetic QA verification.",
+					accessory: "none",
+				},
+			};
+			context.goalStore.put(persistedGoal);
+			const runtimeGate = persistedGoal.workflow.gates.find((gate: any) => gate.id === gateId);
+			expect(runtimeGate?.verify).toHaveLength(1);
+			const signalId = `verification-artifact-signal-${Date.now()}`;
+			const signal: any = {
+				id: signalId,
+				goalId,
+				gateId,
+				sessionId: "verification-artifact-operator",
+				timestamp: Date.now(),
+				commitSha: "0123456789abcdef0123456789abcdef01234567",
+				content: "Run the report-producing QA verification.",
+				verification: { status: "running", steps: [] },
+			};
+			signal.verification.steps = harness.beginVerification(signal, runtimeGate);
+			context.gateStore.recordSignal(signal);
+
+			// Drive the QA reviewer to its existing late-verdict teardown branch without
+			// waiting on a model. Runtime creation, termination, endpoint auth, and gate
+			// persistence remain real; only the review turns themselves are hermetic.
+			dispatchSpy = vi.spyOn(harness, "dispatchVerifierPrompt").mockResolvedValue({ type: "dispatched" });
+			waitTurnSpy = vi.spyOn(harness, "waitForReviewTurn").mockResolvedValue({ type: "idle" });
+			recoverySpy = vi.spyOn(harness, "waitForReviewerErroredTurnRecovery").mockResolvedValue({ type: "idle" });
+			retrySleepSpy = vi.spyOn(harness, "_sleepCancellable").mockResolvedValue(undefined);
+			const originalSetTimeout = harness.clock.setTimeout.bind(harness.clock);
+			graceTimerSpy = vi.spyOn(harness.clock, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+				if (delay === 20_000) {
+					queueMicrotask(callback);
+					return undefined;
+				}
+				return originalSetTimeout(callback, delay);
+			}) as any);
+
+			const originalTerminate = gateway.sessionManager.terminateSession.bind(gateway.sessionManager);
+			terminateSpy = vi.spyOn(gateway.sessionManager, "terminateSession").mockImplementation((async (sessionId: string, ...args: unknown[]) => {
+				if (observation || !sessionId.startsWith("agent-qa-") || !harness.pendingResults.has(sessionId)) {
+					return originalTerminate(sessionId, ...args);
+				}
+
+				const verifierSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+				const serialized = JSON.stringify({
+					sessionId,
+					verdict: "pass",
+					summary: "QA report persisted",
+					report_html: htmlReport,
+				});
+				const upload = rawChunkedVerification(gateway, verifierSecret);
+				lateRequest = upload.request;
+				await upload.started;
+				await writeRequestChunk(upload.request, serialized.slice(0, -1));
+				await new Promise<void>(resolve => setImmediate(resolve));
+
+				// The request is already in flight but readBody cannot authenticate it
+				// until the final byte arrives. Complete real runtime teardown first,
+				// while the harness deliberately retains the pending result resolver.
+				const terminated = await originalTerminate(sessionId, ...args);
+				const pendingDuringTeardown = harness.pendingResults.has(sessionId);
+				const secretOwnerDuringTeardown = gateway.sessionManager.sessionSecretStore.resolveSessionIdBySecret(verifierSecret);
+				const missingResponse = await postVerification(
+					gateway,
+					{ sessionId, verdict: "pass", summary: "missing" },
+					{ Authorization: `Bearer ${gateway.token}` },
+				);
+				const foreignResponse = await postVerification(
+					gateway,
+					{ sessionId, verdict: "pass", summary: "foreign" },
+					{ Authorization: `Bearer ${gateway.token}`, "X-Bobbit-Session-Secret": foreignSecret },
+				);
+				upload.request.end(serialized.slice(-1));
+				const exact = await upload.response;
+				observation = {
+					verifierSessionId: sessionId,
+					verifierSecret,
+					pendingDuringTeardown,
+					secretOwnerDuringTeardown,
+					exact,
+					missing: { status: missingResponse.status, body: await missingResponse.json() },
+					foreign: { status: foreignResponse.status, body: await foreignResponse.json() },
+				};
+				return terminated;
+			}) as any);
+
+			const verification = harness.verifyGateSignal(
+				signal,
+				runtimeGate,
+				persistedGoal.cwd,
+				persistedGoal.branch,
+				"main",
+				new Map(),
+				persistedGoal.spec,
+			);
+			await verification;
+
+			expect(observation, "teardown must overlap the stalled verifier result request").toBeDefined();
+			expect(observation!.pendingDuringTeardown).toBe(true);
+			expect(observation!.missing).toEqual({ status: 403, body: VERIFIER_AUTH_ERROR });
+			expect(observation!.foreign).toEqual({ status: 403, body: VERIFIER_AUTH_ERROR });
+			expect(observation!.exact.status, observation!.exact.body).toBe(200);
+			expect(observation!.exact.complete).toBe(true);
+			expect(JSON.parse(observation!.exact.body)).toEqual({ ok: true });
+			expect(observation!.secretOwnerDuringTeardown).toBe(observation!.verifierSessionId);
+
+			await eventually(
+				() => ({
+					pending: harness.pendingResults.has(observation!.verifierSessionId),
+					active: harness.getActiveVerification(signalId),
+				}),
+				state => !state.pending && !state.active,
+				"verification must complete and leave no transient verifier state",
+			);
+			expect(gateway.sessionManager.sessionSecretStore.resolveSessionIdBySecret(observation!.verifierSecret)).toBeUndefined();
+			const revoked = await postVerification(
+				gateway,
+				{ sessionId: observation!.verifierSessionId, verdict: "pass", summary: "too late" },
+				{ Authorization: `Bearer ${gateway.token}`, "X-Bobbit-Session-Secret": observation!.verifierSecret },
+			);
+			expect(revoked.status).toBe(403);
+			expect(await revoked.json()).toEqual(VERIFIER_AUTH_ERROR);
+
+			const persistedGate = await eventually(
+				async () => {
+					const response = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+					expect(response.status, await response.clone().text()).toBe(200);
+					return response.json();
+				},
+				(gate: any) => gate.signals?.some((candidate: any) =>
+					candidate.id === signalId && candidate.verification?.status === "passed"),
+				"operator gate-detail path must expose the completed verification",
+			);
+			const persistedSignal = persistedGate.signals.find((candidate: any) => candidate.id === signalId);
+			expect(persistedSignal.verification.steps).toHaveLength(1);
+			expect(persistedSignal.verification.steps[0]).toMatchObject({
+				name: stepName,
+				type: "agent-qa",
+				passed: true,
+				status: "passed",
+				output: "QA report persisted",
+				artifact: { contentType: "text/html", content: htmlReport },
+			});
+			expect(persistedSignal.verification.steps[0].artifact.content).toBe(htmlReport);
 		} finally {
-			harness.pendingResults.delete("test-session-file");
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			lateRequest?.destroy();
+			terminateSpy?.mockRestore();
+			dispatchSpy?.mockRestore();
+			waitTurnSpy?.mockRestore();
+			recoverySpy?.mockRestore();
+			retrySleepSpy?.mockRestore();
+			graceTimerSpy?.mockRestore();
+			harness.skipLlmReview = priorHarnessSkip;
+			if (priorReviewSkip === undefined) delete process.env.BOBBIT_LLM_REVIEW_SKIP;
+			else process.env.BOBBIT_LLM_REVIEW_SKIP = priorReviewSkip;
+			if (goalId) await deleteGoal(goalId).catch(() => {});
+			await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
-	test("report_html_file returns 400 for nonexistent file", async ({ gateway }) => {
+	test("rejects report_html_file without touching the supplied host path", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-		harness.pendingResults.set("test-session-nofile", () => {});
+		const sessionId = "test-session-file";
+		const reportPath = path.join(gateway.bobbitDir, `gateway-host-read-probe-${process.pid}.html`);
+		fs.writeFileSync(reportPath, "gateway must not read this marker");
+		const statSpy = vi.spyOn(fs, "statSync");
+		const realpathSpy = vi.spyOn(fs, "realpathSync");
+		const readSpy = vi.spyOn(fs, "readFileSync");
+		const resolver = vi.fn();
+		harness.pendingResults.set(sessionId, resolver);
+		try {
+			const response = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				headers: verifierHeaders(gateway, sessionId),
+				body: JSON.stringify({
+					sessionId,
+					verdict: "pass",
+					summary: "attempted host read",
+					report_html_file: reportPath,
+				}),
+			});
+			const responseBody = await response.json();
 
-		const res = await apiFetch("/api/internal/verification-result", {
-			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-nofile",
-				verdict: "pass",
-				summary: "ok",
-				report_html_file: "/tmp/nonexistent-qa-report-12345.html",
-			}),
-		});
-
-		expect(res.status).toBe(400);
-		const body = await res.json();
-		expect(body.error).toContain("Failed to read report file");
-
-		harness.pendingResults.delete("test-session-nofile");
+			expect(response.status, JSON.stringify(responseBody)).toBe(400);
+			expect(responseBody).toEqual({
+				error: "report_html_file is not accepted by the gateway; upload its contents as report_html",
+			});
+			expect(resolver).not.toHaveBeenCalled();
+			expect(matchingPathCalls(statSpy, reportPath), "gateway stat of report_html_file").toBe(0);
+			expect(matchingPathCalls(realpathSpy, reportPath), "gateway realpath of report_html_file").toBe(0);
+			expect(matchingPathCalls(readSpy, reportPath), "gateway read of report_html_file").toBe(0);
+		} finally {
+			harness.pendingResults.delete(sessionId);
+			statSpy.mockRestore();
+			realpathSpy.mockRestore();
+			readSpy.mockRestore();
+			fs.rmSync(reportPath, { force: true });
+		}
 	});
 
-	test("rejects when both report_html and report_html_file are provided", async ({ gateway }) => {
+	test("passes inline file URLs unchanged without gateway filesystem access", async ({ gateway, scope }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-		harness.pendingResults.set("test-session-both", () => {});
+		const projectRoot = path.join(gateway.bobbitDir, "default-project");
+		fs.mkdirSync(projectRoot, { recursive: true });
+		const workspace = fs.mkdtempSync(path.join(projectRoot, "verification-inline-"));
+		const imagePath = path.join(workspace, "private.png");
+		fs.writeFileSync(imagePath, Buffer.from("gateway must not inline this marker"));
+		const session = await scope.createSession({ cwd: workspace });
+		const sessionId = session.id as string;
+		const htmlReport = `<img src="${pathToFileURL(imagePath).href}" alt="must remain external">`;
+		const resolver = vi.fn();
+		harness.pendingResults.set(sessionId, resolver);
+		const statSpy = vi.spyOn(fs, "statSync");
+		const readSpy = vi.spyOn(fs, "readFileSync");
+		try {
+			const response = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				headers: verifierHeaders(gateway, sessionId),
+				body: JSON.stringify({ sessionId, verdict: "pass", summary: "inline", report_html: htmlReport }),
+			});
 
-		const res = await apiFetch("/api/internal/verification-result", {
-			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-both",
-				verdict: "pass",
-				summary: "ok",
-				report_html: "<h1>Inline</h1>",
-				report_html_file: "/tmp/should-not-be-read.html",
-			}),
-		});
+			expect(response.status, await response.text()).toBe(200);
+			expect(resolver).toHaveBeenCalledTimes(1);
+			expect(resolver.mock.calls[0][0].reportHtml).toBe(htmlReport);
+			expect(matchingPathCalls(statSpy, imagePath), "gateway stat of inline file URL").toBe(0);
+			expect(matchingPathCalls(readSpy, imagePath), "gateway read of inline file URL").toBe(0);
+		} finally {
+			harness.pendingResults.delete(sessionId);
+			statSpy.mockRestore();
+			readSpy.mockRestore();
+			await gateway.api(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
+			fs.rmSync(workspace, { recursive: true, force: true });
+		}
+	});
 
-		expect(res.status).toBe(400);
-		const body = await res.json();
-		expect(body.error).toContain("not both");
+	test("accepts an escape-heavy report at 10 MiB and rejects one decoded byte more", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-report-boundary";
+		const resolver = vi.fn();
+		const exactReport = `\\"`.repeat(MAX_REPORT_BYTES / 2);
+		expect(Buffer.byteLength(exactReport)).toBe(MAX_REPORT_BYTES);
+		harness.pendingResults.set(sessionId, resolver);
+		try {
+			const accepted = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				headers: verifierHeaders(gateway, sessionId),
+				body: JSON.stringify({ sessionId, verdict: "pass", summary: "exact limit", report_html: exactReport }),
+			});
+			expect(accepted.status, await accepted.text()).toBe(200);
+			expect(resolver).toHaveBeenCalledTimes(1);
+			const uploaded = resolver.mock.calls[0][0].reportHtml as string;
+			expect(Buffer.byteLength(uploaded)).toBe(MAX_REPORT_BYTES);
+			expect(sha256(uploaded)).toBe(sha256(exactReport));
 
-		harness.pendingResults.delete("test-session-both");
+			const rejected = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				headers: verifierHeaders(gateway, sessionId),
+				body: JSON.stringify({ sessionId, verdict: "pass", summary: "over limit", report_html: `${exactReport}x` }),
+			});
+			const rejectedBody = await rejected.json();
+			expect(rejected.status, JSON.stringify(rejectedBody)).toBe(400);
+			expect(rejectedBody.error).toBe(`HTML report too large (max ${MAX_REPORT_BYTES} bytes)`);
+			expect(resolver).toHaveBeenCalledTimes(1);
+		} finally {
+			harness.pendingResults.delete(sessionId);
+		}
 	});
 
 	test("ignores non-string report_html", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-
+		const sessionId = "test-session-bad-html";
 		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-bad-html", resolve);
+			harness.pendingResults.set(sessionId, resolve);
 		});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-bad-html",
-				verdict: "pass",
-				summary: "ok",
-				report_html: 12345,
-			}),
+			headers: verifierHeaders(gateway, sessionId),
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "ok", report_html: 12345 }),
 		});
 
 		expect(res.status).toBe(200);
-
-		const result = await promise;
-		expect(result.reportHtml).toBeUndefined();
-
-		harness.pendingResults.delete("test-session-bad-html");
+		expect((await promise).reportHtml).toBeUndefined();
+		harness.pendingResults.delete(sessionId);
 	});
 
-	test("resolver is removed from map after call (endpoint returns 404 on second call)", async ({ gateway }) => {
+	test("accepts repeat delivery only from the same authenticated verifier", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-once";
+		const headers = verifierHeaders(gateway, sessionId);
+		harness.pendingResults.set(sessionId, () => {});
 
-		harness.pendingResults.set("test-session-once", () => {});
-
-		// First call succeeds
 		const res1 = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "test-session-once", verdict: "pass", summary: "ok" }),
+			headers,
+			body: JSON.stringify({ sessionId, verdict: "pass", summary: "ok" }),
 		});
 		expect(res1.status).toBe(200);
 
-		// The endpoint calls the resolver but doesn't delete from the map itself —
-		// that's the harness's responsibility. Verify the resolver was called (map still has it).
-		// But calling again should still work since the entry is still there.
-		// The harness race/finally logic handles cleanup — the endpoint just calls the resolver.
-		// So a second POST to the same sessionId will call the resolver again.
-		// This test verifies the endpoint doesn't crash on re-call.
 		const res2 = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
-			body: JSON.stringify({ sessionId: "test-session-once", verdict: "fail", summary: "re-call" }),
+			headers,
+			body: JSON.stringify({ sessionId, verdict: "fail", summary: "re-call" }),
 		});
 		expect(res2.status).toBe(200);
-
-		harness.pendingResults.delete("test-session-once");
+		harness.pendingResults.delete(sessionId);
 	});
 });

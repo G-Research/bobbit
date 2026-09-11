@@ -1,38 +1,40 @@
 # Blocking tools — agent pauses while another party produces a result
 
-Some builtin tools need to pause the agent turn and wait for something another subsystem must produce before the tool can return. Bobbit implements these via a **harness** pattern: the tool extension makes a blocking HTTP call to an internal endpoint, the server parks a Promise keyed by `(sessionId, toolUseId)`, and a later HTTP call resolves that Promise so the original response can carry the result back to the agent.
+Some builtin workflows must pause while another subsystem produces a result. Bobbit implements these with a **harness** pattern: the server parks a Promise under a correlation key, and a later authenticated callback resolves it. The correlation key routes the result; it is not authorization.
 
 The canonical example is:
 
-- `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result. When a QA agent submits a report via `report_html_file`, the server automatically rewrites `<img src="file://...">` references under the session cwd (including the `.bobbit-qa/` subtree) to inline base64 data URIs, with a 20 MB cumulative cap. See [docs/qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
+- `verification_result` — a reviewer or QA agent submits a verdict that resolves the gate harness's pending entry for that verifier session. The extension may accept `report_html_file` as verifier-local convenience, but it reads and transforms the file before POSTing only `report_html` bytes. The internal endpoint rejects file paths. See [QA testing — Verification submission trust boundary](qa-testing.md#verification-submission-trust-boundary).
 
 Blocking is the right shape here because **another agent is actively doing work** (running reviews, executing QA steps) while the requesting agent waits. The requesting agent genuinely cannot make progress until the verdict lands.
 
 Contrast: `ask_user_choices` used to use this pattern but was moved to a non-blocking design. Waiting on a human is not "work in progress" — holding the turn open misleads the UI ("thinking…") and creates fragile in-memory state. See [docs/non-blocking-ask.md](non-blocking-ask.md) for the alternative pattern used there.
 
-## Flow (verification_result)
+## Flow (`verification_result`)
 
 ```
-  Reviewer agent        Tool extension         Bobbit server                     Gate signal (caller)
-    │                          │                      │                                │
-    │                          │                      │  signal triggers verification  │
-    │                          │                      │  register(sessionId,           │
-    │                          │                      │           toolUseId) → Promise │
-    │                          │                      │                                │ (awaits)
-    │  tool_use                │                      │                                │
-    ├─────────────────────────►│                      │                                │
-    │                          │  POST /api/internal/ │                                │
-    │                          │  verification/submit │                                │
-    │                          ├─────────────────────►│  submit(sessionId,             │
-    │                          │                      │         toolUseId, verdict)    │
-    │                          │                      │  → resolves Promise ──────────►│ gate passes/fails
-    │                          │  { ok: true }        │                                │
-    │                          │◄─────────────────────┤                                │
-    │  tool_result             │                      │                                │
-    │◄─────────────────────────┤                      │                                │
+  Gate harness              Verifier agent       Tool extension             Gateway
+      │ create verifier           │                     │                       │
+      │ park by sessionId         │                     │                       │
+      │ (awaits)                  │                     │                       │
+      │                           │ verification_result │                       │
+      │                           ├────────────────────►│                       │
+      │                           │                     │ read/bound report file│
+      │                           │                     │ inline safe images    │
+      │                           │                     │ POST report_html +    │
+      │                           │                     │ session secret        │
+      │                           │                     ├──────────────────────►│
+      │                           │                     │                       │ resolve secret;
+      │                           │                     │                       │ match session/scope;
+      │◄────────────────────────────────────────────────────────────────────────┤ resolve pending result
+      │                           │                     │◄──────────────────────┤ { ok: true }
+      │ store step output and     │◄────────────────────┤                       │
+      │ optional HTML artifact    │                     │                       │
 ```
 
-The agent-side block is a plain HTTP request — no special SDK support required. The tool extension is written exactly like any other builtin tool; the blocking is just an `await fetch(...)`.
+The verifier's public session ID selects the pending entry but grants no authority. The gateway requires `X-Bobbit-Session-Secret` to resolve to that exact session and to belong to the sandbox scope captured when the request is admitted. Missing, unknown, or foreign secrets return the stable `403` code `VERIFIER_SESSION_SECRET_REQUIRED`; an admin bearer, browser cookie, or guessed session ID cannot substitute. Verdicts are accepted only as exact `pass` or `fail` strings.
+
+This boundary also keeps local paths on the correct side of the API. `report_html_file` is opened only by the extension inside the verifier runtime. The gateway rejects that field and does not rewrite `file://` URLs in uploaded `report_html`. The extension rejects non-regular, oversized, or final-symlink report paths, bounds the read at 10 MiB, and performs canonical, identity-checked image containment before upload. See [QA testing — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports) for image and final-report budgets.
 
 ## File layout
 
@@ -43,16 +45,14 @@ defaults/tools/tasks/
                                        the verification submit endpoint.
 
 src/server/agent/
-  verification-harness.ts              VerificationHarness class. Map of pending verifications
-                                       keyed by `${sessionId}:${toolUseId}`. Exposes register /
-                                       submit / rejectAllForSession plus persistence for in-
-                                       flight verifications and phased step execution.
+  verification-harness.ts              VerificationHarness class. Tracks active gate verification
+                                       and pending result resolvers keyed by verifier session ID.
 
 src/server/server.ts
-  POST /api/internal/verification/submit
-                                       UI-or-agent facing endpoint: validates the verdict,
-                                       calls harness.submit(...), returns { ok: true }.
-  (session-termination listener calls verificationHarness.rejectAllForSession)
+  POST /api/internal/verification-result
+                                       Verifier-only callback: binds the session secret, validates
+                                       verdict/report bytes, resolves the pending result, and returns
+                                       { ok: true }. It never accepts a report file path.
 
 src/ui/components/...                  Gate/task UI surfaces (not a chat widget — verdicts flow
                                        through gate signals, not inline transcript cards).
@@ -62,31 +62,28 @@ Exact file paths may evolve; search for `VerificationHarness` to find the live w
 
 ## Harness contract
 
-A blocking-tool harness exposes three methods:
+A blocking harness needs three lifecycle operations, even when their concrete names differ:
 
-| Method | When called | Purpose |
+| Operation | When called | Purpose |
 |---|---|---|
-| `register(sessionId, toolUseId, payload)` | From the code that starts a wait (e.g. when a gate signal triggers verification). Returns a Promise. | Park a pending entry; give the caller something to await. |
-| `submit(sessionId, toolUseId, result)` | From the REST handler invoked when the external party produces a result. | Resolve the parked Promise with the result. |
-| `rejectAllForSession(sessionId, reason?)` | From the session-termination listener. | Reject any outstanding Promises so blocked callers get a clean error instead of hanging forever. |
+| Register | When work starts. Returns a Promise. | Park a pending entry and give the coordinator something to await. |
+| Resolve | When the producer submits a valid result. | Resolve exactly the intended pending entry. |
+| Reject/cleanup | On cancellation, timeout, or session termination. | Settle and remove outstanding work so callers do not hang. |
 
-Keying by `(sessionId, toolUseId)` means concurrent waits against the same session do not collide, and re-registration of the same `toolUseId` is idempotent — it latches onto the existing entry instead of creating a duplicate.
+`VerificationHarness` specializes this pattern with `pendingResults`, keyed by the verifier session ID. It installs the resolver before dispatching the reviewer or QA prompt and retains it through termination long enough to capture a verdict racing teardown. The endpoint looks up only the identity derived from the session secret, never an unauthenticated caller-selected identity.
 
-## Session termination & replay behavior
+## Session termination and replay behavior
 
-- **Termination.** `sessionManager.addTerminationListener` wires the harness's `rejectAllForSession` in `server.ts`. When a session is terminated or aborted, every pending `register()` Promise rejects with a "Session terminated" error. The caller sees a clean rejection and can surface it.
-- **Server restart.** In-flight verifications are persisted (see `active-verifications.json`) so the harness can resume them after restart. Purely transient blocking calls that are not persisted will see the open HTTP connection severed and return an error; if that matters for your new tool, mirror the persistence pattern in `verification-harness.ts`.
+- **Termination.** Reviewer and QA runners own pending-result cleanup. They keep both the resolver and exact-session credential valid while terminating the verifier so an admitted result can finish without losing a genuine late verdict. Cleanup then removes the pending result and revokes the credential; later submissions cannot reuse it.
+- **Server restart.** In-flight gate verifications are persisted and resumed. The resume path reinstalls a pending resolver for the same verifier session before prompting it to submit or retry. Purely transient waits need their own persistence design if they must survive a severed HTTP connection.
 
 ## Adding your own blocking tool
 
-1. **Write the tool manifest and extension.** Put them under `defaults/tools/<group>/`. The extension resolves the gateway URL and token from env vars (`BOBBIT_GATEWAY_URL`, `BOBBIT_TOKEN`, `BOBBIT_SESSION_ID`) or the state directory, then POSTs to an internal endpoint and awaits the response. Mirror `defaults/tools/tasks/extension.ts`.
-2. **Add a harness.** New file under `src/server/agent/`. Keep the shape: a `Map<key, Pending>` plus `register` / `submit` / `rejectAllForSession`. Add input validators alongside so HTTP handlers can share them.
-3. **Wire the REST endpoint(s)** in `handleApiRoute()` in `src/server/server.ts`:
-   - A POST that validates the submission, calls `harness.submit(...)`, and returns `{ ok: true }`.
-   - If the caller is external (e.g. a chat widget), also wire whatever start-side trigger calls `harness.register(...)`.
-   - Construct the harness in `createServer()` and register a `sessionManager.addTerminationListener` that calls `rejectAllForSession`.
-4. **UI surface (if needed).** Most blocking tools today drive non-chat UI (gate panels, task dashboards). If your tool needs an inline chat widget, see `src/ui/components/` and `src/ui/tools/renderers/` for the patterns; register the renderer in `src/ui/tools/index.ts`.
-5. **Tests.** Unit-test the harness directly (no server needed). For the full round-trip, add an API E2E test in `tests/e2e/` using the in-process harness.
+1. **Write the tool manifest and extension.** Put them under `defaults/tools/<group>/`. Resolve gateway connection details as other builtin extensions do. If only the spawned producer may resolve the wait, send its process-local session secret and keep local file handling in that process.
+2. **Add a harness.** Keep pending entries under a correlation key that uniquely identifies the producer and attempt. Define cancellation, timeout, teardown-race, and restart behavior before wiring the endpoint.
+3. **Wire the REST endpoint** in the server router. Validate the payload, derive authentic caller identity independently of caller-selected routing fields, enforce sandbox scope, then resolve exactly the matching pending entry. A bearer token alone is not sufficient for an agent-only callback.
+4. **UI surface (if needed).** Most blocking tools drive gate panels or task dashboards. Reuse the existing artifact flow when the result is durable evidence rather than creating a second storage or rendering path.
+5. **Tests.** Unit-test registration and cleanup. Integration-test the full callback with missing, foreign, and authentic producer credentials, plus any local-file boundary handled by the extension.
 
 ## Before choosing blocking
 
