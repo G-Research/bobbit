@@ -36,7 +36,22 @@ export function createMcpProjectApprovalFixture(): McpProjectApprovalFixture {
 			mcpServers: {
 				[LOCAL_SERVER_NAME]: {
 					command: process.execPath,
-					args: [MOCK_MCP_SERVER, "--token", LOCAL_SECRET, "--variant", version],
+					args: [
+						MOCK_MCP_SERVER,
+						"--token", LOCAL_SECRET,
+						"--header", `Authorization: Bearer ${LOCAL_SECRET}`,
+						`--header=X-Api-Key: ${LOCAL_SECRET}`,
+						"-H", `Cookie: session=${LOCAL_SECRET}`,
+						`-H=Cookie: session=${LOCAL_SECRET}`,
+						`-HProxy-Authorization: Basic ${LOCAL_SECRET}`,
+						"--proxy-header", `X-Proxy-Token: ${LOCAL_SECRET}`,
+						`--proxy-header=Proxy-Authorization: Basic ${LOCAL_SECRET}`,
+						`Authorization: Bearer ${LOCAL_SECRET}`,
+						`Proxy-Authorization: Basic ${LOCAL_SECRET}`,
+						`Cookie: session=${LOCAL_SECRET}`,
+						`prefix-${LOCAL_SECRET}-suffix`,
+						"--variant", version,
+					],
 					cwd: ".",
 					env: { JOURNEY_API_TOKEN: LOCAL_SECRET },
 				},
