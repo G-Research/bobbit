@@ -93,7 +93,7 @@ knowledge of the meta-tool format.
 
 ## Marketplace MCP and scoped managers
 
-Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above.
+Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above. Marketplace installations are pretrusted through their explicit install/activation flow; repository-controlled definitions must separately pass [MCP server startup approval](mcp-server-approvals.md) before any meta-tool is published.
 
 Key rules:
 
@@ -105,7 +105,7 @@ Key rules:
 - Manual MCP config discovery remains compatible and higher priority for route conflicts. `.mcp.json` and Claude-compatible configs keep `runtimeServerKey === serverName`, retain flat tool names like `mcp__playwright__click`, and win over Marketplace when the same public operation name exists.
 - Managers are contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own clients, status, tool docs, and external ToolManager registrations for that context.
 - `GET /api/mcp-servers` is status/policy-key data only. Market toggles must come from `GET /api/marketplace/pack-activation`, because disabled Marketplace MCP rows and disabled/stale operations would disappear from runtime status and become impossible to re-enable.
-- Status payloads redact secret values: env/header values become `<redacted>`, args are redacted, and URL credentials/query/fragment are removed.
+- Status payloads preserve ordinary command and argument text for deliberate review while replacing environment/header values and credential-bearing command/argument values with `[redacted]`; URL credentials, query parameters, and fragments are removed.
 
 Marketplace install/update/uninstall, pack order, whole-contribution activation, and operation activation reload affected managers, disconnect removed servers, keep unchanged connections where possible, rebuild route maps, and refresh external MCP tools without a full app restart. If a reload exceeds the response budget, the response can report `mcpReload.status: "pending"`; the background reload still refreshes external tools when it settles.
 
@@ -237,13 +237,20 @@ authoritative.
 ## Tools page UI
 
 The Tools page surfaces one row per MCP **server** under a dedicated "MCP"
-section, sibling to the existing builtin sections. Each server row mirrors a
-built-in tool group:
+section, sibling to the existing builtin sections. Project definitions remain
+visible here even when startup approval leaves them with zero operations. The
+startup label (**Pending approval**, **Approved**, **Rejected**, or
+**Configuration changed — review again**) is distinct from connection health
+and from the **Tool calls** policy. See [MCP server startup approvals](mcp-server-approvals.md)
+for the review flow and safe metadata contract.
 
-- **Server header** (`data-testid="mcp-server-toggle"`): chevron, name, status
-  pill (`connected` / `error` / `disconnected`), operation count, and a
-  group-policy `<select>` (`data-testid="mcp-server-policy"`; key
-  `mcp__<server>`). Click to toggle expansion.
+Each server row mirrors a built-in tool group:
+
+- **Server header** (`data-testid="mcp-server-toggle"`): disclosure control,
+  name, startup approval label, connection health, and operation count.
+  The sibling **Tool calls** `<select>` (`data-testid="mcp-server-policy"`; key
+  `mcp__<server>`) controls invocation only; per-server approval/rejection
+  actions control startup.
 - **Server expanded**: one **tool row** per sub-namespace
   (`data-testid="mcp-tool-row"`), each with its own `<select>`
   (`data-testid="mcp-tool-policy"`; key `mcp__<server>__<sub>` for sub,

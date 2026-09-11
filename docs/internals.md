@@ -2489,6 +2489,8 @@ See also: [docs/rest-api.md - Image generation](rest-api.md#image-generation) fo
 
 ## MCP servers
 
+Project-defined MCP servers cross a startup trust boundary before connection or tool discovery; approval is deliberately separate from invocation policy. See [MCP server startup approvals](mcp-server-approvals.md) for source trust classes, fingerprints, persistence, multi-project decisions, and recovery.
+
 MCP discovery has two layers. Marketplace MCP contributions are resolved first, then the manual/Claude-compatible cascade overlays them for compatibility. Sources (later manual config entries override earlier manual entries):
 
 0. Active Marketplace MCP contributions from installed schema-2 packs and MCP Gateway materializations (lowest; `DisabledRefs.mcp` contributions and `DisabledRefs.mcpOperations` operations are omitted before exposure)
@@ -2499,7 +2501,8 @@ MCP discovery has two layers. Marketplace MCP contributions are resolved first, 
 5. `~/.bobbit/.mcp.json`
 6. `<project>/.mcp.json`
 7. `<project>/.claude/.mcp.json`
-8. `<project>/.bobbit/config/mcp.json` (highest priority)
+8. Headquarters `config/mcp.json`
+9. `<project>/.bobbit/config/mcp.json` (highest priority)
 
 Marketplace gateway installs separate **public** MCP identity from **runtime** identity. Public names (`gr`, `gr-write`, sub-namespaces, and policy keys such as `mcp__gr__jira__jira_search`) stay readable, while runtime client keys include source/install/fingerprint identity so multiple gateway sources can coexist. `McpManager` exposes the union of selected operations through a route map. Distinct public operation names all register; identical public names keep the first route in deterministic contribution order and record a conflict diagnostic. Manual JSON MCP routes are considered before Marketplace routes for collision handling.
 
@@ -2534,7 +2537,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 
 **Prompt layout** - `getToolDocsForPrompt()` in `tool-manager.ts` produces a single compact `# Tools` section sent on every assistant turn. Each group is one `## <Group> — see <relpath>` header followed by a one-line bullet per tool: `- name(params) — summary`. The `params` list comes from the YAML `params: [name, name?]` field (trailing `?` marks optional); tools without `params` render as `- name — summary`. Per-tool prose (`docs`, `detail_docs`) is **not** inlined into the prompt — it is folded into the per-group reference markdown the pointer resolves to. Built-in groups point at `<stateDir>/tool-docs/<groupDir>.md` (written by `generateDetailDocs()` from each tool's `docs` paragraph followed by `detail_docs`); MCP groups point at `<stateDir>/mcp-tool-docs/<serverName>.md` (auto-generated from `tools/list`). MCP groups render one bullet per op with no inlined parameter prose — agents call `mcp_describe` for full schemas. This compact format replaced an earlier sentence-form `### name` layout to drop ~78% of the per-turn `# Tools` byte count.
 
-**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. `GET /api/mcp-servers` is contextual status only (`projectId`/`cwd` select a scoped manager; `ensure=true` may create one for authenticated UI flows). Marketplace toggles come from `GET/PUT /api/marketplace/pack-activation`, not runtime status. See also [docs/mcp-meta-tools.md](mcp-meta-tools.md) and [docs/marketplace.md#marketplace-mcp](marketplace.md#marketplace-mcp).
+**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/approval`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. `GET /api/mcp-servers` is contextual status only (`projectId`/`cwd` select a scoped manager; `ensure=true` may create one for authenticated UI flows), including safe metadata for project definitions excluded from runtime. Approval mutations require an authenticated operator and validate the view scope, introducing source, and current fingerprint. Marketplace toggles come from `GET/PUT /api/marketplace/pack-activation`, not runtime status. See also [MCP server startup approvals](mcp-server-approvals.md), [docs/mcp-meta-tools.md](mcp-meta-tools.md), and [docs/marketplace.md#marketplace-mcp](marketplace.md#marketplace-mcp).
 
 ---
 

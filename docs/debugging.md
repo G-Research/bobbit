@@ -1414,9 +1414,13 @@ Diagnose: grep the gateway log for `[verification][reviewer-lifecycle]` (attempt
 
 Key files: `src/server/agent/verification-harness.ts` (`runLlmReviewViaSession`, bounded retry loop in `verifyGateSignal`), `src/server/agent/session-manager.ts` (`createSession` clobber guard). Tests: `tests2/core/verification-harness-review-reliability.test.ts`, `tests2/core/session-id-clobber-guard.test.ts`. Full detail: [docs/llm-review-recovery.md — Reviewer session lifecycle](llm-review-recovery.md#session-lifecycle-and-transcript-preservation).
 
+## MCP server is "Not started" or needs review
+
+**Pending approval**, **Rejected**, and **Configuration changed — review again** are startup trust states, not connection failures. Do not troubleshoot **Tool calls** policy or restart the server to bypass them; review the introducing project and redacted configuration in **Tools → MCP**. Invalid definitions, stale decisions, persistence failures, parse failures, and approval-key recovery are mapped by diagnostic code in [MCP server startup approvals — Troubleshooting](mcp-server-approvals.md#troubleshooting).
+
 ## MCP server unavailable / partial outage
 
-Failed MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.
+Failed eligible MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.
 
 ## MCP per-op `never` policy not enforced
 
