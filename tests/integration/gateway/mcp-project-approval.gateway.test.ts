@@ -260,6 +260,47 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("an on-disk change blocks a cached remote tool call before periodic reconciliation", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "pre-call-freshness");
+		const approvedServer = await startRecordingMcpServer("cached_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		try {
+			const project = await createProject(gateway, isolated, `mcp-pre-call-${randomUUID().slice(0, 8)}`);
+			const serverName = `pre-call-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: approvedServer.url });
+
+			let current = named(await statuses(project.id), serverName);
+			const response = await decide(project.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
+
+			const sessionManager = gateway.sessionManager as any;
+			const manager = sessionManager.getMcpManager({ projectId: project.id });
+			const approvedClient = manager.clients.get(serverName);
+			const toolName = `mcp__${serverName}__cached_probe`;
+			expect(manager.getToolRouteSnapshots().some((tool: any) => tool.name === toolName)).toBe(true);
+			const approvedRequestCount = approvedServer.requests.length;
+			expect(rpcCount(approvedServer, "tools/call")).toBe(0);
+
+			writeProjectMcpConfig(project.root, serverName, { url: changedServer.url });
+			await expect(manager.callTool(toolName, { secret: "must-not-be-sent" })).rejects.toThrow(
+				`MCP server "${serverName}" is not approved to run`,
+			);
+
+			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
+			expect(rpcCount(approvedServer, "tools/call")).toBe(0);
+			expect(changedServer.requests).toHaveLength(0);
+			expect(approvedClient.connected).toBe(false);
+			expect(manager.getToolRouteSnapshots().some((tool: any) => tool.runtimeServerKey === serverName)).toBe(false);
+			current = named(manager.getServerStatuses(), serverName);
+			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "changed" } });
+		} finally {
+			await Promise.allSettled([approvedServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
 	test("a change in the post-reload freshness window disconnects the approved runtime before returning stale", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "post-reload-stale");
 		const approvedServer = await startRecordingMcpServer("post_reload_probe");

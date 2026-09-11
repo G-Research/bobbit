@@ -1732,7 +1732,10 @@ export class McpManager {
 
   private async _callRouteTool(route: McpToolRoute, args: Record<string, unknown>): Promise<McpToolResult> {
     const group = this.connectionGroups.get(route.runtimeServerKey);
-    if (!group || !this._isEligible(group)) {
+    // Tool dispatch is the final data-bearing trust boundary. Rediscover the
+    // effective winner here so an on-disk edit/removal cannot use a formerly
+    // approved client before the normal reconciliation timer observes it.
+    if (!group || !this._isStillEligible(group)) {
       await this.disconnectServer(route.runtimeServerKey, { runtimeOnly: true });
       throw new Error(`MCP server "${route.runtimeServerKey}" is not approved to run`);
     }
