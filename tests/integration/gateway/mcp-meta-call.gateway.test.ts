@@ -113,21 +113,72 @@ async function makeFakeMcpManager(
 	activeSubNamespaces?: readonly string[],
 ) {
 	const { McpManager } = (await loadServerTestRuntime()).mcpManager;
-	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, opts);
+	const projectId = typeof opts?.projectId === "string" ? opts.projectId : undefined;
+	const isHeadquarters = projectId === HEADQUARTERS_PROJECT_ID;
+	const origin = projectId
+		? {
+			scope: "manual",
+			authority: isHeadquarters ? "headquarters" : "project",
+			trust: isHeadquarters ? "pretrusted" : "approval-required",
+			sourceId: `integration-fixture:${serverName}`,
+			file: ".mcp.json",
+			projectId,
+		}
+		: {
+			scope: "manual",
+			authority: "headquarters",
+			trust: "pretrusted",
+			sourceId: `integration-fixture:${serverName}`,
+			file: "Runtime configuration",
+		};
+	const config = { command: "stub" };
+	const ownerContributions = (activeSubNamespaces?.length ? activeSubNamespaces : [undefined]).map(subNamespace => ({
+		listName: serverName,
+		serverName,
+		runtimeServerKey: serverName,
+		config,
+		origin,
+		...(subNamespace ? { subNamespace } : {}),
+	}));
+	const group = {
+		serverName,
+		runtimeServerKey: serverName,
+		config,
+		ownerContributions,
+		...(activeSubNamespaces ? { activeSubNamespaces: new Set(activeSubNamespaces) } : {}),
+	};
+	const groups = [group];
+	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, {
+		...opts,
+		approvalStore: (gw.sessionManager as any).getMcpApprovalStore(),
+	});
+	mgr.discoverConnectionGroups = () => {
+		mgr.discoveredConnectionGroups = new Map(groups.map(entry => [entry.serverName, entry]));
+		return groups;
+	};
+
+	// Project-owned definitions must pass through the real decision flow before
+	// this fixture exposes a connected client. Tool-call policy is tested later
+	// and remains separate from startup approval.
+	const current = mgr.getEffectiveDefinitionForDecision(serverName);
+	if (current?.approval.required) {
+		if (!current.origin.projectId || !current.approval.fingerprint) {
+			throw new Error(`Fixture MCP definition ${serverName} is not reviewable`);
+		}
+		await mgr.decideApproval({
+			projectId: current.origin.projectId,
+			sourceId: current.origin.sourceId,
+			serverName,
+			fingerprint: current.approval.fingerprint,
+		}, "approved");
+	}
+
 	const client = new FakeMcpClient(serverName);
 	client.connected = true;
-	const config = { command: "stub" };
 	(mgr as any).clients.set(serverName, client);
 	(mgr as any).toolDefs.set(serverName, toolDefs);
 	(mgr as any).configs.set(serverName, config);
-	if (activeSubNamespaces) {
-		(mgr as any).connectionGroups.set(serverName, {
-			serverName,
-			config,
-			ownerContributions: [],
-			activeSubNamespaces: new Set(activeSubNamespaces),
-		});
-	}
+	(mgr as any).connectionGroups.set(serverName, group);
 	return mgr;
 }
 
@@ -167,7 +218,14 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 				contributionId,
 				subNamespace: "jira",
 				config,
-				origin: { scope: "project", packName: contributionId },
+				origin: {
+					scope: "project",
+					authority: "marketplace",
+					trust: "pretrusted",
+					sourceId: contributionId,
+					file: `${contributionId}/mcp.json`,
+					packName: contributionId,
+				},
 			}],
 			activeSubNamespaces: new Set(["jira"]),
 		};

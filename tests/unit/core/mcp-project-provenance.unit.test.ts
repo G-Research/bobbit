@@ -1,7 +1,7 @@
 import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, afterEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,11 +12,6 @@ import type { MarketplaceMcpResolver, McpServerStatus } from "../../../src/serve
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-project-provenance-"));
 const fixtureHome = path.join(fixtureRoot, "home");
 const fixtureHeadquarters = path.join(fixtureRoot, "headquarters");
-fs.mkdirSync(fixtureHome, { recursive: true });
-fs.mkdirSync(fixtureHeadquarters, { recursive: true });
-process.env.HOME = fixtureHome;
-process.env.USERPROFILE = fixtureHome;
-process.env.BOBBIT_DIR = fixtureHeadquarters;
 
 const {
 	McpManager,
@@ -28,6 +23,15 @@ const {
 const { McpApprovalStore } = await import("../../../src/server/mcp/mcp-approval-store.ts");
 
 const temporaryRoots: string[] = [];
+beforeEach(() => {
+	// v2-core reuses module workers with isolation disabled, so another test file
+	// may have changed these process-wide discovery roots after this module loaded.
+	process.env.HOME = fixtureHome;
+	process.env.USERPROFILE = fixtureHome;
+	process.env.BOBBIT_DIR = fixtureHeadquarters;
+	fs.mkdirSync(fixtureHome, { recursive: true });
+	fs.mkdirSync(fixtureHeadquarters, { recursive: true });
+});
 afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	for (const entry of fs.readdirSync(fixtureHome)) fs.rmSync(path.join(fixtureHome, entry), { recursive: true, force: true });
