@@ -154,12 +154,12 @@ export function renderMcpApprovalBanner(route: AppRoute = getRouteFromHash()): T
 	const projectId = resolveMcpApprovalBannerProjectId(route);
 	if (!projectId) return nothing;
 	ensureReviewCount(projectId);
+	// The Tools route intentionally has no active session socket. Revalidate its
+	// compact count even when it is zero so a later configuration change can make
+	// the banner appear; active session surfaces still use immediate WS invalidation.
+	scheduleToolsRevalidation(projectId, route);
 	const count = reviewCountByProject.get(projectId) ?? 0;
 	if (count === 0) return nothing;
-	// The Tools route intentionally has no active session socket. Revalidate its
-	// compact count while review is outstanding; the normal WS invalidation is
-	// still the immediate path everywhere an active session exists.
-	scheduleToolsRevalidation(projectId, route);
 	const projectName = state.projects.find((project) => project.id === projectId)?.name ?? "this project";
 	return html`
 		<div

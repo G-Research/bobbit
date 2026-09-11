@@ -133,12 +133,11 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		await expect(localRow.locator('[data-testid="mcp-server-policy"]')).toHaveValue("ask");
 		await expect(page.locator('[data-testid="mcp-approval-banner"]')).toHaveCount(0);
 
-		// A behavior change invalidates the exact approval and restores the banner.
+		// A behavior change while the zero-count banner is absent on Tools must be
+		// discovered without a reload or an active session WebSocket.
 		fixture.writePrimary("v3");
 		const changedResponse = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(primaryProjectId)}&ensure=true`);
 		expect(changedResponse.status).toBe(200);
-		await page.reload();
-		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		const changedBanner = page.locator('[data-testid="mcp-approval-banner"]');
 		await expect(changedBanner).toBeVisible({ timeout: 20_000 });
 		await expect(changedBanner.locator('[data-testid="mcp-approval-banner-count"]')).toHaveText("1");
