@@ -414,7 +414,7 @@ async function refreshScopedToolPageData(resetExpansion: boolean): Promise<void>
 		fetchToolsScoped(),
 		fetchRoles(scopedProjectId),
 		fetchGroupPolicies(scopedProjectId),
-		fetchMcpServers({ projectId: scopedProjectId }),
+		fetchMcpServers({ projectId: scopedProjectId, ensure: true }),
 	]);
 	tools = t;
 	roles = r;
