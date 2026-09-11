@@ -165,9 +165,9 @@ scripts/build-binaries.mjs
 Each sub-package declares strict `os` / `cpu` fields so npm installs
 exactly one per host. The root `package.json` lists all of them under
 `optionalDependencies` pinned to an exact version. Sub-package versions
-are **decoupled from the root bobbit version** — fd and ripgrep change
+are **decoupled from the root `@gresearch/bobbit` version** — fd and ripgrep change
 upstream rarely (~yearly), so the sub-packages stay pinned across many
-bobbit releases. Only bump and republish them when `binaries.versions.json`
+`@gresearch/bobbit` releases. Only bump and republish them when `binaries.versions.json`
 changes.
 
 ### Bumping fd or ripgrep
@@ -218,8 +218,8 @@ changes.
 
 ### Decoupled versioning
 
-Sub-package versions are pinned independently of the root bobbit version.
-For a typical bobbit release that doesn't touch fd or ripgrep, you only
+Sub-package versions are pinned independently of the root `@gresearch/bobbit` version.
+For a typical `@gresearch/bobbit` release that doesn't touch fd or ripgrep, you only
 publish the root — the sub-packages stay at their current version and
 the existing `optionalDependencies` pin in `package.json` continues to
 resolve. Only republish sub-packages when `binaries.versions.json`

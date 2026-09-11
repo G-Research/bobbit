@@ -776,7 +776,7 @@ The inline preparation helper statically imports `PREVIEW_THEME_BRIDGE`. Vite
 therefore includes the canonical script through its dependency graph in both
 the source development server and compiled `dist/ui` assets; a packaged browser
 must not resolve a TypeScript source path at runtime. The npm package ships the
-built UI used by `npx bobbit` for this path.
+built UI used by `npx @gresearch/bobbit` for this path.
 
 The server theme snapshot is deliberately separate. It reads canonical
 `src/ui/app.css` from the package root to provide defaults for standalone

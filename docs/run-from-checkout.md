@@ -6,7 +6,7 @@ The `run` (Linux/macOS) and `run.cmd` (Windows) scripts at the repo root let you
 
 | Approach | Best for |
 |---|---|
-| `npx bobbit` / `npm install -g bobbit` | Published release, no source needed |
+| `npx @gresearch/bobbit` / `npm install -g @gresearch/bobbit` | Published release, no source needed |
 | `npm start` (from repo) | Developing Bobbit itself |
 | **`run` / `run.cmd`** | Running Bobbit from source against any project directory |
 

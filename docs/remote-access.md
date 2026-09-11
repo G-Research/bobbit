@@ -6,7 +6,7 @@ Bobbit can be accessed from other devices (phone, tablet, laptop) over NordVPN's
 
 ```bash
 npm run dev:nord    # Development (harness + Vite HMR)
-npx bobbit --nord   # Production
+npx @gresearch/bobbit --nord   # Production
 ```
 
 This binds the server to your NordLynx mesh IP and enables TLS automatically.

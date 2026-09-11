@@ -1026,7 +1026,7 @@ export function openGatewayDialog(): void {
 								${error ? html`<error-details .message=${error}></error-details>` : ""}
 								<p class="text-xs text-muted-foreground">
 									Start the gateway:
-									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx bobbit</code>
+									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx @gresearch/bobbit</code>
 								</p>
 							</div>
 						`,
