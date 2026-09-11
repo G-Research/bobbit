@@ -3178,11 +3178,50 @@ export interface McpOperationInfo {
 	op?: string;
 }
 
+export type McpApprovalState = "trusted" | "pending" | "approved" | "rejected" | "changed";
+export type McpApprovalDecision = "approved" | "rejected";
+
+export interface McpServerApprovalInfo {
+	required: boolean;
+	state: McpApprovalState;
+	/** Opaque, Headquarters-keyed identity. It contains no raw configuration values. */
+	fingerprint?: string;
+	decidedAt?: string;
+}
+
+export interface McpServerSourceInfo {
+	sourceId: string;
+	authority: "marketplace" | "headquarters" | "user-home" | "project";
+	projectId?: string;
+	projectName?: string;
+	/** Logical, safe-to-display source file. Physical paths remain server-internal. */
+	file: string;
+}
+
+export interface McpServerReviewConfig {
+	transport: "stdio" | "http";
+	command?: string;
+	args?: string[];
+	cwd?: string;
+	url?: string;
+	env?: Record<string, string>;
+	headers?: Record<string, string>;
+}
+
+export interface McpServerDiagnostic {
+	code: string;
+	message: string;
+}
+
 export interface McpServerInfo {
 	name: string;
-	status: "connected" | "disconnected" | "error";
+	status: "connected" | "connecting" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	approval?: McpServerApprovalInfo;
+	source?: McpServerSourceInfo;
+	reviewConfig?: McpServerReviewConfig;
+	diagnostics?: McpServerDiagnostic[];
 	/** Public server policy key (for gateway runtimes this differs from name). */
 	serverPolicyKey?: string;
 	policyKey?: string;
@@ -3192,7 +3231,7 @@ export interface McpServerInfo {
 	tools: McpOperationInfo[];
 }
 
-/** GET /api/mcp-servers — returns one entry per registered MCP server with its operations. */
+/** GET /api/mcp-servers — returns effective servers, including definitions awaiting approval. */
 export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
 		const params = new URLSearchParams();
@@ -3208,6 +3247,33 @@ export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string;
 	} catch {
 		return [];
 	}
+}
+
+export interface McpApprovalRequest {
+	decision: McpApprovalDecision;
+	fingerprint: string;
+	sourceProjectId: string;
+	sourceId: string;
+}
+
+/** Decide startup approval for one exact, currently effective project definition. */
+export async function decideMcpServerApproval(
+	serverName: string,
+	request: McpApprovalRequest,
+	projectId?: string,
+): Promise<McpServerInfo> {
+	const params = new URLSearchParams({ projectId: configApiProjectId(projectId) });
+	const res = await gatewayFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${params.toString()}`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(request),
+	});
+	if (!res.ok) throw await errorFromResponse(res, `Could not update MCP server approval (${res.status})`);
+	const data = await res.json();
+	// Keep rolling-upgrade response-shape handling here, away from the page UI.
+	const server = data && typeof data === "object" && "server" in data ? (data as { server: unknown }).server : data;
+	if (!server || typeof server !== "object") throw new Error("Invalid MCP approval response");
+	return server as McpServerInfo;
 }
 
 export interface ToolProviderProvenance {

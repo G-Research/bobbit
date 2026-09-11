@@ -8,6 +8,7 @@ const ENTRY = path.resolve("tests/ui-fixtures/tool-manager-mcp-section-entry.ts"
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "tool-manager-mcp-section-bundle.js");
 const TOOL_MANAGER_SRC = path.resolve("src/app/tool-manager-page.ts");
+const TOOL_MANAGER_CSS = path.resolve("src/app/tool-manager.css");
 const API_SRC = path.resolve("src/app/api.ts");
 const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
@@ -50,6 +51,38 @@ const FAKE_SERVERS = [
 	},
 ];
 
+const APPROVAL_SERVERS = [
+	{
+		name: "local-project",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "pending", fingerprint: "0123456789abcdef" },
+		source: { sourceId: "project-file:.mcp.json", authority: "project", projectId: "project-a", projectName: "Acme Portal", file: ".mcp.json" },
+		reviewConfig: { transport: "stdio", command: "node", args: ["server.js", "--token", "[redacted]"], cwd: "./services/mcp", env: { API_TOKEN: "[redacted]" } },
+		diagnostics: [{ code: "MCP_APPROVAL_PENDING", message: "Review this project-defined server before Bobbit starts it." }],
+	},
+	{
+		name: "remote-changed",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "changed", fingerprint: "fedcba9876543210" },
+		source: { sourceId: "project-file:.claude/.mcp.json", authority: "project", projectId: "project-b", projectName: "Data Service", file: ".claude/.mcp.json" },
+		reviewConfig: { transport: "http", url: "https://mcp.example.test/events", headers: { Authorization: "[redacted]" } },
+		diagnostics: [{ code: "MCP_APPROVAL_CHANGED", message: "The server configuration changed." }],
+	},
+	{
+		name: "rejected-project",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "rejected", fingerprint: "aaaaaaaaaaaaaaaa" },
+		source: { sourceId: "project-file:.bobbit/config/mcp.json", authority: "project", projectId: "project-a", projectName: "Acme Portal", file: ".bobbit/config/mcp.json" },
+		reviewConfig: { transport: "stdio", command: "python", args: ["mcp.py"] },
+	},
+];
+
 const GATEWAY_SERVERS = [
 	{
 		name: "gr",
@@ -83,6 +116,7 @@ test.beforeAll(() => {
 
 async function loadFixture(page: Page): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.addStyleTag({ path: TOOL_MANAGER_CSS });
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__toolMcpReady === true, null, { timeout: 10_000 });
 }
@@ -291,5 +325,127 @@ test.describe("Tools page → MCP section fixture", () => {
 
 		await reloadWithMcp(page, GATEWAY_SERVERS);
 		await expect(page.locator('[data-testid="mcp-section"] [data-server-name="gr"] [data-testid="mcp-server-policy"]').first()).toHaveValue("");
+	});
+
+	test("reviews safe project configuration with approval separate from health and tool calls", async ({ page }) => {
+		await setupMcp(page, APPROVAL_SERVERS);
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section.getByText("3 servers · 2 need review")).toBeVisible();
+		await expect(section.getByText(/Startup approval is separate from/)).toBeVisible();
+		await expect(section.getByText("Approve all", { exact: false })).toHaveCount(0);
+
+		const pending = section.locator('[data-server-name="local-project"]');
+		await expect(pending.locator('[data-testid="mcp-approval-status"]')).toHaveText("Pending approval");
+		await expect(pending.locator('[data-testid="mcp-server-status"]')).toHaveText("Not started");
+		await expect(pending.locator('[data-testid="mcp-server-policy"]')).toBeVisible();
+		await expect(pending.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "false");
+		await pending.locator('[data-testid="mcp-server-toggle"]').press("Enter");
+		await expect(pending.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "true");
+		const review = pending.locator('[data-testid="mcp-review-panel"]');
+		await expect(review).toContainText("Acme Portal");
+		await expect(review).toContainText(".mcp.json");
+		await expect(review).toContainText("node");
+		await expect(review).toContainText("server.js --token [redacted]");
+		await expect(review).toContainText("API_TOKEN=[redacted]");
+		await expect(review).toContainText("0123456789ab");
+		await expect(page.locator("body")).not.toContainText("super-secret-value");
+
+		const changed = section.locator('[data-server-name="remote-changed"]');
+		await expect(changed.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again");
+		await expect(changed.locator('[data-testid="mcp-approve-server"]')).toHaveText("Approve current configuration");
+		await changed.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(changed.locator('[data-testid="mcp-review-panel"]')).toContainText("Data Service");
+		await expect(changed.locator('[data-testid="mcp-review-panel"]')).toContainText("Authorization: [redacted]");
+
+		const rejected = section.locator('[data-server-name="rejected-project"]');
+		await expect(rejected.locator('[data-testid="mcp-approval-status"]')).toHaveText("Rejected");
+		await expect(rejected.locator('[data-testid="mcp-reject-server"]')).toHaveCount(0);
+		await expect(rejected.locator('[data-testid="mcp-approve-server"]')).toHaveText("Approve current configuration");
+	});
+
+	test("approves and rejects individually, refetches state, and returns focus", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		let row = page.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect.poll(async () => (await fetchLog(page)).find((entry) => entry.method === "POST")).toEqual(
+			expectedGatewayRequest("/api/mcp-servers/local-project/approval?projectId=headquarters", "POST", {
+				decision: "approved",
+				fingerprint: "0123456789abcdef",
+				sourceProjectId: "project-a",
+				sourceId: "project-file:.mcp.json",
+			}),
+		);
+		row = page.locator('[data-server-name="local-project"]');
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved");
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("connected");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toBeFocused();
+
+		await row.locator('[data-testid="mcp-reject-server"]').click();
+		await expect(page.getByText("Reject local-project?", { exact: true })).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Rejected");
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("Not started");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toBeFocused();
+	});
+
+	test("keeps review open and refreshes metadata after a stale decision", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		const changed = structuredClone(APPROVAL_SERVERS[0]);
+		changed.approval = { ...changed.approval, state: "changed", fingerprint: "9999999999999999" };
+		changed.reviewConfig.args = ["server-v2.js"];
+		await page.evaluate((servers) => (window as any).__failNextMcpApproval({
+			status: 409,
+			code: "MCP_APPROVAL_STALE",
+			error: "Definition changed",
+			servers,
+		}), [changed]);
+		const row = page.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(row.locator('[data-testid="mcp-approval-error"]')).toHaveText("Configuration changed while you were reviewing it. Review the current configuration before deciding.");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "true");
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("server-v2.js");
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("999999999999");
+	});
+
+	test("renders zero-tool review rows and uses one-column review metadata at 767px", async ({ page }) => {
+		await page.setViewportSize({ width: 767, height: 800 });
+		await page.evaluate((servers) => (window as any).__setMcpFixture({ servers, tools: [] }), APPROVAL_SERVERS);
+		await page.evaluate(() => (window as any).__loadToolManager());
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section).toBeVisible();
+		await expect(page.getByText("No tools found")).toHaveCount(0);
+		const row = section.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(row.getByText("No operations available.")).toBeVisible();
+		await expect(row.locator(".mcp-review-grid")).toHaveCSS("grid-template-columns", /\d+(\.\d+)?px/);
+		const buttonBox = await row.locator('[data-testid="mcp-approve-server"]').boundingBox();
+		expect(buttonBox?.height).toBeGreaterThanOrEqual(44);
+	});
+
+	test("does not offer decisions for invalid definitions", async ({ page }) => {
+		const invalid = structuredClone(APPROVAL_SERVERS[0]);
+		invalid.name = "invalid-project";
+		invalid.diagnostics = [{ code: "MCP_CONFIG_INVALID", message: "A supported command or HTTP URL is required." }];
+		await setupMcp(page, [invalid]);
+		const row = page.locator('[data-server-name="invalid-project"]');
+		await expect(row.locator('[data-testid="mcp-approve-server"]')).toHaveCount(0);
+		await expect(row.locator('[data-testid="mcp-reject-server"]')).toHaveCount(0);
+		await row.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("MCP_CONFIG_INVALID");
+	});
+
+	test("reloads every scoped Tools resource when the project scope changes", async ({ page }) => {
+		await page.evaluate((servers) => (window as any).__setMcpFixture({
+			servers,
+			projects: [{ id: "project-a", name: "Acme Portal", rootPath: "C:/acme" }],
+		}), APPROVAL_SERVERS);
+		await page.evaluate(() => (window as any).__loadToolManager());
+		await page.getByRole("button", { name: "Acme Portal" }).click();
+		await expect.poll(async () => (await fetchLog(page)).slice(-4).map((entry) => entry.url)).toEqual([
+			`${FIXTURE_GATEWAY_BASE_URL}/api/tools?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/roles?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/tool-group-policies?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/mcp-servers?projectId=project-a`,
+		]);
 	});
 });
