@@ -20785,6 +20785,16 @@ async function handleApiRoute(
 	// POST /api/mcp-servers/:name/approval
 	const mcpApprovalMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/approval$/);
 	if (mcpApprovalMatch && req.method === "POST") {
+		// Agents receive the global bearer credential, so it cannot authorize a
+		// repository server to cross the startup trust boundary. Only the existing
+		// server-verified UI/operator cookie may make an approval decision.
+		if (!cookieTryAuth(req, cookieStore!)) {
+			json({
+				error: "MCP server approval decisions require an authenticated operator.",
+				code: "MCP_APPROVAL_HUMAN_REQUIRED",
+			}, 403);
+			return;
+		}
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }

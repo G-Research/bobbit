@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
-import { apiFetch } from "../../support/harnesses/integration/gateway/e2e-setup.js";
+import {
+	authenticatedOperatorCookie,
+	apiFetch,
+} from "../../support/harnesses/integration/gateway/e2e-setup.js";
 
 const SENTINELS = [
 	"gateway-command-auth-sentinel",
@@ -112,6 +115,7 @@ test.describe("MCP approval API CLI redaction", () => {
 			writeConfig(root, "two");
 			const staleResponse = await apiFetch(`/api/mcp-servers/${encodeURIComponent(SERVER_NAME)}/approval?projectId=${encodeURIComponent(projectId)}`, {
 				method: "POST",
+				headers: { Cookie: await authenticatedOperatorCookie() },
 				body: JSON.stringify({
 					decision: "approved",
 					fingerprint: pending.approval.fingerprint,

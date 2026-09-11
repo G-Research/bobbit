@@ -215,6 +215,24 @@ test.describe("Sandbox Security Boundaries", () => {
 		expect(res.status).toBe(403);
 	});
 
+	test("cannot submit MCP server approval decisions", async ({ gateway }) => {
+		const res = await sandboxFetch(
+			gateway.baseURL,
+			"/api/mcp-servers/untrusted/approval?projectId=headquarters",
+			scopedToken,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					decision: "approved",
+					fingerprint: "forged-fingerprint",
+					sourceProjectId: "headquarters",
+					sourceId: "forged-source",
+				}),
+			},
+		);
+		expect(res.status).toBe(403);
+	});
+
 	test("cannot read preferences", async ({ gateway }) => {
 		const res = await sandboxFetch(gateway.baseURL, "/api/preferences", scopedToken);
 		expect(res.status).toBe(403);
