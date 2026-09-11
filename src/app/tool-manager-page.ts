@@ -267,6 +267,7 @@ let editGrantPolicy = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
 let editTab: "access" | "context" | "renderer" = "access";
+let scopedRefreshRevision = 0;
 
 // ============================================================================
 // POLICY HELPERS
@@ -408,15 +409,18 @@ async function fetchToolsScoped(): Promise<ToolInfo[]> {
 	return response.tools;
 }
 
-async function refreshScopedToolPageData(resetExpansion: boolean): Promise<void> {
+async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boolean> {
 	const scopedProjectId = getConfigApiProjectId();
-	const [t, r, gp, mcp] = await Promise.all([
-		fetchToolsScoped(),
+	const refreshRevision = ++scopedRefreshRevision;
+	const [toolResponse, r, gp, mcp] = await Promise.all([
+		fetchToolsResponse(scopedProjectId),
 		fetchRoles(scopedProjectId),
 		fetchGroupPolicies(scopedProjectId),
 		fetchMcpServers({ projectId: scopedProjectId, ensure: true }),
 	]);
-	tools = t;
+	if (refreshRevision !== scopedRefreshRevision || scopedProjectId !== getConfigApiProjectId()) return false;
+	tools = toolResponse.tools;
+	toolDiagnostics = toolResponse.diagnostics;
 	roles = r;
 	groupPolicies = gp;
 	mcpServers = mcp;
@@ -426,6 +430,7 @@ async function refreshScopedToolPageData(resetExpansion: boolean): Promise<void>
 		collapsedGroups = new Set(TOOL_GROUPS);
 		for (const tool of tools) collapsedGroups.add(tool.group || "Other");
 	}
+	return true;
 }
 
 export async function loadToolPageData(): Promise<void> {
@@ -434,12 +439,14 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	await refreshScopedToolPageData(true);
-	loading = false;
-	renderApp();
+	if (await refreshScopedToolPageData(true)) {
+		loading = false;
+		renderApp();
+	}
 }
 
 export function clearToolPageState(): void {
+	scopedRefreshRevision++;
 	currentView = "list";
 	selectedTool = null;
 	toolDiagnostics = [];
@@ -1054,9 +1061,10 @@ async function handleScopeChange(scope: string): Promise<void> {
 	mcpApprovalErrors.clear();
 	mcpApprovalAnnouncements.clear();
 	renderApp();
-	await refreshScopedToolPageData(true);
-	loading = false;
-	renderApp();
+	if (await refreshScopedToolPageData(true)) {
+		loading = false;
+		renderApp();
+	}
 }
 
 function firstDiagnosticString(diagnostic: ToolDiagnostic, keys: string[]): string | undefined {

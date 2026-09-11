@@ -448,4 +448,90 @@ test.describe("Tools page → MCP section fixture", () => {
 			`${FIXTURE_GATEWAY_BASE_URL}/api/mcp-servers?projectId=project-a&ensure=true`,
 		]);
 	});
+
+	test("discards a delayed Tools scope response after a newer project loads", async ({ page }) => {
+		const projectAServer = structuredClone(APPROVAL_SERVERS[0]);
+		projectAServer.name = "project-a-server";
+		projectAServer.source = { ...projectAServer.source, projectId: "project-a", projectName: "Project A" };
+		const projectBServer = structuredClone(APPROVAL_SERVERS[0]);
+		projectBServer.name = "project-b-server";
+		projectBServer.approval = { ...projectBServer.approval, fingerprint: "bbbbbbbbbbbbbbbb" };
+		projectBServer.source = { ...projectBServer.source, projectId: "project-b", projectName: "Project B" };
+
+		await page.evaluate(({ projects }) => (window as any).__setMcpFixture({ servers: [], projects }), {
+			projects: [
+				{ id: "project-a", name: "Project A", rootPath: "C:/project-a" },
+				{ id: "project-b", name: "Project B", rootPath: "C:/project-b" },
+			],
+		});
+		await page.evaluate(() => (window as any).__loadToolManager());
+		await page.evaluate(({ serverA, serverB }) => {
+			const originalFetch = window.fetch.bind(window);
+			let releaseProjectA = () => {};
+			const projectAGate = new Promise<void>((resolve) => { releaseProjectA = resolve; });
+			(window as any).__projectARequestCount = 0;
+			(window as any).__scopeApprovalRequests = [];
+			(window as any).__releaseProjectARequests = releaseProjectA;
+			window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+				const request = input instanceof Request ? input : null;
+				const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				const url = new URL(rawUrl, window.location.href);
+				const projectId = url.searchParams.get("projectId");
+				if (projectId !== "project-a" && projectId !== "project-b") return originalFetch(input, init);
+
+				const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+				const server = projectId === "project-a" ? serverA : serverB;
+				let body: unknown;
+				if (method === "POST" && url.pathname.endsWith("/approval")) {
+					const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+					(window as any).__scopeApprovalRequests.push({ projectId, body: requestBody });
+					server.approval = { ...server.approval, state: requestBody?.decision };
+					body = server;
+				} else if (url.pathname.endsWith("/api/tools")) {
+					body = { tools: [{ name: `${projectId}-tool`, description: projectId, group: "Fixture" }] };
+				} else if (url.pathname.endsWith("/api/roles")) {
+					body = [];
+				} else if (url.pathname.endsWith("/api/tool-group-policies")) {
+					body = {};
+				} else if (url.pathname.endsWith("/api/mcp-servers")) {
+					body = [server];
+				} else {
+					return originalFetch(input, init);
+				}
+
+				const scopedResponse = new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+				if (projectId === "project-a" && method === "GET") {
+					(window as any).__projectARequestCount++;
+					await projectAGate;
+				}
+				return scopedResponse;
+			}) as typeof window.fetch;
+		}, { serverA: projectAServer, serverB: projectBServer });
+
+		await page.getByRole("button", { name: "Project A" }).click();
+		await page.waitForFunction(() => (window as any).__projectARequestCount === 4);
+		await page.getByRole("button", { name: "Project B" }).click();
+		await expect(page.locator('[data-server-name="project-b-server"]')).toBeVisible();
+
+		await page.evaluate(async () => {
+			(window as any).__releaseProjectARequests();
+			await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		});
+		await expect(page.locator('[data-server-name="project-b-server"]')).toBeVisible();
+		await expect(page.locator('[data-server-name="project-a-server"]')).toHaveCount(0);
+		const projectBRow = page.locator('[data-server-name="project-b-server"]');
+		await projectBRow.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(projectBRow.locator('[data-testid="mcp-review-panel"]')).toContainText("Project B");
+		await expect(projectBRow.locator('[data-testid="mcp-review-panel"]')).toContainText("bbbbbbbbbbbb");
+		await projectBRow.locator('[data-testid="mcp-approve-server"]').click();
+		await expect.poll(() => page.evaluate(() => (window as any).__scopeApprovalRequests)).toEqual([{
+			projectId: "project-b",
+			body: {
+				decision: "approved",
+				fingerprint: "bbbbbbbbbbbbbbbb",
+				sourceProjectId: "project-b",
+				sourceId: "project-file:.mcp.json",
+			},
+		}]);
+	});
 });
