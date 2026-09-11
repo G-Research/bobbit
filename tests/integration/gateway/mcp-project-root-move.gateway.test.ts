@@ -83,6 +83,33 @@ test.describe("project root MCP lifecycle", () => {
 			expect(requestCount(oldServer, "initialize")).toBeGreaterThan(0);
 
 			const sessionManager = gateway.sessionManager as any;
+			const initialManager = sessionManager.getMcpManager({ projectId });
+			const initialClient = initialManager.clients.get(serverName);
+			const projectContexts = gateway.projectContextManager as any;
+			const refreshContext = projectContexts.refreshAfterProjectRootChange;
+			let refreshAttempts = 0;
+			projectContexts.refreshAfterProjectRootChange = async (id: string) => {
+				if (++refreshAttempts === 1) throw new Error("injected replacement context failure");
+				return refreshContext.call(projectContexts, id);
+			};
+			try {
+				response = await gateway.api(`/api/projects/${encodeURIComponent(projectId!)}`, {
+					method: "PUT",
+					body: JSON.stringify({ rootPath: rootB }),
+				});
+			} finally {
+				projectContexts.refreshAfterProjectRootChange = refreshContext;
+			}
+			expect(response.status).toBe(400);
+			expect(initialClient.connected).toBe(false);
+			const afterFailedMove = await gateway.api(`/api/projects/${encodeURIComponent(projectId!)}`);
+			expect(afterFailedMove.status).toBe(200);
+			expect(path.resolve((await afterFailedMove.json()).rootPath)).toBe(path.resolve(rootA));
+			current = named(await statuses(gateway, projectId!), serverName);
+			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
+			expect(replacementServer.requests).toHaveLength(0);
+			expect(customServer.requests).toHaveLength(0);
+
 			const oldManager = sessionManager.getMcpManager({ projectId });
 			const oldClient = oldManager.clients.get(serverName);
 			const oldRequestCount = oldServer.requests.length;

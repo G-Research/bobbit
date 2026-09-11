@@ -7805,6 +7805,17 @@ async function handleApiRoute(
 				};
 				wireGoalManagerResolvers(nextCtx, { sessionManager, projectContextManager, projectRegistry });
 				return next;
+			}, async () => {
+				const registered = projectRegistry.get(projectId);
+				if (registered && !samePath(registered.rootPath, oldRoot)) {
+					projectRegistry.update(projectId, { rootPath: oldRoot });
+				}
+				const restoredCtx = await projectContextManager.refreshAfterProjectRootChange(projectId);
+				if (!restoredCtx) throw new Error(`Project context could not be restored: ${projectId}`);
+				restoredCtx.gateStore.onStatusChange = () => {
+					restoredCtx.goalStore.bumpGeneration();
+				};
+				wireGoalManagerResolvers(restoredCtx, { sessionManager, projectContextManager, projectRegistry });
 			});
 			json(updated);
 		} catch (err: any) {

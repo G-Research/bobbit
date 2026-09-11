@@ -6936,12 +6936,14 @@ export class SessionManager {
 		projectId: string,
 		oldRoot: string,
 		mutation: () => Promise<T>,
+		rollback: () => Promise<void>,
 	): Promise<T> {
 		if (this.suspendedMcpProjects.has(projectId)) {
 			throw Object.assign(new Error("The project root is already being changed."), { code: "PROJECT_ROOT_MOVE_IN_PROGRESS" });
 		}
 		this.suspendedMcpProjects.add(projectId);
-		let completed = false;
+		let mutationStarted = false;
+		let safeToResume = true;
 		try {
 			await this.cleanupScopedMcpManagersForProject(projectId, oldRoot);
 			const remaining = this.getActiveMcpManagers();
@@ -6955,12 +6957,25 @@ export class SessionManager {
 				affectedProjectIds: [projectId],
 			});
 
-			const result = await mutation();
-			completed = true;
-			return result;
+			mutationStarted = true;
+			try {
+				return await mutation();
+			} catch (error) {
+				safeToResume = false;
+				try {
+					await rollback();
+					safeToResume = true;
+				} catch (rollbackError) {
+					throw new AggregateError([error, rollbackError], "Project root change and rollback both failed; MCP remains suspended");
+				}
+				throw error;
+			}
 		} finally {
-			this.suspendedMcpProjects.delete(projectId);
-			if (completed) {
+			// A failed rollback leaves this project excluded for the rest of the
+			// process lifetime. This is deliberately fail-closed: a gateway restart
+			// reconstructs the context from the last durable registry state.
+			if (!mutationStarted || safeToResume) {
+				this.suspendedMcpProjects.delete(projectId);
 				await this.ensureMcpManager({ projectId });
 				await this.reloadMcpAfterProjectMutation(projectId);
 			}
