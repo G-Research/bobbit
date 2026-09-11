@@ -22,7 +22,7 @@ const PROTOCOL_VERSION = '2024-11-05';
  * Expand `${VAR}` patterns in a string using process.env.
  * Unresolved variables are replaced with empty string.
  */
-function expandEnvVars(value: string): string {
+export function expandEnvVars(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_match, varName: string) => {
     return process.env[varName] ?? '';
   });
@@ -31,7 +31,7 @@ function expandEnvVars(value: string): string {
 /**
  * Expand env vars in all values of a config env record.
  */
-function expandEnvRecord(env: Record<string, string>): Record<string, string> {
+export function expandEnvRecord(env: Record<string, string>): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     result[key] = expandEnvVars(value);

@@ -22,7 +22,10 @@ export interface ConfigDirectory {
 }
 
 export interface CustomDirEntry {
+	/** Runtime-resolved physical path. */
 	path: string;
+	/** Original controlling config value, retained for worktree-stable source identity. */
+	declaredPath?: string;
 	types: ConfigType[];
 }
 
@@ -74,8 +77,9 @@ export function parseCustomDirectories(
 						typeof entry === "object" && entry !== null &&
 						typeof entry.path === "string" && entry.path.trim().length > 0
 					) {
-						const resolved = expandPath(entry.path);
-						byPath.set(resolved, { path: resolved, types: ["skills"] });
+						const declaredPath = entry.path.trim();
+						const resolved = expandPath(declaredPath);
+						byPath.set(resolved, { path: resolved, declaredPath, types: ["skills"] });
 					}
 				}
 			}
@@ -110,13 +114,14 @@ export function parseCustomDirectories(
 				typeof entry.path === "string" && entry.path.trim().length > 0 &&
 				Array.isArray(entry.types) && entry.types.length > 0
 			) {
-				const resolved = expandPath(entry.path);
+				const declaredPath = entry.path.trim();
+				const resolved = expandPath(declaredPath);
 				const types = entry.types.filter(
 					(t: unknown): t is ConfigType =>
 						t === "skills" || t === "mcp" || t === "tools" || t === "agents",
 				);
 				if (types.length > 0) {
-					byPath.set(resolved, { path: resolved, types });
+					byPath.set(resolved, { path: resolved, declaredPath, types });
 				}
 			}
 		}
