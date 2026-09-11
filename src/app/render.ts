@@ -26,6 +26,7 @@ import {
 } from "./state.js";
 import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
+import { renderMcpApprovalBanner } from "./mcp-approval-banner.js";
 export { showHeaderToast } from "./header-toast.js";
 import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
@@ -4019,6 +4020,9 @@ export function doRenderApp(): void {
 	// session's slots and destroy their live iframes. Liveness (tab set + session
 	// list + project scope) is what prunes, never connectedness.
 	const sessionTransition = Boolean(state.creatingSession || state.connectingSessionId);
+	// Do not attribute the outgoing project's approval state to an incoming
+	// session while its project binding is still in transition.
+	const mcpApprovalBanner = sessionTransition ? nothing : renderMcpApprovalBanner(route);
 	// A popout / deep-link route renders one validated tab inline with no
 	// retention host (§3.8), so it must not touch recency either. Mid-transition
 	// the incoming session has no panel of its own yet, and reading the selected
@@ -4104,6 +4108,7 @@ export function doRenderApp(): void {
 				<div class="flex-1 flex min-h-0">
 					${renderSidebar()}
 					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">
+						${mcpApprovalBanner}
 						${mainArea()}
 					</div>
 				</div>
@@ -4123,6 +4128,7 @@ export function doRenderApp(): void {
 						${headerRight()}
 					</div>
 					${!sessionTransition && hasUnifiedPanel() ? unifiedTabBar() : ""}
+					${mcpApprovalBanner}
 				</div>
 				<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
 			</div>
@@ -4145,7 +4151,7 @@ export function doRenderApp(): void {
 					${headerLeft()}
 					${headerRight()}
 				</div>
-				<div id="app-main" class="flex-1 min-h-0 flex flex-col">${mainArea()}</div>
+				<div id="app-main" class="flex-1 min-h-0 flex flex-col">${mcpApprovalBanner}${mainArea()}</div>
 			</div>
 		`, app);
 	}
