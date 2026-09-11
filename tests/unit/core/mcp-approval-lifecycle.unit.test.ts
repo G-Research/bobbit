@@ -169,6 +169,32 @@ describe("MCP approval lifecycle gate", () => {
 		assert.equal(manager.getServerStatuses()[0].approval.state, "approved");
 	});
 
+	it("revalidates the effective definition before a cached tool route can send data", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });
+		const stub = new StubMcpClient("repository");
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		assert.deepEqual(manager.getToolInfos().map((tool: any) => tool.name), ["mcp__repository__inspect"]);
+
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["changed.js"] } });
+		await assert.rejects(
+			manager.callTool("mcp__repository__inspect", {}),
+			/MCP server "repository" is not approved to run/,
+		);
+
+		assert.equal(stub.callCount, 0);
+		assert.equal(stub.disconnectCount, 1);
+		assert.deepEqual(manager.getToolInfos(), []);
+		const status = manager.getServerStatuses()[0];
+		assert.equal(status.approval.state, "changed");
+		assert.equal(status.status, "disconnected");
+	});
+
 	it("disconnects and forgets runtime tools when an approved definition is removed", async () => {
 		const { cwd, stateDir } = temporaryCase();
 		writeProjectConfig(cwd, { repository: { command: "node" } });
