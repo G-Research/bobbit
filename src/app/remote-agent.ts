@@ -2390,6 +2390,15 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "mcp_approvals_changed": {
+				// Approval counts live in the banner module; load it only when the
+				// server announces a relevant mutation so RemoteAgent stays decoupled
+				// from the Tools/API module cycle.
+				void import("./mcp-approval-banner.js")
+					.then((module) => module.handleMcpApprovalsChanged(msg))
+					.catch(() => {});
+				break;
+			}
 			case "host_notification": {
 				// This RemoteAgent's authenticated session is the client authority key.
 				// The server has already routed the canonical frame to the exact session /
