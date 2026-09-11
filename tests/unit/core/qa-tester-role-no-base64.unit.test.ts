@@ -7,8 +7,9 @@
  *
  * The QA role must NOT instruct the agent to embed screenshots as base64
  * data URIs in the HTML report — screenshots are spilled to disk via
- * `browser_screenshot(includeBase64=true)` and referenced as file:// paths,
- * which the server inlines when the report is submitted.
+ * `browser_screenshot(includeBase64=true)` and referenced as file:// paths.
+ * The verifier-side extension must inline eligible workspace images and send
+ * only report bytes; the gateway must never receive or dereference the path.
  *
  * We allow:
  *  - the literal parameter name `includeBase64` (it's an API surface)
@@ -73,7 +74,12 @@ test("qa-tester.yaml does not instruct the agent to embed base64 / data URIs", (
 	);
 	assert.match(
 		text,
-		/server\s+inlines/i,
-		"qa-tester.yaml must mention that the server inlines file:// refs",
+		/verifier-side `verification_result` extension inlines eligible workspace images and uploads only `report_html` bytes/i,
+		"qa-tester.yaml must assign file:// image inlining to the verifier-side extension",
+	);
+	assert.match(
+		text,
+		/gateway never receives or dereferences the path/i,
+		"qa-tester.yaml must state that the gateway does not receive or dereference report paths",
 	);
 });

@@ -13,6 +13,218 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
+const MAX_VERIFICATION_REPORT_BYTES = 10 * 1024 * 1024;
+const MAX_INLINED_IMAGE_BYTES = 20 * 1024 * 1024;
+const FILE_IMAGE_RE = /<img\s[^>]*src=["']file:\/\/([^"']+)["'][^>]*>/gi;
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+};
+
+// Canonical QA may place the final report outside cwd in its isolated work dir.
+// Verifier-local bounded descriptor reads of regular, non-symlink files are the
+// trust boundary; only embedded file:// screenshots are workspace-confined.
+function readBoundedRegularFile(filePath: string, maxBytes: number, label: string): Buffer {
+	const preflight = fs.lstatSync(filePath);
+	if (preflight.isSymbolicLink() || !preflight.isFile()) {
+		throw new Error(`${label} must be a regular file`);
+	}
+
+	let flags = fs.constants.O_RDONLY;
+	if (typeof fs.constants.O_NOFOLLOW === "number") flags |= fs.constants.O_NOFOLLOW;
+	if (process.platform !== "win32" && typeof fs.constants.O_NONBLOCK === "number") {
+		flags |= fs.constants.O_NONBLOCK;
+	}
+
+	const fd = fs.openSync(filePath, flags);
+	try {
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
+		if (stat.size > maxBytes) throw new Error(`${label} is too large (${stat.size} bytes, max ${maxBytes})`);
+
+		const content = Buffer.allocUnsafe(maxBytes + 1);
+		let bytesRead = 0;
+		while (bytesRead < content.byteLength) {
+			const count = fs.readSync(fd, content, bytesRead, content.byteLength - bytesRead, null);
+			if (count === 0) break;
+			bytesRead += count;
+		}
+		if (bytesRead > maxBytes) throw new Error(`${label} is too large (${bytesRead} bytes, max ${maxBytes})`);
+		return content.subarray(0, bytesRead);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function isUnderRoot(candidate: string, root: string): boolean {
+	const rel = path.relative(root, candidate);
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+type FileIdentity = Readonly<{ dev: bigint; ino: bigint }>;
+type WorkspaceRoot = Readonly<{ canonicalPath: string; identity: FileIdentity }>;
+
+function fileIdentity(stat: fs.BigIntStats): FileIdentity | undefined {
+	if (typeof stat.dev !== "bigint" || typeof stat.ino !== "bigint" || stat.dev < 0n || stat.ino <= 0n) {
+		return undefined;
+	}
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+function hasIdentity(stat: fs.BigIntStats, identity: FileIdentity): boolean {
+	const actual = fileIdentity(stat);
+	return actual !== undefined && actual.dev === identity.dev && actual.ino === identity.ino;
+}
+
+function isSamePath(left: string, right: string): boolean {
+	return path.relative(left, right) === "" && path.relative(right, left) === "";
+}
+
+function captureWorkspaceRoot(): WorkspaceRoot | undefined {
+	try {
+		const cwdStat = fs.statSync(".", { bigint: true });
+		const identity = fileIdentity(cwdStat);
+		if (!cwdStat.isDirectory() || !identity) return undefined;
+		const canonicalPath = fs.realpathSync(".");
+		const canonicalStat = fs.lstatSync(canonicalPath, { bigint: true });
+		if (
+			canonicalStat.isSymbolicLink()
+			|| !canonicalStat.isDirectory()
+			|| !hasIdentity(canonicalStat, identity)
+		) return undefined;
+		return { canonicalPath, identity };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read an already-canonical workspace file through a descriptor whose identity is
+ * revalidated against both its pathname and the still-stable workspace root.
+ */
+function readBoundedWorkspaceFile(
+	filePath: string,
+	root: WorkspaceRoot,
+	maxBytes: number,
+	label: string,
+): Buffer {
+	let flags = fs.constants.O_RDONLY;
+	if (typeof fs.constants.O_NOFOLLOW === "number") flags |= fs.constants.O_NOFOLLOW;
+	if (process.platform !== "win32" && typeof fs.constants.O_NONBLOCK === "number") {
+		flags |= fs.constants.O_NONBLOCK;
+	}
+
+	const fd = fs.openSync(filePath, flags);
+	try {
+		const descriptorStat = fs.fstatSync(fd, { bigint: true });
+		const descriptorIdentity = fileIdentity(descriptorStat);
+		if (!descriptorStat.isFile() || !descriptorIdentity) throw new Error(`${label} must be a regular file`);
+		if (descriptorStat.size > BigInt(maxBytes)) {
+			throw new Error(`${label} is too large (${descriptorStat.size} bytes, max ${maxBytes})`);
+		}
+
+		// Re-resolve after open. An ancestor symlink/junction swap either changes
+		// containment or makes the pathname identity differ from this descriptor.
+		const currentRoot = fs.realpathSync(".");
+		const currentRootPath = fs.realpathSync(root.canonicalPath);
+		if (
+			!isSamePath(currentRoot, root.canonicalPath)
+			|| !isSamePath(currentRootPath, root.canonicalPath)
+		) throw new Error(`${label} is outside the workspace`);
+		const cwdStat = fs.statSync(".", { bigint: true });
+		const rootPathStat = fs.lstatSync(root.canonicalPath, { bigint: true });
+		const rootCanonicalStat = fs.lstatSync(currentRoot, { bigint: true });
+		if (
+			!cwdStat.isDirectory()
+			|| !hasIdentity(cwdStat, root.identity)
+			|| rootPathStat.isSymbolicLink()
+			|| !rootPathStat.isDirectory()
+			|| !hasIdentity(rootPathStat, root.identity)
+			|| rootCanonicalStat.isSymbolicLink()
+			|| !rootCanonicalStat.isDirectory()
+			|| !hasIdentity(rootCanonicalStat, root.identity)
+		) {
+			throw new Error("Workspace root changed while reading report image");
+		}
+
+		const currentCanonicalPath = fs.realpathSync(filePath);
+		if (!isUnderRoot(currentCanonicalPath, root.canonicalPath)) {
+			throw new Error(`${label} is outside the workspace`);
+		}
+		const pathnameStat = fs.lstatSync(filePath, { bigint: true });
+		const canonicalStat = fs.lstatSync(currentCanonicalPath, { bigint: true });
+		if (
+			pathnameStat.isSymbolicLink()
+			|| !pathnameStat.isFile()
+			|| !hasIdentity(pathnameStat, descriptorIdentity)
+			|| canonicalStat.isSymbolicLink()
+			|| !canonicalStat.isFile()
+			|| !hasIdentity(canonicalStat, descriptorIdentity)
+		) {
+			throw new Error(`${label} changed while opening`);
+		}
+
+		const content = Buffer.allocUnsafe(maxBytes + 1);
+		let bytesRead = 0;
+		while (bytesRead < content.byteLength) {
+			const count = fs.readSync(fd, content, bytesRead, content.byteLength - bytesRead, null);
+			if (count === 0) break;
+			bytesRead += count;
+		}
+		if (bytesRead > maxBytes) throw new Error(`${label} is too large (${bytesRead} bytes, max ${maxBytes})`);
+		return content.subarray(0, bytesRead);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/** Inline workspace screenshots before upload, inside the verifier's own runtime. */
+function inlineWorkspaceFileImages(html: string): string {
+	const root = captureWorkspaceRoot();
+	if (!root) return html;
+	let total = 0;
+	let finalHtmlBytes = Buffer.byteLength(html, "utf8");
+	if (finalHtmlBytes > MAX_VERIFICATION_REPORT_BYTES) {
+		throw new Error(`HTML report is too large (${finalHtmlBytes} bytes, max ${MAX_VERIFICATION_REPORT_BYTES})`);
+	}
+	return html.replace(FILE_IMAGE_RE, (tag, captured: string) => {
+		try {
+			let decoded: string;
+			try { decoded = decodeURIComponent(captured); } catch { decoded = captured; }
+			if (/^\/[A-Za-z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
+			const requested = path.normalize(decoded);
+			const ext = path.extname(requested).toLowerCase();
+			const mime = IMAGE_MIME_BY_EXT[ext];
+			if (!mime) return tag;
+			const real = fs.realpathSync(requested);
+			if (!isUnderRoot(real, root.canonicalPath)) return tag;
+			const remaining = MAX_INLINED_IMAGE_BYTES - total;
+			if (remaining <= 0) return tag;
+			const content = readBoundedWorkspaceFile(real, root, remaining, "Report image");
+			const replacement = tag.replace(
+				/src=["']file:\/\/[^"']+["']/i,
+				`src="data:${mime};base64,${content.toString("base64")}"`,
+			);
+			const replacementDelta = Buffer.byteLength(replacement, "utf8") - Buffer.byteLength(tag, "utf8");
+			if (finalHtmlBytes + replacementDelta > MAX_VERIFICATION_REPORT_BYTES) return tag;
+			total += content.byteLength;
+			finalHtmlBytes += replacementDelta;
+			return replacement;
+		} catch {
+			return tag;
+		}
+	});
+}
+
+function loadReportHtml(filePath: string): string {
+	return inlineWorkspaceFileImages(
+		readBoundedRegularFile(filePath, MAX_VERIFICATION_REPORT_BYTES, "HTML report").toString("utf8"),
+	);
+}
+
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
@@ -261,7 +473,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const body: Record<string, unknown> = { sessionId, verdict: params.verdict, summary: params.summary };
 				if (params.report_html) body.report_html = params.report_html;
-				if (params.report_html_file) body.report_html_file = params.report_html_file;
+				// Resolve file paths here, inside the verifier runtime. The gateway only
+				// receives bytes and therefore cannot be used as a host file-read oracle.
+				if (params.report_html_file) body.report_html = loadReportHtml(params.report_html_file);
 				return ok(await api("POST", "/api/internal/verification-result", body));
 			} catch (e: any) { return err(e.message); }
 		},
