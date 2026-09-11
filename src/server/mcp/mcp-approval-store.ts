@@ -133,14 +133,31 @@ export class McpApprovalStore {
   private load(): void {
     fs.mkdirSync(this.stateDir, { recursive: true });
     this.decisions = this.readLedger();
+    let keyWasUnavailable = false;
     try {
       const key = fs.readFileSync(this.keyPath);
-      if (key.length === KEY_BYTES) this.key = key;
+      if (key.length === KEY_BYTES) {
+        this.key = key;
+      } else {
+        keyWasUnavailable = true;
+        fs.rmSync(this.keyPath, { force: true });
+      }
     } catch {
-      // A missing key is created below. Existing ledger rows remain harmless:
-      // the new HMAC cannot reproduce their fingerprints, so they classify changed.
+      keyWasUnavailable = true;
     }
     if (!this.key) this.key = this.createKey();
+
+    // Rows created with a lost or corrupt key cannot be authenticated. Drop their
+    // history so recovery is consistently fail-closed to pending rather than
+    // presenting an unverifiable "configuration changed" state.
+    if (keyWasUnavailable && this.decisions.length > 0) {
+      this.decisions = [];
+      try {
+        fs.rmSync(this.ledgerPath, { force: true });
+      } catch {
+        console.error("[mcp] MCP_APPROVAL_LEDGER_RESET_FAILED");
+      }
+    }
   }
 
   private readLedger(): PersistedDecision[] {
@@ -216,6 +233,7 @@ export class McpApprovalStore {
     let handle: fs.promises.FileHandle | undefined;
     try {
       handle = await fs.promises.open(temporary, "wx", 0o600);
+      if (!this.key) throw new Error("MCP approval HMAC key is unavailable.");
       await handle.writeFile(`${JSON.stringify({ schema: 1, decisions } satisfies PersistedLedger, null, 2)}\n`, "utf8");
       await handle.sync();
       await handle.close();

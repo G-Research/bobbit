@@ -270,7 +270,7 @@ export function saveCustomDirectories(
 	dirs: CustomDirEntry[],
 ): void {
 	const serializable = dirs.map((d) => ({
-		path: d.path,
+		path: d.declaredPath ?? d.path,
 		types: d.types,
 	}));
 	if (typeof projectConfigStore.setConfigDirectories === "function") {

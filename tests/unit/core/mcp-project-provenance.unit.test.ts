@@ -1,0 +1,299 @@
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+guardProcessEnv();
+
+import { afterAll, afterEach, describe, it } from "vitest";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { ProjectConfigReader } from "../../../src/server/agent/config-directories.ts";
+import type { MarketplaceMcpResolver, McpServerStatus } from "../../../src/server/mcp/mcp-manager.ts";
+
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-project-provenance-"));
+const fixtureHome = path.join(fixtureRoot, "home");
+const fixtureHeadquarters = path.join(fixtureRoot, "headquarters");
+fs.mkdirSync(fixtureHome, { recursive: true });
+fs.mkdirSync(fixtureHeadquarters, { recursive: true });
+process.env.HOME = fixtureHome;
+process.env.USERPROFILE = fixtureHome;
+process.env.BOBBIT_DIR = fixtureHeadquarters;
+
+const {
+	McpManager,
+	canonicalCustomDirLocator,
+	redactMcpServerConfig,
+	redactRecord,
+	redactUrl,
+} = await import("../../../src/server/mcp/mcp-manager.ts");
+const { McpApprovalStore } = await import("../../../src/server/mcp/mcp-approval-store.ts");
+
+const temporaryRoots: string[] = [];
+afterEach(() => {
+	for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+	for (const entry of fs.readdirSync(fixtureHome)) fs.rmSync(path.join(fixtureHome, entry), { recursive: true, force: true });
+	for (const entry of fs.readdirSync(fixtureHeadquarters)) fs.rmSync(path.join(fixtureHeadquarters, entry), { recursive: true, force: true });
+});
+afterAll(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+function temporaryRoot(prefix = "mcp-provenance-case-"): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	temporaryRoots.push(root);
+	return root;
+}
+
+function writeConfig(file: string, servers: Record<string, unknown>): void {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }));
+}
+
+function reader(directories: Array<{ path: string; types: string[] }> = []): ProjectConfigReader {
+	return {
+		get: () => undefined,
+		getConfigDirectories: () => directories,
+	};
+}
+
+function byName(statuses: McpServerStatus[]): Record<string, McpServerStatus> {
+	return Object.fromEntries(statuses.map((status) => [status.name, status]));
+}
+
+describe("MCP source provenance", () => {
+	it("classifies every built-in source class and attributes primary and additional project files", () => {
+		const root = temporaryRoot();
+		const cwd = path.join(root, "primary");
+		const additionalCwd = path.join(root, "additional");
+		const stateDir = path.join(root, "state");
+		const primaryCustom = path.join(root, "primary-custom");
+		const additionalCustom = path.join(root, "additional-custom");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(additionalCwd, { recursive: true });
+
+		writeConfig(path.join(cwd, ".mcp.json"), { primaryRoot: { command: "primary-root" } });
+		writeConfig(path.join(cwd, ".claude", ".mcp.json"), { primaryClaude: { command: "primary-claude" } });
+		writeConfig(path.join(cwd, ".bobbit", "config", "mcp.json"), { primaryBobbit: { command: "primary-bobbit" } });
+		writeConfig(path.join(primaryCustom, ".mcp.json"), { primaryCustom: { command: "primary-custom" } });
+		writeConfig(path.join(additionalCwd, ".mcp.json"), { additionalRoot: { command: "additional-root" } });
+		writeConfig(path.join(additionalCwd, ".claude", ".mcp.json"), { additionalClaude: { command: "additional-claude" } });
+		writeConfig(path.join(additionalCwd, ".bobbit", "config", "mcp.json"), { additionalBobbit: { command: "additional-bobbit" } });
+		writeConfig(path.join(additionalCustom, ".mcp.json"), { additionalCustom: { command: "additional-custom" } });
+
+		fs.writeFileSync(path.join(fixtureHome, ".claude.json"), JSON.stringify({
+			mcpServers: { homeClaude: { command: "home-claude" } },
+			projects: { [cwd]: { mcpServers: { homeProjectEntry: { command: "home-project" } } } },
+		}));
+		writeConfig(path.join(fixtureHome, ".claude", ".mcp.json"), { homeClaudeMcp: { command: "home-claude-mcp" } });
+		writeConfig(path.join(fixtureHome, ".bobbit", ".mcp.json"), { homeBobbitMcp: { command: "home-bobbit-mcp" } });
+		writeConfig(path.join(fixtureHeadquarters, "config", "mcp.json"), { headquarters: { command: "headquarters" } });
+
+		const marketplaceResolver: MarketplaceMcpResolver = () => [{
+			listName: "installed",
+			serverName: "marketplace",
+			config: { command: "marketplace" },
+			origin: { scope: "project", packId: "pack-1", packName: "Installed Pack" },
+		}];
+		const manager = new McpManager(cwd, reader([{ path: primaryCustom, types: ["mcp"] }]), stateDir, {
+			projectId: "primary-id",
+			projectName: "Primary Project",
+			marketplaceResolver,
+			approvalStore: new McpApprovalStore(stateDir),
+		});
+		manager.setAdditionalProjects([{
+			projectId: "additional-id",
+			projectName: "Additional Project",
+			cwd: additionalCwd,
+			configStore: reader([{ path: additionalCustom, types: ["mcp"] }]),
+		}]);
+		manager.discoverConnectionGroups();
+		const statuses = byName(manager.getServerStatuses());
+
+		for (const name of ["primaryRoot", "primaryClaude", "primaryBobbit", "primaryCustom"]) {
+			assert.equal(statuses[name].source?.authority, "project", name);
+			assert.equal(statuses[name].source?.projectId, "primary-id", name);
+			assert.equal(statuses[name].source?.projectName, "Primary Project", name);
+			assert.equal(statuses[name].approval?.state, "pending", name);
+		}
+		assert.equal(statuses.primaryRoot.source?.sourceId, "project-file:.mcp.json");
+		assert.equal(statuses.primaryClaude.source?.sourceId, "project-file:.claude/.mcp.json");
+		assert.equal(statuses.primaryBobbit.source?.sourceId, "project-file:.bobbit/config/mcp.json");
+		assert.match(statuses.primaryCustom.source!.sourceId, /^project-custom-dir:v1:[a-f0-9]{64}:.mcp.json$/);
+
+		for (const name of ["additionalRoot", "additionalClaude", "additionalBobbit", "additionalCustom"]) {
+			assert.equal(statuses[name].source?.authority, "project", name);
+			assert.equal(statuses[name].source?.projectId, "additional-id", name);
+			assert.equal(statuses[name].source?.projectName, "Additional Project", name);
+			assert.equal(statuses[name].approval?.state, "pending", name);
+		}
+
+		for (const name of ["homeClaude", "homeProjectEntry", "homeClaudeMcp", "homeBobbitMcp"]) {
+			assert.equal(statuses[name].source?.authority, "user-home", name);
+			assert.equal(statuses[name].approval?.state, "trusted", name);
+			assert.equal(statuses[name].approval?.required, false, name);
+		}
+		assert.equal(statuses.headquarters.source?.authority, "headquarters");
+		assert.equal(statuses.headquarters.approval?.state, "trusted");
+		assert.equal(statuses.marketplace.source?.authority, "marketplace");
+		assert.equal(statuses.marketplace.approval?.state, "trusted");
+		assert.ok(statuses.primaryCustom.source?.file?.endsWith("/.mcp.json"));
+		assert.equal("path" in statuses.primaryCustom.source!, false);
+		assert.equal("path" in statuses.primaryCustom.origin!, false);
+	});
+
+	it("applies public-name precedence before approval so a pending project winner blocks a trusted Marketplace fallback", () => {
+		const root = temporaryRoot();
+		const cwd = path.join(root, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeConfig(path.join(cwd, ".mcp.json"), { collision: { command: "repository-command" } });
+		const manager = new McpManager(cwd, reader(), path.join(root, "state"), {
+			projectId: "project-id",
+			marketplaceResolver: () => [{
+				listName: "collision",
+				serverName: "collision",
+				config: { command: "trusted-command" },
+				origin: { scope: "project", packId: "trusted-pack" },
+			}],
+		});
+
+		const groups = manager.discoverConnectionGroups();
+		assert.equal(groups.length, 1);
+		assert.equal(groups[0].config.command, "repository-command");
+		const status = manager.getServerStatuses()[0];
+		assert.equal(status.source?.authority, "project");
+		assert.equal(status.approval?.state, "pending");
+	});
+
+	it("attributes parse failures safely while preserving valid sibling sources", () => {
+		const root = temporaryRoot();
+		const cwd = path.join(root, "project");
+		fs.mkdirSync(path.join(cwd, ".claude"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".mcp.json"), "{ secret-invalid-json");
+		writeConfig(path.join(cwd, ".claude", ".mcp.json"), { validSibling: { command: "node" } });
+		const manager = new McpManager(cwd, reader(), path.join(root, "state"), { projectId: "project-id" });
+
+		const groups = manager.discoverConnectionGroups();
+		assert.deepEqual(groups.map((group) => group.serverName), ["validSibling"]);
+		assert.deepEqual(manager.getDiscoveryDiagnostics(), [{
+			code: "MCP_CONFIG_PARSE_FAILED",
+			message: "Could not parse MCP configuration from .mcp.json.",
+		}]);
+		assert.doesNotMatch(JSON.stringify(manager.getDiscoveryDiagnostics()), /secret-invalid-json/);
+	});
+});
+
+describe("safe MCP review metadata", () => {
+	it("redacts secret records, URL credentials/query/fragment, credential arguments, and configured secret values", () => {
+		process.env.MCP_REDACTION_SECRET = "expanded-secret";
+		assert.deepEqual(redactRecord({ ZED: "secret", ALPHA: "secret" }), {
+			ALPHA: "[redacted]",
+			ZED: "[redacted]",
+		});
+		assert.equal(redactUrl("https://user:password@example.test/mcp?token=secret#fragment"), "https://example.test/mcp");
+		assert.equal(redactUrl("not a url"), "[redacted]");
+		assert.deepEqual(redactMcpServerConfig({
+			command: "node",
+			args: [
+				"server.js",
+				"--token", "plain-secret",
+				"--api-key=inline-secret",
+				"${MCP_REDACTION_SECRET}",
+				"expanded-secret",
+				"--ordinary", "visible",
+			],
+			cwd: "/safe/workspace",
+			env: { TOKEN: "${MCP_REDACTION_SECRET}" },
+			headers: { Authorization: "plain-secret" },
+		}), {
+			transport: "stdio",
+			command: "node",
+			args: [
+				"server.js",
+				"--token", "[redacted]",
+				"--api-key=[redacted]",
+				"[redacted]",
+				"[redacted]",
+				"--ordinary", "visible",
+			],
+			cwd: "/safe/workspace",
+			env: { TOKEN: "[redacted]" },
+			headers: { Authorization: "[redacted]" },
+		});
+	});
+});
+
+describe("worktree-stable project MCP identity", () => {
+	it("normalizes custom directory locators lexically without injecting a checkout root", () => {
+		assert.equal(canonicalCustomDirLocator(" ./mcp/../mcp "), "mcp");
+		assert.equal(canonicalCustomDirLocator(".\\mcp"), "mcp");
+		assert.equal(canonicalCustomDirLocator("~/team/../mcp"), "~/mcp");
+		assert.equal(canonicalCustomDirLocator("relative/mcp"), "relative/mcp");
+		assert.equal(path.isAbsolute(canonicalCustomDirLocator("relative/mcp")), false);
+	});
+
+	it("reuses approvals for identical standard definitions across worktree roots and requires review for changed content", async () => {
+		const root = temporaryRoot();
+		const firstRoot = path.join(root, "root-checkout");
+		const secondRoot = path.join(root, "worktree-checkout");
+		const stateDir = path.join(root, "state");
+		writeConfig(path.join(firstRoot, ".mcp.json"), { same: { command: "node", args: ["same.js"] } });
+		writeConfig(path.join(secondRoot, ".mcp.json"), { same: { command: "node", args: ["same.js"] } });
+		const store = new McpApprovalStore(stateDir);
+		const first = new McpManager(firstRoot, reader(), stateDir, { projectId: "stable-project", approvalStore: store });
+		const pending = first.getEffectiveDefinitionForDecision("same")!;
+		await first.decideApproval({
+			projectId: "stable-project",
+			sourceId: pending.origin.sourceId!,
+			serverName: "same",
+			fingerprint: pending.approval.fingerprint!,
+		}, "approved");
+
+		const second = new McpManager(secondRoot, reader(), stateDir, { projectId: "stable-project", approvalStore: store });
+		assert.equal(second.getEffectiveDefinitionForDecision("same")?.approval.state, "approved");
+		writeConfig(path.join(secondRoot, ".mcp.json"), { same: { command: "node", args: ["changed.js"] } });
+		assert.equal(second.getEffectiveDefinitionForDecision("same")?.approval.state, "changed");
+	});
+
+	it("uses the canonical custom declaration rather than runtime or worktree paths for source identity", async () => {
+		const root = temporaryRoot();
+		const firstRoot = path.join(root, "root-checkout");
+		const secondRoot = path.join(root, "worktree-checkout");
+		const customDir = path.join(root, "shared-custom");
+		const otherCustomDir = path.join(root, "other-custom");
+		const stateDir = path.join(root, "state");
+		fs.mkdirSync(firstRoot, { recursive: true });
+		fs.mkdirSync(secondRoot, { recursive: true });
+		writeConfig(path.join(customDir, ".mcp.json"), { custom: { command: "node", args: ["same.js"] } });
+		writeConfig(path.join(otherCustomDir, ".mcp.json"), { custom: { command: "node", args: ["same.js"] } });
+		const declared = path.relative(process.cwd(), customDir).replace(/\\/g, "/");
+		const store = new McpApprovalStore(stateDir);
+		const first = new McpManager(firstRoot, reader([{ path: declared, types: ["mcp"] }]), stateDir, {
+			projectId: "stable-project",
+			approvalStore: store,
+		});
+		const pending = first.getEffectiveDefinitionForDecision("custom")!;
+		await first.decideApproval({
+			projectId: "stable-project",
+			sourceId: pending.origin.sourceId!,
+			serverName: "custom",
+			fingerprint: pending.approval.fingerprint!,
+		}, "approved");
+
+		const equivalent = new McpManager(secondRoot, reader([{ path: `./${declared}`, types: ["mcp"] }]), stateDir, {
+			projectId: "stable-project",
+			approvalStore: store,
+		});
+		const equivalentDefinition = equivalent.getEffectiveDefinitionForDecision("custom")!;
+		assert.equal(equivalentDefinition.origin.sourceId, pending.origin.sourceId);
+		assert.equal(equivalentDefinition.approval.state, "approved");
+
+		writeConfig(path.join(customDir, ".mcp.json"), { custom: { command: "node", args: ["changed.js"] } });
+		assert.equal(equivalent.getEffectiveDefinitionForDecision("custom")?.approval.state, "changed");
+
+		const otherDeclared = path.relative(process.cwd(), otherCustomDir).replace(/\\/g, "/");
+		const different = new McpManager(secondRoot, reader([{ path: otherDeclared, types: ["mcp"] }]), stateDir, {
+			projectId: "stable-project",
+			approvalStore: store,
+		});
+		const differentDefinition = different.getEffectiveDefinitionForDecision("custom")!;
+		assert.notEqual(differentDefinition.origin.sourceId, pending.origin.sourceId);
+		assert.equal(differentDefinition.approval.state, "pending");
+	});
+});

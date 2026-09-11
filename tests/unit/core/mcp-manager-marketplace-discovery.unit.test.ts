@@ -528,7 +528,7 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(second.calls, []);
   });
 
-  it("gives manual JSON MCP routes precedence over gateway marketplace routes with the same public name", async () => {
+  it("applies manual JSON precedence before approval and does not start a trusted gateway fallback", async () => {
     const { cwd, stateDir } = tmpDirs();
     fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
       mcpServers: { gr: { command: "manual" } },
@@ -548,20 +548,11 @@ describe("McpManager marketplace discovery primitives", () => {
     ]), { marketplaceResolver: resolver }) as any;
 
     await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
-    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, runtimeServerKey: t.runtimeServerKey, contributionId: t.contributionId })), [
-      { name: "mcp__gr__jira__search", runtimeServerKey: "gr", contributionId: undefined },
-    ]);
-    assert.deepEqual(mgr.getRouteDiagnostics(), [{
-      type: "conflict",
-      toolName: "mcp__gr__jira__search",
-      keptRuntimeServerKey: "gr",
-      droppedRuntimeServerKey: "gw-gr",
-      droppedContributionId: "gateway-contribution",
-    }]);
-
-    await mgr.callTool("mcp__gr__jira__search", { q: "manual" });
-    assert.deepEqual(manual.calls, [{ toolName: "jira__search", args: { q: "manual" } }]);
-    assert.deepEqual(gateway.calls, []);
+    assert.deepEqual(mgr.getToolRouteSnapshots(), []);
+    assert.deepEqual(mgr.getRouteDiagnostics(), []);
+    assert.equal(mgr.getServerStatuses()[0].approval.state, "pending");
+    assert.equal(manual.connectCount, 0);
+    assert.equal(gateway.connectCount, 0);
   });
 
   it("keeps conflict precedence stable when a lower-priority connection lists tools first", async () => {
@@ -633,10 +624,10 @@ describe("McpManager marketplace discovery primitives", () => {
     const local = statuses.find((s: any) => s.name === "local")!;
     const remote = statuses.find((s: any) => s.name === "remote")!;
 
-    assert.deepEqual(local.config.env, { API_TOKEN: "<redacted>", PLAIN: "<redacted>" });
-    assert.deepEqual(local.config.args, ["<redacted>", "<redacted>"]);
+    assert.deepEqual(local.config.env, { API_TOKEN: "[redacted]", PLAIN: "[redacted]" });
+    assert.deepEqual(local.config.args, ["--token", "[redacted]"]);
     assert.deepEqual(local.ownerContributions[0].config.env, local.config.env);
-    assert.deepEqual(remote.config.headers, { Authorization: "<redacted>", "X-Plain": "<redacted>" });
+    assert.deepEqual(remote.config.headers, { Authorization: "[redacted]", "X-Plain": "[redacted]" });
     assert.equal(remote.config.url, "https://example.test/mcp");
     assert.deepEqual(remote.ownerContributions[0].config.headers, remote.config.headers);
     assert.ok(!JSON.stringify(statuses).includes("stdio-secret"));
@@ -779,27 +770,28 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(mgr.getToolInfos(), []);
   });
 
-  it("updates ownership metadata for unchanged connected server configs", async () => {
+  it("updates non-identity Marketplace ownership metadata for unchanged connected server configs", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "same" };
-    const resolver: MarketplaceMcpResolver = () => [contrib("same", "same", config)];
+    let packName = "original-pack";
+    const resolver: MarketplaceMcpResolver = () => [contrib("same", "same", config, undefined, {
+      origin: { scope: "project", packId: "stable-pack-id", packName },
+    })];
     const stub = new StubMcpClient("same", { tools: [op("do")] });
     const mgr = new TestMcpManager(cwd, stateDir, new Map([["same", stub]]), { marketplaceResolver: resolver }) as any;
 
     await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
-    assert.equal(mgr.getServerStatuses()[0].origin.scope, "project");
+    assert.equal(mgr.getServerStatuses()[0].origin.packName, "original-pack");
     assert.equal(stub.connectCount, 1);
 
-    fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
-      mcpServers: { same: config },
-    }));
+    packName = "renamed-pack";
     const unchanged = await mgr.reloadDiscoveredServers({ timeoutMs: 0 });
 
     assert.deepEqual(unchanged.unchanged, ["same"]);
     assert.equal(stub.connectCount, 1);
     const status = mgr.getServerStatuses()[0];
-    assert.equal(status.origin?.scope, "manual");
-    assert.equal(status.ownerContributions?.[0]?.origin.scope, "manual");
+    assert.equal(status.origin?.packName, "renamed-pack");
+    assert.equal(status.ownerContributions?.[0]?.origin.packName, "renamed-pack");
   });
 });
 
