@@ -36,6 +36,7 @@ class StubMcpClient {
 		private readonly options: {
 			tools?: McpToolDef[];
 			connectGate?: Promise<void>;
+			listToolsGate?: Promise<void>;
 		} = {},
 	) {}
 
@@ -52,6 +53,7 @@ class StubMcpClient {
 
 	async listTools(): Promise<McpToolDef[]> {
 		this.listToolsCount += 1;
+		if (this.options.listToolsGate) await this.options.listToolsGate;
 		return this.options.tools ?? [{ name: "inspect", inputSchema: { type: "object" } }];
 	}
 
@@ -280,6 +282,80 @@ describe("MCP approval lifecycle gate", () => {
 		assert.equal(stub.connectCount, 1);
 		assert.equal(manager.getServerStatuses()[0].approval.state, "trusted");
 		assert.equal(manager.getServerStatuses()[0].approval.required, false);
+	});
+
+	it("rediscovers after initialize so a changed definition cannot list or publish tools", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });
+		let releaseConnect!: () => void;
+		const connectGate = new Promise<void>((resolve) => { releaseConnect = resolve; });
+		const stub = new StubMcpClient("repository", { connectGate });
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+
+		const activeReload = manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		assert.equal(stub.connectCount, 1);
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["changed.js"] } });
+		releaseConnect();
+		await activeReload;
+
+		assert.equal(stub.disconnectCount, 1);
+		assert.equal(stub.listToolsCount, 0);
+		assert.deepEqual(manager.getToolInfos(), []);
+		const status = manager.getServerStatuses()[0];
+		assert.equal(status.approval.state, "changed");
+		assert.equal(status.status, "disconnected");
+	});
+
+	it("rediscovers before publication so a definition changed during tools/list cannot publish routes", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });
+		let releaseListTools!: () => void;
+		const listToolsGate = new Promise<void>((resolve) => { releaseListTools = resolve; });
+		const stub = new StubMcpClient("repository", { listToolsGate });
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+
+		const activeReload = manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		while (stub.listToolsCount === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["changed.js"] } });
+		releaseListTools();
+		await activeReload;
+
+		assert.equal(stub.disconnectCount, 1);
+		assert.equal(stub.listToolsCount, 1);
+		assert.deepEqual(manager.getToolInfos(), []);
+		assert.equal(manager.getServerStatuses()[0].approval.state, "changed");
+	});
+
+	it("rediscovers after initialize so a removed definition cannot list or publish tools", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node" } });
+		let releaseConnect!: () => void;
+		const connectGate = new Promise<void>((resolve) => { releaseConnect = resolve; });
+		const stub = new StubMcpClient("repository", { connectGate });
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+
+		const activeReload = manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		assert.equal(stub.connectCount, 1);
+		fs.rmSync(path.join(cwd, ".mcp.json"));
+		releaseConnect();
+		await activeReload;
+
+		assert.equal(stub.disconnectCount, 1);
+		assert.equal(stub.listToolsCount, 0);
+		assert.deepEqual(manager.getToolInfos(), []);
+		assert.deepEqual(manager.getServerStatuses(), []);
 	});
 
 	it("rechecks approval after initialize and a queued reload cannot publish tools rejected concurrently", async () => {

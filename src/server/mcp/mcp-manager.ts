@@ -236,8 +236,11 @@ function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
 }
 
 const REDACTED = "[redacted]";
-const CREDENTIAL_FLAG = /(?:token|secret|password|passwd|passphrase|api[-_]?key|authorization|auth|credential|cookie|headers?|bearer|user(?:name)?)$/i;
-const SENSITIVE_HEADER_NAME = /(?:^|[-_])(?:authorization|auth|token|secret|password|passwd|api[-_]?key|credential|cookie)(?:$|[-_])/i;
+const CREDENTIAL_NAME_COMPONENTS = new Set([
+  "api-key", "auth", "authorization", "bearer", "cookie", "credential", "credentials",
+  "header", "headers", "key", "passphrase", "passwd", "password", "private", "secret",
+  "session", "token", "user", "username",
+]);
 const SHELL_ARGUMENT = /(?:[^\s"'`]+|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)+/g;
 
 interface McpArgumentRedactionState {
@@ -257,10 +260,22 @@ function redactWholeValue(value: string): string {
   return `${quoted.prefix}${REDACTED}${quoted.suffix}`;
 }
 
+function isCredentialName(value: string): boolean {
+  const components = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  if (components.some((component) => CREDENTIAL_NAME_COMPONENTS.has(component))) return true;
+  // Preserve common compact spellings while requiring an exact component so
+  // unrelated names such as "monkey" do not become credential flags.
+  return components.some((component) => component === "apikey");
+}
+
 function isCredentialFlag(value: string): boolean {
   if (value === "-H") return true;
   if (!/^--?[^-]/.test(value)) return false;
-  return CREDENTIAL_FLAG.test(value.replace(/^--?/, ""));
+  return isCredentialName(value.replace(/^--?/, ""));
 }
 
 function redactHeaderValue(value: string): string | undefined {
@@ -268,7 +283,7 @@ function redactHeaderValue(value: string): string | undefined {
   const colon = quoted.value.indexOf(":");
   if (colon < 1) return undefined;
   const name = quoted.value.slice(0, colon).trim();
-  if (!SENSITIVE_HEADER_NAME.test(name)) return undefined;
+  if (!isCredentialName(name)) return undefined;
   const spacing = quoted.value.slice(colon + 1).match(/^\s*/)?.[0] ?? "";
   return `${quoted.prefix}${quoted.value.slice(0, colon + 1)}${spacing}${REDACTED}${quoted.suffix}`;
 }
@@ -854,8 +869,15 @@ export class McpManager {
   }
 
   private _isStillEligible(group: ResolvedMcpConnectionGroup): boolean {
+    if (group.ownerContributions[0]?.origin.sourceId === "programmatic-manual") {
+      return this._isEligible(group);
+    }
+    // Connecting and listing tools both cross asynchronous trust boundaries.
+    // Rediscover here so an on-disk edit/removal during either operation cannot
+    // publish the stale definition before the normal reconciliation timer runs.
+    this.discoverConnectionGroups();
     const current = this.discoveredConnectionGroups.get(group.serverName);
-    if (!current) return group.ownerContributions[0]?.origin.sourceId === "programmatic-manual" && this._isEligible(group);
+    if (!current) return false;
     if (this._fingerprintGroup(current) !== this._fingerprintGroup(group)) return false;
     return this._isEligible(current);
   }

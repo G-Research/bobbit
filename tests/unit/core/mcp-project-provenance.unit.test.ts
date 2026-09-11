@@ -222,6 +222,32 @@ describe("safe MCP review metadata", () => {
 		});
 	});
 
+	it("redacts token-delimited key credentials without hiding unrelated names", () => {
+		const redacted = redactMcpServerConfig({
+			command: "node --private-key unit-command-private-key --access_key=unit-command-access-key --signing-key unit-command-signing-key --monkey command-visible",
+			args: [
+				"--private-key", "unit-arg-private-key",
+				"--access_key=unit-arg-access-key",
+				"--signing-key", "unit-arg-signing-key",
+				"X-Private-Key: unit-header-private-key",
+				"--monkey", "argument-visible",
+			],
+			headers: { "X-Private-Key": "unit-configured-private-key" },
+		});
+
+		assert.equal(redacted.command,
+			"node --private-key [redacted] --access_key=[redacted] --signing-key [redacted] --monkey command-visible");
+		assert.deepEqual(redacted.args, [
+			"--private-key", "[redacted]",
+			"--access_key=[redacted]",
+			"--signing-key", "[redacted]",
+			"X-Private-Key: [redacted]",
+			"--monkey", "argument-visible",
+		]);
+		assert.deepEqual(redacted.headers, { "X-Private-Key": "[redacted]" });
+		assert.doesNotMatch(JSON.stringify(redacted), /unit-(?:command|arg|header|configured)-.*-key/);
+	});
+
 	it("redacts CLI header forms and secret substrings in argument arrays and command strings", () => {
 		const secrets = [
 			"unit-command-auth-sentinel",
