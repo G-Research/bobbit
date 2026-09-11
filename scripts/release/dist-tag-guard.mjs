@@ -7,10 +7,15 @@ const VERSION_PATTERN = new RegExp(
 		String.raw`(?:\+${BUILD_ID}(?:\.${BUILD_ID})*)?$`,
 );
 
+/**
+ * @param {unknown} value
+ * @returns {value is string}
+ */
 export function isExactVersion(value) {
 	return typeof value === "string" && VERSION_PATTERN.test(value);
 }
 
+/** @param {string} value */
 function parseVersion(value) {
 	const match = VERSION_PATTERN.exec(value);
 	if (!match) throw new Error(`invalid version: ${value}`);
@@ -22,6 +27,10 @@ function parseVersion(value) {
 
 // SemVer gives numeric identifiers lower precedence than non-numeric ones;
 // build metadata is parsed but intentionally does not affect ordering.
+/**
+ * @param {string[]} left
+ * @param {string[]} right
+ */
 function comparePrerelease(left, right) {
 	if (left.length === 0 || right.length === 0) {
 		return left.length === right.length ? 0 : left.length === 0 ? 1 : -1;
@@ -38,6 +47,10 @@ function comparePrerelease(left, right) {
 	return 0;
 }
 
+/**
+ * @param {string} leftValue
+ * @param {string} rightValue
+ */
 export function compareReleaseVersions(leftValue, rightValue) {
 	const [left, right] = [parseVersion(leftValue), parseVersion(rightValue)];
 	for (let index = 0; index < 3; index += 1) {
@@ -46,6 +59,9 @@ export function compareReleaseVersions(leftValue, rightValue) {
 	return comparePrerelease(left.prerelease, right.prerelease);
 }
 
+/**
+ * @param {{ packageName: string, distTag: string, version: string, fetchImpl?: typeof fetch }} options
+ */
 export async function assertDistTagAdvances({ packageName, distTag, version, fetchImpl = fetch }) {
 	const url = `https://registry.npmjs.org/${encodeURIComponent(packageName)}/${encodeURIComponent(distTag)}`;
 	const response = await fetchImpl(url, { headers: { accept: "application/json" } });
@@ -55,7 +71,7 @@ export async function assertDistTagAdvances({ packageName, distTag, version, fet
 	}
 	if (!response.ok) throw new Error(`dist-tag lookup returned ${response.status}`);
 
-	const current = (await response.json()).version;
+	const { version: current } = /** @type {{ version: string }} */ (await response.json());
 	if (compareReleaseVersions(version, current) <= 0) {
 		throw new Error(`refusing to move ${distTag} backwards: ${current} -> ${version}`);
 	}
