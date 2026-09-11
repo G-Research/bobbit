@@ -14,7 +14,7 @@ Bobbit is a tool that lets you run an AI coding agent on your machine and contro
 The quickest way to try Bobbit:
 
 ```bash
-npx bobbit
+npx @gresearch/bobbit
 ```
 
 This downloads and runs Bobbit in one step. It will scaffold a server `.bobbit/` directory, create the built-in **Headquarters** workspace for the current run directory, and start the server.
@@ -22,7 +22,7 @@ This downloads and runs Bobbit in one step. It will scaffold a server `.bobbit/`
 If you'd prefer a permanent install:
 
 ```bash
-npm install -g bobbit
+npm install -g @gresearch/bobbit
 bobbit
 ```
 

@@ -11,7 +11,7 @@
 
 ## 1. Overview & motivation
 
-Since v0.6.0 (#334) `npm install bobbit` fails in network-restricted environments:
+Since v0.6.0 (#334) `npm install @gresearch/bobbit` fails in network-restricted environments:
 
 1. **`@huggingface/transformers`** transitively pulls in `onnxruntime-node` and `sharp`, both of which run `postinstall` scripts that fetch prebuilt native binaries from GitHub Releases / CDNs — not the npm registry. No npm mirror can intercept them.
 2. **`@lancedb/lancedb`** ships a platform-specific native Rust binary per target triple.
