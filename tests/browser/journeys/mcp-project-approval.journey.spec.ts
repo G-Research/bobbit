@@ -145,8 +145,11 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		await changedBanner.locator('[data-testid="mcp-review-servers"]').click();
 
 		localRow = page.locator(`[data-testid="mcp-server-row"][data-server-name="${LOCAL_SERVER_NAME}"]`);
+		const changedToggle = localRow.locator('[data-testid="mcp-server-toggle"]');
 		await expect(localRow.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again");
 		await expect(localRow.locator('[data-testid="mcp-server-status"]')).toHaveText("Not started");
+		await expect(changedToggle).toHaveAttribute("aria-expanded", "true");
+		await expect(changedToggle).toBeFocused();
 		await expect(localRow.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant v3");
 		await expect(localRow.locator('[data-testid="mcp-approve-server"]')).toHaveText("Approve current configuration");
 
