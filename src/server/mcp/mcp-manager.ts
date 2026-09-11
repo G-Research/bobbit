@@ -2,7 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { McpClient } from "./mcp-client.js";
+import { McpClient, expandEnvRecord } from "./mcp-client.js";
+import {
+  McpApprovalStore,
+  validateMcpServerConfig,
+  type McpApprovalClassification,
+  type McpApprovalDecision,
+  type McpApprovalIdentity,
+} from "./mcp-approval-store.js";
 import { isValidOperationSchema, parseMcpToolName } from "./mcp-meta.js";
 import type {
   McpServerConfig,
@@ -10,7 +17,7 @@ import type {
   McpToolResult,
   McpToolDocCache,
 } from "./mcp-types.js";
-import { bobbitConfigDir, bobbitStateDir, normalProjectBobbitDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitStateDir, headquartersDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
 import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "../agent/project-registry.js";
@@ -21,12 +28,22 @@ export interface McpDiscoveryScope {
 }
 
 export type McpContributionScope = "server" | "global-user" | "project" | "manual" | string;
+export type McpSourceAuthority = "marketplace" | "headquarters" | "user-home" | "project";
+export type McpSourceTrust = "pretrusted" | "approval-required";
 
 export interface ResolvedMcpOrigin {
   scope: McpContributionScope;
+  /** Optional on resolver input for compatibility; normalized before discovery returns. */
+  authority?: McpSourceAuthority;
+  trust?: McpSourceTrust;
+  sourceId?: string;
+  file?: string;
+  projectId?: string;
+  projectName?: string;
   packName?: string;
   packId?: string;
   sourceUrl?: string;
+  /** Internal physical path. Never persist or expose it as review metadata. */
   path?: string;
 }
 
@@ -57,6 +74,25 @@ export interface ResolvedMcpConnectionGroup {
   ownerContributions: ResolvedMcpContribution[];
   /** undefined means a flat contribution owns all namespaces. */
   activeSubNamespaces?: Set<string>;
+}
+
+export interface McpSourceSummary {
+  sourceId: string;
+  authority: McpSourceAuthority;
+  projectId?: string;
+  projectName?: string;
+  file: string;
+}
+
+export type McpReviewConfig = RedactedMcpServerConfig;
+export interface McpStatusDiagnostic { code: string; message: string; }
+
+export interface EffectiveMcpDefinition {
+  name: string;
+  config: McpServerConfig;
+  origin: ResolvedMcpOrigin;
+  approval: McpApprovalClassification;
+  validationError?: string;
 }
 
 export interface McpRouteDiagnostic {
@@ -129,6 +165,10 @@ export interface McpServerStatus {
   origin?: ResolvedMcpOrigin;
   ownerContributions?: RedactedResolvedMcpContribution[];
   activeSubNamespaces?: string[];
+  approval?: McpApprovalClassification;
+  source?: McpSourceSummary;
+  reviewConfig?: McpReviewConfig;
+  diagnostics?: McpStatusDiagnostic[];
 }
 
 /** Bobbit-compatible tool info produced from MCP tool defs */
@@ -195,16 +235,17 @@ function sameConfig(a: McpServerConfig, b: McpServerConfig): boolean {
   return stableFingerprint(a) === stableFingerprint(b);
 }
 
-const REDACTED = "<redacted>";
+const REDACTED = "[redacted]";
+const CREDENTIAL_FLAG = /(?:token|secret|password|passwd|api[-_]?key|authorization|credential|cookie)$/i;
 
-function redactRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
+export function redactRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
   if (!record) return undefined;
   const out: Record<string, string> = {};
   for (const key of Object.keys(record).sort()) out[key] = REDACTED;
   return out;
 }
 
-function redactUrl(raw: string): string {
+export function redactUrl(raw: string): string {
   try {
     const url = new URL(raw);
     url.username = "";
@@ -217,10 +258,28 @@ function redactUrl(raw: string): string {
   }
 }
 
-function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServerConfig {
+export function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServerConfig {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return { transport: "stdio" };
   const out: RedactedMcpServerConfig = { transport: config.url ? "http" : "stdio" };
   if (config.command) out.command = config.command;
-  if (config.args) out.args = config.args.map(() => REDACTED);
+  if (config.args) {
+    const secretValues = new Set([
+      ...Object.values(config.env ?? {}),
+      ...Object.values(config.env ? expandEnvRecord(config.env) : {}),
+      ...Object.values(config.headers ?? {}),
+    ].filter(Boolean));
+    let redactNext = false;
+    out.args = config.args.map((arg) => {
+      if (redactNext || secretValues.has(arg)) {
+        redactNext = false;
+        return REDACTED;
+      }
+      const equals = arg.match(/^(--?[^=]+)=(.*)$/);
+      if (equals && CREDENTIAL_FLAG.test(equals[1])) return `${equals[1]}=${REDACTED}`;
+      if (CREDENTIAL_FLAG.test(arg.replace(/^--?/, ""))) redactNext = true;
+      return arg;
+    });
+  }
   if (config.cwd) out.cwd = config.cwd;
   if (config.url) out.url = redactUrl(config.url);
   const env = redactRecord(config.env);
@@ -230,16 +289,63 @@ function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServerConfig
   return out;
 }
 
-function redactMcpContribution(contribution: ResolvedMcpContribution): RedactedResolvedMcpContribution {
-  return { ...contribution, config: redactMcpServerConfig(contribution.config) };
+function safeOrigin(origin: ResolvedMcpOrigin): ResolvedMcpOrigin {
+  const { path: _physicalPath, ...safe } = origin;
+  if (safe.sourceUrl) safe.sourceUrl = redactUrl(safe.sourceUrl);
+  return safe;
 }
 
-function flatManualContribution(name: string, config: McpServerConfig): ResolvedMcpContribution {
+function redactMcpContribution(contribution: ResolvedMcpContribution): RedactedResolvedMcpContribution {
+  return { ...contribution, origin: safeOrigin(contribution.origin), config: redactMcpServerConfig(contribution.config) };
+}
+
+function flatManualContribution(
+  name: string,
+  config: McpServerConfig,
+  origin: ResolvedMcpOrigin = {
+    scope: "manual",
+    authority: "headquarters",
+    trust: "pretrusted",
+    sourceId: "programmatic-manual",
+    file: "Runtime configuration",
+  },
+): ResolvedMcpContribution {
+  return { listName: name, serverName: name, config, origin };
+}
+
+interface ResolvedManualServer {
+  config: McpServerConfig;
+  origin: ResolvedMcpOrigin;
+}
+
+export function canonicalCustomDirLocator(declaredPath: string): string {
+  let locator = declaredPath.trim().replace(/\\/g, "/");
+  const driveAbsolute = /^[A-Za-z]:\//.test(locator);
+  const uncAbsolute = locator.startsWith("//");
+  const posixAbsolute = locator.startsWith("/") && !uncAbsolute;
+  const tilde = locator === "~" || locator.startsWith("~/");
+  locator = uncAbsolute
+    ? `//${path.posix.normalize(locator.slice(2) || ".")}`
+    : path.posix.normalize(locator || ".");
+  if (driveAbsolute) locator = `${locator[0].toLowerCase()}${locator.slice(1)}`;
+  if (process.platform === "win32" && (driveAbsolute || uncAbsolute || posixAbsolute)) locator = locator.toLowerCase();
+  if (tilde && locator === ".") return "~";
+  return locator;
+}
+
+function customDirectorySourceId(declaredPath: string): string {
+  const digest = crypto.createHash("sha256").update(canonicalCustomDirLocator(declaredPath)).digest("hex");
+  return `project-custom-dir:v1:${digest}:.mcp.json`;
+}
+
+function normalizedMarketplaceOrigin(contribution: ResolvedMcpContribution): ResolvedMcpOrigin {
+  const origin = contribution.origin ?? { scope: "manual" };
   return {
-    listName: name,
-    serverName: name,
-    config,
-    origin: { scope: "manual" },
+    ...origin,
+    authority: "marketplace",
+    trust: "pretrusted",
+    sourceId: origin.sourceId ?? contribution.contributionId ?? origin.packId ?? `marketplace:${contribution.listName}`,
+    file: origin.file ?? `${origin.packName ?? "Marketplace pack"}/${origin.path ? path.basename(origin.path) : contribution.listName}`,
   };
 }
 
@@ -261,6 +367,7 @@ export class McpManager {
   /** Maps public Bobbit tool names to their authoritative runtime route. */
   private _toolRouteMap = new Map<string, McpToolRoute>();
   private _routeDiagnostics: McpRouteDiagnostic[] = [];
+  private _discoveryDiagnostics: McpStatusDiagnostic[] = [];
   private _routeMapDirty = true;
   /** Maps truncated Bobbit tool names back to original MCP tool names. Kept for legacy tests/introspection. */
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
@@ -268,9 +375,11 @@ export class McpManager {
   private _summaryCache = new Map<string, Map<string, string>>();
 
   private projectConfigStore: ProjectConfigReader | null;
-  private additionalProjects: Array<{cwd: string, configStore: ProjectConfigReader}> = [];
+  private additionalProjects: Array<{projectId?: string; projectName?: string; cwd: string; configStore: ProjectConfigReader}> = [];
   private stateDir: string | undefined;
   private readonly scopeKey: string;
+  private approvalStore: McpApprovalStore | undefined;
+  private readonly projectName?: string;
 
   /** Override-able for tests via constructor opts. */
   private listToolsTimeoutMs: number = DEFAULT_LIST_TOOLS_TIMEOUT_MS;
@@ -286,10 +395,14 @@ export class McpManager {
       projectId?: string;
       marketplaceResolver?: MarketplaceMcpResolver;
       scopeKey?: string;
+      projectName?: string;
+      approvalStore?: McpApprovalStore;
     },
   ) {
     this.projectConfigStore = projectConfigStore ?? null;
     this.stateDir = stateDir;
+    this.approvalStore = opts?.approvalStore;
+    this.projectName = opts?.projectName;
     if (opts?.listToolsTimeoutMs !== undefined) this.listToolsTimeoutMs = opts.listToolsTimeoutMs;
     if (opts?.callToolTimeoutMs !== undefined) this.callToolTimeoutMs = opts.callToolTimeoutMs;
     if (opts?.marketplaceResolver) this.marketplaceResolver = opts.marketplaceResolver;
@@ -322,7 +435,7 @@ export class McpManager {
   }
 
   /** Register additional project directories for MCP server discovery. */
-  setAdditionalProjects(projects: Array<{cwd: string, configStore: ProjectConfigReader}>): void {
+  setAdditionalProjects(projects: Array<{projectId?: string; projectName?: string; cwd: string; configStore: ProjectConfigReader}>): void {
     this.additionalProjects = projects;
   }
 
@@ -387,12 +500,29 @@ export class McpManager {
     }
 
     const manual = this._discoverManualServers();
-    for (const [name, config] of Object.entries(manual)) {
+    for (const [name, resolved] of manual) {
+      // Manual definitions have always won public-name route conflicts. Apply
+      // that precedence before eligibility so a denied higher definition cannot
+      // reveal and start a lower Marketplace fallback.
+      for (const [runtimeKey, group] of [...byServer]) {
+        const remainingOwners = group.ownerContributions.filter((owner) => owner.serverName !== name);
+        if (runtimeKey === name || remainingOwners.length === 0) {
+          byServer.delete(runtimeKey);
+        } else if (remainingOwners.length !== group.ownerContributions.length) {
+          byServer.set(runtimeKey, {
+            ...group,
+            ownerContributions: remainingOwners,
+            activeSubNamespaces: remainingOwners.some((owner) => !owner.subNamespace)
+              ? undefined
+              : new Set(remainingOwners.map((owner) => owner.subNamespace!)),
+          });
+        }
+      }
       byServer.set(name, {
         serverName: name,
         runtimeServerKey: name,
-        config,
-        ownerContributions: [flatManualContribution(name, config)],
+        config: resolved.config,
+        ownerContributions: [flatManualContribution(name, resolved.config, resolved.origin)],
       });
     }
 
@@ -406,7 +536,11 @@ export class McpManager {
     try {
       return this.marketplaceResolver(this.getDiscoveryScope()).filter((c) => {
         return !!c && typeof c.listName === "string" && typeof c.serverName === "string" && !!c.config;
-      }).map((c) => ({ ...c, runtimeServerKey: c.runtimeServerKey ?? c.serverName }));
+      }).map((c) => ({
+        ...c,
+        runtimeServerKey: c.runtimeServerKey ?? c.serverName,
+        origin: normalizedMarketplaceOrigin(c),
+      }));
     } catch (err) {
       console.error("[mcp] Marketplace MCP resolver failed:", (err as Error).message);
       return [];
@@ -426,7 +560,11 @@ export class McpManager {
   static groupMarketplaceContributions(contributions: ResolvedMcpContribution[]): ResolvedMcpConnectionGroup[] {
     const byRuntime = new Map<string, ResolvedMcpConnectionGroup>();
     for (const rawContrib of contributions) {
-      const contrib = { ...rawContrib, runtimeServerKey: rawContrib.runtimeServerKey ?? rawContrib.serverName };
+      const contrib = {
+        ...rawContrib,
+        runtimeServerKey: rawContrib.runtimeServerKey ?? rawContrib.serverName,
+        origin: normalizedMarketplaceOrigin(rawContrib),
+      };
       const runtimeKey = contrib.runtimeServerKey;
       const existing = byRuntime.get(runtimeKey);
       if (!existing || !sameConfig(existing.config, contrib.config)) {
@@ -450,141 +588,241 @@ export class McpManager {
     return [...byRuntime.values()];
   }
 
-  private _discoverManualServers(): Record<string, McpServerConfig> {
-    const merged: Record<string, McpServerConfig> = {};
+  private _sourceOrigin(
+    projectId: string | undefined,
+    projectName: string | undefined,
+    sourceId: string,
+    file: string,
+    physicalPath: string,
+  ): ResolvedMcpOrigin {
+    const headquarters = (!!projectId && (isHeadquartersProject(projectId) || projectId === SYSTEM_PROJECT_ID))
+      || (!projectId && path.resolve(this.cwd) === path.resolve(headquartersDir()));
+    return {
+      scope: "manual",
+      authority: headquarters ? "headquarters" : "project",
+      trust: headquarters ? "pretrusted" : "approval-required",
+      sourceId,
+      file,
+      ...(projectId ? { projectId } : {}),
+      ...(projectName ? { projectName } : {}),
+      path: physicalPath,
+    };
+  }
 
-    // 0. Custom directories (lowest priority — merged first, overridden by everything)
+  private _discoverManualServers(): Map<string, ResolvedManualServer> {
+    const merged = new Map<string, ResolvedManualServer>();
+    this._discoveryDiagnostics = [];
+    const primaryId = this.discoveryScope.projectId;
+
+    // 0. Custom directories (lowest priority — merged first, overridden by everything).
     if (this.projectConfigStore) {
-      const customDirs = parseCustomDirectories(this.projectConfigStore)
-        .filter(d => d.types.includes("mcp"));
-      for (const dir of customDirs) {
-        this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
+      for (const dir of parseCustomDirectories(this.projectConfigStore).filter((entry) => entry.types.includes("mcp"))) {
+        const filePath = path.join(dir.path, ".mcp.json");
+        const declaredPath = dir.declaredPath ?? dir.path;
+        this._mergeConfigFile(merged, filePath, this._sourceOrigin(
+          primaryId,
+          this.projectName,
+          customDirectorySourceId(declaredPath),
+          `${canonicalCustomDirLocator(declaredPath)}/.mcp.json`,
+          filePath,
+        ));
       }
     }
 
-    // 0b. Additional registered projects (low priority — overridden by user and primary project)
+    // 0b. Additional registered projects (low priority — overridden by user and primary project).
     for (const proj of this.additionalProjects) {
-      const projCustomDirs = parseCustomDirectories(proj.configStore)
-        .filter(d => d.types.includes("mcp"));
-      for (const dir of projCustomDirs) {
-        this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
+      for (const dir of parseCustomDirectories(proj.configStore).filter((entry) => entry.types.includes("mcp"))) {
+        const filePath = path.join(dir.path, ".mcp.json");
+        const declaredPath = dir.declaredPath ?? dir.path;
+        this._mergeConfigFile(merged, filePath, this._sourceOrigin(
+          proj.projectId,
+          proj.projectName,
+          customDirectorySourceId(declaredPath),
+          `${canonicalCustomDirLocator(declaredPath)}/.mcp.json`,
+          filePath,
+        ));
       }
-      this._mergeConfigFile(merged, path.join(proj.cwd, ".mcp.json"), "mcpServers");
-      this._mergeConfigFile(merged, path.join(proj.cwd, ".claude", ".mcp.json"), "mcpServers");
-      this._mergeConfigFile(merged, path.join(proj.cwd, ".bobbit", "config", "mcp.json"), "mcpServers");
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".mcp.json"), this._sourceOrigin(proj.projectId, proj.projectName, "project-file:.mcp.json", ".mcp.json", path.join(proj.cwd, ".mcp.json")));
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".claude", ".mcp.json"), this._sourceOrigin(proj.projectId, proj.projectName, "project-file:.claude/.mcp.json", ".claude/.mcp.json", path.join(proj.cwd, ".claude", ".mcp.json")));
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".bobbit", "config", "mcp.json"), this._sourceOrigin(proj.projectId, proj.projectName, "project-file:.bobbit/config/mcp.json", ".bobbit/config/mcp.json", path.join(proj.cwd, ".bobbit", "config", "mcp.json")));
     }
 
     const home = os.homedir();
-    this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
-    this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"));
-    this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
-    this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
+    const userOrigin = (sourceId: string, file: string, physicalPath: string): ResolvedMcpOrigin => ({
+      scope: "manual", authority: "user-home", trust: "pretrusted", sourceId, file, path: physicalPath,
+    });
+    this._mergeConfigFile(merged, path.join(home, ".claude.json"), userOrigin("user-home:.claude.json", "~/.claude.json", path.join(home, ".claude.json")));
+    this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"), userOrigin("user-home:.claude.json:project", "~/.claude.json (project entry)", path.join(home, ".claude.json")));
+    this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), userOrigin("user-home:.claude/.mcp.json", "~/.claude/.mcp.json", path.join(home, ".claude", ".mcp.json")));
+    this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), userOrigin("user-home:.bobbit/.mcp.json", "~/.bobbit/.mcp.json", path.join(home, ".bobbit", ".mcp.json")));
 
-    this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
-    this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
-    // Always load the server-level (Headquarters) Bobbit MCP config — it is the
-    // global base layer visible to all scopes. For normal projects, additionally
-    // load the project-scoped config so project-local servers layer on top.
-    this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
-    const projectId = this.discoveryScope.projectId;
-    if (projectId && !isHeadquartersProject(projectId) && projectId !== SYSTEM_PROJECT_ID) {
-      this._mergeConfigFile(merged, path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json"), "mcpServers");
+    this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), this._sourceOrigin(primaryId, this.projectName, "project-file:.mcp.json", ".mcp.json", path.join(this.cwd, ".mcp.json")));
+    this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), this._sourceOrigin(primaryId, this.projectName, "project-file:.claude/.mcp.json", ".claude/.mcp.json", path.join(this.cwd, ".claude", ".mcp.json")));
+
+    const headquartersPath = path.join(bobbitConfigDir(), "mcp.json");
+    this._mergeConfigFile(merged, headquartersPath, {
+      scope: "manual", authority: "headquarters", trust: "pretrusted",
+      sourceId: "headquarters:mcp.json", file: "Headquarters config/mcp.json", path: headquartersPath,
+    });
+    if (primaryId && !isHeadquartersProject(primaryId) && primaryId !== SYSTEM_PROJECT_ID) {
+      const projectFile = path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json");
+      this._mergeConfigFile(merged, projectFile, this._sourceOrigin(primaryId, this.projectName, "project-file:.bobbit/config/mcp.json", ".bobbit/config/mcp.json", projectFile));
     }
 
     return merged;
   }
 
   /** Read a JSON config file and merge its servers into the target. */
-  private _mergeConfigFile(
-    target: Record<string, McpServerConfig>,
-    filePath: string,
-    key: "mcpServers",
-  ): void {
+  private _mergeConfigFile(target: Map<string, ResolvedManualServer>, filePath: string, origin: ResolvedMcpOrigin): void {
     try {
       if (!fs.existsSync(filePath)) return;
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(raw);
-
-      const servers: Record<string, McpServerConfig> | undefined = parsed[key];
-      if (servers && typeof servers === "object") {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      const servers: Record<string, McpServerConfig> | undefined = parsed.mcpServers;
+      if (servers && typeof servers === "object" && !Array.isArray(servers)) {
         for (const [name, config] of Object.entries(servers)) {
-          if (config && typeof config === "object") {
-            target[name] = config;
-          }
+          target.set(name, { config: config as McpServerConfig, origin });
         }
       }
-    } catch (err) {
-      console.error(
-        `[mcp] Failed to read config file ${filePath}:`,
-        (err as Error).message,
-      );
+    } catch {
+      this._discoveryDiagnostics.push({ code: "MCP_CONFIG_PARSE_FAILED", message: `Could not parse MCP configuration from ${origin.file ?? "the configured source"}.` });
+      console.error(`[mcp] MCP_CONFIG_PARSE_FAILED (${origin.file ?? "unknown source"})`);
     }
   }
 
-  /**
-   * Read ~/.claude.json → projects → <matching-path> → mcpServers.
-   * Claude Code stores per-project MCP config under a "projects" map keyed by
-   * the project's absolute path. We match the current cwd against those keys
-   * (case-insensitive on Windows, normalized separators).
-   */
   private _mergeProjectConfigFromClaudeJson(
-    target: Record<string, McpServerConfig>,
+    target: Map<string, ResolvedManualServer>,
     filePath: string,
+    origin: ResolvedMcpOrigin,
   ): void {
     try {
       if (!fs.existsSync(filePath)) return;
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(raw);
-
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
       const projects = parsed.projects;
       if (!projects || typeof projects !== "object") return;
-
-      // Normalize a path for comparison: forward slashes, lowercase on win32
-      const normalize = (p: string) => {
-        let n = p.replace(/\\/g, "/").replace(/\/+$/, "");
-        if (process.platform === "win32") n = n.toLowerCase();
-        return n;
+      const normalize = (value: string) => {
+        let normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+        if (process.platform === "win32") normalized = normalized.toLowerCase();
+        return normalized;
       };
-
-      const cwdNorm = normalize(this.cwd);
+      const cwd = normalize(this.cwd);
       for (const [projectPath, projectConfig] of Object.entries(projects)) {
-        if (normalize(projectPath) !== cwdNorm) continue;
-        const servers = (projectConfig as any)?.mcpServers;
-        if (servers && typeof servers === "object") {
+        if (normalize(projectPath) !== cwd) continue;
+        const servers = (projectConfig as { mcpServers?: unknown })?.mcpServers;
+        if (servers && typeof servers === "object" && !Array.isArray(servers)) {
           for (const [name, config] of Object.entries(servers)) {
-            if (config && typeof config === "object") {
-              target[name] = config as McpServerConfig;
-            }
+            target.set(name, { config: config as McpServerConfig, origin });
           }
         }
         break;
       }
-    } catch (err) {
-      console.error(
-        `[mcp] Failed to read project config from ${filePath}:`,
-        (err as Error).message,
-      );
+    } catch {
+      this._discoveryDiagnostics.push({ code: "MCP_CONFIG_PARSE_FAILED", message: `Could not parse MCP configuration from ${origin.file ?? "the configured source"}.` });
+      console.error(`[mcp] MCP_CONFIG_PARSE_FAILED (${origin.file ?? "unknown source"})`);
     }
+  }
+
+  getDiscoveryDiagnostics(): McpStatusDiagnostic[] {
+    return this._discoveryDiagnostics.map((diagnostic) => ({ ...diagnostic }));
   }
 
   // ── Connection lifecycle ───────────────────────────────────────────
 
-  /**
-   * Connect to a specific MCP server.
-   * Creates a client, performs the initialize handshake, and caches tool definitions.
-   */
-  async connectServer(name: string, config: McpServerConfig): Promise<void> {
-    const desiredGroup = this.discoveredConnectionGroups.get(name) ?? {
+  private _getApprovalStore(): McpApprovalStore {
+    return this.approvalStore ??= new McpApprovalStore(this.stateDir ?? bobbitStateDir());
+  }
+
+  private _definitionForGroup(group: ResolvedMcpConnectionGroup): EffectiveMcpDefinition {
+    const origin = group.ownerContributions[0]?.origin ?? flatManualContribution(group.serverName, group.config).origin;
+    const trust = origin.trust ?? (origin.authority === "marketplace" ? "pretrusted" : "approval-required");
+    const sourceId = origin.sourceId ?? `unattributed:${group.serverName}`;
+    const validationError = validateMcpServerConfig(group.config);
+    const approval: McpApprovalClassification = trust === "pretrusted"
+      ? { required: false, state: "trusted" }
+      : validationError
+        ? { required: true, state: "pending" }
+        : this._getApprovalStore().classify({
+          projectId: origin.projectId,
+          sourceId,
+          serverName: group.serverName,
+          trust,
+          config: group.config,
+        });
+    return {
+      name: group.serverName,
+      config: group.config,
+      origin: { ...origin, trust, sourceId },
+      approval,
+      ...(validationError ? { validationError } : {}),
+    };
+  }
+
+  private _isEligible(group: ResolvedMcpConnectionGroup): boolean {
+    const definition = this._definitionForGroup(group);
+    return !definition.validationError && (definition.approval.state === "trusted" || definition.approval.state === "approved");
+  }
+
+  private _isStillEligible(group: ResolvedMcpConnectionGroup): boolean {
+    const current = this.discoveredConnectionGroups.get(group.serverName);
+    if (!current) return group.ownerContributions[0]?.origin.sourceId === "programmatic-manual" && this._isEligible(group);
+    if (this._fingerprintGroup(current) !== this._fingerprintGroup(group)) return false;
+    return this._isEligible(current);
+  }
+
+  /** Freshly discover the effective winner used to validate an approval request. */
+  getEffectiveDefinitionForDecision(name: string): EffectiveMcpDefinition | undefined {
+    this.discoverConnectionGroups();
+    const group = this.discoveredConnectionGroups.get(name);
+    return group ? this._definitionForGroup(group) : undefined;
+  }
+
+  async decideApproval(identity: McpApprovalIdentity, decision: McpApprovalDecision): Promise<EffectiveMcpDefinition> {
+    const current = this.getEffectiveDefinitionForDecision(identity.serverName);
+    if (!current || current.origin.projectId !== identity.projectId || current.origin.sourceId !== identity.sourceId) {
+      throw Object.assign(new Error("The MCP server configuration changed while it was being reviewed."), { code: "MCP_APPROVAL_STALE" });
+    }
+    if (current.origin.trust !== "approval-required") {
+      throw Object.assign(new Error("This MCP server source does not require approval."), { code: "MCP_APPROVAL_NOT_REQUIRED" });
+    }
+    if (current.validationError) {
+      throw Object.assign(new Error(current.validationError), { code: "MCP_CONFIG_INVALID" });
+    }
+    if (current.approval.fingerprint !== identity.fingerprint) {
+      throw Object.assign(new Error("The MCP server configuration changed while it was being reviewed."), { code: "MCP_APPROVAL_STALE" });
+    }
+    await this._getApprovalStore().decide(identity, decision);
+    return this._definitionForGroup(this.discoveredConnectionGroups.get(identity.serverName)!);
+  }
+
+  /** Reconcile one server through the same discovery and approval gate as normal startup. */
+  async restartDiscoveredServer(name: string): Promise<McpServerStatus | undefined> {
+    await this.reloadDiscoveredServers({ force: true, queueIfInFlight: true, timeoutMs: 0 });
+    return this.getServerStatuses().find((status) => status.name === name);
+  }
+
+  /** Connect a discovered server without allowing callers to supply a fallback definition. */
+  async connectServer(name: string, _config?: McpServerConfig): Promise<void> {
+    const desiredGroup = this.discoveredConnectionGroups.get(name);
+    if (!desiredGroup || !this._isEligible(desiredGroup)) {
+      await this.disconnectServer(name, { runtimeOnly: true });
+      return;
+    }
+    await this._connectEligibleServer(name, desiredGroup);
+  }
+
+  /** Explicit seam for trusted programmatic definitions and isolated client tests. */
+  async connectPretrustedServer(name: string, config: McpServerConfig): Promise<void> {
+    const group: ResolvedMcpConnectionGroup = {
       serverName: name,
       runtimeServerKey: name,
       config,
       ownerContributions: [flatManualContribution(name, config)],
     };
+    await this._connectEligibleServer(name, group);
+  }
 
-    // Disconnect existing client for this server if any
-    if (this.clients.has(name)) {
-      await this.disconnectServer(name);
-    }
+  private async _connectEligibleServer(name: string, desiredGroup: ResolvedMcpConnectionGroup): Promise<void> {
+    const config = desiredGroup.config;
+    if (this.clients.has(name)) await this.disconnectServer(name);
 
     this.configs.set(name, config);
     this.connectionGroups.set(name, desiredGroup);
@@ -598,6 +836,12 @@ export class McpManager {
         await client.connect(config);
       }
       this.clients.set(name, client);
+      // A concurrent rejection/configuration change during initialize must not
+      // reach tools/list or publish a stale route.
+      if (!this._isStillEligible(desiredGroup)) {
+        await this.disconnectServer(name, { runtimeOnly: true });
+        return;
+      }
 
       // Fetch tool definitions with a timeout — a hung `tools/list` must not
       // block sibling-server discovery (design §5.1).
@@ -634,6 +878,10 @@ export class McpManager {
         }
       }
 
+      if (!this._isStillEligible(desiredGroup)) {
+        await this.disconnectServer(name, { runtimeOnly: true });
+        return;
+      }
       this.toolDefs.set(name, validTools);
       this._markRouteMapDirty();
 
@@ -664,9 +912,14 @@ export class McpManager {
   }
 
   private _fingerprintGroup(group: ResolvedMcpConnectionGroup): string {
+    const origin = group.ownerContributions[0]?.origin;
     return stableFingerprint({
       runtimeServerKey: group.runtimeServerKey,
       config: group.config,
+      sourceId: origin?.sourceId,
+      projectId: origin?.projectId,
+      authority: origin?.authority,
+      trust: origin?.trust,
     });
   }
 
@@ -761,7 +1014,7 @@ export class McpManager {
     const skippedErrored: string[] = [];
     const failed: Array<{ name: string; error: string }> = [];
 
-    for (const name of [...this.configs.keys()]) {
+    for (const name of [...new Set([...this.configs.keys(), ...this.clients.keys()])]) {
       if (!desired.has(name)) {
         await this.disconnectServer(name, { forget: true });
         disconnected.push(name);
@@ -773,10 +1026,17 @@ export class McpManager {
       const fp = this._fingerprintGroup(group);
       const unchangedConfig = this.serverFingerprints.get(name) === fp;
       this.discoveredConnectionGroups.set(name, group);
+
+      if (!this._isEligible(group)) {
+        if (this.clients.has(name) || this.configs.has(name)) {
+          await this.disconnectServer(name, { runtimeOnly: true });
+          disconnected.push(name);
+        }
+        return;
+      }
+
       if (!force && unchangedConfig) {
-        // The connection can stay up, but ownership/origin metadata may have
-        // changed under the same transport config (for example manual override
-        // with identical config, or Marketplace disable while manual remains).
+        // The connection can stay up, but ownership metadata may have changed.
         this.configs.set(name, group.config);
         this.connectionGroups.set(name, group);
         this.serverFingerprints.set(name, fp);
@@ -790,12 +1050,9 @@ export class McpManager {
           return;
         }
       }
-      await this.connectServer(name, group.config);
-      if (this.errors.has(name)) {
-        failed.push({ name, error: this.errors.get(name)! });
-      } else {
-        connected.push(name);
-      }
+      await this._connectEligibleServer(name, group);
+      if (this.errors.has(name)) failed.push({ name, error: this.errors.get(name)! });
+      else if (this.clients.get(name)?.connected) connected.push(name);
     }));
 
     let status: McpReloadStatus = "ok";
@@ -807,7 +1064,7 @@ export class McpManager {
   }
 
   /** Disconnect a specific server and remove its cached state. */
-  async disconnectServer(name: string, opts?: { forget?: boolean }): Promise<void> {
+  async disconnectServer(name: string, opts?: { forget?: boolean; runtimeOnly?: boolean }): Promise<void> {
     const client = this.clients.get(name);
     if (client) {
       try {
@@ -823,11 +1080,11 @@ export class McpManager {
     this.toolDefs.delete(name);
     this.errors.delete(name);
     this._markRouteMapDirty();
-    if (opts?.forget) {
+    if (opts?.forget || opts?.runtimeOnly) {
       this.configs.delete(name);
       this.connectionGroups.delete(name);
-      this.discoveredConnectionGroups.delete(name);
       this.serverFingerprints.delete(name);
+      if (opts.forget) this.discoveredConnectionGroups.delete(name);
       for (const key of [...this._toolNameMap.keys()]) {
         if (this._toolNameMap.get(key)?.serverName === name) this._toolNameMap.delete(key);
       }
@@ -1251,35 +1508,52 @@ export class McpManager {
     }
   }
 
-  /** Get status for all known servers (discovered + connected + errored). */
+  /** Get status for all effective winners, including definitions denied runtime eligibility. */
   getServerStatuses(): McpServerStatus[] {
     const statuses: McpServerStatus[] = [];
+    const names = new Set([...this.discoveredConnectionGroups.keys(), ...this.configs.keys()]);
 
-    for (const [name, config] of this.configs) {
+    for (const name of names) {
+      const group = this.discoveredConnectionGroups.get(name) ?? this.connectionGroups.get(name);
+      const config = group?.config ?? this.configs.get(name);
+      if (!group || !config) continue;
+      const definition = this._definitionForGroup(group);
+      const eligible = !definition.validationError
+        && (definition.approval.state === "trusted" || definition.approval.state === "approved");
       const client = this.clients.get(name);
-      const error = this.errors.get(name);
-      const tools = this.toolDefs.get(name);
-
-      let status: McpServerStatus["status"];
-      if (error) {
-        status = "error";
-      } else if (client?.connected) {
-        status = "connected";
-      } else {
-        status = "disconnected";
+      const error = eligible ? this.errors.get(name) : undefined;
+      const tools = eligible ? this.toolDefs.get(name) : undefined;
+      const origin = safeOrigin(definition.origin);
+      const diagnostics: McpStatusDiagnostic[] = [];
+      if (definition.validationError) {
+        diagnostics.push({ code: "MCP_CONFIG_INVALID", message: definition.validationError });
+      } else if (definition.approval.state === "pending") {
+        diagnostics.push({ code: "MCP_APPROVAL_PENDING", message: "Server startup is awaiting approval." });
+      } else if (definition.approval.state === "rejected") {
+        diagnostics.push({ code: "MCP_APPROVAL_REJECTED", message: "Server startup was rejected." });
+      } else if (definition.approval.state === "changed") {
+        diagnostics.push({ code: "MCP_APPROVAL_CHANGED", message: "The server configuration changed and must be reviewed again." });
       }
 
-      const group = this.connectionGroups.get(name) ?? this.discoveredConnectionGroups.get(name);
-      const ownerContributions = group?.ownerContributions.map(redactMcpContribution);
       statuses.push({
         name,
-        status,
+        status: error ? "error" : client?.connected && eligible ? "connected" : "disconnected",
         toolCount: tools?.length ?? 0,
         ...(error ? { error } : {}),
         config: redactMcpServerConfig(config),
-        ...(group?.ownerContributions[0]?.origin ? { origin: group.ownerContributions[0].origin } : {}),
-        ...(ownerContributions ? { ownerContributions } : {}),
-        ...(group?.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
+        origin,
+        approval: definition.approval,
+        source: {
+          sourceId: definition.origin.sourceId!,
+          authority: definition.origin.authority ?? "project",
+          ...(definition.origin.projectId ? { projectId: definition.origin.projectId } : {}),
+          ...(definition.origin.projectName ? { projectName: definition.origin.projectName } : {}),
+          file: definition.origin.file ?? "Unknown source",
+        },
+        ...(definition.approval.required ? { reviewConfig: redactMcpServerConfig(config) } : {}),
+        ...(diagnostics.length > 0 ? { diagnostics } : {}),
+        ownerContributions: group.ownerContributions.map(redactMcpContribution),
+        ...(group.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
       });
     }
 
@@ -1343,6 +1617,11 @@ export class McpManager {
   }
 
   private async _callRouteTool(route: McpToolRoute, args: Record<string, unknown>): Promise<McpToolResult> {
+    const group = this.connectionGroups.get(route.runtimeServerKey);
+    if (!group || !this._isEligible(group)) {
+      await this.disconnectServer(route.runtimeServerKey, { runtimeOnly: true });
+      throw new Error(`MCP server "${route.runtimeServerKey}" is not approved to run`);
+    }
     const client = this.clients.get(route.runtimeServerKey);
     if (!client) {
       throw new Error(
