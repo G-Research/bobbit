@@ -1,0 +1,66 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const LOCAL_SERVER_NAME = "approval-local-journey";
+export const REMOTE_SERVER_NAME = "approval-remote-journey";
+export const LOCAL_SECRET = "local-browser-secret-must-not-render";
+export const REMOTE_SECRET = "remote-browser-secret-must-not-render";
+
+const MOCK_MCP_SERVER = fileURLToPath(new URL("../../fixtures/mock-mcp-server.mjs", import.meta.url));
+
+export interface McpProjectApprovalFixture {
+	root: string;
+	primaryRoot: string;
+	secondaryRoot: string;
+	primaryConfigPath: string;
+	secondaryConfigPath: string;
+	writePrimary(version: string): void;
+	cleanup(): void;
+}
+
+/** Filesystem-only fixture for the real browser-v2 gateway journey. */
+export function createMcpProjectApprovalFixture(): McpProjectApprovalFixture {
+	const runRoot = process.env.BOBBIT_E2E_TMP_ROOT;
+	if (!runRoot) throw new Error("BOBBIT_E2E_TMP_ROOT must identify the browser run root");
+	const root = mkdtempSync(join(runRoot, "mcp-project-approval-"));
+	const primaryRoot = join(root, "primary");
+	const secondaryRoot = join(root, "secondary");
+	mkdirSync(primaryRoot, { recursive: true });
+	mkdirSync(secondaryRoot, { recursive: true });
+	const primaryConfigPath = join(primaryRoot, ".mcp.json");
+	const secondaryConfigPath = join(secondaryRoot, ".mcp.json");
+
+	const writePrimary = (version: string): void => {
+		writeFileSync(primaryConfigPath, JSON.stringify({
+			mcpServers: {
+				[LOCAL_SERVER_NAME]: {
+					command: process.execPath,
+					args: [MOCK_MCP_SERVER, "--token", LOCAL_SECRET, "--variant", version],
+					cwd: ".",
+					env: { JOURNEY_API_TOKEN: LOCAL_SECRET },
+				},
+			},
+		}, null, 2), "utf8");
+	};
+
+	writePrimary("v1");
+	writeFileSync(secondaryConfigPath, JSON.stringify({
+		mcpServers: {
+			[REMOTE_SERVER_NAME]: {
+				url: `http://127.0.0.1:9/mcp?access_token=${REMOTE_SECRET}#private`,
+				headers: { Authorization: `Bearer ${REMOTE_SECRET}` },
+			},
+		},
+	}, null, 2), "utf8");
+
+	return {
+		root,
+		primaryRoot,
+		secondaryRoot,
+		primaryConfigPath,
+		secondaryConfigPath,
+		writePrimary,
+		cleanup: () => rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+	};
+}
