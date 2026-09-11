@@ -759,11 +759,14 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.equal(stub.connectCount, 1);
 
     release();
-    assert.equal((await active).status, "ok");
+    const activeResult = await active;
+    assert.equal(activeResult.status, "ok");
+    assert.deepEqual(activeResult.connected, []);
+    assert.deepEqual(activeResult.disconnected, []);
     const [queuedResult, coalescedResult] = await Promise.all([queued, coalesced]);
     assert.equal(queuedResult.status, "ok");
-    assert.deepEqual(queuedResult.disconnected, ["one"]);
-    assert.deepEqual(coalescedResult.disconnected, ["one"]);
+    assert.deepEqual(queuedResult.disconnected, []);
+    assert.deepEqual(coalescedResult.disconnected, []);
     assert.equal(stub.connectCount, 1);
     assert.equal(stub.disconnectCount, 1);
     assert.deepEqual(mgr.getServerStatuses(), []);
