@@ -149,7 +149,7 @@ test.describe("Tools page → MCP section fixture", () => {
 			expectedGatewayRequest("/api/tools?projectId=headquarters"),
 			expectedGatewayRequest("/api/roles?projectId=headquarters"),
 			expectedGatewayRequest("/api/tool-group-policies?projectId=headquarters"),
-			expectedGatewayRequest("/api/mcp-servers?projectId=headquarters"),
+			expectedGatewayRequest("/api/mcp-servers?projectId=headquarters&ensure=true"),
 		]);
 
 		const section = page.locator('[data-testid="mcp-section"]');
@@ -445,7 +445,7 @@ test.describe("Tools page → MCP section fixture", () => {
 			`${FIXTURE_GATEWAY_BASE_URL}/api/tools?projectId=project-a`,
 			`${FIXTURE_GATEWAY_BASE_URL}/api/roles?projectId=project-a`,
 			`${FIXTURE_GATEWAY_BASE_URL}/api/tool-group-policies?projectId=project-a`,
-			`${FIXTURE_GATEWAY_BASE_URL}/api/mcp-servers?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/mcp-servers?projectId=project-a&ensure=true`,
 		]);
 	});
 });
