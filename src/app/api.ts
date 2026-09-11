@@ -684,6 +684,12 @@ export function startSessionListPushSync(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "remote_state_snapshot") {
 				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
+			} else if (msg?.type === "mcp_approvals_changed") {
+				// Keep project banners current on non-session surfaces without adding
+				// the banner/render graph to this eager API module.
+				void import("./mcp-approval-banner.js")
+					.then((module) => module.handleMcpApprovalsChanged(msg))
+					.catch(() => {});
 			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
 				if (msg.type === "sessions_changed" && typeof msg.sessionId === "string" && Array.isArray(msg.user_tags)) {
 					// The payload may describe an earlier serialized write. Keep the
