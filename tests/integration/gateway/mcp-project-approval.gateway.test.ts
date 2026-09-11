@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { McpApprovalStore } from "../../../src/server/mcp/mcp-approval-store.js";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
-import { apiFetch } from "../../support/harnesses/integration/gateway/e2e-setup.js";
+import {
+	authenticatedOperatorCookie,
+	apiFetch,
+	rawApiFetch,
+} from "../../support/harnesses/integration/gateway/e2e-setup.js";
 import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
 import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import {
@@ -105,6 +109,7 @@ async function decide(
 ): Promise<Response> {
 	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?projectId=${encodeURIComponent(viewProjectId)}`, {
 		method: "POST",
+		headers: { Cookie: await authenticatedOperatorCookie() },
 		body: JSON.stringify({
 			decision,
 			fingerprint: overrides.fingerprint ?? status.approval.fingerprint,
@@ -170,6 +175,25 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect(appendCount(marker)).toBe(0);
 			expect(JSON.stringify(current)).not.toContain("must-not-cross-the-api");
 			expect(current.reviewConfig?.env).toEqual({ FIXTURE_SECRET: "[redacted]", GENERATION: "[redacted]" });
+
+			// The global admin bearer is available to direct agents and must not let
+			// repository instructions authorize their own MCP process. Authorization
+			// is checked before the body is parsed or any ledger/runtime mutation.
+			const bearerOnly = await rawApiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
+				method: "POST",
+				body: JSON.stringify({
+					decision: "approved",
+					fingerprint: current.approval.fingerprint,
+					sourceProjectId: current.source.projectId,
+					sourceId: current.source.sourceId,
+				}),
+			});
+			expect(bearerOnly.status).toBe(403);
+			expect(await bearerOnly.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
+			expect(existsSync(path.join(isolated.approvalDir, "mcp-server-approvals.json"))).toBe(false);
+			current = named(await statuses(project.id), serverName);
+			expect(current.approval.state).toBe("pending");
+			expect(appendCount(marker)).toBe(0);
 
 			const restart = await apiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/restart?projectId=${encodeURIComponent(project.id)}`, { method: "POST" });
 			expect(restart.status).toBe(200);

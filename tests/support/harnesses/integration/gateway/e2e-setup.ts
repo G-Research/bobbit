@@ -315,6 +315,13 @@ async function humanSessionCookie(): Promise<string> {
 		return cookie;
 	} catch { return ""; }
 }
+
+/** Return a genuine signed UI/operator cookie or fail the test setup explicitly. */
+export async function authenticatedOperatorCookie(): Promise<string> {
+	const cookie = await humanSessionCookie();
+	if (!cookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return cookie;
+}
 async function withChildrenAuthzCookie(path: string, method: string, headers: Record<string, string>): Promise<Record<string, string>> {
 	const bare = path.split("?")[0];
 	const isChildCreate = method.toUpperCase() === "POST" && bare === "/api/goals";
