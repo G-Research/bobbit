@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "vitest";
 import YAML from "yaml";
 
-const RELEASE_CONTROL_FILES = [
+const REQUIRED_CORE_RELEASE_FILES = [
 	"scripts/release/changelog-section.mjs",
 	"scripts/release/dist-tag-guard.mjs",
 	"scripts/release/release-contract.mjs",
@@ -12,8 +12,13 @@ const RELEASE_CONTROL_FILES = [
 ] as const;
 
 const CODEQL_CONFIG_PATH = resolve(process.cwd(), ".github/codeql/codeql-config.yml");
+const RELEASE_DIRECTORY_PATH = resolve(process.cwd(), "scripts/release");
 const RELEASE_TSCONFIG_PATH = resolve(process.cwd(), "tsconfig.release.json");
 const PACKAGE_JSON_PATH = resolve(process.cwd(), "package.json");
+const RELEASE_MODULE_FILES = readdirSync(RELEASE_DIRECTORY_PATH, { withFileTypes: true })
+	.filter(entry => entry.isFile() && entry.name.endsWith(".mjs"))
+	.map(entry => `scripts/release/${entry.name}`)
+	.sort();
 
 interface CodeQlConfig {
 	paths?: string[];
@@ -84,7 +89,10 @@ describe("release static-analysis ownership", () => {
 	it("keeps release controls in CodeQL while excluding ordinary tooling and test assets", () => {
 		const config = YAML.parse(readFileSync(CODEQL_CONFIG_PATH, "utf8")) as CodeQlConfig;
 
-		for (const file of RELEASE_CONTROL_FILES) {
+		for (const file of REQUIRED_CORE_RELEASE_FILES) {
+			assert.ok(RELEASE_MODULE_FILES.includes(file), `required publication control ${file} must remain present`);
+		}
+		for (const file of RELEASE_MODULE_FILES) {
 			assert.equal(isAnalyzed(config, file), true, `CodeQL must analyze publication control ${file}`);
 		}
 
@@ -100,7 +108,7 @@ describe("release static-analysis ownership", () => {
 		}
 	});
 
-	it("strictly type-checks exactly the four release-control modules", () => {
+	it("strictly type-checks every release-control module", () => {
 		const config = readJson<ReleaseTsConfig>(RELEASE_TSCONFIG_PATH);
 		assert.equal(config.compilerOptions?.allowJs, true, "release type-check must load JavaScript modules");
 		assert.equal(config.compilerOptions?.checkJs, true, "release JavaScript must receive type diagnostics");
@@ -108,8 +116,8 @@ describe("release static-analysis ownership", () => {
 		assert.equal(config.compilerOptions?.strict, true, "publication controls require strict checking");
 		assert.deepEqual(
 			[...(config.files ?? [])].sort(),
-			[...RELEASE_CONTROL_FILES].sort(),
-			"the dedicated config must explicitly own the complete release-control graph",
+			RELEASE_MODULE_FILES,
+			"the dedicated config must explicitly own every current release module",
 		);
 		assert.equal(config.include, undefined, "the narrow release config must not acquire unrelated files through include globs");
 	});
