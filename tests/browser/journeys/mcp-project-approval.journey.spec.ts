@@ -67,7 +67,17 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		await expect(localReview).toContainText(".mcp.json");
 		await expect(localReview).toContainText("stdio");
 		await expect(localReview).toContainText(process.execPath);
-		await expect(localReview).toContainText("--token [redacted] --variant v1");
+		await expect(localReview).toContainText("--token [redacted]");
+		await expect(localReview).toContainText("--header Authorization: [redacted]");
+		await expect(localReview).toContainText("--header=[redacted]");
+		await expect(localReview).toContainText("-H Cookie: [redacted]");
+		await expect(localReview).toContainText("-H=[redacted]");
+		await expect(localReview).toContainText("-H[redacted]");
+		await expect(localReview).toContainText("--proxy-header X-Proxy-Token: [redacted]");
+		await expect(localReview).toContainText("--proxy-header=[redacted]");
+		await expect(localReview).toContainText("Proxy-Authorization: [redacted]");
+		await expect(localReview).toContainText("prefix-[redacted]-suffix");
+		await expect(localReview).toContainText("--variant v1");
 		await expect(localReview).toContainText("Working directory");
 		await expect(localReview).toContainText("JOURNEY_API_TOKEN=[redacted]");
 

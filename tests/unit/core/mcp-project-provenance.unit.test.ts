@@ -221,6 +221,79 @@ describe("safe MCP review metadata", () => {
 			headers: { Authorization: "[redacted]" },
 		});
 	});
+
+	it("redacts CLI header forms and secret substrings in argument arrays and command strings", () => {
+		const secrets = [
+			"unit-command-auth-sentinel",
+			"unit-command-cookie-sentinel",
+			"unit-command-proxy-sentinel",
+			"unit-env-sentinel",
+			"unit-header-sentinel",
+			"unit-separated-header-sentinel",
+			"unit-equals-header-sentinel",
+			"unit-short-header-sentinel",
+			"unit-short-equals-header-sentinel",
+			"unit-attached-header-sentinel",
+			"unit-proxy-header-sentinel",
+			"unit-proxy-equals-header-sentinel",
+			"unit-authorization-sentinel",
+			"unit-proxy-authorization-sentinel",
+			"unit-cookie-sentinel",
+		];
+		const redacted = redactMcpServerConfig({
+			command: "node relay.js --header \"Authorization: Bearer unit-command-auth-sentinel\" -H'Cookie: unit-command-cookie-sentinel' --proxy-header=unit-command-proxy-sentinel --label prefix-unit-env-sentinel-suffix",
+			args: [
+				"--header", "Authorization: Bearer unit-separated-header-sentinel",
+				"--header=X-Api-Key: unit-equals-header-sentinel",
+				"-H", "Cookie: unit-short-header-sentinel",
+				"-H=Cookie: unit-short-equals-header-sentinel",
+				"-HProxy-Authorization: Basic unit-attached-header-sentinel",
+				"--proxy-header", "unit-proxy-header-sentinel",
+				"--proxy-header=Proxy-Authorization: Basic unit-proxy-equals-header-sentinel",
+				"Authorization: Bearer unit-authorization-sentinel",
+				"Proxy-Authorization: Basic unit-proxy-authorization-sentinel",
+				"Cookie: session=unit-cookie-sentinel",
+				"prefix-unit-env-sentinel-suffix",
+				"prefix-unit-header-sentinel-suffix",
+			],
+			env: { API_TOKEN: "unit-env-sentinel" },
+			headers: { "X-Configured-Secret": "unit-header-sentinel" },
+		});
+
+		assert.equal(redacted.command,
+			"node relay.js --header \"Authorization: [redacted]\" -H'[redacted]' --proxy-header=[redacted] --label prefix-[redacted]-suffix");
+		assert.deepEqual(redacted.args, [
+			"--header", "Authorization: [redacted]",
+			"--header=[redacted]",
+			"-H", "Cookie: [redacted]",
+			"-H=[redacted]",
+			"-H[redacted]",
+			"--proxy-header", "[redacted]",
+			"--proxy-header=[redacted]",
+			"Authorization: [redacted]",
+			"Proxy-Authorization: [redacted]",
+			"Cookie: [redacted]",
+			"prefix-[redacted]-suffix",
+			"prefix-[redacted]-suffix",
+		]);
+		const serialized = JSON.stringify(redacted);
+		for (const secret of secrets) assert.doesNotMatch(serialized, new RegExp(secret), secret);
+	});
+
+	it("fails closed for malformed CLI argument values without throwing or exposing adjacent secrets", () => {
+		const malformed = redactMcpServerConfig({
+			command: "node --header malformed-command-secret",
+			args: ["--header", 17, "--proxy-header", null, "-H", { secret: "malformed-object-secret" }, "--header"],
+			env: { STRING_SECRET: "malformed-command-secret", INVALID_SECRET: 42 },
+			headers: { Authorization: "malformed-header-secret", Invalid: false },
+		} as any);
+
+		assert.equal(malformed.command, "node --header [redacted]");
+		assert.deepEqual(malformed.args, ["--header", "[redacted]", "[redacted]", "[redacted]", "-H", "[redacted]", "[redacted]"]);
+		assert.deepEqual(malformed.env, { INVALID_SECRET: "[redacted]", STRING_SECRET: "[redacted]" });
+		assert.deepEqual(malformed.headers, { Authorization: "[redacted]", Invalid: "[redacted]" });
+		assert.doesNotMatch(JSON.stringify(malformed), /malformed-(?:command|object|header)-secret/);
+	});
 });
 
 describe("worktree-stable project MCP identity", () => {
