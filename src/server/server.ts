@@ -20852,16 +20852,19 @@ async function handleApiRoute(
 		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		let effectiveCwd: string | undefined;
 		if (cwd) {
 			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
 			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			effectiveCwd = cwdValidation.cwd;
 		}
 		const ensure = url.searchParams.get("ensure") === "true";
 		const resolvedProjectId = resolvedProject.projectId;
-		let mcpManager = ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId });
+		const managerScope = { projectId: resolvedProjectId, cwd: effectiveCwd };
+		let mcpManager = ensure ? await sessionManager.ensureMcpManager(managerScope) : sessionManager.getMcpManager(managerScope);
 		if (ensure && mcpManager) {
-			await sessionManager.reconcileMcpProject(resolvedProjectId);
-			mcpManager = sessionManager.getMcpManager({ projectId: resolvedProjectId });
+			await sessionManager.reconcileMcpProject(resolvedProjectId, effectiveCwd);
+			mcpManager = sessionManager.getMcpManager(managerScope);
 		}
 		if (!mcpManager) {
 			json([]);
@@ -20888,8 +20891,15 @@ async function handleApiRoute(
 			return;
 		}
 		const projectId = url.searchParams.get("projectId") || undefined;
+		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		let effectiveCwd: string | undefined;
+		if (cwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			effectiveCwd = cwdValidation.cwd;
+		}
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") {
 			json({ error: "Missing approval request body", code: "MCP_APPROVAL_INVALID_REQUEST" }, 400);
@@ -20908,7 +20918,8 @@ async function handleApiRoute(
 			return;
 		}
 		const serverName = decodeURIComponent(mcpApprovalMatch[1]);
-		let mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProject.projectId });
+		const managerScope = { projectId: resolvedProject.projectId, cwd: effectiveCwd };
+		let mcpManager = await sessionManager.ensureMcpManager(managerScope);
 		if (!mcpManager) {
 			json({ error: "MCP not initialized", code: "MCP_NOT_INITIALIZED" }, 500);
 			return;
@@ -20919,12 +20930,12 @@ async function handleApiRoute(
 				sourceId,
 				serverName,
 				fingerprint,
-			}, decision);
-			mcpManager = sessionManager.getMcpManager({ projectId: resolvedProject.projectId }) ?? mcpManager;
+			}, decision, effectiveCwd);
+			mcpManager = sessionManager.getMcpManager(managerScope) ?? mcpManager;
 			json({ server: serializeMcpServerStatus(mcpManager, status) });
 		} catch (error) {
 			const code = typeof (error as any)?.code === "string" ? (error as any).code : "MCP_APPROVAL_FAILED";
-			mcpManager = sessionManager.getMcpManager({ projectId: resolvedProject.projectId }) ?? mcpManager;
+			mcpManager = sessionManager.getMcpManager(managerScope) ?? mcpManager;
 			const current = mcpManager.getServerStatuses().find(status => status.name === serverName);
 			const safeCurrent = current ? serializeMcpServerStatus(mcpManager, current) : undefined;
 			if (code === "MCP_APPROVAL_STALE") {
@@ -20957,12 +20968,14 @@ async function handleApiRoute(
 		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		let effectiveCwd: string | undefined;
 		if (cwd) {
 			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
 			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			effectiveCwd = cwdValidation.cwd;
 		}
 		const resolvedProjectId = resolvedProject.projectId;
-		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId });
+		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId, cwd: effectiveCwd });
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;

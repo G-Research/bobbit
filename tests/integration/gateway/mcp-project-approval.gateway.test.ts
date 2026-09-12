@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { McpApprovalStore } from "../../../src/server/mcp/mcp-approval-store.js";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
@@ -92,8 +92,10 @@ async function createProject(gateway: GatewayFixture, state: IsolatedMcpState, n
 	return { id: project.id, root };
 }
 
-async function statuses(projectId: string): Promise<ServerStatus[]> {
-	const response = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&ensure=true`);
+async function statuses(projectId: string, cwd?: string): Promise<ServerStatus[]> {
+	const params = new URLSearchParams({ projectId, ensure: "true" });
+	if (cwd) params.set("cwd", cwd);
+	const response = await apiFetch(`/api/mcp-servers?${params.toString()}`);
 	expect(response.status).toBe(200);
 	return response.json();
 }
@@ -109,8 +111,11 @@ async function decide(
 	status: ServerStatus,
 	decision: "approved" | "rejected",
 	overrides: Partial<{ fingerprint: string; sourceProjectId: string; sourceId: string }> = {},
+	cwd?: string,
 ): Promise<Response> {
-	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?projectId=${encodeURIComponent(viewProjectId)}`, {
+	const params = new URLSearchParams({ projectId: viewProjectId });
+	if (cwd) params.set("cwd", cwd);
+	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?${params.toString()}`, {
 		method: "POST",
 		headers: await authenticatedMcpOperatorHeaders(),
 		body: JSON.stringify({
@@ -328,6 +333,74 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect(approvedManager.getToolRouteSnapshots().some((tool: any) => tool.runtimeServerKey === serverName)).toBe(false);
 			await setToolPolicy(project.id, serverName, null);
 		} finally {
+			await isolated.cleanup();
+		}
+	});
+
+	test("SessionManager binds worktree discovery, reuses exact approval, and revokes changed or removed definitions", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "session-worktree");
+		const rootServer = await startRecordingMcpServer("root_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		try {
+			const project = await createProject(gateway, isolated, `mcp-session-worktree-${randomUUID().slice(0, 8)}`);
+			const worktreeRoot = path.join(project.root, "worktrees", "candidate");
+			const serverName = `worktree-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: rootServer.url });
+
+			let rootStatus = named(await statuses(project.id), serverName);
+			let response = await decide(project.id, rootStatus, "approved");
+			expect(response.status).toBe(200);
+			rootStatus = (await response.json()).server;
+			expect(rootStatus).toMatchObject({ status: "connected", approval: { state: "approved" } });
+
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: rootServer.url });
+			const sessionManager = gateway.sessionManager as any;
+			const firstSessionId = `worktree-owner-${randomUUID()}`;
+			const secondSessionId = `worktree-borrower-${randomUUID()}`;
+			sessionManager.sessions.set(firstSessionId, { id: firstSessionId, projectId: project.id, cwd: worktreeRoot });
+			sessionManager.sessions.set(secondSessionId, { id: secondSessionId, projectId: project.id, cwd: worktreeRoot });
+			const firstManager = await sessionManager.ensureMcpManagerForSession(firstSessionId);
+			const secondManager = await sessionManager.ensureMcpManagerForSession(secondSessionId);
+			expect(firstManager).toBe(secondManager);
+			expect(firstManager).not.toBe(sessionManager.getMcpManager({ projectId: project.id }));
+			expect(sessionManager.getMcpManagerForSession(firstSessionId)).toBe(firstManager);
+
+			let worktreeStatus = named(await statuses(project.id, worktreeRoot), serverName);
+			expect(worktreeStatus).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(worktreeStatus.source.sourceId).toBe(rootStatus.source.sourceId);
+			expect(worktreeStatus.approval.fingerprint).toBe(rootStatus.approval.fingerprint);
+			const ledger = JSON.parse(readFileSync(isolated.store.ledgerPath, "utf8")) as { decisions: unknown[] };
+			expect(ledger.decisions).toHaveLength(1);
+
+			const worktreeClient = firstManager.clients.get(serverName);
+			const rootRequestCount = rootServer.requests.length;
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: changedServer.url });
+			worktreeStatus = named(await statuses(project.id, worktreeRoot), serverName);
+			expect(worktreeStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "changed" } });
+			expect(worktreeClient.connected).toBe(false);
+			expect(rootServer.requests).toHaveLength(rootRequestCount);
+			expect(changedServer.requests).toHaveLength(0);
+
+			response = await decide(project.id, worktreeStatus, "approved", {}, worktreeRoot);
+			expect(response.status).toBe(200);
+			worktreeStatus = (await response.json()).server;
+			expect(worktreeStatus).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(rpcCount(changedServer, "initialize")).toBe(1);
+			const changedClient = firstManager.clients.get(serverName);
+
+			unlinkSync(path.join(worktreeRoot, ".mcp.json"));
+			expect((await statuses(project.id, worktreeRoot)).some(server => server.name === serverName)).toBe(false);
+			expect(changedClient.connected).toBe(false);
+			expect(named(await statuses(project.id), serverName).status).toBe("connected");
+
+			sessionManager.sessions.delete(firstSessionId);
+			await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId: project.id, cwd: worktreeRoot }, firstSessionId);
+			expect(sessionManager.getMcpManager({ projectId: project.id, cwd: worktreeRoot })).toBe(firstManager);
+			sessionManager.sessions.delete(secondSessionId);
+			await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId: project.id, cwd: worktreeRoot }, secondSessionId);
+			expect(sessionManager.getMcpManager({ projectId: project.id, cwd: worktreeRoot })).toBeNull();
+		} finally {
+			await Promise.allSettled([rootServer.close(), changedServer.close()]);
 			await isolated.cleanup();
 		}
 	});

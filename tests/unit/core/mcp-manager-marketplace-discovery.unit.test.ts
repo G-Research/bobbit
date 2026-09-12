@@ -904,6 +904,82 @@ describe("SessionManager scoped MCP manager creation", () => {
     assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
   });
 
+  it("keeps root compatibility while sharing and cleaning combined project-worktree managers", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-session-worktree-scope-"));
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    const otherRoot = path.join(root, "other");
+    const worktreeRoot = path.join(projectRoot, "worktrees", "candidate");
+    fs.mkdirSync(path.join(projectRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(path.join(otherRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+    const projectId = "worktree-scope-project";
+    const otherProjectId = "worktree-scope-other";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([
+      { id: projectId, name: "Worktree Scope", rootPath: projectRoot, createdAt: Date.now(), colorLight: "#3b82f6", colorDark: "#60a5fa" },
+      { id: otherProjectId, name: "Other", rootPath: otherRoot, createdAt: Date.now(), colorLight: "#3b82f6", colorDark: "#60a5fa" },
+    ]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
+    pcm.initAll();
+    const sessionManager = new SessionManager({ projectContextManager: pcm }) as any;
+    const created: Array<{ cwd: string; scopeKey: string; manager: any }> = [];
+    sessionManager.createMcpManager = (cwd: string, opts: { projectId: string; scopeKey: string }) => {
+      const manager = {
+        connectAll: async () => {},
+        disconnectAll: async () => { manager.disconnected = true; },
+        disconnected: false,
+        getScopeKey: () => opts.scopeKey,
+        getDiscoveryScope: () => ({ projectId: opts.projectId, cwd }),
+      };
+      created.push({ cwd, scopeKey: opts.scopeKey, manager });
+      return manager;
+    };
+
+    try {
+      const rootManager = await sessionManager.ensureMcpManager({ projectId, cwd: projectRoot });
+      assert.equal(created[0].scopeKey, `project:${projectId}`);
+      const firstSessionId = "worktree-session-one";
+      const secondSessionId = "worktree-session-two";
+      sessionManager.sessions.set(firstSessionId, { id: firstSessionId, projectId, cwd: worktreeRoot });
+      sessionManager.sessions.set(secondSessionId, { id: secondSessionId, projectId, cwd: worktreeRoot });
+
+      const pipeline = sessionManager.buildPipelineContext(projectId, projectRoot);
+      const [worktreeManager, sharedManager] = await Promise.all([
+        pipeline.rebindMcpManager!(firstSessionId, projectId, worktreeRoot),
+        sessionManager.ensureMcpManagerForSession(secondSessionId),
+      ]);
+      assert.notEqual(worktreeManager, rootManager);
+      assert.equal(sharedManager, worktreeManager);
+      assert.equal(created.length, 2);
+      assert.match(created[1].scopeKey, new RegExp(`^project:${projectId}:cwd:`));
+      assert.equal(sessionManager.getMcpManagerForSession(firstSessionId), worktreeManager);
+      assert.deepEqual(
+        sessionManager.additionalMcpProjects(worktreeRoot, projectId).map((entry: { projectId: string }) => entry.projectId),
+        [otherProjectId],
+      );
+
+      sessionManager.sessions.delete(firstSessionId);
+      await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId, cwd: worktreeRoot }, firstSessionId);
+      assert.equal(worktreeManager.disconnected, false);
+      sessionManager.sessions.delete(secondSessionId);
+      await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId, cwd: worktreeRoot }, secondSessionId);
+      assert.equal(worktreeManager.disconnected, true);
+      assert.equal(sessionManager.getMcpManager({ projectId, cwd: worktreeRoot }), null);
+      assert.equal(sessionManager.getMcpManager({ projectId, cwd: projectRoot }), rootManager);
+    } finally {
+      await Promise.allSettled(sessionManager.getActiveMcpManagers().map((manager: any) => manager.disconnectAll()));
+      await pcm.closeAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("routes project-only marketplace tools through pipeline, policy, docs, and activation", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-project-tool-route-"));
     const registryStateDir = path.join(root, "state");
