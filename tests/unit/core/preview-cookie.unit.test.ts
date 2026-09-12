@@ -573,9 +573,15 @@ describe("session-bound preview resource cookies", () => {
 		const time = mutableClock();
 		const store = new CookieStore(KEY, { clock: time.clock });
 		const value = store.mintPreviewResource(SID);
+		assert.equal(tryPreviewAuth(fakeReq(), store, SID), false);
 		assert.equal(tryPreviewAuth(fakeReq(`${COOKIE_NAME}=${store.mint()}`), store, SID), false);
 		assert.equal(tryPreviewAuth(fakeReq(`${PREVIEW_COOKIE_NAME}=${value}`), store, SID), true);
 		assert.equal(tryPreviewAuth(fakeReq(`${PREVIEW_COOKIE_NAME}=${value}`), store, OTHER_SID), false);
+
+		const absentResponse = fakeRes();
+		const issuedForAbsence = issuePreviewCookieIfMissing(fakeReq(), absentResponse as any, store, SID);
+		assert.ok(issuedForAbsence);
+		assert.ok(store.verifyPreviewResource(issuedForAbsence, SID));
 
 		time.setSeconds(BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS - PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS);
 		const response = fakeRes("other=value; Path=/");
