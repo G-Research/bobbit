@@ -211,12 +211,11 @@ const DEFAULT_CALL_TOOL_TIMEOUT_MS = 30_000;
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const v = (value as Record<string, unknown>)[key];
-      if (v !== undefined) out[key] = stableValue(v);
-    }
-    return out;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().flatMap((key) => {
+      const child = record[key];
+      return child === undefined ? [] : [[key, stableValue(child)]];
+    }));
   }
   return value;
 }
@@ -353,9 +352,7 @@ function redactMcpCommand(command: string, secretValues: readonly string[]): str
 
 export function redactRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
   if (!record) return undefined;
-  const out: Record<string, string> = {};
-  for (const key of Object.keys(record).sort()) out[key] = REDACTED;
-  return out;
+  return Object.fromEntries(Object.keys(record).sort().map((key) => [key, REDACTED]));
 }
 
 export function redactUrl(raw: string): string {

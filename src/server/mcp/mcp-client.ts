@@ -32,11 +32,14 @@ export function expandEnvVars(value: string): string {
  * Expand env vars in all values of a config env record.
  */
 export function expandEnvRecord(env: Record<string, string>): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    result[key] = expandEnvVars(value);
-  }
-  return result;
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, expandEnvVars(value)]));
+}
+
+export function buildMcpProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+  return Object.fromEntries([
+    ...Object.entries(process.env),
+    ...Object.entries(env ? expandEnvRecord(env) : {}),
+  ]);
 }
 
 function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
@@ -177,12 +180,10 @@ export class McpClient {
   private async _connectStdio(config: McpServerConfig): Promise<void> {
     const { command, args = [], env, cwd } = config;
 
-    // Build environment: inherit process.env, overlay expanded config env
-    const childEnv = { ...process.env };
-    if (env) {
-      const expanded = expandEnvRecord(env);
-      Object.assign(childEnv, expanded);
-    }
+    // Object.fromEntries in buildMcpProcessEnv creates own data properties even
+    // for names such as "__proto__", keeping spawned behavior aligned with
+    // approval fingerprints.
+    const childEnv = buildMcpProcessEnv(env);
 
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -413,14 +414,15 @@ export class McpClient {
 
   private _httpRequestHeaders(): Record<string, string> {
     const configuredSessionHeader = this._hasConfiguredHttpSessionHeader();
-    return {
-      'Content-Type': 'application/json',
+    const entries: Array<[string, string]> = [
+      ['Content-Type', 'application/json'],
       // Streamable HTTP transport spec: client MUST advertise both response shapes.
-      Accept: 'application/json, text/event-stream',
-      // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
-      ...(this._httpSessionId && !configuredSessionHeader ? { 'Mcp-Session-Id': this._httpSessionId } : {}),
-      ...this._config!.headers,
-    };
+      ['Accept', 'application/json, text/event-stream'],
+    ];
+    // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
+    if (this._httpSessionId && !configuredSessionHeader) entries.push(['Mcp-Session-Id', this._httpSessionId]);
+    entries.push(...Object.entries(this._config!.headers ?? {}));
+    return Object.fromEntries(entries);
   }
 
   private _captureHttpSessionHeader(headers: IncomingHttpHeaders): void {
