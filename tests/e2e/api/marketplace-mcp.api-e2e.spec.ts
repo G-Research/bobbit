@@ -591,7 +591,10 @@ test.describe("Marketplace MCP API integration", () => {
 			const approvedRequestCount = approvedServer.requests.length;
 			refresh = await refreshProjectPackOrder(copiedProjectId!, [installedPackName]);
 			expect(refresh.status).toBe(200);
-			response = await apiFetch(mcpServersPath(copiedProjectId!));
+			// Project-scoped reloads intentionally do not create a manager for an
+			// inactive project. The durable Tools surface explicitly ensures one before
+			// reviewing pending definitions, so exercise the same discovery path here.
+			response = await apiFetch(`${mcpServersPath(copiedProjectId!)}&ensure=true`);
 			const copiedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
 			expect(copiedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "pending" } });
 			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
