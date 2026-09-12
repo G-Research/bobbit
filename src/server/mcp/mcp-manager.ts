@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { McpClient, expandEnvRecord } from "./mcp-client.js";
+import { McpClient, expandEnvRecord, sanitizeMcpRuntimeError } from "./mcp-client.js";
 import {
   McpApprovalStore,
   validateMcpServerConfig,
@@ -1060,7 +1060,7 @@ export class McpManager {
           await this.disconnectServer(name, { runtimeOnly: true });
           return;
         }
-        const reason = (err as Error).message;
+        const reason = sanitizeMcpRuntimeError(err, currentGroup.config);
         console.error(`[mcp] tools/list failed for "${name}": ${reason}`);
         this.errors.set(name, reason);
         // Server stays in errored state with empty toolDefs — sibling servers
@@ -1102,7 +1102,7 @@ export class McpManager {
             : ""),
       );
     } catch (err) {
-      const msg = (err as Error).message;
+      const msg = sanitizeMcpRuntimeError(err, currentGroup.config);
       this.errors.set(name, msg);
       console.error(`[mcp] Failed to connect to server "${name}":`, msg);
 
@@ -1291,7 +1291,7 @@ export class McpManager {
       } catch (err) {
         console.error(
           `[mcp] Error disconnecting server "${name}":`,
-          (err as Error).message,
+          sanitizeMcpRuntimeError(err, this.configs.get(name)),
         );
       }
       this.clients.delete(name);
@@ -1739,7 +1739,10 @@ export class McpManager {
       const definition = this._definitionForGroup(group);
       const eligible = this._isEligible(group);
       const client = this.clients.get(name);
-      const error = eligible ? this.errors.get(name) : undefined;
+      const storedError = eligible ? this.errors.get(name) : undefined;
+      // Status is a public API/UI boundary. Re-project even though writers use
+      // the same sanitizer, so legacy/injected state cannot bypass redaction.
+      const error = storedError ? sanitizeMcpRuntimeError(storedError, config) : undefined;
       const tools = eligible ? this.toolDefs.get(name) : undefined;
       const origin = safeOrigin(definition.origin);
       const diagnostics: McpStatusDiagnostic[] = [];

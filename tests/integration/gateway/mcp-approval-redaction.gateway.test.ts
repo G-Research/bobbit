@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import path from "node:path";
+import { vi } from "vitest";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	authenticatedMcpOperatorHeaders,
@@ -45,6 +47,8 @@ const SERVER_NAME = "mcp-redaction-gateway";
 type SafeConfig = { command: string; args: string[]; env: Record<string, string>; headers: Record<string, string> };
 type ServerStatus = {
 	name: string;
+	status?: string;
+	error?: string;
 	approval: { state: string; fingerprint: string };
 	source: { sourceId: string; projectId: string };
 	config: SafeConfig;
@@ -139,6 +143,96 @@ function assertSafeDto(value: unknown, generation: string): ServerStatus {
 }
 
 test.describe("MCP approval API CLI redaction", () => {
+	test("approved HTTP response bodies and JSON-RPC errors cannot disclose configured secrets", async ({ gateway }) => {
+		for (const failure of ["response-body", "json-rpc"] as const) {
+			const serverName = `mcp-runtime-${failure}-${randomUUID()}`;
+			const secret = `runtime-${failure}-secret-${randomUUID()}`;
+			let receivedConfiguredHeader = false;
+			const remote = createServer((req, res) => {
+				const chunks: Buffer[] = [];
+				req.on("data", (chunk: Buffer) => chunks.push(chunk));
+				req.on("end", () => {
+					receivedConfiguredHeader ||= req.headers.authorization === `Bearer ${secret}`;
+					if (failure === "response-body") {
+						res.writeHead(401, { "Content-Type": "text/plain" });
+						res.end(`remote echoed ${req.headers.authorization}`);
+						return;
+					}
+					const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: number };
+					res.writeHead(200, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({
+						jsonrpc: "2.0",
+						id: request.id,
+						error: { code: -32000, message: `initialize rejected ${req.headers.authorization}` },
+					}));
+				});
+			});
+			await new Promise<void>((resolve, reject) => {
+				remote.once("error", reject);
+				remote.listen(0, "127.0.0.1", resolve);
+			});
+			const address = remote.address();
+			if (!address || typeof address === "string") throw new Error("HTTP MCP fixture did not bind a TCP port");
+
+			const root = path.join(gateway.bobbitDir, `.mcp-runtime-redaction-${randomUUID()}`);
+			mkdirSync(root, { recursive: true });
+			writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({
+				mcpServers: {
+					[serverName]: {
+						url: `http://127.0.0.1:${address.port}/mcp`,
+						headers: { Authorization: `Bearer ${secret}` },
+					},
+				},
+			}), "utf8");
+			let projectId = "";
+			const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			try {
+				const create = await gateway.api("/api/projects", {
+					method: "POST",
+					body: JSON.stringify({ name: `MCP runtime redaction ${randomUUID()}`, rootPath: root, acceptCanonical: true }),
+				});
+				expect(create.status).toBe(201);
+				projectId = ((await create.json()) as { id: string }).id;
+
+				const pendingResponse = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&ensure=true`);
+				expect(pendingResponse.status).toBe(200);
+				const pending = ((await pendingResponse.json()) as ServerStatus[]).find((entry) => entry.name === serverName);
+				expect(pending?.approval.state).toBe("pending");
+
+				const approvalResponse = await apiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(projectId)}`, {
+					method: "POST",
+					headers: await authenticatedMcpOperatorHeaders(),
+					body: JSON.stringify({
+						decision: "approved",
+						fingerprint: pending!.approval.fingerprint,
+						sourceProjectId: pending!.source.projectId,
+						sourceId: pending!.source.sourceId,
+					}),
+				});
+				expect(approvalResponse.status).toBe(200);
+				const approvalBody = await approvalResponse.json();
+				const statusResponse = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&ensure=true`);
+				expect(statusResponse.status).toBe(200);
+				const statusBody = await statusResponse.json();
+				const status = (statusBody as ServerStatus[]).find((entry) => entry.name === serverName);
+
+				expect(receivedConfiguredHeader).toBe(true);
+				expect(status).toMatchObject({ status: "error", approval: { state: "approved" } });
+				expect(status?.error).toContain(failure === "response-body" ? "HTTP 401 for initialize" : "Initialize failed: initialize rejected");
+				if (failure === "response-body") expect(JSON.stringify([approvalBody, statusBody, errorLog.mock.calls])).not.toContain("remote echoed");
+				for (const surface of [approvalBody, statusBody, errorLog.mock.calls]) {
+					expect(JSON.stringify(surface)).not.toContain(secret);
+				}
+			} finally {
+				errorLog.mockRestore();
+				if (projectId) await gateway.api(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
+				await new Promise<void>((resolve) => remote.close(() => resolve()));
+				rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
 	test("status and stale-decision DTOs preserve review structure without exposing credentials", async ({ gateway }) => {
 		const root = path.join(gateway.bobbitDir, `.mcp-redaction-${randomUUID()}`);
 		mkdirSync(root, { recursive: true });

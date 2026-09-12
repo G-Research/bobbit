@@ -17,6 +17,8 @@ const REQUEST_TIMEOUT_MS = 60_000;
 
 const CLIENT_INFO = { name: 'bobbit', version: '0.1.6' };
 const PROTOCOL_VERSION = '2024-11-05';
+const REDACTED = '[redacted]';
+const MAX_RUNTIME_ERROR_LENGTH = 1_000;
 
 /**
  * Expand `${VAR}` patterns in a string using process.env.
@@ -40,6 +42,101 @@ export function buildMcpProcessEnv(env?: Record<string, string>): NodeJS.Process
     ...Object.entries(process.env),
     ...Object.entries(env ? expandEnvRecord(env) : {}),
   ]);
+}
+
+function stringRecordValues(record: Record<string, string> | undefined): string[] {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return [];
+  return Object.values(record).filter((value): value is string => typeof value === 'string');
+}
+
+function decodeUrlComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function redactedDiagnosticUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return REDACTED;
+  }
+}
+
+function configuredRuntimeSecrets(config: McpServerConfig | null | undefined): string[] {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return [];
+  const rawValues = [
+    ...stringRecordValues(config.env),
+    ...stringRecordValues(config.headers),
+  ];
+  const values = [...rawValues, ...rawValues.map(expandEnvVars)];
+
+  if (typeof config.url === 'string' && config.url) {
+    for (const rawUrl of new Set([config.url, expandEnvVars(config.url)])) {
+      try {
+        const url = new URL(rawUrl);
+        values.push(url.username, decodeUrlComponent(url.username));
+        values.push(url.password, decodeUrlComponent(url.password));
+        for (const value of url.searchParams.values()) {
+          values.push(value, decodeUrlComponent(value));
+        }
+        for (const part of url.search.slice(1).split('&')) {
+          const equals = part.indexOf('=');
+          if (equals >= 0) values.push(part.slice(equals + 1));
+        }
+        const fragment = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+        values.push(fragment, decodeUrlComponent(fragment));
+      } catch {
+        // The complete malformed URL is still projected below. It has no safe
+        // structure from which to extract individual credential components.
+      }
+    }
+  }
+
+  return [...new Set(values.filter((value) => value && value !== REDACTED))]
+    .sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Project an MCP transport/runtime failure to bounded health text. Configured
+ * environment/header values are expanded exactly as the transport expands env
+ * values, and URL credentials are removed in both whole-URL and component form.
+ */
+export function sanitizeMcpRuntimeError(
+  error: unknown,
+  config: McpServerConfig | null | undefined,
+): string {
+  let message = error instanceof Error ? error.message : String(error);
+  if (!message) message = 'Unknown MCP runtime error';
+
+  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.url === 'string' && config.url) {
+    const urls = [...new Set([config.url, expandEnvVars(config.url)])]
+      .flatMap((raw) => {
+        try {
+          const parsed = new URL(raw);
+          return [raw, parsed.href, decodeUrlComponent(raw), decodeUrlComponent(parsed.href)];
+        } catch {
+          return [raw];
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    for (const rawUrl of urls) {
+      message = message.split(rawUrl).join(redactedDiagnosticUrl(rawUrl));
+    }
+  }
+
+  for (const secret of configuredRuntimeSecrets(config)) {
+    message = message.split(secret).join(REDACTED);
+  }
+  return message.slice(0, MAX_RUNTIME_ERROR_LENGTH);
 }
 
 function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
@@ -112,7 +209,8 @@ export class McpClient {
     this._assertConnected();
     const response = await this._sendRequest('tools/list', {});
     if (response.error) {
-      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${jsonRpcErrorMessage(response.error)}`);
+      const reason = sanitizeMcpRuntimeError(jsonRpcErrorMessage(response.error), this._config);
+      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${reason}`);
     }
     const result = response.result as { tools?: McpToolDef[] } | undefined;
     return result?.tools ?? [];
@@ -124,9 +222,10 @@ export class McpClient {
     const response = await this._sendRequest('tools/call', { name, arguments: args });
 
     if (response.error) {
-      const errMsg = typeof response.error === 'object'
+      const rawMessage = typeof response.error === 'object'
         ? (response.error.message || JSON.stringify(response.error))
         : String(response.error);
+      const errMsg = sanitizeMcpRuntimeError(rawMessage, this._config);
       return {
         content: [{ type: 'text', text: errMsg }],
         isError: true,
@@ -440,7 +539,9 @@ export class McpClient {
       this._captureHttpSessionHeader(response.headers);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`HTTP ${response.statusCode}: ${response.body.slice(0, 500)}`);
+        // Response bodies are remote-controlled and may echo request secrets.
+        // Health diagnostics need the status and operation, never body bytes.
+        throw new Error(`HTTP ${response.statusCode} for ${request.method}`);
       }
 
       const contentType = responseHeader(response.headers, 'content-type');
@@ -462,12 +563,17 @@ export class McpClient {
         return { jsonrpc: '2.0', id: request.id, error: { code: -1, message: 'Empty SSE response' } } as any;
       }
 
-      return JSON.parse(response.body) as JsonRpcResponse;
+      try {
+        return JSON.parse(response.body) as JsonRpcResponse;
+      } catch {
+        throw new Error(`Invalid JSON response for ${request.method}`);
+      }
     } catch (err) {
       if (err instanceof HttpRequestTimeoutError) {
         throw err;
       }
-      throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${err}`);
+      const reason = sanitizeMcpRuntimeError(err, this._config);
+      throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${reason}`);
     }
   }
 
@@ -528,7 +634,8 @@ export class McpClient {
     });
 
     if (response.error) {
-      throw new Error(`[mcp:${this.serverName}] Initialize failed: ${response.error.message}`);
+      const reason = sanitizeMcpRuntimeError(jsonRpcErrorMessage(response.error), this._config);
+      throw new Error(`[mcp:${this.serverName}] Initialize failed: ${reason}`);
     }
 
     // Send initialized notification
@@ -542,6 +649,6 @@ export class McpClient {
   }
 
   private _log(message: string): void {
-    console.error(`[mcp:${this.serverName}] ${message}`);
+    console.error(`[mcp:${this.serverName}] ${sanitizeMcpRuntimeError(message, this._config)}`);
   }
 }
