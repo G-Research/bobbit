@@ -486,7 +486,7 @@ describe("browser route/context matrix", () => {
 		}
 	});
 
-	it("permits same-origin embedded previews/resources and rejects same-site siblings and opaque origins", () => {
+	it("permits same-origin previews and only credentialed opaque GET/HEAD follow-ons", () => {
 		assert.equal(decide({
 			url: "/preview/session/index.html",
 			rawHeaders: fetchHeaders("same-origin", "navigate", "iframe"),
@@ -495,6 +495,37 @@ describe("browser route/context matrix", () => {
 			url: "/preview/session/style.css",
 			rawHeaders: fetchHeaders("same-origin", "no-cors", "style"),
 		}).allowed, true);
+
+		const opaqueHeaders = (mode: string, dest: string, origin?: string) => rawHeaders({
+			Host: "localhost:4242",
+			...(origin ? { Origin: origin } : {}),
+			Cookie: "other=ignored; bobbit_preview=opaque-capability",
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Mode": mode,
+			"Sec-Fetch-Dest": dest,
+		});
+		for (const [mode, dest, origin] of [
+			["cors", "empty", "null"],
+			["cors", "script", "null"],
+			["cors", "font", "null"],
+			["no-cors", "style", undefined],
+			["no-cors", "image", undefined],
+		] as const) {
+			for (const method of ["GET", "HEAD"]) {
+				const result = decide({ method, url: "/preview/session/asset", rawHeaders: opaqueHeaders(mode, dest, origin) });
+				assert.equal(result.allowed, true, `${method} ${mode}/${dest}/${origin ?? "originless"}`);
+				assert.equal(result.context, "preview-resource");
+				assert.equal(result.normalizedOrigin, origin);
+				assert.equal(result.cors, undefined, "route auth, not generic admission, owns null-origin CORS");
+			}
+		}
+		const iframeContinuation = decide({
+			url: "/preview/session/index.html",
+			rawHeaders: opaqueHeaders("navigate", "iframe"),
+		});
+		assert.equal(iframeContinuation.allowed, true);
+		assert.equal(iframeContinuation.context, "preview-iframe");
+
 		assertDenied("origin-mismatch", {
 			url: "/preview/session/style.css",
 			rawHeaders: fetchHeaders("same-site", "cors", "style", "https://sibling.example"),
@@ -503,6 +534,38 @@ describe("browser route/context matrix", () => {
 			url: "/preview/session/index.html",
 			rawHeaders: fetchHeaders("cross-site", "navigate", "iframe", "null"),
 		});
+	});
+
+	it("does not widen opaque admission beyond credentialed preview subresources", () => {
+		const opaque = (overrides: Record<string, string> = {}) => rawHeaders({
+			Host: "localhost:4242",
+			Origin: "null",
+			Cookie: "bobbit_preview=opaque-capability",
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Mode": "cors",
+			"Sec-Fetch-Dest": "empty",
+			...overrides,
+		});
+		assertDenied("invalid-origin", {
+			url: "/preview/session/data.json",
+			rawHeaders: opaque({ Cookie: "bobbit_session=broad-cookie" }),
+		});
+		assertDenied("invalid-origin", { url: "/api/mcp-servers/name/approval", method: "POST", rawHeaders: opaque() });
+		assertDenied("invalid-origin", { url: "/app.js", rawHeaders: opaque() });
+		assertDenied("invalid-origin", { url: "/preview/session/data.json", method: "POST", rawHeaders: opaque() });
+		assertDenied("invalid-origin", {
+			transport: "websocket",
+			url: "/preview/session/data.json",
+			rawHeaders: opaque({ "Sec-Fetch-Mode": "websocket", "Sec-Fetch-Dest": "websocket" }),
+		});
+		const preflight = decide({
+			url: "/preview/session/data.json",
+			method: "OPTIONS",
+			rawHeaders: opaque({ "Access-Control-Request-Method": "GET" }),
+		});
+		assert.equal(preflight.allowed, false);
+		assert.equal(preflight.reason, "invalid-preflight");
+		assert.equal("cors" in preflight, false);
 	});
 
 	it("rejects partial, duplicated, and malformed Fetch Metadata", () => {

@@ -22,8 +22,17 @@ export const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 export const COOKIE_FUTURE_SKEW_SECONDS = 5 * 60;
 export const COOKIE_RENEWAL_WINDOW_SECONDS = 60 * 60 * 24 * 7;
 
+/** Read-only capability used only below one preview session mount. */
+export const PREVIEW_COOKIE_NAME = "bobbit_preview";
+export const PREVIEW_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24;
+export const PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS = 60 * 60;
+
 const COOKIE_VERSION = "v1";
 const COOKIE_MAX_WIRE_LENGTH = 103;
+const PREVIEW_COOKIE_VERSION = "pv1";
+const PREVIEW_COOKIE_SIGNING_DOMAIN = "bobbit-preview-resource\0";
+const PREVIEW_COOKIE_MAX_WIRE_LENGTH = 144;
+const PREVIEW_SESSION_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9][0-9]*)$/;
 
@@ -37,7 +46,7 @@ export interface CookieVerification {
 	issuedAt: number;
 	/** Canonical `exp` value from the cookie, in Unix seconds. */
 	expiresAt: number;
-	/** True when expiry is at or within the inclusive seven-day renewal window. */
+	/** True when expiry is at or within the credential's inclusive renewal window. */
 	needsRenewal: boolean;
 }
 
@@ -141,15 +150,57 @@ export class CookieStore {
 		// authentication tag with ordinary string or Buffer equality.
 		if (!timingSafeEqual(expected, signature)) return undefined;
 
-		if (expiresAt <= issuedAt || expiresAt - issuedAt > COOKIE_MAX_AGE_SECONDS) return undefined;
+		return this.verifyTimes(issuedAt, expiresAt, COOKIE_MAX_AGE_SECONDS, COOKIE_RENEWAL_WINDOW_SECONDS);
+	}
+
+	/** Mint a purpose-separated read capability bound to one preview session. */
+	mintPreviewResource(sessionId: string): string {
+		const canonicalSessionId = canonicalPreviewSessionId(sessionId);
+		if (!canonicalSessionId) throw new Error("Invalid preview session ID");
+		const issuedAt = unixSeconds(this.clock);
+		const expiresAt = issuedAt + PREVIEW_COOKIE_MAX_AGE_SECONDS;
+		if (!Number.isSafeInteger(expiresAt)) throw new Error("Cookie expiry exceeds the safe integer range");
+		const nonce = secureRandomBytes(this.randomBytes, COOKIE_NONCE_BYTES).toString("base64url");
+		const payload = `${PREVIEW_COOKIE_VERSION}.${canonicalSessionId}.${issuedAt}.${expiresAt}.${nonce}`;
+		const signature = createHmac("sha256", this.signingKey)
+			.update(PREVIEW_COOKIE_SIGNING_DOMAIN, "ascii")
+			.update(payload, "ascii")
+			.digest("base64url");
+		return `${payload}.${signature}`;
+	}
+
+	/** Verify a preview capability against the exact requested session. */
+	verifyPreviewResource(value: string, sessionId: string): CookieVerification | undefined {
+		const canonicalSessionId = canonicalPreviewSessionId(sessionId);
+		if (!canonicalSessionId || typeof value !== "string" || value.length > PREVIEW_COOKIE_MAX_WIRE_LENGTH) return undefined;
+		const parts = value.split(".");
+		if (parts.length !== 6) return undefined;
+		const [version, payloadSessionId, rawIssuedAt, rawExpiresAt, rawNonce, rawSignature] = parts;
+		if (version !== PREVIEW_COOKIE_VERSION || payloadSessionId !== canonicalSessionId) return undefined;
+		const issuedAt = canonicalUint(rawIssuedAt);
+		const expiresAt = canonicalUint(rawExpiresAt);
+		const nonce = canonicalBase64Url(rawNonce, COOKIE_NONCE_BYTES);
+		const signature = canonicalBase64Url(rawSignature, COOKIE_SIGNING_KEY_BYTES);
+		if (issuedAt === undefined || expiresAt === undefined || !nonce || !signature) return undefined;
+		const payload = `${version}.${payloadSessionId}.${rawIssuedAt}.${rawExpiresAt}.${rawNonce}`;
+		const expected = createHmac("sha256", this.signingKey)
+			.update(PREVIEW_COOKIE_SIGNING_DOMAIN, "ascii")
+			.update(payload, "ascii")
+			.digest();
+		if (!timingSafeEqual(expected, signature)) return undefined;
+		return this.verifyTimes(issuedAt, expiresAt, PREVIEW_COOKIE_MAX_AGE_SECONDS, PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS);
+	}
+
+	private verifyTimes(
+		issuedAt: number,
+		expiresAt: number,
+		maxAgeSeconds: number,
+		renewalWindowSeconds: number,
+	): CookieVerification | undefined {
+		if (expiresAt <= issuedAt || expiresAt - issuedAt > maxAgeSeconds) return undefined;
 		const now = unixSeconds(this.clock);
 		if (issuedAt > now + COOKIE_FUTURE_SKEW_SECONDS || now >= expiresAt) return undefined;
-
-		return {
-			issuedAt,
-			expiresAt,
-			needsRenewal: expiresAt - now <= COOKIE_RENEWAL_WINDOW_SECONDS,
-		};
+		return { issuedAt, expiresAt, needsRenewal: expiresAt - now <= renewalWindowSeconds };
 	}
 }
 
@@ -177,6 +228,12 @@ export function parseCookies(req: http.IncomingMessage): Record<string, string> 
 export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean {
 	const value = parseCookies(req)[COOKIE_NAME];
 	return value !== undefined && Boolean(store.verify(value));
+}
+
+/** Return true only for a capability bound to the requested preview session. */
+export function tryPreviewAuth(req: http.IncomingMessage, store: CookieStore, sessionId: string): boolean {
+	const value = parseCookies(req)[PREVIEW_COOKIE_NAME];
+	return value !== undefined && Boolean(store.verifyPreviewResource(value, sessionId));
 }
 
 /**
@@ -222,6 +279,57 @@ export function issueIfMissing(
 	const verification = existing === undefined ? undefined : store.verify(existing);
 	if (verification && !verification.needsRenewal) return undefined;
 	return issueCookie(res, store, opts);
+}
+
+/** Issue the narrow preview capability. Secure is mandatory even on loopback. */
+export function issuePreviewCookie(
+	res: http.ServerResponse,
+	store: CookieStore,
+	sessionId: string,
+	opts: { basePath?: string } = {},
+): string {
+	const canonicalSessionId = canonicalPreviewSessionId(sessionId);
+	if (!canonicalSessionId) throw new Error("Invalid preview session ID");
+	const value = store.mintPreviewResource(canonicalSessionId);
+	const basePath = canonicalCookieBasePath(opts.basePath);
+	appendSetCookie(res, [
+		`${PREVIEW_COOKIE_NAME}=${value}`,
+		"HttpOnly",
+		"Secure",
+		"SameSite=None",
+		`Path=${basePath}/preview/${sessionId}/`,
+		`Max-Age=${PREVIEW_COOKIE_MAX_AGE_SECONDS}`,
+	].join("; "));
+	return value;
+}
+
+/** Issue or renew a preview capability only when primary auth already succeeded. */
+export function issuePreviewCookieIfMissing(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	store: CookieStore,
+	sessionId: string,
+	opts: { basePath?: string } = {},
+): string | undefined {
+	const existing = parseCookies(req)[PREVIEW_COOKIE_NAME];
+	const verification = existing === undefined ? undefined : store.verifyPreviewResource(existing, sessionId);
+	if (verification && !verification.needsRenewal) return undefined;
+	return issuePreviewCookie(res, store, sessionId, opts);
+}
+
+function canonicalPreviewSessionId(sessionId: string): string | undefined {
+	if (typeof sessionId !== "string" || !PREVIEW_SESSION_ID_RE.test(sessionId)) return undefined;
+	return sessionId.toLowerCase();
+}
+
+function canonicalCookieBasePath(raw: string | undefined): string {
+	if (raw === undefined || raw === "" || raw === "/") return "";
+	if (raw !== raw.trim() || !raw.startsWith("/") || raw.endsWith("/") || raw.includes("//")
+		|| raw.includes("\\") || /[;?#\u0000-\u001f\u007f]/.test(raw)
+		|| raw.split("/").some(segment => segment === "." || segment === "..")) {
+		throw new Error("Invalid preview cookie base path");
+	}
+	return raw;
 }
 
 /** Extract the raw Bobbit session cookie, useful for SSE re-authentication. */

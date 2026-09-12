@@ -3,6 +3,7 @@ import {
 	API_CORS_ALLOWED_METHODS,
 	API_CORS_PREFLIGHT_MAX_AGE_SECONDS,
 } from "./cors.js";
+import { PREVIEW_COOKIE_NAME } from "./auth/cookie.js";
 
 export type RequestTransport = "http" | "websocket";
 
@@ -281,8 +282,9 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 
 	const originHeader = readRawHeader(metadata.rawHeaders, "origin");
 	if (originHeader.kind === "duplicate") return deny("duplicate-origin", preliminaryContext, host.serialized);
+	const hasOpaqueOrigin = originHeader.kind === "value" && originHeader.value === "null";
 	let origin: ParsedOrigin | undefined;
-	if (originHeader.kind === "value") {
+	if (originHeader.kind === "value" && !hasOpaqueOrigin) {
 		origin = parseSerializedOrigin(originHeader.value);
 		if (!origin) return deny("invalid-origin", preliminaryContext, host.serialized);
 	}
@@ -334,6 +336,11 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 	if (hasPreflightFields || context === "preflight") {
 		return admitPreflight(policy, metadata, context, host, matchingOrigins, origin, fetch, requestedMethodHeader, requestedHeadersHeader, privateNetworkHeader);
 	}
+
+	if (isOpaquePreviewFollowOn(metadata, context, fetch, hasOpaqueOrigin)) {
+		return allow(policy, context, host, matchingOrigins, hasOpaqueOrigin ? "null" : undefined, metadata.isTls);
+	}
+	if (hasOpaqueOrigin) return deny("invalid-origin", context, host.serialized);
 
 	const originKind = classifyOrigin(policy, matchingOrigins, origin);
 	if (origin && originKind === "mismatch") return deny("origin-mismatch", context, host.serialized, origin.serialized);
@@ -448,6 +455,34 @@ function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: Fe
 	return context !== "websocket" && context !== "preflight" && isCoherentFetchContext(context, fetch);
 }
 
+function isOpaquePreviewFollowOn(
+	metadata: RequestAdmissionMetadata,
+	context: RequestRouteContext,
+	fetch: FetchMetadata | undefined,
+	hasOpaqueOrigin: boolean,
+): boolean {
+	if (!SAFE_METHODS.has(normalizeMethod(metadata.method)) || !fetch || fetch.site !== "cross-site") return false;
+	const isResource = context === "preview-resource" && (fetch.mode === "cors" || fetch.mode === "no-cors");
+	const isIframeContinuation = context === "preview-iframe"
+		&& !hasOpaqueOrigin
+		&& fetch.mode === "navigate"
+		&& fetch.dest === "iframe";
+	if ((!isResource && !isIframeContinuation) || !isCoherentFetchContext(context, fetch)) return false;
+	if (!hasOpaqueOrigin && readRawHeader(metadata.rawHeaders, "origin").kind !== "missing") return false;
+	return hasNamedCookie(metadata.rawHeaders, PREVIEW_COOKIE_NAME);
+}
+
+function hasNamedCookie(rawHeaders: readonly string[], wantedName: string): boolean {
+	const header = readRawHeader(rawHeaders, "cookie");
+	if (header.kind !== "value") return false;
+	for (const part of header.value.split(";")) {
+		const separator = part.indexOf("=");
+		if (separator < 1) continue;
+		if (part.slice(0, separator).trim() === wantedName && part.slice(separator + 1).trim() !== "") return true;
+	}
+	return false;
+}
+
 function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetadata): boolean {
 	// WebKit identifies WebSocket handshakes with `Sec-Fetch-Dest: websocket`,
 	// while Chromium/Firefox may omit the header or send `empty`. The transport,
@@ -484,17 +519,18 @@ function allow(
 	context: RequestRouteContext,
 	host: ParsedHost,
 	matchingOrigins: readonly ParsedOrigin[],
-	origin: ParsedOrigin | undefined,
+	origin: ParsedOrigin | "null" | undefined,
 	isTls: boolean,
 	cors?: CorsProjection,
 ): RequestAdmissionAllowed {
-	const gatewayOrigin = selectGatewayOrigin(policy, matchingOrigins, origin, isTls);
+	const parsedOrigin = origin === "null" ? undefined : origin;
+	const gatewayOrigin = selectGatewayOrigin(policy, matchingOrigins, parsedOrigin, isTls);
 	return {
 		allowed: true,
 		reason: "allowed",
 		context,
 		normalizedHost: host.serialized,
-		...(origin ? { normalizedOrigin: origin.serialized } : {}),
+		...(origin ? { normalizedOrigin: origin === "null" ? origin : origin.serialized } : {}),
 		...(gatewayOrigin ? { gatewayOrigin } : {}),
 		trustedLocal: policy.allAuthoritiesLoopback,
 		...(cors ? { cors } : {}),
