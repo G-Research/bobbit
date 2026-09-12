@@ -297,10 +297,16 @@ function localMcpReviewOwner(): GatewaySession | Goal | undefined {
 	return undefined;
 }
 
-async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
+interface McpRequestScopeResolution {
+	scope: McpServerRequestScope;
+	projectScope?: string;
+	clearReviewOwner?: boolean;
+}
+
+async function resolveMcpRequestScope(): Promise<McpRequestScopeResolution> {
 	const route = getRouteFromHash();
 	if (route.view !== "tools" || (!route.mcpReviewSessionId && !route.mcpReviewGoalId)) {
-		return { projectId: getConfigApiProjectId() };
+		return { scope: { projectId: getConfigApiProjectId() } };
 	}
 	let owner = localMcpReviewOwner();
 	if (!owner) {
@@ -311,15 +317,19 @@ async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
 		if (response.ok) owner = await response.json() as GatewaySession | Goal;
 	}
 	if (owner && typeof owner.projectId === "string" && typeof owner.cwd === "string") {
-		setConfigScope(owner.projectId);
-		return route.mcpReviewSessionId
-			? requestScope(owner.projectId, owner.cwd, { sessionId: route.mcpReviewSessionId })
-			: requestScope(owner.projectId, owner.cwd, { goalId: route.mcpReviewGoalId! });
+		return {
+			scope: route.mcpReviewSessionId
+				? requestScope(owner.projectId, owner.cwd, { sessionId: route.mcpReviewSessionId })
+				: requestScope(owner.projectId, owner.cwd, { goalId: route.mcpReviewGoalId! }),
+			projectScope: owner.projectId,
+		};
 	}
 	// A removed/invalid owner cannot retain path authority. Fall back to the
 	// selected project's root scope and make that durable in the current route.
-	setMcpReviewToolsRoute(undefined, true, true);
-	return { projectId: getConfigApiProjectId() };
+	return {
+		scope: { projectId: getConfigApiProjectId() },
+		clearReviewOwner: true,
+	};
 }
 
 function mcpScopeKey(scope: McpServerRequestScope): string {
@@ -518,7 +528,9 @@ export async function loadToolPageData(): Promise<void> {
 	renderApp();
 	const resolvedMcpScope = await resolveMcpRequestScope();
 	if (loadViewEpoch !== toolPageViewEpoch || loadRevision !== scopedRefreshRevision) return;
-	mcpRequestScope = resolvedMcpScope;
+	if (resolvedMcpScope.projectScope) setConfigScope(resolvedMcpScope.projectScope);
+	if (resolvedMcpScope.clearReviewOwner) setMcpReviewToolsRoute(undefined, true, true);
+	mcpRequestScope = resolvedMcpScope.scope;
 	if (await refreshScopedToolPageData(true)) {
 		loading = false;
 		renderApp();
