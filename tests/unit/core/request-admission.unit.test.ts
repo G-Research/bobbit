@@ -519,12 +519,12 @@ describe("browser route/context matrix", () => {
 				assert.equal(result.cors, undefined, "route auth, not generic admission, owns null-origin CORS");
 			}
 		}
-		const iframeContinuation = decide({
-			url: "/preview/session/index.html",
-			rawHeaders: opaqueHeaders("navigate", "iframe"),
-		});
-		assert.equal(iframeContinuation.allowed, true);
-		assert.equal(iframeContinuation.context, "preview-iframe");
+		for (const url of ["/preview/session/", "/preview/session/index.html"]) {
+			assertDenied("cross-site-browser-request", {
+				url,
+				rawHeaders: opaqueHeaders("navigate", "iframe"),
+			});
+		}
 
 		assertDenied("origin-mismatch", {
 			url: "/preview/session/style.css",
