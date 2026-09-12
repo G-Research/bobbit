@@ -1,5 +1,6 @@
 import { test, expect } from "../in-process-harness.js";
-import { apiFetch, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, defaultProject, defaultProjectId, secretsDir } from "../e2e-setup.js";
+import { startRecordingMcpServer } from "../../support/mcp-approval/gateway-mcp-fixtures.js";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
@@ -204,6 +205,33 @@ function writeAuthoredNonMcpPack(repo: string): void {
 		"  skills: []",
 		"",
 	].join("\n"), "utf-8");
+}
+
+function writeRemoteMcpPack(packDir: string, packName: string, serverName: string, url: string, secret: string): void {
+	fs.mkdirSync(path.join(packDir, "mcp"), { recursive: true });
+	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
+		`name: ${packName}`,
+		"description: Marketplace attestation regression pack",
+		"version: 1.0.0",
+		"schema: 2",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		"  skills: []",
+		"  mcp: [remote]",
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(packDir, "mcp", "remote.json"), JSON.stringify({
+		server: serverName,
+		transport: { type: "http", url, headers: { Authorization: `Bearer ${secret}` } },
+	}, null, 2), "utf-8");
+}
+
+async function refreshProjectPackOrder(projectId: string, order: string[]): Promise<Response> {
+	return apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "project", projectId, order }),
+	});
 }
 
 test.describe("Marketplace MCP API integration", () => {
@@ -467,6 +495,131 @@ test.describe("Marketplace MCP API integration", () => {
 		} finally {
 			await cleanup(sourceId, projectId, packName ? [packName] : []);
 			await gatewaySource.close();
+		}
+	});
+
+	test("only exact server-attested project Marketplace installs start MCP clients", async ({ gateway }) => {
+		await gateway.sessionManager.initMcp(gateway.bobbitDir);
+		const project = await defaultProject();
+		const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "marketplace-mcp-attestation-api-"));
+		const sourceRoot = path.join(fixtureRoot, "source");
+		const copiedProjectRoot = path.join(fixtureRoot, "copied-project");
+		const forgedPackName = "forged-mcp-pack";
+		const installedPackName = "attested-mcp-pack";
+		const forgedServer = await startRecordingMcpServer("forged_probe");
+		const approvedServer = await startRecordingMcpServer("approved_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		let sourceId: string | undefined;
+		let copiedProjectId: string | undefined;
+		try {
+			const forgedPack = path.join(project.rootPath, ".bobbit", "config", "market-packs", forgedPackName);
+			writeRemoteMcpPack(forgedPack, forgedPackName, "forged_runtime", forgedServer.url, "forged-header-secret");
+			fs.writeFileSync(path.join(forgedPack, ".pack-meta.yaml"), [
+				"sourceId: forged-source",
+				"sourceUrl: https://user:forged-meta-secret@example.test/packs?token=forged-meta-secret",
+				"sourceRef: main",
+				"commit: attacker-controlled",
+				`packName: ${forgedPackName}`,
+				"version: 1.0.0",
+				"installedAt: 2026-01-01T00:00:00.000Z",
+				"updatedAt: 2026-01-01T00:00:00.000Z",
+				"scope: project",
+				"",
+			].join("\n"), "utf8");
+
+			let refresh = await refreshProjectPackOrder(project.id, [forgedPackName]);
+			expect(refresh.status).toBe(200);
+			let response = await apiFetch(mcpServersPath(project.id));
+			expect(response.status).toBe(200);
+			let forgedStatus = (await response.json()).find((entry: any) => entry.name === "forged_runtime");
+			expect(forgedStatus).toMatchObject({
+				status: "disconnected",
+				toolCount: 0,
+				approval: { required: true, state: "pending" },
+				origin: { authority: "project", trust: "approval-required" },
+			});
+			expect(forgedServer.requests).toHaveLength(0);
+			expect(JSON.stringify(forgedStatus)).not.toContain("forged-header-secret");
+			expect(JSON.stringify(forgedStatus)).not.toContain("forged-meta-secret");
+
+			const removeForged = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "project", projectId: project.id, packName: forgedPackName }),
+			});
+			expect(removeForged.status).toBe(204);
+
+			writeRemoteMcpPack(path.join(sourceRoot, installedPackName), installedPackName, "attested_runtime", approvedServer.url, "installed-header-secret");
+			const add = await apiFetch("/api/marketplace/sources", {
+				method: "POST",
+				body: JSON.stringify({ url: sourceRoot }),
+			});
+			expect(add.status).toBe(201);
+			sourceId = (await add.json()).source.id;
+			const install = await apiFetch("/api/marketplace/install", {
+				method: "POST",
+				body: JSON.stringify({ sourceId, dirName: installedPackName, scope: "project", projectId: project.id }),
+			});
+			expect(install.status).toBe(201);
+			expect((await install.json()).mcpReload?.connected).toContain("attested_runtime");
+
+			response = await apiFetch(mcpServersPath(project.id));
+			const trustedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
+			expect(trustedStatus).toMatchObject({
+				status: "connected",
+				toolCount: 1,
+				approval: { required: false, state: "trusted" },
+				origin: { authority: "marketplace", trust: "pretrusted" },
+			});
+			expect(approvedServer.requests.some(request => request.method === "initialize")).toBe(true);
+			expect(approvedServer.requests.some(request => request.method === "tools/list")).toBe(true);
+			expect(JSON.stringify(trustedStatus)).not.toContain("installed-header-secret");
+
+			const attestationPath = path.join(secretsDir(), "marketplace-mcp-install-attestations.json");
+			let privateLedger = fs.readFileSync(attestationPath, "utf8");
+			expect(privateLedger).toContain(installedPackName);
+			expect(privateLedger).not.toContain("installed-header-secret");
+			expect(privateLedger).not.toContain(approvedServer.url);
+			expect(privateLedger).not.toContain("Authorization");
+
+			fs.cpSync(path.join(project.rootPath, ".bobbit", "config", "market-packs", installedPackName), path.join(copiedProjectRoot, ".bobbit", "config", "market-packs", installedPackName), { recursive: true });
+			const createCopiedProject = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `copied-attestation-${Date.now()}`, rootPath: copiedProjectRoot, acceptCanonical: true }),
+			});
+			expect(createCopiedProject.status).toBe(201);
+			copiedProjectId = (await createCopiedProject.json()).id;
+			const approvedRequestCount = approvedServer.requests.length;
+			refresh = await refreshProjectPackOrder(copiedProjectId!, [installedPackName]);
+			expect(refresh.status).toBe(200);
+			response = await apiFetch(mcpServersPath(copiedProjectId!));
+			const copiedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
+			expect(copiedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "pending" } });
+			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
+
+			const installedPack = path.join(project.rootPath, ".bobbit", "config", "market-packs", installedPackName);
+			writeRemoteMcpPack(installedPack, installedPackName, "attested_runtime", changedServer.url, "changed-header-secret");
+			refresh = await refreshProjectPackOrder(project.id, [installedPackName]);
+			expect(refresh.status).toBe(200);
+			response = await apiFetch(mcpServersPath(project.id));
+			const changedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
+			expect(changedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "changed" } });
+			expect(changedServer.requests).toHaveLength(0);
+			expect(JSON.stringify(changedStatus)).not.toContain("changed-header-secret");
+			const projectTools = await (await apiFetch(toolsPath(project.id))).json();
+			expect(projectTools.tools.some((tool: any) => tool.name.includes("attested_runtime"))).toBe(false);
+
+			const uninstall = await apiFetch("/api/marketplace/installed", {
+				method: "DELETE",
+				body: JSON.stringify({ scope: "project", projectId: project.id, packName: installedPackName }),
+			});
+			expect(uninstall.status).toBe(204);
+			privateLedger = fs.readFileSync(attestationPath, "utf8");
+			expect(privateLedger).not.toContain(installedPackName);
+		} finally {
+			if (copiedProjectId) await apiFetch(`/api/projects/${encodeURIComponent(copiedProjectId)}`, { method: "DELETE" }).catch(() => {});
+			await cleanup(sourceId, project.id, [forgedPackName, installedPackName]);
+			await Promise.all([forgedServer.close(), approvedServer.close(), changedServer.close()]);
+			fs.rmSync(fixtureRoot, { recursive: true, force: true });
 		}
 	});
 });
