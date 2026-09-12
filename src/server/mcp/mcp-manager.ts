@@ -309,6 +309,23 @@ function redactConfiguredSecretSubstrings(value: string, secretValues: readonly 
   return redacted;
 }
 
+const ABSOLUTE_URL_ARGUMENT = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+
+/** Project one whole URL argument, or the URL value of an option assignment, to safe review text. */
+function redactMcpUrlArgument(argument: string, secretValues: readonly string[]): string | undefined {
+  const outer = quotedParts(argument);
+  const assignment = outer.value.match(/^(--?[^=\s]+)=(.*)$/s);
+  const rawValue = assignment?.[2] ?? outer.value;
+  const inner = quotedParts(rawValue);
+  if (!ABSOLUTE_URL_ARGUMENT.test(inner.value)) return undefined;
+
+  // redactUrl fails closed for malformed URL-like values. Retain the existing
+  // configured-value filter for credentials embedded in an otherwise safe path.
+  const safeUrl = redactConfiguredSecretSubstrings(redactUrl(inner.value), secretValues);
+  const renderedValue = `${inner.prefix}${safeUrl}${inner.suffix}`;
+  return `${outer.prefix}${assignment ? `${assignment[1]}=${renderedValue}` : renderedValue}${outer.suffix}`;
+}
+
 function redactMcpArgument(
   argument: string,
   state: McpArgumentRedactionState,
@@ -325,6 +342,9 @@ function redactMcpArgument(
   if (equals && isCredentialFlag(equals[1])) {
     return `${quoted.prefix}${equals[1]}=${redactWholeValue(equals[2])}${quoted.suffix}`;
   }
+
+  const redactedUrl = redactMcpUrlArgument(argument, secretValues);
+  if (redactedUrl !== undefined) return redactedUrl;
 
   const attachedHeader = quoted.value.match(/^(-H)(.+)$/s);
   if (attachedHeader) {

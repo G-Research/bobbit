@@ -30,20 +30,34 @@ const SENTINELS = [
 	"gateway-arg-access-key-sentinel",
 	"gateway-arg-signing-key-sentinel",
 	"gateway-header-private-key-sentinel",
+	"gateway-url-user-sentinel",
+	"gateway-url-password-sentinel",
+	"gateway-url-query-sentinel",
+	"gateway-url-fragment-sentinel",
+	"gateway-option-user-sentinel",
+	"gateway-option-password-sentinel",
+	"gateway-option-query-sentinel",
+	"gateway-option-fragment-sentinel",
 ] as const;
 
 const SERVER_NAME = "mcp-redaction-gateway";
 
+type SafeConfig = { command: string; args: string[]; env: Record<string, string>; headers: Record<string, string> };
 type ServerStatus = {
 	name: string;
 	approval: { state: string; fingerprint: string };
 	source: { sourceId: string; projectId: string };
-	reviewConfig: { command: string; args: string[]; env: Record<string, string>; headers: Record<string, string> };
+	config: SafeConfig;
+	reviewConfig: SafeConfig;
+	ownerContributions: Array<{ config: SafeConfig }>;
 };
+
+const WHOLE_URL = "https://gateway-url-user-sentinel:gateway-url-password-sentinel@mcp.example.test/bridge?access_token=gateway-url-query-sentinel#gateway-url-fragment-sentinel";
+const OPTION_URL = "https://gateway-option-user-sentinel:gateway-option-password-sentinel@mcp.example.test/option?access_token=gateway-option-query-sentinel#gateway-option-fragment-sentinel";
 
 function config(generation: string): Record<string, unknown> {
 	return {
-		command: "node relay.js --header \"Authorization: Bearer gateway-command-auth-sentinel\" -H'Cookie: gateway-command-cookie-sentinel' --proxy-header=gateway-command-proxy-sentinel --private-key gateway-command-private-key-sentinel --access_key=gateway-command-access-key-sentinel --signing-key gateway-command-signing-key-sentinel --monkey command-visible --label prefix-gateway-env-sentinel-suffix",
+		command: `node relay.js --header "Authorization: Bearer gateway-command-auth-sentinel" -H'Cookie: gateway-command-cookie-sentinel' --proxy-header=gateway-command-proxy-sentinel --private-key gateway-command-private-key-sentinel --access_key=gateway-command-access-key-sentinel --signing-key gateway-command-signing-key-sentinel --monkey command-visible --label prefix-gateway-env-sentinel-suffix ${WHOLE_URL} --endpoint=${OPTION_URL}`,
 		args: [
 			"--header", "Authorization: Bearer gateway-separated-header-sentinel",
 			"--header=X-Api-Key: gateway-equals-header-sentinel",
@@ -62,6 +76,8 @@ function config(generation: string): Record<string, unknown> {
 			"--signing-key", "gateway-arg-signing-key-sentinel",
 			"X-Private-Key: gateway-header-private-key-sentinel",
 			"--monkey", "argument-visible",
+			WHOLE_URL,
+			`--endpoint=${OPTION_URL}`,
 			"--generation", generation,
 		],
 		env: { API_TOKEN: "gateway-env-sentinel" },
@@ -83,13 +99,8 @@ function assertSafeDto(value: unknown, generation: string): ServerStatus {
 	for (const sentinel of SENTINELS) expect(serialized).not.toContain(sentinel);
 	const statuses = Array.isArray(value) ? value : [(value as { server: unknown }).server];
 	const status = statuses.find((entry: ServerStatus) => entry.name === SERVER_NAME) as ServerStatus | undefined;
-	expect(status).toBeDefined();
-	expect(status!.reviewConfig).toMatchObject({
-		command: "node relay.js --header \"Authorization: [redacted]\" -H'[redacted]' --proxy-header=[redacted] --private-key [redacted] --access_key=[redacted] --signing-key [redacted] --monkey command-visible --label prefix-[redacted]-suffix",
-		env: { API_TOKEN: "[redacted]" },
-		headers: { "X-Configured-Secret": "[redacted]", "X-Private-Key": "[redacted]" },
-	});
-	expect(status!.reviewConfig.args).toEqual([
+	const expectedCommand = "node relay.js --header \"Authorization: [redacted]\" -H'[redacted]' --proxy-header=[redacted] --private-key [redacted] --access_key=[redacted] --signing-key [redacted] --monkey command-visible --label prefix-[redacted]-suffix https://mcp.example.test/bridge --endpoint=https://mcp.example.test/option";
+	const expectedArgs = [
 		"--header", "Authorization: [redacted]",
 		"--header=[redacted]",
 		"-H", "Cookie: [redacted]",
@@ -107,8 +118,23 @@ function assertSafeDto(value: unknown, generation: string): ServerStatus {
 		"--signing-key", "[redacted]",
 		"X-Private-Key: [redacted]",
 		"--monkey", "argument-visible",
+		"https://mcp.example.test/bridge",
+		"--endpoint=https://mcp.example.test/option",
 		"--generation", generation,
-	]);
+	];
+	const expectedConfig = {
+		command: expectedCommand,
+		args: expectedArgs,
+		env: { API_TOKEN: "[redacted]" },
+		headers: { "X-Configured-Secret": "[redacted]", "X-Private-Key": "[redacted]" },
+	};
+	expect(status).toBeDefined();
+	expect(status!.config).toEqual(expect.objectContaining(expectedConfig));
+	expect(status!.reviewConfig).toEqual(expect.objectContaining(expectedConfig));
+	expect(status!.ownerContributions).not.toHaveLength(0);
+	for (const contribution of status!.ownerContributions) {
+		expect(contribution.config).toEqual(expect.objectContaining(expectedConfig));
+	}
 	return status!;
 }
 

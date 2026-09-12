@@ -155,6 +155,31 @@ describe("MCP source provenance", () => {
 		assert.equal("path" in statuses.primaryCustom.origin!, false);
 	});
 
+	it("redacts credential-bearing URLs from pretrusted user-home status metadata", () => {
+		const root = temporaryRoot();
+		const cwd = path.join(root, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const wholeUrl = "https://unit-home-user-sentinel:unit-home-password-sentinel@mcp.example.test/home?access_token=unit-home-query-sentinel#unit-home-fragment-sentinel";
+		const optionUrl = "https://unit-home-option-user-sentinel:unit-home-option-password-sentinel@mcp.example.test/option?access_token=unit-home-option-query-sentinel#unit-home-option-fragment-sentinel";
+		writeConfig(path.join(fixtureHome, ".claude", ".mcp.json"), {
+			homeUrl: { command: "node", args: ["relay.js", wholeUrl, `--endpoint=${optionUrl}`] },
+		});
+
+		const manager = new McpManager(cwd, reader(), path.join(root, "state"), { projectId: "project-id" });
+		manager.discoverConnectionGroups();
+		const status = byName(manager.getServerStatuses()).homeUrl;
+		assert.equal(status.source?.authority, "user-home");
+		assert.equal(status.approval?.state, "trusted");
+		assert.deepEqual(status.config?.args, [
+			"relay.js",
+			"https://mcp.example.test/home",
+			"--endpoint=https://mcp.example.test/option",
+		]);
+		assert.deepEqual(status.ownerContributions?.[0]?.config.args, status.config?.args);
+		assert.equal(status.reviewConfig, undefined);
+		assert.doesNotMatch(JSON.stringify(status), /unit-home-(?:option-)?(?:user|password|query|fragment)-sentinel/);
+	});
+
 	it("applies public-name precedence before approval so a pending project winner blocks a trusted Marketplace fallback", () => {
 		const root = temporaryRoot();
 		const cwd = path.join(root, "project");
@@ -233,6 +258,30 @@ describe("safe MCP review metadata", () => {
 			env: { TOKEN: "[redacted]" },
 			headers: { Authorization: "[redacted]" },
 		});
+	});
+
+	it("sanitizes whole and option-assigned URL arguments while preserving endpoint structure", () => {
+		const wholeUrl = "https://unit-url-user-sentinel:unit-url-password-sentinel@mcp.example.test/bridge?access_token=unit-url-query-sentinel#unit-url-fragment-sentinel";
+		const optionUrl = "https://unit-option-user-sentinel:unit-option-password-sentinel@mcp.example.test/option?access_token=unit-option-query-sentinel#unit-option-fragment-sentinel";
+		const config = {
+			command: `node relay.js ${wholeUrl} --endpoint=${optionUrl} --ordinary visible`,
+			args: ["relay.js", wholeUrl, `--endpoint=${optionUrl}`, "https://%malformed-url-sentinel", "--ordinary", "visible"],
+		};
+		const redacted = redactMcpServerConfig(config);
+
+		assert.equal(redacted.command,
+			"node relay.js https://mcp.example.test/bridge --endpoint=https://mcp.example.test/option --ordinary visible");
+		assert.deepEqual(redacted.args, [
+			"relay.js",
+			"https://mcp.example.test/bridge",
+			"--endpoint=https://mcp.example.test/option",
+			"[redacted]",
+			"--ordinary",
+			"visible",
+		]);
+		assert.doesNotMatch(JSON.stringify(redacted), /unit-(?:url|option)-(?:user|password|query|fragment)-sentinel|malformed-url-sentinel/);
+		assert.equal(config.args[1], wholeUrl, "display projection must not mutate runtime arguments");
+		assert.equal(config.args[2], `--endpoint=${optionUrl}`, "display projection must not mutate runtime arguments");
 	});
 
 	it("redacts token-delimited key credentials without hiding unrelated names", () => {
