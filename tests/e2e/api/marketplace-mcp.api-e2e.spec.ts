@@ -600,12 +600,27 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
 
 			const installedPack = path.join(project.rootPath, ".bobbit", "config", "market-packs", installedPackName);
+			const approvedRequestCountBeforeMutation = approvedServer.requests.length;
+			// The transport declaration is unchanged; only dynamically loadable pack
+			// content changes. Complete-pack integrity must still revoke pretrust.
+			fs.writeFileSync(path.join(installedPack, "runtime-loader.mjs"), "export const generation = 'mutated';\n", "utf8");
+			refresh = await refreshProjectPackOrder(project.id, [installedPackName]);
+			expect(refresh.status).toBe(200);
+			response = await apiFetch(mcpServersPath(project.id));
+			const contentChangedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
+			expect(contentChangedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "changed" } });
+			expect(contentChangedStatus.approval.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+			expect(approvedServer.requests).toHaveLength(approvedRequestCountBeforeMutation);
+			expect(JSON.stringify(contentChangedStatus)).not.toContain("marketplacePackIntegrity");
+			expect((await (await apiFetch(toolsPath(project.id))).json()).tools.some((tool: any) => tool.name.includes("attested_runtime"))).toBe(false);
+
 			writeRemoteMcpPack(installedPack, installedPackName, "attested_runtime", changedServer.url, "changed-header-secret");
 			refresh = await refreshProjectPackOrder(project.id, [installedPackName]);
 			expect(refresh.status).toBe(200);
 			response = await apiFetch(mcpServersPath(project.id));
 			const changedStatus = (await response.json()).find((entry: any) => entry.name === "attested_runtime");
 			expect(changedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "changed" } });
+			expect(changedStatus.approval.fingerprint).not.toBe(contentChangedStatus.approval.fingerprint);
 			expect(changedServer.requests).toHaveLength(0);
 			expect(JSON.stringify(changedStatus)).not.toContain("changed-header-secret");
 			const projectTools = await (await apiFetch(toolsPath(project.id))).json();

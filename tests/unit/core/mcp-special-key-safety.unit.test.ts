@@ -27,7 +27,6 @@ const {
 	redactRecord,
 } = await import("../../../src/server/mcp/mcp-manager.ts");
 const { McpClient, buildMcpProcessEnv, expandEnvRecord } = await import("../../../src/server/mcp/mcp-client.ts");
-const { marketplaceMcpBehaviorFingerprint } = await import("../../../src/server/mcp/marketplace-mcp-install-attestation.ts");
 
 const temporaryRoots: string[] = [];
 afterEach(() => {
@@ -132,7 +131,10 @@ describe("MCP prototype-like configuration keys", () => {
 		assert.notEqual(store.fingerprint(headerChanged), fingerprint);
 		assert.notEqual(store.fingerprint(envChanged), fingerprint);
 		assert.notEqual(store.fingerprint(unknownChanged), fingerprint);
-		assert.notEqual(marketplaceMcpBehaviorFingerprint(headerChanged), marketplaceMcpBehaviorFingerprint(original));
+		assert.notEqual(
+			store.marketplaceInstallFingerprint(headerChanged, "pack-integrity"),
+			store.marketplaceInstallFingerprint(original, "pack-integrity"),
+		);
 
 		assert.ok(fingerprint);
 		await store.decide({

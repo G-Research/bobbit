@@ -20,6 +20,8 @@ export interface McpApprovalDefinition {
   serverName: string;
   trust: "pretrusted" | "approval-required";
   config: McpServerConfig;
+  /** Server-internal digest of an installed project Marketplace pack. */
+  marketplacePackIntegrity?: string;
 }
 
 export interface McpApprovalClassification {
@@ -209,16 +211,40 @@ export class McpApprovalStore {
     }
   }
 
-  fingerprint(config: McpServerConfig): string | undefined {
+  fingerprint(config: McpServerConfig, marketplacePackIntegrity?: string): string | undefined {
     if (!this.key) return undefined;
+    const hmac = crypto.createHmac("sha256", this.key);
+    if (marketplacePackIntegrity) {
+      hmac.update("bobbit:mcp-approval:marketplace-pack:v1\0", "utf8");
+      hmac.update(JSON.stringify({
+        schema: 1,
+        config: canonicalMcpServerConfig(config),
+        marketplacePackIntegrity,
+      }), "utf8");
+    } else {
+      // Preserve the established fingerprint for ordinary project definitions so
+      // this internal Marketplace binding does not invalidate unrelated approvals.
+      hmac.update(JSON.stringify(canonicalMcpServerConfig(config)));
+    }
+    return hmac.digest("hex");
+  }
+
+  /** Purpose-separated opaque install attestation; raw pack digests are never persisted. */
+  marketplaceInstallFingerprint(config: McpServerConfig, marketplacePackIntegrity: string): string | undefined {
+    if (!this.key || !marketplacePackIntegrity) return undefined;
     return crypto.createHmac("sha256", this.key)
-      .update(JSON.stringify(canonicalMcpServerConfig(config)))
+      .update("bobbit:mcp-marketplace-install-attestation:v2\0", "utf8")
+      .update(JSON.stringify({
+        schema: 2,
+        config: canonicalMcpServerConfig(config),
+        marketplacePackIntegrity,
+      }), "utf8")
       .digest("hex");
   }
 
   classify(definition: McpApprovalDefinition): McpApprovalClassification {
     if (definition.trust === "pretrusted") return { required: false, state: "trusted" };
-    const fingerprint = this.fingerprint(definition.config);
+    const fingerprint = this.fingerprint(definition.config, definition.marketplacePackIntegrity);
     if (!fingerprint || !definition.projectId) return { required: true, state: "pending", ...(fingerprint ? { fingerprint } : {}) };
     const tuple = this.decisions.filter((row) => row.projectId === definition.projectId
       && row.sourceId === definition.sourceId && row.serverName === definition.serverName);

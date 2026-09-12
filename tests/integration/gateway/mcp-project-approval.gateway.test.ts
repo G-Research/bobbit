@@ -549,6 +549,51 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("a forced reload changed during disconnect sends no initialize request to the stale replacement", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "pre-connect-disconnect-window");
+		const approvedServer = await startRecordingMcpServer("approved_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		try {
+			const project = await createProject(gateway, isolated, `mcp-disconnect-window-${randomUUID().slice(0, 8)}`);
+			const serverName = `disconnect-window-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: approvedServer.url });
+			let current = named(await statuses(project.id), serverName);
+			const response = await decide(project.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(rpcCount(approvedServer, "initialize")).toBe(1);
+
+			const manager = (gateway.sessionManager as any).getMcpManager({ projectId: project.id });
+			const oldClient = manager.clients.get(serverName);
+			const originalDisconnect = oldClient.disconnect.bind(oldClient);
+			let enteredDisconnect!: () => void;
+			let releaseDisconnect!: () => void;
+			const disconnectEntered = new Promise<void>((resolve) => { enteredDisconnect = resolve; });
+			const disconnectGate = new Promise<void>((resolve) => { releaseDisconnect = resolve; });
+			oldClient.disconnect = async () => {
+				await originalDisconnect();
+				enteredDisconnect();
+				await disconnectGate;
+			};
+
+			const forcedReload = manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+			await disconnectEntered;
+			writeProjectMcpConfig(project.root, serverName, { url: changedServer.url });
+			releaseDisconnect();
+			await forcedReload;
+
+			expect(rpcCount(approvedServer, "initialize")).toBe(1);
+			expect(changedServer.requests).toHaveLength(0);
+			expect(manager.getToolRouteSnapshots()).toEqual([]);
+			current = named(manager.getServerStatuses(), serverName);
+			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "changed" } });
+		} finally {
+			await Promise.allSettled([approvedServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
 	test("shared runtime owners advance one at a time without reporting the persisted decision as stale", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "shared-owner-decision");
 		const remote = await startRecordingMcpServer("shared_owner_probe");

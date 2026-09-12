@@ -36,7 +36,10 @@ import {
 	type McpGatewaySkippedEntry,
 } from "./mcp-gateway-source.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
-import type { MarketplaceMcpInstallAttestationStore } from "../mcp/marketplace-mcp-install-attestation.js";
+import {
+	measureMarketplaceMcpPackIntegrity,
+	type MarketplaceMcpInstallAttestationStore,
+} from "../mcp/marketplace-mcp-install-attestation.js";
 
 /** Install scopes — builtin is never an install target. */
 export type InstallScope = "global-user" | "server" | "project";
@@ -562,14 +565,33 @@ export class MarketplaceInstaller {
 		return scopePaths(ctx.scope as PackScope, base).marketPacksRoot;
 	}
 
-	private attestProjectMcpPack(ctx: ScopeContext, sourceId: string, packRoot: string, manifest: PackManifest): void {
+	private measureStagedProjectMcpPack(ctx: ScopeContext, packRoot: string, manifest: PackManifest): string | undefined {
+		if (ctx.scope !== "project" || !ctx.projectId || !this.opts.mcpInstallAttestationStore
+			|| (manifest.contents.mcp ?? []).length === 0) return undefined;
+		return measureMarketplaceMcpPackIntegrity(packRoot);
+	}
+
+	private attestProjectMcpPack(
+		ctx: ScopeContext,
+		sourceId: string,
+		packRoot: string,
+		manifest: PackManifest,
+		expectedPackIntegrity?: string,
+	): void {
 		if (ctx.scope !== "project" || !ctx.projectId || !this.opts.mcpInstallAttestationStore) return;
 		const definitions = (loadPackContributions(packRoot, manifest).mcp ?? []).map((mcp) => ({
 			contributionId: mcp.listName,
 			serverName: mcp.serverName,
 			config: mcp.config,
 		}));
-		this.opts.mcpInstallAttestationStore.replacePack(ctx.projectId, sourceId, manifest.name, definitions);
+		this.opts.mcpInstallAttestationStore.replacePack(
+			ctx.projectId,
+			sourceId,
+			manifest.name,
+			packRoot,
+			definitions,
+			expectedPackIntegrity,
+		);
 	}
 
 	/**
@@ -624,9 +646,11 @@ export class MarketplaceInstaller {
 			updatedAt: now,
 			scope: scope as PackScope,
 		};
+		let expectedPackIntegrity: string | undefined;
 		try {
 			copyDirVerbatim(src, staging);
 			writeMeta(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
@@ -636,7 +660,7 @@ export class MarketplaceInstaller {
 			this.appendOrder(ctx, packName);
 			// Attestation is the final authoritative commit: no later failure may
 			// report this install as unsuccessful while leaving it pretrusted.
-			this.attestProjectMcpPack(ctx, source.id, dest, manifest);
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			try { this.removeOrder(ctx, packName); } catch { /* best-effort rollback */ }
 			fs.rmSync(dest, { recursive: true, force: true });
@@ -687,9 +711,11 @@ export class MarketplaceInstaller {
 			updatedAt: now,
 			scope: args.scope as PackScope,
 		};
+		let expectedPackIntegrity: string | undefined;
 		try {
 			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
@@ -698,7 +724,7 @@ export class MarketplaceInstaller {
 		try {
 			this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
 			this.appendOrder(ctx, packName);
-			this.attestProjectMcpPack(ctx, source.id, dest, manifest);
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			try { this.removeOrder(ctx, packName); } catch { /* best-effort rollback */ }
 			fs.rmSync(dest, { recursive: true, force: true });
@@ -762,9 +788,11 @@ export class MarketplaceInstaller {
 
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
+		let expectedPackIntegrity: string | undefined;
 		try {
 			copyDirVerbatim(found.dir, staging);
 			writeMeta(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			// Swap: move current aside, publish staging, drop the old.
 			fs.renameSync(dest, backup);
 			try {
@@ -774,7 +802,7 @@ export class MarketplaceInstaller {
 				fs.renameSync(backup, dest);
 				throw err;
 			}
-			this.attestProjectMcpPack(ctx, source.id, dest, manifest);
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
 			if (fs.existsSync(backup)) {
@@ -825,9 +853,11 @@ export class MarketplaceInstaller {
 		};
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
+		let expectedPackIntegrity: string | undefined;
 		try {
 			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(dest, backup);
 			try {
 				fs.renameSync(staging, dest);
@@ -836,7 +866,7 @@ export class MarketplaceInstaller {
 				throw err;
 			}
 			this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
-			this.attestProjectMcpPack(ctx, source.id, dest, manifest);
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
 			if (fs.existsSync(backup)) {
