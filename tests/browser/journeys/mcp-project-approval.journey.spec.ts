@@ -1,3 +1,4 @@
+import type { Route } from "@playwright/test";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, registerProject, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	createMcpProjectApprovalFixture,
@@ -298,9 +299,64 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		await row.locator('[data-testid="mcp-approve-server"]').click();
 		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
 
+		// A decision request already sent to the server may finish after the user
+		// switches from a worktree review to plain project Tools. Its old-view UI
+		// tail must not refresh worktree data over the new root view.
+		fixture.writeWorktree("v3");
+		const actionChange = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		expect(actionChange.status).toBe(200);
+		await page.reload();
+		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again", { timeout: 20_000 });
+		if (await row.locator('[data-testid="mcp-server-toggle"]').getAttribute("aria-expanded") !== "true") {
+			await row.locator('[data-testid="mcp-server-toggle"]').click();
+		}
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant worktree-v3");
+
+		let releaseApproval = () => {};
+		let markApprovalStarted = () => {};
+		const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+		const approvalStarted = new Promise<void>((resolve) => { markApprovalStarted = resolve; });
+		const delayedApprovalHandler = async (route: Route): Promise<void> => {
+			const request = route.request();
+			const url = new URL(request.url());
+			if (request.method() === "POST" && url.searchParams.get("cwd") === fixture.worktreeRoot) {
+				markApprovalStarted();
+				await approvalGate;
+			}
+			await route.continue();
+		};
+		await page.route("**/api/mcp-servers/**/approval?**", delayedApprovalHandler);
+		const delayedApprovalResponse = page.waitForResponse((response) => {
+			const url = new URL(response.url());
+			return response.request().method() === "POST"
+				&& url.pathname.endsWith(`/api/mcp-servers/${WORKTREE_SERVER_NAME}/approval`)
+				&& url.searchParams.get("cwd") === fixture.worktreeRoot;
+		});
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await approvalStarted;
+		await page.getByRole("button", { name: projectName, exact: true }).click();
+		await expect(page).toHaveURL(/#\/tools$/);
+		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again", { timeout: 20_000 });
+		if (await row.locator('[data-testid="mcp-server-toggle"]').getAttribute("aria-expanded") !== "true") {
+			await row.locator('[data-testid="mcp-server-toggle"]').click();
+		}
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant root");
+		await expect(row.locator('[data-testid="mcp-approve-server"]')).toBeEnabled();
+		releaseApproval();
+		expect((await delayedApprovalResponse).status()).toBe(200);
+		await page.waitForTimeout(500);
+		await expect(page).toHaveURL(/#\/tools$/);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again");
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant root");
+		await expect(page.getByText("--variant worktree-v3", { exact: false })).toHaveCount(0);
+		await expect(row.locator('[data-testid="mcp-approve-server"]')).toBeEnabled();
+		await page.unroute("**/api/mcp-servers/**/approval?**", delayedApprovalHandler);
+
 		// A late worktree response cannot overwrite the root project scope chosen
 		// while it is in flight. The behaviorally different root definition stays unapproved.
-		fixture.writeWorktree("v3");
+		fixture.writeWorktree("v4");
 		const racedChange = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
 		expect(racedChange.status).toBe(200);
 		await navigateToHash(page, `#/session/${sessionId}`);

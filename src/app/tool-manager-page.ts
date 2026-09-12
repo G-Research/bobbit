@@ -273,6 +273,9 @@ let saving = false;
 let collapsedGroups = new Set<string>();
 let editTab: "access" | "context" | "renderer" = "access";
 let scopedRefreshRevision = 0;
+// A page/view lifetime is distinct from individual refreshes. Async actions
+// capture this epoch so their UI tail cannot act on a later route or scope.
+let toolPageViewEpoch = 0;
 let mcpRequestScope: McpServerRequestScope = { projectId: getConfigApiProjectId() };
 
 function requestScope(projectId: string, cwd: string | undefined): McpServerRequestScope {
@@ -315,6 +318,14 @@ async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
 
 function mcpScopeKey(scope: McpServerRequestScope): string {
 	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
+}
+
+function ownsMcpView(epoch: number, scopeKey: string): boolean {
+	return epoch === toolPageViewEpoch && scopeKey === mcpScopeKey(mcpRequestScope);
+}
+
+function mcpBusyKey(serverName: string, scope: McpServerRequestScope = mcpRequestScope): string {
+	return `${mcpScopeKey(scope)}\n${serverName}`;
 }
 
 // ============================================================================
@@ -458,6 +469,7 @@ async function fetchToolsScoped(): Promise<ToolInfo[]> {
 }
 
 async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boolean> {
+	const refreshViewEpoch = toolPageViewEpoch;
 	const scopedProjectId = getConfigApiProjectId();
 	const scopedMcpRequest = mcpRequestScope.projectId === scopedProjectId
 		? { ...mcpRequestScope }
@@ -471,7 +483,8 @@ async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boole
 		fetchMcpServers({ ...scopedMcpRequest, ensure: true }),
 	]);
 	if (
-		refreshRevision !== scopedRefreshRevision
+		refreshViewEpoch !== toolPageViewEpoch
+		|| refreshRevision !== scopedRefreshRevision
 		|| scopedProjectId !== getConfigApiProjectId()
 		|| scopedMcpKey !== mcpScopeKey(mcpRequestScope)
 	) return false;
@@ -490,6 +503,7 @@ async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boole
 }
 
 export async function loadToolPageData(): Promise<void> {
+	const loadViewEpoch = ++toolPageViewEpoch;
 	const loadRevision = ++scopedRefreshRevision;
 	currentView = "list";
 	selectedTool = null;
@@ -497,7 +511,7 @@ export async function loadToolPageData(): Promise<void> {
 	saving = false;
 	renderApp();
 	const resolvedMcpScope = await resolveMcpRequestScope();
-	if (loadRevision !== scopedRefreshRevision) return;
+	if (loadViewEpoch !== toolPageViewEpoch || loadRevision !== scopedRefreshRevision) return;
 	mcpRequestScope = resolvedMcpScope;
 	if (await refreshScopedToolPageData(true)) {
 		loading = false;
@@ -506,6 +520,7 @@ export async function loadToolPageData(): Promise<void> {
 }
 
 export function clearToolPageState(): void {
+	toolPageViewEpoch++;
 	scopedRefreshRevision++;
 	mcpRequestScope = { projectId: getConfigApiProjectId() };
 	currentView = "list";
@@ -788,8 +803,9 @@ function mcpApprovalIsInvalid(server: McpServerInfo): boolean {
 	return server.diagnostics?.some((diagnostic) => diagnostic.code === "MCP_CONFIG_INVALID" || diagnostic.code === "MCP_CONFIG_PARSE_FAILED") ?? false;
 }
 
-function focusMcpReviewToggle(name: string): void {
+function focusMcpReviewToggle(name: string, stillCurrent: () => boolean = () => true): void {
 	requestAnimationFrame(() => {
+		if (!stillCurrent()) return;
 		const rows = document.querySelectorAll<HTMLElement>('[data-testid="mcp-server-row"]');
 		for (const row of rows) {
 			if (row.dataset.serverName === name) {
@@ -800,8 +816,10 @@ function focusMcpReviewToggle(name: string): void {
 	});
 }
 
-function focusMcpPairingInput(): void {
-	requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]')?.focus());
+function focusMcpPairingInput(stillCurrent: () => boolean = () => true): void {
+	requestAnimationFrame(() => {
+		if (stillCurrent()) document.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]')?.focus();
+	});
 }
 
 function mcpPairingErrorMessage(error: unknown): string {
@@ -866,9 +884,12 @@ function renderMcpPairingCallout(): TemplateResult | typeof nothing {
 async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDecision): Promise<void> {
 	const approval = server.approval;
 	const source = server.source;
+	const decisionViewEpoch = toolPageViewEpoch;
 	const decisionScope = { ...mcpRequestScope };
 	const decisionScopeKey = mcpScopeKey(decisionScope);
-	if (!approval?.fingerprint || !source?.sourceId || !source.projectId || busyMcpServers.has(server.name) || mcpApprovalIsInvalid(server)) return;
+	const decisionBusyKey = mcpBusyKey(server.name, decisionScope);
+	const stillOwnsView = () => ownsMcpView(decisionViewEpoch, decisionScopeKey);
+	if (!approval?.fingerprint || !source?.sourceId || !source.projectId || busyMcpServers.has(decisionBusyKey) || mcpApprovalIsInvalid(server)) return;
 	if (decision === "rejected" && approval.state === "approved") {
 		const confirmed = await confirmAction(
 			`Reject ${server.name}?`,
@@ -876,10 +897,10 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 			"Reject server",
 			true,
 		);
-		if (!confirmed) return;
+		if (!confirmed || !stillOwnsView()) return;
 	}
 
-	busyMcpServers.add(server.name);
+	busyMcpServers.add(decisionBusyKey);
 	mcpApprovalErrors.delete(server.name);
 	mcpApprovalAnnouncements.set(server.name, `${decision === "approved" ? "Approving" : "Rejecting"} ${server.name}…`);
 	renderApp();
@@ -891,15 +912,16 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 			sourceProjectId: source.projectId,
 			sourceId: source.sourceId,
 		}, decisionScope);
+		if (!stillOwnsView()) return;
 		await refreshScopedToolPageData(false);
-		if (decisionScopeKey === mcpScopeKey(mcpRequestScope)) {
-			mcpApprovalAnnouncements.set(server.name, `${server.name} ${decision === "approved" ? "approved" : "rejected"}.`);
-		}
+		if (!stillOwnsView()) return;
+		mcpApprovalAnnouncements.set(server.name, `${server.name} ${decision === "approved" ? "approved" : "rejected"}.`);
 	} catch (error) {
-		if (decisionScopeKey !== mcpScopeKey(mcpRequestScope)) return;
+		if (!stillOwnsView()) return;
 		const details = errorDetails(error);
 		if (details.code === "MCP_APPROVAL_STALE") {
 			await refreshScopedToolPageData(false);
+			if (!stillOwnsView()) return;
 			expandedMcpServers.add(server.name);
 			mcpApprovalErrors.set(server.name, "Configuration changed while you were reviewing it. Review the current configuration before deciding.");
 		} else if (details.code === "MCP_APPROVAL_HUMAN_REQUIRED") {
@@ -914,11 +936,11 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 		}
 		mcpApprovalAnnouncements.set(server.name, `Approval for ${server.name} was not changed.`);
 	} finally {
-		busyMcpServers.delete(server.name);
-		renderApp();
-		if (decisionScopeKey === mcpScopeKey(mcpRequestScope)) {
-			if (pairingRequired) focusMcpPairingInput();
-			else focusMcpReviewToggle(server.name);
+		busyMcpServers.delete(decisionBusyKey);
+		if (stillOwnsView()) {
+			renderApp();
+			if (pairingRequired) focusMcpPairingInput(stillOwnsView);
+			else focusMcpReviewToggle(server.name, stillOwnsView);
 		}
 	}
 }
@@ -966,7 +988,7 @@ function renderMcpReviewPanel(server: McpServerInfo): TemplateResult | typeof no
 function renderMcpApprovalActions(server: McpServerInfo): TemplateResult | typeof nothing {
 	const state = server.approval?.state;
 	if (!server.approval?.required || state === "trusted" || mcpApprovalIsInvalid(server) || !server.approval.fingerprint || !server.source?.projectId) return nothing;
-	const busy = busyMcpServers.has(server.name);
+	const busy = busyMcpServers.has(mcpBusyKey(server.name));
 	const rejectLabel = state === "approved" ? "Reject server" : "Reject";
 	const approveLabel = state === "pending" ? "Approve" : "Approve current configuration";
 	return html`
@@ -1201,6 +1223,7 @@ function renderNavBar(): TemplateResult {
 // ============================================================================
 
 async function handleScopeChange(scope: string): Promise<void> {
+	toolPageViewEpoch++;
 	scopedRefreshRevision++;
 	setConfigScope(scope);
 	setMcpReviewToolsRoute(undefined, true, true);
