@@ -197,7 +197,7 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, globalAuthPath, mcpApprovalSecretsDir } from "../bobbit-dir.js";
 import {
 	activeAgentSessionsDir,
 	containerTranscriptRelativePath,
@@ -3451,7 +3451,7 @@ export interface SessionManagerOptions {
 	hostNotificationPublisher?: HostSessionNotificationPublisher;
 	/** Test-only override for the browser-compatible serialized attachment guard. */
 	uploadedAttachmentSerializedSendLimitBytes?: number;
-	/** Shared Headquarters approval ledger override. Production lazily constructs one from stateDir. */
+	/** Shared private approval-ledger override for focused tests. */
 	mcpApprovalStore?: McpApprovalStore;
 	/** Bounded reconciliation cadence for external MCP config edits. Set to 0 to disable in focused tests. */
 	mcpReconcileIntervalMs?: number;
@@ -3610,7 +3610,7 @@ export class SessionManager {
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	/** Project sources temporarily withheld while their registered root changes. */
 	private readonly suspendedMcpProjects = new Set<string>();
-	/** One Headquarters-owned ledger shared by every manager in this gateway. */
+	/** One private server-owned ledger shared by every manager in this gateway. */
 	private mcpApprovalStore: McpApprovalStore | undefined;
 	private readonly mcpReconcileIntervalMs: number;
 	private mcpReconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -6992,7 +6992,10 @@ export class SessionManager {
 	}
 
 	private getMcpApprovalStore(): McpApprovalStore {
-		return this.mcpApprovalStore ??= new McpApprovalStore(this.stateDir);
+		// Never read or migrate the historical stateDir ledger: stateDir can be a
+		// descendant of a registered repository, so repository-controlled key and
+		// ledger files must not be able to mint startup approval.
+		return this.mcpApprovalStore ??= new McpApprovalStore(mcpApprovalSecretsDir());
 	}
 
 	private additionalMcpProjects(cwd: string): Array<{ projectId: string; projectName: string; cwd: string; configStore: import("./project-config-store.js").ProjectConfigStore }> {

@@ -116,7 +116,7 @@ function isDecision(value: unknown): value is PersistedDecision {
     && [row.projectId, row.sourceId, row.serverName, row.fingerprint, row.decidedAt].every((entry) => typeof entry === "string" && entry.length > 0);
 }
 
-/** Headquarters-owned approval ledger and HMAC fingerprint key. */
+/** Private server-owned approval ledger and HMAC fingerprint key. */
 export class McpApprovalStore {
   private key: Buffer | undefined;
   private decisions: PersistedDecision[] = [];
@@ -124,20 +124,26 @@ export class McpApprovalStore {
   readonly ledgerPath: string;
   readonly keyPath: string;
 
-  constructor(private readonly stateDir: string) {
-    this.ledgerPath = path.join(stateDir, LEDGER_FILE);
-    this.keyPath = path.join(stateDir, KEY_FILE);
+  constructor(private readonly storageDir: string) {
+    this.ledgerPath = path.join(storageDir, LEDGER_FILE);
+    this.keyPath = path.join(storageDir, KEY_FILE);
     this.load();
   }
 
   private load(): void {
-    fs.mkdirSync(this.stateDir, { recursive: true });
+    fs.mkdirSync(this.storageDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      try { fs.chmodSync(this.storageDir, 0o700); } catch { /* best-effort perms */ }
+    }
     this.decisions = this.readLedger();
     let keyWasUnavailable = false;
     try {
       const key = fs.readFileSync(this.keyPath);
       if (key.length === KEY_BYTES) {
         this.key = key;
+        if (process.platform !== "win32") {
+          try { fs.chmodSync(this.keyPath, 0o600); } catch { /* best-effort perms */ }
+        }
       } else {
         keyWasUnavailable = true;
         fs.rmSync(this.keyPath, { force: true });
@@ -239,6 +245,9 @@ export class McpApprovalStore {
       await handle.close();
       handle = undefined;
       await fs.promises.rename(temporary, this.ledgerPath);
+      if (process.platform !== "win32") {
+        try { await fs.promises.chmod(this.ledgerPath, 0o600); } catch { /* best-effort perms */ }
+      }
     } catch (error) {
       console.error("[mcp] MCP_APPROVAL_PERSIST_FAILED");
       throw Object.assign(new Error("Could not persist the MCP server approval decision."), { code: "MCP_APPROVAL_PERSIST_FAILED", cause: error });
