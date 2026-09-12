@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { ConfigCascade } from "../../../src/server/agent/config-cascade.js";
 import { EventBuffer } from "../../../src/server/agent/event-buffer.js";
+import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.js";
 import { RoleManager } from "../../../src/server/agent/role-manager.js";
 import { RoleStore, type Role } from "../../../src/server/agent/role-store.js";
 import { SessionManager } from "../../../src/server/agent/session-manager.js";
@@ -12,6 +13,7 @@ import { scopedToolContext } from "../../../src/server/agent/session-setup.js";
 import { ToolGroupPolicyStore } from "../../../src/server/agent/tool-group-policy-store.js";
 import { resolveGrantPolicy } from "../../../src/server/agent/tool-activation.js";
 import { ToolManager } from "../../../src/server/agent/tool-manager.js";
+import { makeMetaToolName } from "../../../src/server/mcp/mcp-meta.js";
 
 const PROJECT_A = "project-a";
 const PROJECT_B = "project-b";
@@ -47,6 +49,7 @@ type FixtureContext = {
 	roleStore: RoleStore;
 	toolManager: ToolManager;
 	toolGroupPolicyStore: ToolGroupPolicyStore;
+	projectConfigStore: ProjectConfigStore;
 	sessionStore: MemorySessionStore;
 };
 
@@ -171,6 +174,7 @@ describe("project-scoped persistent group grants", () => {
 			roleStore: new RoleStore(configDir),
 			toolManager: new ToolManager(configDir),
 			toolGroupPolicyStore: new ToolGroupPolicyStore(configDir),
+			projectConfigStore: new ProjectConfigStore(configDir),
 			sessionStore: new MemorySessionStore(),
 		});
 		projectA = makeContext(PROJECT_A, projectAConfig);
@@ -187,6 +191,7 @@ describe("project-scoped persistent group grants", () => {
 		]);
 		const pcm = {
 			getOrCreate: (id: string) => contexts.get(id),
+			getExisting: (id: string) => contexts.get(id),
 			all: () => [...contexts.values(), serverContext],
 		};
 
@@ -348,5 +353,77 @@ describe("project-scoped persistent group grants", () => {
 		expect(projectA.roleStore.getLocal("coder")?.toolPolicies?.[TOOL]).toBe("allow");
 		expect(restartCaptures).toEqual([{ sessionId: session.id, overrideAllowedTools: [] }]);
 		expect(manager.sessions.get(session.id).allowedTools, "RC7_EMPTY_ALLOWLIST_WIDENED_DURING_RESTART").toEqual([]);
+	});
+
+	it("uses the host-worktree MCP binding after a sandbox cwd rewrite for group grants and restart policy", async () => {
+		const branch = "session/sandbox-bound";
+		const hostWorktree = path.join(projectA.project.rootPath, "worktrees", "sandbox-bound");
+		const containerCwd = `/workspace-wt/${branch}`;
+		const mcpGroup = "MCP: review-server";
+		const canonicalName = "mcp__review-server__inspect";
+		const metaName = makeMetaToolName("review-server");
+		const session = {
+			...makeLiveSession("sandbox-bound-mcp", PROJECT_A),
+			cwd: containerCwd,
+			worktreePath: hostWorktree,
+			branch,
+			sandboxed: true,
+		};
+		seedSession(projectA, session);
+		manager.sessions.set(session.id, session);
+		projectA.toolGroupPolicyStore.setGroupPolicy(mcpGroup, "ask");
+
+		const scopeKey = manager.mcpScopeKey({ projectId: PROJECT_A, cwd: hostWorktree });
+		const boundManager = {
+			getScopeKey: () => scopeKey,
+			getServerStatuses: () => [],
+			getToolInfos: () => [{
+				name: canonicalName,
+				group: mcpGroup,
+				serverName: "review-server",
+				mcpToolName: "inspect",
+				description: "Inspect a review.",
+			}],
+		};
+		manager.scopedMcpManagers.set(scopeKey, boundManager);
+		manager.mcpSessionScopes.set(session.id, { projectId: PROJECT_A, cwd: hostWorktree, scopeKey });
+
+		const pending = manager.requestToolGrant(session.id, metaName, mcpGroup);
+		const permissionId = manager.sessions.get(session.id).pendingGrantRequest.id;
+		const granted = await manager.grantToolPermission(
+			session.id,
+			metaName,
+			"group",
+			mcpGroup,
+			"session-only",
+			permissionId,
+		);
+
+		expect(granted).toEqual(expect.arrayContaining([canonicalName, metaName]));
+		await expect(pending).resolves.toMatchObject({
+			granted: true,
+			tools: expect.arrayContaining([canonicalName, metaName]),
+			scope: "group",
+			group: mcpGroup,
+		});
+
+		const restarted = await manager.recomputeAllowedToolsForRestart(session, projectA.sessionStore.get(session.id));
+		expect(restarted).toEqual(expect.arrayContaining([canonicalName, metaName]));
+		expect(manager.getMcpManagerForSession(session.id)).toBe(boundManager);
+		expect(manager.getMcpManager({ projectId: PROJECT_A, cwd: containerCwd })).toBeNull();
+
+		const activation = manager.buildToolActivationArgs(
+			session.id,
+			restarted.map((name: string) => ({ kind: "mcp", name })),
+			CODER,
+			containerCwd,
+			PROJECT_A,
+		);
+		const extensionSources = activation.args
+			.flatMap((arg: string, index: number, args: string[]) => args[index - 1] === "--extension" ? [arg] : [])
+			.filter((file: string) => fs.existsSync(file))
+			.map((file: string) => fs.readFileSync(file, "utf8"));
+		expect(extensionSources.some((source: string) => source.includes(`name: ${JSON.stringify(metaName)}`))).toBe(true);
+		expect(extensionSources.some((source: string) => source.includes(`scopeKey: ${JSON.stringify(scopeKey)}`))).toBe(true);
 	});
 });

@@ -405,6 +405,73 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("a rejection reloads a worktree manager published while decision persistence is paused", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "deferred-decision-worktree");
+		const remote = await startRecordingMcpServer("deferred_probe");
+		const sessionManager = gateway.sessionManager as any;
+		let sessionId: string | undefined;
+		let viewManager: any;
+		let originalDecideApproval: ((...args: any[]) => Promise<unknown>) | undefined;
+		let releasePersistence: (() => void) | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-deferred-${randomUUID().slice(0, 8)}`);
+			const worktreeRoot = path.join(project.root, "worktrees", "candidate");
+			const serverName = `deferred-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: remote.url });
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: remote.url });
+
+			let current = named(await statuses(project.id), serverName);
+			let response = await decide(project.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+
+			viewManager = sessionManager.getMcpManager({ projectId: project.id });
+			originalDecideApproval = viewManager.decideApproval.bind(viewManager);
+			const persistenceReleased = new Promise<void>(resolve => { releasePersistence = resolve; });
+			let persistencePaused!: () => void;
+			const reachedPersistencePause = new Promise<void>(resolve => { persistencePaused = resolve; });
+			viewManager.decideApproval = async (...args: any[]) => {
+				persistencePaused();
+				await persistenceReleased;
+				return originalDecideApproval!(...args);
+			};
+
+			const decisionResponse = decide(project.id, current, "rejected");
+			await reachedPersistencePause;
+			sessionId = `deferred-worktree-${randomUUID()}`;
+			sessionManager.sessions.set(sessionId, { id: sessionId, projectId: project.id, cwd: worktreeRoot });
+			const worktreeManager = await sessionManager.ensureMcpManagerForSession(sessionId);
+			const worktreeClient = worktreeManager.clients.get(serverName);
+			const externalToolName = `mcp__${serverName}__deferred_probe`;
+			expect(worktreeClient?.connected).toBe(true);
+			expect(worktreeManager.getToolInfos().some((tool: any) => tool.name === externalToolName)).toBe(true);
+			sessionManager.refreshExternalMcpToolRegistrations();
+
+			releasePersistence!();
+			response = await decisionResponse;
+
+			expect(response.status).toBe(200);
+			expect((await response.json()).server).toMatchObject({
+				status: "disconnected",
+				toolCount: 0,
+				approval: { state: "rejected" },
+			});
+			expect(worktreeClient.connected).toBe(false);
+			expect(worktreeManager.getToolInfos()).toEqual([]);
+			const tools = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(tools.tools.some((tool: any) => tool.name === externalToolName)).toBe(false);
+		} finally {
+			releasePersistence?.();
+			if (viewManager && originalDecideApproval) viewManager.decideApproval = originalDecideApproval;
+			if (sessionId) {
+				sessionManager.sessions.delete(sessionId);
+				sessionManager.mcpSessionScopes.delete(sessionId);
+			}
+			await remote.close();
+			await isolated.cleanup();
+		}
+	});
+
 	test("an on-disk change blocks a cached remote tool call before periodic reconciliation", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "pre-call-freshness");
 		const approvedServer = await startRecordingMcpServer("cached_probe");
