@@ -15,10 +15,7 @@ interface McpApprovalBannerState {
 	activeProjectId: string | null;
 }
 
-export interface McpApprovalReviewScope extends McpServerRequestScope {
-	sessionId?: string;
-	goalId?: string;
-}
+export type McpApprovalReviewScope = McpServerRequestScope;
 
 const reviewCountByScope = new Map<string, number>();
 const countRequestByScope = new Map<string, Promise<void>>();
@@ -31,14 +28,14 @@ function scopeForSession(sessionId: string | undefined, source: McpApprovalBanne
 	const session = source.gatewaySessions.find((candidate) => candidate.id === sessionId)
 		?? source.archivedSessions.find((candidate) => candidate.id === sessionId);
 	if (!session?.projectId) return undefined;
-	return { projectId: session.projectId, ...(session.cwd ? { cwd: session.cwd, sessionId } : {}) };
+	return { projectId: session.projectId, sessionId, ...(session.cwd ? { cwd: session.cwd } : {}) };
 }
 
 function scopeForGoal(goalId: string | undefined, source: McpApprovalBannerState): McpApprovalReviewScope | undefined {
 	if (!goalId) return undefined;
 	const goal = source.goals.find((candidate) => candidate.id === goalId);
 	if (!goal?.projectId) return undefined;
-	return { projectId: goal.projectId, ...(goal.cwd ? { cwd: goal.cwd, goalId } : {}) };
+	return { projectId: goal.projectId, goalId, ...(goal.cwd ? { cwd: goal.cwd } : {}) };
 }
 
 /** Resolve the project and optional existing session/goal cwd represented by the current surface. */
@@ -80,9 +77,9 @@ export function resolveMcpApprovalBannerProjectId(
 }
 
 function scopeKey(scope: McpServerRequestScope): string {
-	// Cwd is server-authored. Preserve it byte-for-byte: client-side case or
-	// separator folding can conflate distinct POSIX execution directories.
-	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
+	// Cwd and opaque owner are server-authored. Preserve them byte-for-byte:
+	// client-side folding can conflate distinct POSIX execution directories.
+	return JSON.stringify([scope.projectId, scope.cwd ?? null, scope.sessionId ?? null, scope.goalId ?? null]);
 }
 
 function scheduleToolsRevalidation(scope: McpApprovalReviewScope, route: AppRoute): void {
@@ -108,7 +105,7 @@ function ensureReviewCount(scope: McpApprovalReviewScope): void {
 	if (reviewCountByScope.has(key) || countRequestByScope.has(key)) return;
 	const revision = countRevisionByScope.get(key) ?? 0;
 	let request: Promise<void>;
-	request = fetchMcpServers({ projectId: scope.projectId, cwd: scope.cwd, ensure: true })
+	request = fetchMcpServers({ ...scope, ensure: true })
 		.then((servers) => {
 			if ((countRevisionByScope.get(key) ?? 0) !== revision) return;
 			const count = servers.filter((server) =>

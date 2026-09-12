@@ -278,8 +278,12 @@ let scopedRefreshRevision = 0;
 let toolPageViewEpoch = 0;
 let mcpRequestScope: McpServerRequestScope = { projectId: getConfigApiProjectId() };
 
-function requestScope(projectId: string, cwd: string | undefined): McpServerRequestScope {
-	return cwd ? { projectId, cwd } : { projectId };
+function requestScope(
+	projectId: string,
+	cwd: string | undefined,
+	owner: { sessionId: string } | { goalId: string },
+): McpServerRequestScope {
+	return { projectId, ...owner, ...(cwd ? { cwd } : {}) };
 }
 
 function localMcpReviewOwner(): GatewaySession | Goal | undefined {
@@ -308,7 +312,9 @@ async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
 	}
 	if (owner && typeof owner.projectId === "string" && typeof owner.cwd === "string") {
 		setConfigScope(owner.projectId);
-		return requestScope(owner.projectId, owner.cwd);
+		return route.mcpReviewSessionId
+			? requestScope(owner.projectId, owner.cwd, { sessionId: route.mcpReviewSessionId })
+			: requestScope(owner.projectId, owner.cwd, { goalId: route.mcpReviewGoalId! });
 	}
 	// A removed/invalid owner cannot retain path authority. Fall back to the
 	// selected project's root scope and make that durable in the current route.
@@ -317,7 +323,7 @@ async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
 }
 
 function mcpScopeKey(scope: McpServerRequestScope): string {
-	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
+	return JSON.stringify([scope.projectId, scope.cwd ?? null, scope.sessionId ?? null, scope.goalId ?? null]);
 }
 
 function ownsMcpView(epoch: number, scopeKey: string): boolean {

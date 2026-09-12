@@ -7127,6 +7127,22 @@ export class SessionManager {
 		return { projectId: session.projectId, cwd };
 	}
 
+	/**
+	 * Resolve the host discovery coordinate already bound to, or derivable for,
+	 * an actual live/persisted session. This is a read-only review capability:
+	 * callers must still verify the returned project and validate their claimed
+	 * cwd against the session owner before selecting an MCP manager.
+	 */
+	resolveMcpReviewScopeForSession(sessionId: string): { projectId: string; cwd: string } | undefined {
+		const live = this.sessions.get(sessionId);
+		const persisted = live ? undefined : this.getPersistedSession(sessionId);
+		const owner = live ?? persisted;
+		if (!owner?.projectId) return undefined;
+		const scope = this.getMcpSessionScope(sessionId);
+		if (scope.projectId !== owner.projectId || !scope.cwd) return undefined;
+		return { projectId: scope.projectId, cwd: scope.cwd };
+	}
+
 	private async bindMcpManagerToSession(sessionId: string, projectId?: string, cwd?: string): Promise<McpManager | null> {
 		if (!projectId || !cwd) {
 			this.mcpSessionScopes.delete(sessionId);

@@ -20863,18 +20863,64 @@ async function handleApiRoute(
 		return;
 	}
 
+	type McpRequestCwdResolution = { ok: true; cwd?: string } | { ok: false };
+	const resolveMcpRequestCwd = (resolvedProjectId: string): McpRequestCwdResolution => {
+		const sessionIds = url.searchParams.getAll("sessionId");
+		const goalIds = url.searchParams.getAll("goalId");
+		const cwdValues = url.searchParams.getAll("cwd");
+		const invalidShape = sessionIds.length > 1 || goalIds.length > 1 || cwdValues.length > 1
+			|| (sessionIds.length > 0 && goalIds.length > 0);
+		const sessionId = sessionIds[0];
+		const goalId = goalIds[0];
+		const requestedCwd = cwdValues[0] || undefined;
+		const validOwnerId = (value: string | undefined): value is string =>
+			!!value && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+		if (invalidShape || (sessionIds.length > 0 && !validOwnerId(sessionId)) || (goalIds.length > 0 && !validOwnerId(goalId))) {
+			json({ error: "MCP review scope must contain at most one valid sessionId or goalId.", code: "MCP_REVIEW_SCOPE_INVALID" }, 400);
+			return { ok: false };
+		}
+
+		let source: CwdOwnershipSource = { kind: "user-input" };
+		let effectiveCwd = requestedCwd;
+		if (sessionId) {
+			const owner = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+			const reviewScope = sessionManager.resolveMcpReviewScopeForSession(sessionId);
+			if (!owner || !reviewScope || reviewScope.projectId !== resolvedProjectId || owner.projectId !== resolvedProjectId) {
+				json({ error: "The MCP review session does not belong to the selected project.", code: "CWD_OUTSIDE_PROJECT" }, 422);
+				return { ok: false };
+			}
+			source = { kind: "session", sessionId };
+			const claimedCwd = requestedCwd ?? owner.cwd ?? reviewScope.cwd;
+			const claimValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, claimedCwd, source);
+			if (!claimValidation.ok) { writeCwdValidationError(claimValidation); return { ok: false }; }
+			// The browser may display a sandbox path. Runtime discovery must stay on
+			// the exact authoritative host coordinate already bound/derivable for it.
+			effectiveCwd = reviewScope.cwd;
+		} else if (goalId) {
+			const goalContext = projectContextManager.getContextForGoal(goalId);
+			const goal = goalContext?.goalStore.get(goalId);
+			if (!goalContext || goalContext.project.id !== resolvedProjectId || !goal || (goal.projectId && goal.projectId !== resolvedProjectId)) {
+				json({ error: "The MCP review goal does not belong to the selected project.", code: "CWD_OUTSIDE_PROJECT" }, 422);
+				return { ok: false };
+			}
+			source = { kind: "goal", goalId };
+			effectiveCwd = requestedCwd ?? goal.cwd ?? goal.worktreePath;
+		}
+
+		if (!effectiveCwd) return { ok: true };
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, effectiveCwd, source);
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return { ok: false }; }
+		return { ok: true, cwd: cwdValidation.cwd };
+	};
+
 	// GET /api/mcp-servers
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		let effectiveCwd: string | undefined;
-		if (cwd) {
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-			effectiveCwd = cwdValidation.cwd;
-		}
+		const cwdResolution = resolveMcpRequestCwd(resolvedProject.projectId);
+		if (!cwdResolution.ok) return;
+		const effectiveCwd = cwdResolution.cwd;
 		const ensure = url.searchParams.get("ensure") === "true";
 		const resolvedProjectId = resolvedProject.projectId;
 		const managerScope = { projectId: resolvedProjectId, cwd: effectiveCwd };
@@ -20908,15 +20954,11 @@ async function handleApiRoute(
 			return;
 		}
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		let effectiveCwd: string | undefined;
-		if (cwd) {
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-			effectiveCwd = cwdValidation.cwd;
-		}
+		const cwdResolution = resolveMcpRequestCwd(resolvedProject.projectId);
+		if (!cwdResolution.ok) return;
+		const effectiveCwd = cwdResolution.cwd;
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") {
 			json({ error: "Missing approval request body", code: "MCP_APPROVAL_INVALID_REQUEST" }, 400);
