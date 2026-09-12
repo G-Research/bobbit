@@ -3238,8 +3238,13 @@ export interface McpServerInfo {
 	tools: McpOperationInfo[];
 }
 
+export interface McpServerRequestScope {
+	projectId: string;
+	cwd?: string;
+}
+
 /** GET /api/mcp-servers — returns effective servers, including definitions awaiting approval. */
-export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
+export async function fetchMcpServers(opts?: Partial<McpServerRequestScope> & { ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
 		const params = new URLSearchParams();
 		params.set("projectId", configApiProjectId(opts?.projectId));
@@ -3267,9 +3272,11 @@ export interface McpApprovalRequest {
 export async function decideMcpServerApproval(
 	serverName: string,
 	request: McpApprovalRequest,
-	projectId?: string,
+	scope?: string | McpServerRequestScope,
 ): Promise<McpServerInfo> {
+	const projectId = typeof scope === "string" ? scope : scope?.projectId;
 	const params = new URLSearchParams({ projectId: configApiProjectId(projectId) });
+	if (typeof scope !== "string" && scope?.cwd) params.set("cwd", scope.cwd);
 	const approvalGatewayBaseUrl = activeGatewayConnection().baseUrl;
 	const res = await gatewayFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${params.toString()}`, {
 		method: "POST",

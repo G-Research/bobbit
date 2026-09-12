@@ -1,10 +1,12 @@
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, registerProject, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	createMcpProjectApprovalFixture,
+	createMcpWorktreeApprovalFixture,
 	LOCAL_SECRET,
 	REMOTE_SECRET,
 	LOCAL_SERVER_NAME,
 	REMOTE_SERVER_NAME,
+	WORKTREE_SERVER_NAME,
 } from "../../support/browser/mcp-project-approval-fixture.js";
 
 test.use({ enableMcp: true, gatewayStateGroup: "mcp-project-approval" });
@@ -219,6 +221,118 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		if (sessionId) await deleteSession(sessionId).catch(() => {});
 		if (secondaryProjectId) await apiFetch(`/api/projects/${encodeURIComponent(secondaryProjectId)}`, { method: "DELETE" }).catch(() => {});
 		if (primaryProjectId) await apiFetch(`/api/projects/${encodeURIComponent(primaryProjectId)}`, { method: "DELETE" }).catch(() => {});
+		fixture.cleanup();
+	}
+});
+
+test("worktree MCP review scope survives navigation, decisions, reload, and request races", async ({ page, gateway }) => {
+	test.setTimeout(120_000);
+	const fixture = createMcpWorktreeApprovalFixture();
+	const pairingCode = gateway.createMcpOperatorPairingCode().code;
+	const projectName = `Worktree Approval ${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+	let projectId = "";
+	let sessionId = "";
+	const approvalRequests: string[] = [];
+	page.on("request", (request) => {
+		const url = new URL(request.url());
+		if (url.pathname.endsWith(`/api/mcp-servers/${WORKTREE_SERVER_NAME}/approval`)) approvalRequests.push(request.url());
+	});
+
+	try {
+		const project = await registerProject({ name: projectName, rootPath: fixture.projectRoot, seedWorkflows: false });
+		projectId = project.id;
+		sessionId = await createSession({ projectId, cwd: fixture.worktreeRoot });
+
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		const banner = page.locator('[data-testid="mcp-approval-banner"]');
+		await expect(banner).toBeVisible({ timeout: 20_000 });
+		await expect(banner.locator('[data-testid="mcp-approval-banner-count"]')).toHaveText("1");
+
+		const worktreeLoad = page.waitForResponse((response) => {
+			const url = new URL(response.url());
+			return url.pathname.endsWith("/api/mcp-servers")
+				&& url.searchParams.get("projectId") === projectId
+				&& url.searchParams.get("cwd") === fixture.worktreeRoot;
+		});
+		await banner.locator('[data-testid="mcp-review-servers"]').click();
+		await worktreeLoad;
+		await expect(page).toHaveURL(new RegExp(`#\\/tools\\?reviewSession=${sessionId}$`));
+
+		let row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Pending approval", { timeout: 20_000 });
+		if (await row.locator('[data-testid="mcp-server-toggle"]').getAttribute("aria-expanded") !== "true") {
+			await row.locator('[data-testid="mcp-server-toggle"]').click();
+		}
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant worktree-v1");
+
+		const pairing = page.locator('[data-testid="mcp-pairing-callout"]');
+		await pairing.locator('[data-testid="mcp-pairing-code"]').fill(pairingCode);
+		await pairing.locator('[data-testid="mcp-pair-browser"]').click();
+		await expect(pairing.locator('[data-testid="mcp-pairing-notice"]')).toBeVisible();
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
+		expect(approvalRequests).toHaveLength(1);
+		const approvalUrl = new URL(approvalRequests[0]);
+		expect(approvalUrl.searchParams.get("projectId")).toBe(projectId);
+		expect(approvalUrl.searchParams.get("cwd")).toBe(fixture.worktreeRoot);
+
+		// The opaque owner id in the route recovers the authoritative cwd after reload.
+		await page.reload();
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		await expect(page).toHaveURL(new RegExp(`#\\/tools\\?reviewSession=${sessionId}$`));
+		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("connected");
+
+		fixture.writeWorktree("v2");
+		const changed = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		expect(changed.status).toBe(200);
+		await page.reload();
+		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again", { timeout: 20_000 });
+		if (await row.locator('[data-testid="mcp-server-toggle"]').getAttribute("aria-expanded") !== "true") {
+			await row.locator('[data-testid="mcp-server-toggle"]').click();
+		}
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant worktree-v2");
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
+
+		// A late worktree response cannot overwrite the root project scope chosen
+		// while it is in flight. The behaviorally different root definition stays unapproved.
+		fixture.writeWorktree("v3");
+		const racedChange = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		expect(racedChange.status).toBe(200);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(banner).toBeVisible({ timeout: 20_000 });
+		let delayWorktree = true;
+		await page.route("**/api/mcp-servers?**", async (route) => {
+			const url = new URL(route.request().url());
+			if (delayWorktree && url.searchParams.get("cwd") === fixture.worktreeRoot) {
+				delayWorktree = false;
+				await new Promise((resolve) => setTimeout(resolve, 750));
+			}
+			await route.continue();
+		});
+		const lateWorktreeResponse = page.waitForResponse((response) => {
+			const url = new URL(response.url());
+			return url.pathname.endsWith("/api/mcp-servers") && url.searchParams.get("cwd") === fixture.worktreeRoot;
+		});
+		await banner.locator('[data-testid="mcp-review-servers"]').click();
+		await expect(page).toHaveURL(/#\/tools\?reviewSession=/);
+		await page.getByRole("button", { name: projectName, exact: true }).click();
+		await expect(page).toHaveURL(/#\/tools$/);
+		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again", { timeout: 20_000 });
+		if (await row.locator('[data-testid="mcp-server-toggle"]').getAttribute("aria-expanded") !== "true") {
+			await row.locator('[data-testid="mcp-server-toggle"]').click();
+		}
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant root");
+		await lateWorktreeResponse;
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant root");
+	} finally {
+		if (sessionId) await deleteSession(sessionId).catch(() => {});
+		if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 		fixture.cleanup();
 	}
 });
