@@ -3,12 +3,12 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { decideMcpServerApproval, fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpApprovalDecision, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
+import { decideMcpServerApproval, fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpApprovalDecision, type McpServerInfo, type McpOperationInfo, type McpServerRequestScope, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { confirmAction, showConnectionError } from "./dialogs.js";
-import { state, renderApp } from "./state.js";
-import { setHashRoute } from "./routing.js";
+import { state, renderApp, type GatewaySession, type Goal } from "./state.js";
+import { getRouteFromHash, setHashRoute, setMcpReviewToolsRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
@@ -273,6 +273,49 @@ let saving = false;
 let collapsedGroups = new Set<string>();
 let editTab: "access" | "context" | "renderer" = "access";
 let scopedRefreshRevision = 0;
+let mcpRequestScope: McpServerRequestScope = { projectId: getConfigApiProjectId() };
+
+function requestScope(projectId: string, cwd: string | undefined): McpServerRequestScope {
+	return cwd ? { projectId, cwd } : { projectId };
+}
+
+function localMcpReviewOwner(): GatewaySession | Goal | undefined {
+	const route = getRouteFromHash();
+	if (route.view !== "tools") return undefined;
+	if (route.mcpReviewSessionId) {
+		return state.gatewaySessions.find((session) => session.id === route.mcpReviewSessionId)
+			?? state.archivedSessions.find((session) => session.id === route.mcpReviewSessionId);
+	}
+	if (route.mcpReviewGoalId) return state.goals.find((goal) => goal.id === route.mcpReviewGoalId);
+	return undefined;
+}
+
+async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
+	const route = getRouteFromHash();
+	if (route.view !== "tools" || (!route.mcpReviewSessionId && !route.mcpReviewGoalId)) {
+		return { projectId: getConfigApiProjectId() };
+	}
+	let owner = localMcpReviewOwner();
+	if (!owner) {
+		const ownerPath = route.mcpReviewSessionId
+			? `/api/sessions/${encodeURIComponent(route.mcpReviewSessionId)}`
+			: `/api/goals/${encodeURIComponent(route.mcpReviewGoalId!)}`;
+		const response = await gatewayFetch(ownerPath);
+		if (response.ok) owner = await response.json() as GatewaySession | Goal;
+	}
+	if (owner && typeof owner.projectId === "string" && typeof owner.cwd === "string") {
+		setConfigScope(owner.projectId);
+		return requestScope(owner.projectId, owner.cwd);
+	}
+	// A removed/invalid owner cannot retain path authority. Fall back to the
+	// selected project's root scope and make that durable in the current route.
+	setMcpReviewToolsRoute(undefined, true, true);
+	return { projectId: getConfigApiProjectId() };
+}
+
+function mcpScopeKey(scope: McpServerRequestScope): string {
+	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
+}
 
 // ============================================================================
 // POLICY HELPERS
@@ -416,14 +459,22 @@ async function fetchToolsScoped(): Promise<ToolInfo[]> {
 
 async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boolean> {
 	const scopedProjectId = getConfigApiProjectId();
+	const scopedMcpRequest = mcpRequestScope.projectId === scopedProjectId
+		? { ...mcpRequestScope }
+		: { projectId: scopedProjectId };
+	const scopedMcpKey = mcpScopeKey(scopedMcpRequest);
 	const refreshRevision = ++scopedRefreshRevision;
 	const [toolResponse, r, gp, mcp] = await Promise.all([
 		fetchToolsResponse(scopedProjectId),
 		fetchRoles(scopedProjectId),
 		fetchGroupPolicies(scopedProjectId),
-		fetchMcpServers({ projectId: scopedProjectId, ensure: true }),
+		fetchMcpServers({ ...scopedMcpRequest, ensure: true }),
 	]);
-	if (refreshRevision !== scopedRefreshRevision || scopedProjectId !== getConfigApiProjectId()) return false;
+	if (
+		refreshRevision !== scopedRefreshRevision
+		|| scopedProjectId !== getConfigApiProjectId()
+		|| scopedMcpKey !== mcpScopeKey(mcpRequestScope)
+	) return false;
 	tools = toolResponse.tools;
 	toolDiagnostics = toolResponse.diagnostics;
 	roles = r;
@@ -439,11 +490,15 @@ async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boole
 }
 
 export async function loadToolPageData(): Promise<void> {
+	const loadRevision = ++scopedRefreshRevision;
 	currentView = "list";
 	selectedTool = null;
 	loading = true;
 	saving = false;
 	renderApp();
+	const resolvedMcpScope = await resolveMcpRequestScope();
+	if (loadRevision !== scopedRefreshRevision) return;
+	mcpRequestScope = resolvedMcpScope;
 	if (await refreshScopedToolPageData(true)) {
 		loading = false;
 		renderApp();
@@ -452,6 +507,7 @@ export async function loadToolPageData(): Promise<void> {
 
 export function clearToolPageState(): void {
 	scopedRefreshRevision++;
+	mcpRequestScope = { projectId: getConfigApiProjectId() };
 	currentView = "list";
 	selectedTool = null;
 	toolDiagnostics = [];
@@ -810,6 +866,8 @@ function renderMcpPairingCallout(): TemplateResult | typeof nothing {
 async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDecision): Promise<void> {
 	const approval = server.approval;
 	const source = server.source;
+	const decisionScope = { ...mcpRequestScope };
+	const decisionScopeKey = mcpScopeKey(decisionScope);
 	if (!approval?.fingerprint || !source?.sourceId || !source.projectId || busyMcpServers.has(server.name) || mcpApprovalIsInvalid(server)) return;
 	if (decision === "rejected" && approval.state === "approved") {
 		const confirmed = await confirmAction(
@@ -832,10 +890,13 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 			fingerprint: approval.fingerprint,
 			sourceProjectId: source.projectId,
 			sourceId: source.sourceId,
-		}, getConfigApiProjectId());
+		}, decisionScope);
 		await refreshScopedToolPageData(false);
-		mcpApprovalAnnouncements.set(server.name, `${server.name} ${decision === "approved" ? "approved" : "rejected"}.`);
+		if (decisionScopeKey === mcpScopeKey(mcpRequestScope)) {
+			mcpApprovalAnnouncements.set(server.name, `${server.name} ${decision === "approved" ? "approved" : "rejected"}.`);
+		}
 	} catch (error) {
+		if (decisionScopeKey !== mcpScopeKey(mcpRequestScope)) return;
 		const details = errorDetails(error);
 		if (details.code === "MCP_APPROVAL_STALE") {
 			await refreshScopedToolPageData(false);
@@ -855,8 +916,10 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 	} finally {
 		busyMcpServers.delete(server.name);
 		renderApp();
-		if (pairingRequired) focusMcpPairingInput();
-		else focusMcpReviewToggle(server.name);
+		if (decisionScopeKey === mcpScopeKey(mcpRequestScope)) {
+			if (pairingRequired) focusMcpPairingInput();
+			else focusMcpReviewToggle(server.name);
+		}
 	}
 }
 
@@ -1138,7 +1201,10 @@ function renderNavBar(): TemplateResult {
 // ============================================================================
 
 async function handleScopeChange(scope: string): Promise<void> {
+	scopedRefreshRevision++;
 	setConfigScope(scope);
+	setMcpReviewToolsRoute(undefined, true, true);
+	mcpRequestScope = { projectId: getConfigApiProjectId() };
 	loading = true;
 	mcpApprovalErrors.clear();
 	mcpApprovalAnnouncements.clear();

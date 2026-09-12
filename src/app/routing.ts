@@ -30,6 +30,9 @@ export interface AppRoute {
 	dashboardTab?: DashboardTabId;
 	focusGateId?: string;
 	focusSignalId?: string;
+	/** Opaque owner used to recover a worktree-scoped MCP review after navigation/reload. */
+	mcpReviewSessionId?: string;
+	mcpReviewGoalId?: string;
 }
 
 const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates", "plan", "children"]);
@@ -90,8 +93,16 @@ export function getRouteFromHash(): AppRoute {
 	if (toolEditMatch) {
 		return { view: "tool-edit", toolName: toolEditMatch[1] };
 	}
-	if (hash === "#/tools") {
-		return { view: "tools" };
+	if (hash === "#/tools" || hash.startsWith("#/tools?")) {
+		const queryIndex = hash.indexOf("?");
+		const params = queryIndex >= 0 ? new URLSearchParams(hash.slice(queryIndex + 1)) : null;
+		const sessionId = params?.get("reviewSession") || undefined;
+		const goalId = params?.get("reviewGoal") || undefined;
+		return {
+			view: "tools",
+			mcpReviewSessionId: sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId) ? sessionId : undefined,
+			mcpReviewGoalId: goalId && /^[a-f0-9-]+$/i.test(goalId) ? goalId : undefined,
+		};
 	}
 	const workflowEditMatch = hash.match(/^#\/workflows\/([a-zA-Z0-9_-]+)$/);
 	if (workflowEditMatch) {
@@ -194,6 +205,25 @@ export function canonicalizePathSessionRoute(sessionId: string): void {
 	if (window.location.pathname !== expectedPath || window.location.hash !== expectedHash) return;
 	// replaceState avoids a hashchange while cleaning up path-style deep links.
 	history.replaceState(history.state ?? {}, "", appUrl(`/#/session/${sessionId}`));
+}
+
+export function setMcpReviewToolsRoute(
+	owner?: { sessionId?: string; goalId?: string },
+	replace?: boolean,
+	silent?: boolean,
+): void {
+	const query = new URLSearchParams();
+	if (owner?.sessionId) query.set("reviewSession", owner.sessionId);
+	else if (owner?.goalId) query.set("reviewGoal", owner.goalId);
+	const suffix = query.toString();
+	const newHash = `#/tools${suffix ? `?${suffix}` : ""}`;
+	if (window.location.hash === newHash) return;
+	if (replace) {
+		history.replaceState({}, "", newHash);
+		if (!silent) window.dispatchEvent(new HashChangeEvent("hashchange"));
+	} else {
+		window.location.hash = newHash;
+	}
 }
 
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {

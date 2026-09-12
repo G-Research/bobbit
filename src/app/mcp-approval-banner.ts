@@ -1,7 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
-import { fetchMcpServers } from "./api.js";
-import { setConfigScope } from "./config-scope.js";
-import { getRouteFromHash, setHashRoute, type AppRoute } from "./routing.js";
+import { fetchMcpServers, type McpServerRequestScope } from "./api.js";
+import { getConfigApiProjectId, setConfigScope } from "./config-scope.js";
+import { getRouteFromHash, setHashRoute, setMcpReviewToolsRoute, type AppRoute } from "./routing.js";
 import { renderApp, state, type GatewaySession, type Goal, type Project } from "./state.js";
 
 interface McpApprovalBannerState {
@@ -15,73 +15,112 @@ interface McpApprovalBannerState {
 	activeProjectId: string | null;
 }
 
-const reviewCountByProject = new Map<string, number>();
-const countRequestByProject = new Map<string, Promise<void>>();
-const countRevisionByProject = new Map<string, number>();
-let toolsRevalidationTimer: ReturnType<typeof setTimeout> | undefined;
-let toolsRevalidationProjectId: string | undefined;
-
-function sessionProjectId(sessionId: string | undefined, source: McpApprovalBannerState): string | undefined {
-	if (!sessionId) return undefined;
-	return source.gatewaySessions.find((session) => session.id === sessionId)?.projectId
-		?? source.archivedSessions.find((session) => session.id === sessionId)?.projectId;
+export interface McpApprovalReviewScope extends McpServerRequestScope {
+	sessionId?: string;
+	goalId?: string;
 }
 
-/** Resolve the project represented by the current surface without inferring it from cwd. */
+const reviewCountByScope = new Map<string, number>();
+const countRequestByScope = new Map<string, Promise<void>>();
+const countRevisionByScope = new Map<string, number>();
+let toolsRevalidationTimer: ReturnType<typeof setTimeout> | undefined;
+let toolsRevalidationScopeKey: string | undefined;
+
+function scopeForSession(sessionId: string | undefined, source: McpApprovalBannerState): McpApprovalReviewScope | undefined {
+	if (!sessionId) return undefined;
+	const session = source.gatewaySessions.find((candidate) => candidate.id === sessionId)
+		?? source.archivedSessions.find((candidate) => candidate.id === sessionId);
+	if (!session?.projectId) return undefined;
+	return { projectId: session.projectId, ...(session.cwd ? { cwd: session.cwd, sessionId } : {}) };
+}
+
+function scopeForGoal(goalId: string | undefined, source: McpApprovalBannerState): McpApprovalReviewScope | undefined {
+	if (!goalId) return undefined;
+	const goal = source.goals.find((candidate) => candidate.id === goalId);
+	if (!goal?.projectId) return undefined;
+	return { projectId: goal.projectId, ...(goal.cwd ? { cwd: goal.cwd, goalId } : {}) };
+}
+
+/** Resolve the project and optional existing session/goal cwd represented by the current surface. */
+export function resolveMcpApprovalBannerScope(
+	route: AppRoute,
+	source: McpApprovalBannerState = state,
+): McpApprovalReviewScope | undefined {
+	if (route.view === "session") {
+		const routeScope = scopeForSession(route.sessionId, source);
+		if (routeScope) return routeScope;
+	}
+	if (route.view === "goal-dashboard") {
+		const routeScope = scopeForGoal(route.goalId, source);
+		if (routeScope) return routeScope;
+	}
+	if (route.view === "tools") {
+		const reviewScope = scopeForSession(route.mcpReviewSessionId, source)
+			?? scopeForGoal(route.mcpReviewGoalId, source);
+		// Plain Tools is always the selected configuration project's root scope.
+		// Only an explicit opaque owner route may retain a session/goal cwd.
+		return reviewScope ?? { projectId: getConfigApiProjectId() };
+	}
+
+	const activeSessionScope = scopeForSession(source.selectedSessionId ?? undefined, source)
+		?? scopeForSession(source.remoteAgent?.gatewaySessionId, source);
+	if (activeSessionScope) return activeSessionScope;
+
+	const activeGoalScope = scopeForGoal(source.goalDashboardId ?? undefined, source);
+	if (activeGoalScope) return activeGoalScope;
+	return source.activeProjectId ? { projectId: source.activeProjectId } : undefined;
+}
+
+/** Backwards-compatible project-only projection for existing callers/tests. */
 export function resolveMcpApprovalBannerProjectId(
 	route: AppRoute,
 	source: McpApprovalBannerState = state,
 ): string | undefined {
-	if (route.view === "session") {
-		const routeProjectId = sessionProjectId(route.sessionId, source);
-		if (routeProjectId) return routeProjectId;
-	}
-	if (route.view === "goal-dashboard") {
-		const routeProjectId = source.goals.find((goal) => goal.id === route.goalId)?.projectId;
-		if (routeProjectId) return routeProjectId;
-	}
-
-	const activeSessionProjectId = sessionProjectId(source.selectedSessionId ?? undefined, source)
-		?? sessionProjectId(source.remoteAgent?.gatewaySessionId, source);
-	if (activeSessionProjectId) return activeSessionProjectId;
-
-	const activeGoalProjectId = source.goals.find((goal) => goal.id === source.goalDashboardId)?.projectId;
-	return activeGoalProjectId ?? source.activeProjectId ?? undefined;
+	return resolveMcpApprovalBannerScope(route, source)?.projectId;
 }
 
-function scheduleToolsRevalidation(projectId: string, route: AppRoute): void {
-	if (route.view !== "tools" || toolsRevalidationTimer && toolsRevalidationProjectId === projectId) return;
+function scopeKey(scope: McpServerRequestScope): string {
+	// Cwd is server-authored. Preserve it byte-for-byte: client-side case or
+	// separator folding can conflate distinct POSIX execution directories.
+	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
+}
+
+function scheduleToolsRevalidation(scope: McpApprovalReviewScope, route: AppRoute): void {
+	const key = scopeKey(scope);
+	if (route.view !== "tools" || toolsRevalidationTimer && toolsRevalidationScopeKey === key) return;
 	if (toolsRevalidationTimer) clearTimeout(toolsRevalidationTimer);
-	toolsRevalidationProjectId = projectId;
+	toolsRevalidationScopeKey = key;
 	toolsRevalidationTimer = setTimeout(() => {
 		toolsRevalidationTimer = undefined;
-		toolsRevalidationProjectId = undefined;
+		toolsRevalidationScopeKey = undefined;
 		const currentRoute = getRouteFromHash();
-		if (currentRoute.view !== "tools" || resolveMcpApprovalBannerProjectId(currentRoute) !== projectId) return;
-		reviewCountByProject.delete(projectId);
-		countRequestByProject.delete(projectId);
-		countRevisionByProject.set(projectId, (countRevisionByProject.get(projectId) ?? 0) + 1);
+		const currentScope = resolveMcpApprovalBannerScope(currentRoute);
+		if (currentRoute.view !== "tools" || !currentScope || scopeKey(currentScope) !== key) return;
+		reviewCountByScope.delete(key);
+		countRequestByScope.delete(key);
+		countRevisionByScope.set(key, (countRevisionByScope.get(key) ?? 0) + 1);
 		renderApp();
 	}, 2_000);
 }
 
-function ensureReviewCount(projectId: string): void {
-	if (reviewCountByProject.has(projectId) || countRequestByProject.has(projectId)) return;
-	const revision = countRevisionByProject.get(projectId) ?? 0;
+function ensureReviewCount(scope: McpApprovalReviewScope): void {
+	const key = scopeKey(scope);
+	if (reviewCountByScope.has(key) || countRequestByScope.has(key)) return;
+	const revision = countRevisionByScope.get(key) ?? 0;
 	let request: Promise<void>;
-	request = fetchMcpServers({ projectId, ensure: true })
+	request = fetchMcpServers({ projectId: scope.projectId, cwd: scope.cwd, ensure: true })
 		.then((servers) => {
-			if ((countRevisionByProject.get(projectId) ?? 0) !== revision) return;
+			if ((countRevisionByScope.get(key) ?? 0) !== revision) return;
 			const count = servers.filter((server) =>
 				server.approval?.state === "pending" || server.approval?.state === "changed"
 			).length;
-			reviewCountByProject.set(projectId, count);
+			reviewCountByScope.set(key, count);
 			renderApp();
 		})
 		.finally(() => {
-			if (countRequestByProject.get(projectId) === request) countRequestByProject.delete(projectId);
+			if (countRequestByScope.get(key) === request) countRequestByScope.delete(key);
 		});
-	countRequestByProject.set(projectId, request);
+	countRequestByScope.set(key, request);
 }
 
 function focusFirstReviewRow(): void {
@@ -110,10 +149,13 @@ function focusFirstReviewRow(): void {
 	setTimeout(() => observer?.disconnect(), 10_000);
 }
 
-async function reviewProjectServers(projectId: string): Promise<void> {
-	setConfigScope(projectId);
-	const alreadyOnTools = getRouteFromHash().view === "tools";
-	setHashRoute("tools");
+async function reviewProjectServers(scope: McpApprovalReviewScope): Promise<void> {
+	setConfigScope(scope.projectId);
+	const currentRoute = getRouteFromHash();
+	const alreadyOnTools = currentRoute.view === "tools";
+	if (scope.cwd && scope.sessionId) setMcpReviewToolsRoute({ sessionId: scope.sessionId });
+	else if (scope.cwd && scope.goalId) setMcpReviewToolsRoute({ goalId: scope.goalId });
+	else setHashRoute("tools");
 	// A same-route hash assignment emits no navigation event, so refresh the
 	// existing Tools surface directly before starting the single reveal lifecycle.
 	// Normal navigation owns its load, and the observer waits for that render.
@@ -127,14 +169,18 @@ async function reviewProjectServers(projectId: string): Promise<void> {
 /** Invalidate counts after a server decision or configuration reconciliation. */
 export function invalidateMcpApprovalBanner(projectIds?: readonly string[]): void {
 	const ids = projectIds?.filter((id): id is string => typeof id === "string" && id.length > 0);
-	const affected = ids?.length ? [...new Set(ids)] : [...new Set([
-		...reviewCountByProject.keys(),
-		...countRequestByProject.keys(),
+	const knownKeys = [...new Set([
+		...reviewCountByScope.keys(),
+		...countRequestByScope.keys(),
+		...countRevisionByScope.keys(),
 	])];
-	for (const projectId of affected) {
-		reviewCountByProject.delete(projectId);
-		countRequestByProject.delete(projectId);
-		countRevisionByProject.set(projectId, (countRevisionByProject.get(projectId) ?? 0) + 1);
+	const affected = ids?.length
+		? knownKeys.filter((key) => ids.some((projectId) => key.startsWith(`${JSON.stringify([projectId]).slice(0, -1)},`)))
+		: knownKeys;
+	for (const key of affected) {
+		reviewCountByScope.delete(key);
+		countRequestByScope.delete(key);
+		countRevisionByScope.set(key, (countRevisionByScope.get(key) ?? 0) + 1);
 	}
 	renderApp();
 }
@@ -151,16 +197,17 @@ export function handleMcpApprovalsChanged(message: unknown): void {
 }
 
 export function renderMcpApprovalBanner(route: AppRoute = getRouteFromHash()): TemplateResult | typeof nothing {
-	const projectId = resolveMcpApprovalBannerProjectId(route);
-	if (!projectId) return nothing;
-	ensureReviewCount(projectId);
+	const scope = resolveMcpApprovalBannerScope(route);
+	if (!scope) return nothing;
+	const key = scopeKey(scope);
+	ensureReviewCount(scope);
 	// The Tools route intentionally has no active session socket. Revalidate its
 	// compact count even when it is zero so a later configuration change can make
 	// the banner appear; active session surfaces still use immediate WS invalidation.
-	scheduleToolsRevalidation(projectId, route);
-	const count = reviewCountByProject.get(projectId) ?? 0;
+	scheduleToolsRevalidation(scope, route);
+	const count = reviewCountByScope.get(key) ?? 0;
 	if (count === 0) return nothing;
-	const projectName = state.projects.find((project) => project.id === projectId)?.name ?? "this project";
+	const projectName = state.projects.find((project) => project.id === scope.projectId)?.name ?? "this project";
 	return html`
 		<div
 			class="shrink-0 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 py-1.5 text-xs"
@@ -175,7 +222,7 @@ export function renderMcpApprovalBanner(route: AppRoute = getRouteFromHash()): T
 				type="button"
 				class="min-h-11 shrink-0 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 				data-testid="mcp-review-servers"
-				@click=${() => { void reviewProjectServers(projectId); }}
+				@click=${() => { void reviewProjectServers(scope); }}
 			>Review servers</button>
 		</div>
 	`;
