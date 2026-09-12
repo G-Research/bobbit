@@ -125,7 +125,7 @@ async function previewFrameState(page: Page): Promise<{
 		try { void localStorage.length; } catch { localStorageReadable = false; }
 		try { void sessionStorage.length; } catch { sessionStorageReadable = false; }
 		return {
-			bodyText: (body.innerText || "").replace(/\s+/g, " ").trim(),
+			bodyText: ((body as HTMLElement).innerText || "").replace(/\s+/g, " ").trim(),
 			parentReadable,
 			localStorageReadable,
 			sessionStorageReadable,
