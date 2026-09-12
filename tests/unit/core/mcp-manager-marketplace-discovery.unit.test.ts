@@ -528,7 +528,7 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.deepEqual(second.calls, []);
   });
 
-  it("gives manual JSON MCP routes precedence over gateway marketplace routes with the same public name", async () => {
+  it("applies manual JSON precedence before approval and does not start a trusted gateway fallback", async () => {
     const { cwd, stateDir } = tmpDirs();
     fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
       mcpServers: { gr: { command: "manual" } },
@@ -548,20 +548,11 @@ describe("McpManager marketplace discovery primitives", () => {
     ]), { marketplaceResolver: resolver }) as any;
 
     await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
-    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, runtimeServerKey: t.runtimeServerKey, contributionId: t.contributionId })), [
-      { name: "mcp__gr__jira__search", runtimeServerKey: "gr", contributionId: undefined },
-    ]);
-    assert.deepEqual(mgr.getRouteDiagnostics(), [{
-      type: "conflict",
-      toolName: "mcp__gr__jira__search",
-      keptRuntimeServerKey: "gr",
-      droppedRuntimeServerKey: "gw-gr",
-      droppedContributionId: "gateway-contribution",
-    }]);
-
-    await mgr.callTool("mcp__gr__jira__search", { q: "manual" });
-    assert.deepEqual(manual.calls, [{ toolName: "jira__search", args: { q: "manual" } }]);
-    assert.deepEqual(gateway.calls, []);
+    assert.deepEqual(mgr.getToolRouteSnapshots(), []);
+    assert.deepEqual(mgr.getRouteDiagnostics(), []);
+    assert.equal(mgr.getServerStatuses()[0].approval.state, "pending");
+    assert.equal(manual.connectCount, 0);
+    assert.equal(gateway.connectCount, 0);
   });
 
   it("keeps conflict precedence stable when a lower-priority connection lists tools first", async () => {
@@ -633,10 +624,10 @@ describe("McpManager marketplace discovery primitives", () => {
     const local = statuses.find((s: any) => s.name === "local")!;
     const remote = statuses.find((s: any) => s.name === "remote")!;
 
-    assert.deepEqual(local.config.env, { API_TOKEN: "<redacted>", PLAIN: "<redacted>" });
-    assert.deepEqual(local.config.args, ["<redacted>", "<redacted>"]);
+    assert.deepEqual(local.config.env, { API_TOKEN: "[redacted]", PLAIN: "[redacted]" });
+    assert.deepEqual(local.config.args, ["--token", "[redacted]"]);
     assert.deepEqual(local.ownerContributions[0].config.env, local.config.env);
-    assert.deepEqual(remote.config.headers, { Authorization: "<redacted>", "X-Plain": "<redacted>" });
+    assert.deepEqual(remote.config.headers, { Authorization: "[redacted]", "X-Plain": "[redacted]" });
     assert.equal(remote.config.url, "https://example.test/mcp");
     assert.deepEqual(remote.ownerContributions[0].config.headers, remote.config.headers);
     assert.ok(!JSON.stringify(statuses).includes("stdio-secret"));
@@ -768,38 +759,42 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.equal(stub.connectCount, 1);
 
     release();
-    assert.equal((await active).status, "ok");
+    const activeResult = await active;
+    assert.equal(activeResult.status, "ok");
+    assert.deepEqual(activeResult.connected, []);
+    assert.deepEqual(activeResult.disconnected, []);
     const [queuedResult, coalescedResult] = await Promise.all([queued, coalesced]);
     assert.equal(queuedResult.status, "ok");
-    assert.deepEqual(queuedResult.disconnected, ["one"]);
-    assert.deepEqual(coalescedResult.disconnected, ["one"]);
+    assert.deepEqual(queuedResult.disconnected, []);
+    assert.deepEqual(coalescedResult.disconnected, []);
     assert.equal(stub.connectCount, 1);
     assert.equal(stub.disconnectCount, 1);
     assert.deepEqual(mgr.getServerStatuses(), []);
     assert.deepEqual(mgr.getToolInfos(), []);
   });
 
-  it("updates ownership metadata for unchanged connected server configs", async () => {
+  it("updates non-identity Marketplace ownership metadata for unchanged connected server configs", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "same" };
-    const resolver: MarketplaceMcpResolver = () => [contrib("same", "same", config)];
+    let packName = "original-pack";
+    const resolver: MarketplaceMcpResolver = () => [contrib("same", "same", config, undefined, {
+      origin: { scope: "project", packId: "stable-pack-id", packName },
+    })];
     const stub = new StubMcpClient("same", { tools: [op("do")] });
     const mgr = new TestMcpManager(cwd, stateDir, new Map([["same", stub]]), { marketplaceResolver: resolver }) as any;
 
     await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
-    assert.equal(mgr.getServerStatuses()[0].origin.scope, "project");
+    assert.equal(mgr.getServerStatuses()[0].origin.packName, "original-pack");
     assert.equal(stub.connectCount, 1);
 
-    fs.writeFileSync(path.join(cwd, ".mcp.json"), JSON.stringify({
-      mcpServers: { same: config },
-    }));
+    packName = "renamed-pack";
     const unchanged = await mgr.reloadDiscoveredServers({ timeoutMs: 0 });
 
     assert.deepEqual(unchanged.unchanged, ["same"]);
     assert.equal(stub.connectCount, 1);
     const status = mgr.getServerStatuses()[0];
-    assert.equal(status.origin?.scope, "manual");
-    assert.equal(status.ownerContributions?.[0]?.origin.scope, "manual");
+    assert.equal(status.origin?.packName, "renamed-pack");
+    assert.equal(status.ownerContributions?.[0]?.origin.packName, "renamed-pack");
   });
 });
 
@@ -907,6 +902,82 @@ describe("SessionManager scoped MCP manager creation", () => {
     const projectStateDir = path.join(projectRoot, ".bobbit", "state");
     assert.equal(fs.existsSync(path.join(projectStateDir, "goals.sqlite")), false);
     assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
+  });
+
+  it("keeps root compatibility while sharing and cleaning combined project-worktree managers", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-session-worktree-scope-"));
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    const otherRoot = path.join(root, "other");
+    const worktreeRoot = path.join(projectRoot, "worktrees", "candidate");
+    fs.mkdirSync(path.join(projectRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(path.join(otherRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+    const projectId = "worktree-scope-project";
+    const otherProjectId = "worktree-scope-other";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([
+      { id: projectId, name: "Worktree Scope", rootPath: projectRoot, createdAt: Date.now(), colorLight: "#3b82f6", colorDark: "#60a5fa" },
+      { id: otherProjectId, name: "Other", rootPath: otherRoot, createdAt: Date.now(), colorLight: "#3b82f6", colorDark: "#60a5fa" },
+    ]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
+    pcm.initAll();
+    const sessionManager = new SessionManager({ projectContextManager: pcm }) as any;
+    const created: Array<{ cwd: string; scopeKey: string; manager: any }> = [];
+    sessionManager.createMcpManager = (cwd: string, opts: { projectId: string; scopeKey: string }) => {
+      const manager = {
+        connectAll: async () => {},
+        disconnectAll: async () => { manager.disconnected = true; },
+        disconnected: false,
+        getScopeKey: () => opts.scopeKey,
+        getDiscoveryScope: () => ({ projectId: opts.projectId, cwd }),
+      };
+      created.push({ cwd, scopeKey: opts.scopeKey, manager });
+      return manager;
+    };
+
+    try {
+      const rootManager = await sessionManager.ensureMcpManager({ projectId, cwd: projectRoot });
+      assert.equal(created[0].scopeKey, `project:${projectId}`);
+      const firstSessionId = "worktree-session-one";
+      const secondSessionId = "worktree-session-two";
+      sessionManager.sessions.set(firstSessionId, { id: firstSessionId, projectId, cwd: worktreeRoot });
+      sessionManager.sessions.set(secondSessionId, { id: secondSessionId, projectId, cwd: worktreeRoot });
+
+      const pipeline = sessionManager.buildPipelineContext(projectId, projectRoot);
+      const [worktreeManager, sharedManager] = await Promise.all([
+        pipeline.rebindMcpManager!(firstSessionId, projectId, worktreeRoot),
+        sessionManager.ensureMcpManagerForSession(secondSessionId),
+      ]);
+      assert.notEqual(worktreeManager, rootManager);
+      assert.equal(sharedManager, worktreeManager);
+      assert.equal(created.length, 2);
+      assert.match(created[1].scopeKey, new RegExp(`^project:${projectId}:cwd:`));
+      assert.equal(sessionManager.getMcpManagerForSession(firstSessionId), worktreeManager);
+      assert.deepEqual(
+        sessionManager.additionalMcpProjects(worktreeRoot, projectId).map((entry: { projectId: string }) => entry.projectId),
+        [otherProjectId],
+      );
+
+      sessionManager.sessions.delete(firstSessionId);
+      await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId, cwd: worktreeRoot }, firstSessionId);
+      assert.equal(worktreeManager.disconnected, false);
+      sessionManager.sessions.delete(secondSessionId);
+      await sessionManager.cleanupScopedMcpManagersForSessionScope({ projectId, cwd: worktreeRoot }, secondSessionId);
+      assert.equal(worktreeManager.disconnected, true);
+      assert.equal(sessionManager.getMcpManager({ projectId, cwd: worktreeRoot }), null);
+      assert.equal(sessionManager.getMcpManager({ projectId, cwd: projectRoot }), rootManager);
+    } finally {
+      await Promise.allSettled(sessionManager.getActiveMcpManagers().map((manager: any) => manager.disconnectAll()));
+      await pcm.closeAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("routes project-only marketplace tools through pipeline, policy, docs, and activation", async () => {

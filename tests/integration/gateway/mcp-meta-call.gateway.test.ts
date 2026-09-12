@@ -113,21 +113,72 @@ async function makeFakeMcpManager(
 	activeSubNamespaces?: readonly string[],
 ) {
 	const { McpManager } = (await loadServerTestRuntime()).mcpManager;
-	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, opts);
+	const projectId = typeof opts?.projectId === "string" ? opts.projectId : undefined;
+	const isHeadquarters = projectId === HEADQUARTERS_PROJECT_ID;
+	const origin = projectId
+		? {
+			scope: "manual",
+			authority: isHeadquarters ? "headquarters" : "project",
+			trust: isHeadquarters ? "pretrusted" : "approval-required",
+			sourceId: `integration-fixture:${serverName}`,
+			file: ".mcp.json",
+			projectId,
+		}
+		: {
+			scope: "manual",
+			authority: "headquarters",
+			trust: "pretrusted",
+			sourceId: `integration-fixture:${serverName}`,
+			file: "Runtime configuration",
+		};
+	const config = { command: "stub" };
+	const ownerContributions = (activeSubNamespaces?.length ? activeSubNamespaces : [undefined]).map(subNamespace => ({
+		listName: serverName,
+		serverName,
+		runtimeServerKey: serverName,
+		config,
+		origin,
+		...(subNamespace ? { subNamespace } : {}),
+	}));
+	const group = {
+		serverName,
+		runtimeServerKey: serverName,
+		config,
+		ownerContributions,
+		...(activeSubNamespaces ? { activeSubNamespaces: new Set(activeSubNamespaces) } : {}),
+	};
+	const groups = [group];
+	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, {
+		...opts,
+		approvalStore: (gw.sessionManager as any).getMcpApprovalStore(),
+	});
+	mgr.discoverConnectionGroups = () => {
+		mgr.discoveredConnectionGroups = new Map(groups.map(entry => [entry.serverName, entry]));
+		return groups;
+	};
+
+	// Project-owned definitions must pass through the real decision flow before
+	// this fixture exposes a connected client. Tool-call policy is tested later
+	// and remains separate from startup approval.
+	const current = mgr.getEffectiveDefinitionForDecision(serverName);
+	if (current?.approval.required) {
+		if (!current.origin.projectId || !current.approval.fingerprint) {
+			throw new Error(`Fixture MCP definition ${serverName} is not reviewable`);
+		}
+		await mgr.decideApproval({
+			projectId: current.origin.projectId,
+			sourceId: current.origin.sourceId,
+			serverName,
+			fingerprint: current.approval.fingerprint,
+		}, "approved");
+	}
+
 	const client = new FakeMcpClient(serverName);
 	client.connected = true;
-	const config = { command: "stub" };
 	(mgr as any).clients.set(serverName, client);
 	(mgr as any).toolDefs.set(serverName, toolDefs);
 	(mgr as any).configs.set(serverName, config);
-	if (activeSubNamespaces) {
-		(mgr as any).connectionGroups.set(serverName, {
-			serverName,
-			config,
-			ownerContributions: [],
-			activeSubNamespaces: new Set(activeSubNamespaces),
-		});
-	}
+	(mgr as any).connectionGroups.set(serverName, group);
 	return mgr;
 }
 
@@ -150,9 +201,38 @@ async function seedFakeScopedMcpManager(
 	return mgr;
 }
 
-async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: string) {
+function sessionMcpScope(gw: GatewayInfo, sessionId: string): { projectId: string; cwd: string; scopeKey: string } {
+	const sessionManager = gw.sessionManager as any;
+	const bound = sessionManager.mcpSessionScopes.get(sessionId);
+	if (bound) return bound;
+	const scope = sessionManager.getMcpSessionScope(sessionId);
+	if (!scope.projectId || !scope.cwd) throw new Error(`Session ${sessionId} has no MCP scope`);
+	return { ...scope, scopeKey: sessionManager.mcpScopeKey(scope) };
+}
+
+async function seedFakeSessionMcpManager(
+	gw: GatewayInfo,
+	sessionId: string,
+	serverName = "fake-server",
+	toolDefs: readonly StubOp[] = STUB_OPS,
+	activeSubNamespaces?: readonly string[],
+) {
+	const scope = sessionMcpScope(gw, sessionId);
+	const managers = (gw.sessionManager as any).scopedMcpManagers as Map<string, any>;
+	const previous = managers.get(scope.scopeKey);
+	const mgr = await makeFakeMcpManager(gw, serverName, {
+		projectId: scope.projectId,
+		scopeKey: scope.scopeKey,
+	}, toolDefs, activeSubNamespaces);
+	managers.set(scope.scopeKey, mgr);
+	if (previous && previous !== mgr) await previous.disconnectAll();
+	gw.sessionManager.refreshExternalMcpToolRegistrations();
+	return mgr;
+}
+
+async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: string, explicitScopeKey?: string) {
 	const { McpManager } = (await loadServerTestRuntime()).mcpManager;
-	const scopeKey = projectId ? `project:${projectId}` : undefined;
+	const scopeKey = explicitScopeKey ?? (projectId ? `project:${projectId}` : undefined);
 	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, projectId ? { projectId, scopeKey } : undefined);
 	const makeGroup = (runtimeServerKey: string, contributionId: string, url: string) => {
 		const config = { url };
@@ -167,7 +247,14 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 				contributionId,
 				subNamespace: "jira",
 				config,
-				origin: { scope: "project", packName: contributionId },
+				origin: {
+					scope: "project",
+					authority: "marketplace",
+					trust: "pretrusted",
+					sourceId: contributionId,
+					file: `${contributionId}/mcp.json`,
+					packName: contributionId,
+				},
 			}],
 			activeSubNamespaces: new Set(["jira"]),
 		};
@@ -191,6 +278,16 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 	} else {
 		(gw.sessionManager as any).mcpManager = mgr;
 	}
+	return mgr;
+}
+
+async function seedFakeSessionGatewayRuntimeMcpManager(gw: GatewayInfo, sessionId: string) {
+	const scope = sessionMcpScope(gw, sessionId);
+	const managers = (gw.sessionManager as any).scopedMcpManagers as Map<string, any>;
+	const previous = managers.get(scope.scopeKey);
+	const mgr = await seedFakeGatewayRuntimeMcpManager(gw, scope.projectId, scope.scopeKey);
+	if (previous && previous !== mgr) await previous.disconnectAll();
+	gw.sessionManager.refreshExternalMcpToolRegistrations();
 	return mgr;
 }
 
@@ -393,11 +490,11 @@ test.describe("MCP meta-tool API E2E", () => {
 
 		await seedFakeMcpManager(gateway, "default-server");
 		const projectMgr = await seedFakeScopedMcpManager(gateway, projectId!, "project-server");
-		const cwdKey = `cwd:${path.resolve(projectRoot)}`;
+		const cwdKey = (gateway.sessionManager as any).mcpScopeKey({ cwd: projectRoot });
 		const cwdMgr = await makeFakeMcpManager(gateway, "cwd-server", { scopeKey: cwdKey });
 		(gateway.sessionManager as any).scopedMcpManagers.set(cwdKey, cwdMgr);
 		const unrelatedRoot = path.join(projectRoot!, "..", "unrelated-mcp-scope");
-		const unrelatedCwdKey = `cwd:${path.resolve(unrelatedRoot)}`;
+		const unrelatedCwdKey = (gateway.sessionManager as any).mcpScopeKey({ cwd: unrelatedRoot });
 		const unrelatedCwdMgr = await makeFakeMcpManager(gateway, "unrelated-cwd-server", { scopeKey: unrelatedCwdKey });
 		(gateway.sessionManager as any).scopedMcpManagers.set(unrelatedCwdKey, unrelatedCwdMgr);
 		gateway.sessionManager.refreshExternalMcpToolRegistrations();
@@ -546,8 +643,8 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	// 4. happy path
 	test("POST /api/internal/mcp-describe lists ops and returns single op detail", async ({ gateway }) => {
-		await seedFakeScopedMcpManager(gateway, projectId);
 		const sessionId = await createOwnedSession();
+		await seedFakeSessionMcpManager(gateway, sessionId);
 
 		const headers = {
 			"Content-Type": "application/json",
@@ -596,8 +693,8 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("POST /api/internal/mcp-describe accepts gateway public server names with generated runtime keys", async ({ gateway }) => {
-		await seedFakeGatewayRuntimeMcpManager(gateway, projectId);
 		const sessionId = await createOwnedSession();
+		await seedFakeSessionGatewayRuntimeMcpManager(gateway, sessionId);
 
 		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
 			method: "POST",
@@ -616,8 +713,8 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("POST /api/internal/mcp-describe uses stripped operation names for sub-namespace servers", async ({ gateway }) => {
-		await seedFakeScopedMcpManager(gateway, projectId, "gr", SUB_NAMESPACE_OPS, ["ai-adoption"]);
 		const sessionId = await createOwnedSession();
+		await seedFakeSessionMcpManager(gateway, sessionId, "gr", SUB_NAMESPACE_OPS, ["ai-adoption"]);
 
 		const headers = {
 			"Content-Type": "application/json",
@@ -671,8 +768,8 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("POST /api/internal/mcp-call returns deterministic unknown operation and server errors", async ({ gateway }) => {
-		await seedFakeScopedMcpManager(gateway, projectId);
 		const sessionId = await createOwnedSession();
+		await seedFakeSessionMcpManager(gateway, sessionId);
 		const headers = {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${token}`,
@@ -705,8 +802,8 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	// 5. mcp-call never-policy enforcement (Layer B)
 	test("POST /api/internal/mcp-call denies per-op `never` policy via role", async ({ gateway }) => {
-		await seedFakeScopedMcpManager(gateway, projectId);
 		const denySessionId = await createOwnedSession(DENY_ROLE.name);
+		await seedFakeSessionMcpManager(gateway, denySessionId);
 
 		// Call the denied tool — Layer B enforcement should return 403.
 		const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
@@ -728,7 +825,6 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("POST /api/internal/mcp-call lets broad role allow override persisted per-op `never`", async ({ gateway }) => {
-		await seedFakeScopedMcpManager(gateway, projectId);
 		const policyResp = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(OP_POLICY_KEY)}`, {
 			method: "PUT",
 			body: JSON.stringify({ policy: "never" }),
@@ -737,6 +833,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 		try {
 			const broadAllowSessionId = await createOwnedSession(BROAD_ALLOW_ROLE.name);
+			await seedFakeSessionMcpManager(gateway, broadAllowSessionId);
 
 			const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
 				method: "POST",

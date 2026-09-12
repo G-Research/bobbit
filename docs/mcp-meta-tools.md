@@ -30,7 +30,7 @@ that pattern at the gateway layer.
 
 ## What the model sees
 
-For each registered MCP server, the model gets one meta-tool:
+For each runtime-eligible MCP server whose operations were successfully discovered, the model gets one meta-tool:
 
 ```
 mcp_gr-halo(operation, args)
@@ -70,6 +70,14 @@ returned by `mcp_describe` on demand.
 `mcp_describe` without an `operation` parameter lists every op on the server,
 which is useful when the model is exploring.
 
+Project-controlled servers publish neither a meta-tool nor discoverable schemas
+until their exact current definition has startup approval. Pending, rejected,
+changed, and invalid servers are not started or contacted, so a model cannot use
+`mcp_describe`, a generated proxy, or an internal call to cross the startup gate.
+Approval is a private operator action, not a model-facing operation; the later
+`Allow` / `Ask` / `Never` policy still governs calls after startup. See
+[MCP server startup approvals](mcp-server-approvals.md).
+
 ## What stays the same
 
 Internally, `mcp__<server>__<op>` remains the canonical routing identifier —
@@ -93,7 +101,9 @@ knowledge of the meta-tool format.
 
 ## Marketplace MCP and scoped managers
 
-Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above.
+Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above. Server- and global-user-scoped Marketplace contributions are pretrusted through their explicit install/activation flow.
+
+A project-scoped contribution is pretrusted only when it matches a private install attestation for its exact project/source/pack/contribution/server identity, effective configuration, and complete published pack. For MCP-contributing project packs, Marketplace measures every directory, regular file, and safe internal relative symlink, including paths, entry types, executable/search bits, file bytes, and link targets; staged and published measurements must match. Traversal races, unsafe links or entries, changed snapshots, and enforced bounds fail closed. The ledger keeps only a keyed fingerprint, not the raw pack measurement, and legacy configuration-only attestations are not accepted. Non-MCP packs skip this MCP-specific pass. Copied content, an old/missing/corrupt attestation, or any pack change requires approval before a meta-tool is published; manual approval also binds the current complete-pack measurement. See the canonical guide's [source trust classes](mcp-server-approvals.md#which-sources-require-approval) and [Marketplace install attestations](mcp-server-approvals.md#marketplace-install-attestations).
 
 Key rules:
 
@@ -103,15 +113,16 @@ Key rules:
 - Flat contributions own a whole server. Contributions with `subNamespace` own one `mcp_<server>__<sub>` meta-tool; identical-config sub-namespaces may share one client.
 - Tools policy keys decide `allow` / `ask` / `never` at server (`mcp__<server>`), package/sub-namespace (`mcp__<server>__<sub>`), and operation (`mcp__<server>__<sub>__<op>`) levels. Operation activation is a harder boundary: disabled operations are omitted before policy resolution and cannot be reintroduced by role policy.
 - Manual MCP config discovery remains compatible and higher priority for route conflicts. `.mcp.json` and Claude-compatible configs keep `runtimeServerKey === serverName`, retain flat tool names like `mcp__playwright__click`, and win over Marketplace when the same public operation name exists.
-- Managers are contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own clients, status, tool docs, and external ToolManager registrations for that context.
+- Managers are contextual. Project/session managers are keyed by the stable logical project and canonical host execution directory, and own clients, status, tool docs, and external ToolManager registrations for that exact root/worktree content. A session remains bound to its host worktree manager even when its visible sandbox cwd differs; sessions on the same exact scope can share the manager, which is disconnected after the scope's last session releases it.
+- Plain Tools → MCP status uses the registered project-root manager. Reviewing an external sibling worktree requires a current owning session or goal from the same project and a cwd that validates against that owner. An arbitrary path, missing/stale owner, foreign project, or root-only view fails before manager creation or repository discovery.
 - `GET /api/mcp-servers` is status/policy-key data only. Market toggles must come from `GET /api/marketplace/pack-activation`, because disabled Marketplace MCP rows and disabled/stale operations would disappear from runtime status and become impossible to re-enable.
-- Status payloads redact secret values: env/header values become `<redacted>`, args are redacted, and URL credentials/query/fragment are removed.
+- Status payloads preserve ordinary command and argument structure for deliberate review while replacing environment/header values, configured secret substrings, and credential-bearing command/argument values with `[redacted]`; URL credentials, query parameters, and fragments are removed. Runtime error text is projected separately: configured environment/header values and URL credential/query/fragment components are removed, complete URLs become safe endpoints, and output is bounded before reaching status or API consumers.
 
-Marketplace install/update/uninstall, pack order, whole-contribution activation, and operation activation reload affected managers, disconnect removed servers, keep unchanged connections where possible, rebuild route maps, and refresh external MCP tools without a full app restart. If a reload exceeds the response budget, the response can report `mcpReload.status: "pending"`; the background reload still refreshes external tools when it settles.
+Marketplace install/update/uninstall, pack order, whole-contribution activation, operation activation, and startup decisions reload affected active managers, disconnect removed or newly ineligible servers, keep unchanged eligible connections where possible, rebuild route maps, and refresh external MCP tools without a full app restart. Approval state is shared through the private decision store, so concurrent root/worktree managers and managers created later converge on the same decision. If a Marketplace reload exceeds the response budget, the response can report `mcpReload.status: "pending"`; the background reload still refreshes external tools when it settles.
 
 ## Failure isolation
 
-A misbehaving MCP server no longer takes down the agent turn:
+A misbehaving *approved or pretrusted* MCP server no longer takes down the agent turn. Unapproved servers are excluded earlier and do not receive even a stub meta-tool:
 
 - **Per-call timeouts** — 10 s on `tools/list`, 30 s on `tools/call`,
   enforced in `src/server/mcp/mcp-manager.ts`. Wrapped at the manager level so
@@ -237,13 +248,28 @@ authoritative.
 ## Tools page UI
 
 The Tools page surfaces one row per MCP **server** under a dedicated "MCP"
-section, sibling to the existing builtin sections. Each server row mirrors a
-built-in tool group:
+section, sibling to the existing builtin sections. Project definitions remain
+visible here even when startup approval leaves them with zero operations. The
+startup label (**Pending approval**, **Approved**, **Rejected**, or
+**Configuration changed — review again**) is distinct from connection health
+and from the **Tool calls** policy.
 
-- **Server header** (`data-testid="mcp-server-toggle"`): chevron, name, status
-  pill (`connected` / `error` / `disconnected`), operation count, and a
-  group-policy `<select>` (`data-testid="mcp-server-policy"`; key
-  `mcp__<server>`). Click to toggle expansion.
+Approve/Reject actions require the dedicated MCP operator credential obtained
+from the one-use code printed in the gateway terminal. A normal gateway cookie,
+bearer token, agent session secret, or model tool cannot make a decision. The
+credential is sent only on that mutation, and opaque-origin repository previews
+cannot read it from the host application's browser storage. Session/goal review
+links also retain their validated worktree owner scope so the row describes the
+same definition that runtime would publish. See [MCP server startup approvals](mcp-server-approvals.md)
+for pairing, review flow, and safe metadata contracts.
+
+Each server row mirrors a built-in tool group:
+
+- **Server header** (`data-testid="mcp-server-toggle"`): disclosure control,
+  name, startup approval label, connection health, and operation count.
+  The sibling **Tool calls** `<select>` (`data-testid="mcp-server-policy"`; key
+  `mcp__<server>`) controls invocation only; per-server approval/rejection
+  actions control startup.
 - **Server expanded**: one **tool row** per sub-namespace
   (`data-testid="mcp-tool-row"`), each with its own `<select>`
   (`data-testid="mcp-tool-policy"`; key `mcp__<server>__<sub>` for sub,

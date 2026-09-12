@@ -33,6 +33,11 @@ interface CliModule {
 		token: string;
 		urls: StartupUrls;
 	}): string;
+	formatMcpPairingCodeBanner(code: string): string;
+	startGatewayAndCreateMcpPairingCode(gateway: {
+		start(): Promise<number>;
+		createMcpOperatorPairingCode(): { code: string; expiresAt: string };
+	}): Promise<{ actualPort: number; pairingCode: string }>;
 }
 
 async function cliModule(): Promise<CliModule> {
@@ -168,6 +173,75 @@ describe("mounted startup URLs", () => {
 		});
 		assert.equal(urls.authEnforced, true);
 		assert.equal(urls.uiUrl, "http://localhost:3001/?token=forced-secret");
+	});
+});
+
+describe("MCP operator pairing bootstrap", () => {
+	it("creates the pairing code once and only after the gateway is listening", async () => {
+		const { startGatewayAndCreateMcpPairingCode } = await cliModule();
+		const events: string[] = [];
+		const result = await startGatewayAndCreateMcpPairingCode({
+			async start() {
+				events.push("listening");
+				return 43127;
+			},
+			createMcpOperatorPairingCode() {
+				events.push("pairing-code");
+				return { code: "terminal-only-secret", expiresAt: "2030-01-01T00:10:00.000Z" };
+			},
+		});
+
+		assert.deepEqual(events, ["listening", "pairing-code"]);
+		assert.deepEqual(result, { actualPort: 43127, pairingCode: "terminal-only-secret" });
+	});
+
+	it("does not create a pairing code when the gateway fails to listen", async () => {
+		const { startGatewayAndCreateMcpPairingCode } = await cliModule();
+		let createCalls = 0;
+		await assert.rejects(
+			startGatewayAndCreateMcpPairingCode({
+				async start() {
+					throw new Error("listen failed");
+				},
+				createMcpOperatorPairingCode() {
+					createCalls++;
+					return { code: "must-not-exist", expiresAt: "2030-01-01T00:10:00.000Z" };
+				},
+			}),
+			/listen failed/,
+		);
+		assert.equal(createCalls, 0);
+	});
+
+	it("prints the code with the exact terminal-only pairing guidance", async () => {
+		const { buildStartupUrls, formatMcpPairingCodeBanner, formatStartupBanner } = await cliModule();
+		const code = "terminal-only-secret";
+		const urls = buildStartupUrls({
+			protocol: "https",
+			host: "gateway.example",
+			port: 3001,
+			basePath: "/team/bobbit",
+			token: "gateway-token",
+			trustedLocal: false,
+		});
+		const startupBanner = formatStartupBanner({
+			version: "0.0.0-test",
+			cwd: "/workspace",
+			staticDir: "/dist/ui",
+			token: "gateway-token",
+			urls,
+		});
+
+		assert.equal(
+			formatMcpPairingCodeBanner(code),
+			[
+				`MCP pairing code: ${code}`,
+				"Paste this in Tools → MCP to pair one browser for approvals.",
+				"One use; expires in 10 minutes. Pairing replaces the previous browser authorization.",
+			].join("\n"),
+		);
+		assert.doesNotMatch(JSON.stringify(urls), /terminal-only-secret/);
+		assert.doesNotMatch(startupBanner, /terminal-only-secret/);
 	});
 });
 

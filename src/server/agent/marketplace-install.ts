@@ -36,6 +36,10 @@ import {
 	type McpGatewaySkippedEntry,
 } from "./mcp-gateway-source.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import {
+	measureMarketplaceMcpPackIntegrity,
+	type MarketplaceMcpInstallAttestationStore,
+} from "../mcp/marketplace-mcp-install-attestation.js";
 
 /** Install scopes — builtin is never an install target. */
 export type InstallScope = "global-user" | "server" | "project";
@@ -372,11 +376,15 @@ export interface MarketplaceInstallerOptions {
 	/** Injectable discovery seam for installer decision tests. Protocol fidelity is
 	 * pinned independently by marketplace-mcp-gateway.test.ts. */
 	mcpGatewayFetch?: (source: MarketplaceSource) => Promise<McpGatewayParseResult>;
+	/** Server-private authority for exact project-scope Marketplace MCP installs. */
+	mcpInstallAttestationStore?: MarketplaceMcpInstallAttestationStore;
 }
 
 interface ScopeContext {
 	scope: InstallScope;
 	projectBase?: string;
+	/** Stable registered-project identity; required to attest project MCP installs. */
+	projectId?: string;
 	/** Store holding this scope's `pack_order` (ProjectConfigStore). */
 	packOrderStore?: PackOrderStore;
 }
@@ -557,6 +565,39 @@ export class MarketplaceInstaller {
 		return scopePaths(ctx.scope as PackScope, base).marketPacksRoot;
 	}
 
+	private measureStagedProjectMcpPack(ctx: ScopeContext, packRoot: string, manifest: PackManifest): string | undefined {
+		if (ctx.scope !== "project" || !ctx.projectId || !this.opts.mcpInstallAttestationStore
+			|| (manifest.contents.mcp ?? []).length === 0) return undefined;
+		return measureMarketplaceMcpPackIntegrity(packRoot);
+	}
+
+	private attestProjectMcpPack(
+		ctx: ScopeContext,
+		sourceId: string,
+		packRoot: string,
+		manifest: PackManifest,
+		expectedPackIntegrity?: string,
+	): void {
+		if (ctx.scope !== "project" || !ctx.projectId || !this.opts.mcpInstallAttestationStore) return;
+		if ((manifest.contents.mcp ?? []).length === 0) {
+			this.opts.mcpInstallAttestationStore.removePack(ctx.projectId, manifest.name);
+			return;
+		}
+		const definitions = (loadPackContributions(packRoot, manifest).mcp ?? []).map((mcp) => ({
+			contributionId: mcp.listName,
+			serverName: mcp.serverName,
+			config: mcp.config,
+		}));
+		this.opts.mcpInstallAttestationStore.replacePack(
+			ctx.projectId,
+			sourceId,
+			manifest.name,
+			packRoot,
+			definitions,
+			expectedPackIntegrity,
+		);
+	}
+
 	/**
 	 * Atomic install: stage → write meta → rename. Appends to pack_order.
 	 *
@@ -574,11 +615,12 @@ export class MarketplaceInstaller {
 		dirName: string;
 		scope: InstallScope;
 		projectBase?: string;
+		projectId?: string;
 		packOrderStore?: PackOrderStore;
 	}): InstalledPackWire {
 		const { sourceId, dirName, scope } = args;
 		if (!isSafeDirName(dirName)) throw new MarketplaceError("unsafe_name", `unsafe source dir name: ${JSON.stringify(dirName)}`);
-		const ctx: ScopeContext = { scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
+		const ctx: ScopeContext = { scope, projectBase: args.projectBase, projectId: args.projectId, packOrderStore: args.packOrderStore };
 
 		const { root, commit, source } = this.syncSource(sourceId);
 		const src = path.join(root, dirName);
@@ -598,6 +640,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
+			sourceId: source.id,
 			sourceUrl: source.url,
 			sourceRef: source.ref ?? "",
 			commit,
@@ -607,16 +650,27 @@ export class MarketplaceInstaller {
 			updatedAt: now,
 			scope: scope as PackScope,
 		};
+		let expectedPackIntegrity: string | undefined;
 		try {
 			copyDirVerbatim(src, staging);
 			writeMeta(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
 			throw err;
 		}
+		try {
+			this.appendOrder(ctx, packName);
+			// Attestation is the final authoritative commit: no later failure may
+			// report this install as unsuccessful while leaving it pretrusted.
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
+		} catch (err) {
+			try { this.removeOrder(ctx, packName); } catch { /* best-effort rollback */ }
+			fs.rmSync(dest, { recursive: true, force: true });
+			throw err;
+		}
 
-		this.appendOrder(ctx, packName);
 		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
@@ -626,6 +680,7 @@ export class MarketplaceInstaller {
 		dirName: string;
 		scope: InstallScope;
 		projectBase?: string;
+		projectId?: string;
 		packOrderStore?: PackOrderStore;
 	}): Promise<InstalledPackWire> {
 		const source = this.opts.sourceStore.get(args.sourceId);
@@ -641,7 +696,7 @@ export class MarketplaceInstaller {
 		const packName = manifest.name;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in gateway: ${JSON.stringify(packName)}`);
 
-		const ctx: ScopeContext = { scope: args.scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
+		const ctx: ScopeContext = { scope: args.scope, projectBase: args.projectBase, projectId: args.projectId, packOrderStore: args.packOrderStore };
 		const marketRoot = this.marketPacksRoot(ctx);
 		const dest = path.join(marketRoot, packName);
 		if (fs.existsSync(dest)) throw new MarketplaceError("already_installed", `pack already installed at ${args.scope}: ${packName}`);
@@ -650,6 +705,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
+			sourceId: source.id,
 			sourceUrl: source.url,
 			sourceRef: "",
 			commit: provider.fingerprint,
@@ -659,35 +715,45 @@ export class MarketplaceInstaller {
 			updatedAt: now,
 			scope: args.scope as PackScope,
 		};
+		let expectedPackIntegrity: string | undefined;
 		try {
 			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(staging, dest);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
 			throw err;
 		}
-		this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
-		this.appendOrder(ctx, packName);
+		try {
+			this.opts.sourceStore.update(args.sourceId, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
+			this.appendOrder(ctx, packName);
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
+		} catch (err) {
+			try { this.removeOrder(ctx, packName); } catch { /* best-effort rollback */ }
+			fs.rmSync(dest, { recursive: true, force: true });
+			throw err;
+		}
 		return withMcpGatewayDiagnostics({ scope: args.scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 
 	/** Uninstall: delete the dir, drop from pack_order. */
-	uninstallPack(args: { packName: string; scope: InstallScope; projectBase?: string; packOrderStore?: PackOrderStore }): void {
+	uninstallPack(args: { packName: string; scope: InstallScope; projectBase?: string; projectId?: string; packOrderStore?: PackOrderStore }): void {
 		const { packName, scope } = args;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name: ${JSON.stringify(packName)}`);
-		const ctx: ScopeContext = { scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
+		const ctx: ScopeContext = { scope, projectBase: args.projectBase, projectId: args.projectId, packOrderStore: args.packOrderStore };
 		const dest = path.join(this.marketPacksRoot(ctx), packName);
 		if (!fs.existsSync(dest)) throw new MarketplaceError("not_installed", `not installed at ${scope}: ${packName}`);
+		if (scope === "project" && args.projectId) this.opts.mcpInstallAttestationStore?.removePack(args.projectId, packName);
 		fs.rmSync(dest, { recursive: true, force: true });
 		this.removeOrder(ctx, packName);
 	}
 
 	/** Update: re-sync source, atomically replace contents, rewrite meta (keep installedAt). */
-	updatePack(args: { packName: string; scope: InstallScope; projectBase?: string; packOrderStore?: PackOrderStore }): InstalledPackWire {
+	updatePack(args: { packName: string; scope: InstallScope; projectBase?: string; projectId?: string; packOrderStore?: PackOrderStore }): InstalledPackWire {
 		const { packName, scope } = args;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name: ${JSON.stringify(packName)}`);
-		const ctx: ScopeContext = { scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
+		const ctx: ScopeContext = { scope, projectBase: args.projectBase, projectId: args.projectId, packOrderStore: args.packOrderStore };
 		const marketRoot = this.marketPacksRoot(ctx);
 		const dest = path.join(marketRoot, packName);
 		if (!fs.existsSync(dest)) throw new MarketplaceError("not_installed", `not installed at ${scope}: ${packName}`);
@@ -713,6 +779,7 @@ export class MarketplaceInstaller {
 
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
+			sourceId: source.id,
 			sourceUrl: source.url,
 			sourceRef: source.ref ?? oldMeta.sourceRef ?? "",
 			commit,
@@ -725,9 +792,11 @@ export class MarketplaceInstaller {
 
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
+		let expectedPackIntegrity: string | undefined;
 		try {
 			copyDirVerbatim(found.dir, staging);
 			writeMeta(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			// Swap: move current aside, publish staging, drop the old.
 			fs.renameSync(dest, backup);
 			try {
@@ -737,20 +806,25 @@ export class MarketplaceInstaller {
 				fs.renameSync(backup, dest);
 				throw err;
 			}
-			fs.rmSync(backup, { recursive: true, force: true });
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
-			fs.rmSync(backup, { recursive: true, force: true });
+			if (fs.existsSync(backup)) {
+				fs.rmSync(dest, { recursive: true, force: true });
+				fs.renameSync(backup, dest);
+			}
 			throw err;
 		}
+		try { fs.rmSync(backup, { recursive: true, force: true }); }
+		catch { console.warn(`[marketplace] could not remove obsolete pack backup for ${packName}`); }
 		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
 	/** Update either an authored pack or a virtual MCP gateway pack. */
-	async updateMarketplacePack(args: { packName: string; scope: InstallScope; projectBase?: string; packOrderStore?: PackOrderStore }): Promise<InstalledPackWire> {
+	async updateMarketplacePack(args: { packName: string; scope: InstallScope; projectBase?: string; projectId?: string; packOrderStore?: PackOrderStore }): Promise<InstalledPackWire> {
 		const { packName, scope } = args;
 		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name: ${JSON.stringify(packName)}`);
-		const ctx: ScopeContext = { scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
+		const ctx: ScopeContext = { scope, projectBase: args.projectBase, projectId: args.projectId, packOrderStore: args.packOrderStore };
 		const marketRoot = this.marketPacksRoot(ctx);
 		const dest = path.join(marketRoot, packName);
 		if (!fs.existsSync(dest)) throw new MarketplaceError("not_installed", `not installed at ${scope}: ${packName}`);
@@ -771,6 +845,7 @@ export class MarketplaceInstaller {
 		const manifest = gatewayProviderToVirtualPack(provider, { sourceId: source.id, installedPackName: packName });
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
+			sourceId: source.id,
 			sourceUrl: source.url,
 			sourceRef: "",
 			commit: provider.fingerprint,
@@ -782,9 +857,11 @@ export class MarketplaceInstaller {
 		};
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
+		let expectedPackIntegrity: string | undefined;
 		try {
 			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, installedPackName: packName, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
+			expectedPackIntegrity = this.measureStagedProjectMcpPack(ctx, staging, manifest);
 			fs.renameSync(dest, backup);
 			try {
 				fs.renameSync(staging, dest);
@@ -792,13 +869,18 @@ export class MarketplaceInstaller {
 				fs.renameSync(backup, dest);
 				throw err;
 			}
-			fs.rmSync(backup, { recursive: true, force: true });
+			this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
+			this.attestProjectMcpPack(ctx, source.id, dest, manifest, expectedPackIntegrity);
 		} catch (err) {
 			fs.rmSync(staging, { recursive: true, force: true });
-			fs.rmSync(backup, { recursive: true, force: true });
+			if (fs.existsSync(backup)) {
+				fs.rmSync(dest, { recursive: true, force: true });
+				fs.renameSync(backup, dest);
+			}
 			throw err;
 		}
-		this.opts.sourceStore.update(source.id, { lastSyncedAt: now, lastCommit: parsed.providers.map((p) => p.fingerprint).join(",") });
+		try { fs.rmSync(backup, { recursive: true, force: true }); }
+		catch { console.warn(`[marketplace] could not remove obsolete pack backup for ${packName}`); }
 		return withMcpGatewayDiagnostics({ scope, packName, manifest, meta, status: "ok", updateAvailable: false, sourceStatus: "ok" }, parsed.skipped);
 	}
 

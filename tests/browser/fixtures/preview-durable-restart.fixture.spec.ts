@@ -111,33 +111,44 @@ async function expectPreviewTabActive(page: Page, message: string): Promise<void
 	await expect(tab, `${message}: preview side-panel tab should show the entry label`).toContainText(ENTRY);
 }
 
-async function previewDiagnostics(page: Page): Promise<string> {
-	return page.evaluate(() => {
-		const tab = document.querySelector(`[data-panel-tab-id="${CSS.escape("preview:entry:durable-preview.html")}"]`) as HTMLElement | null;
-		const panel = document.querySelector(".goal-preview-panel") as HTMLElement | null;
-		const iframe = document.querySelector(".goal-preview-panel iframe") as HTMLIFrameElement | null;
-		let iframeBodyText = "";
-		try { iframeBodyText = iframe?.contentDocument?.body?.innerText || ""; } catch (err) { iframeBodyText = `iframe-read-error:${String(err)}`; }
-		return JSON.stringify({
-			tabVisible: !!tab && tab.getBoundingClientRect().width > 0 && tab.getBoundingClientRect().height > 0,
-			tabActive: !!tab?.classList.contains("goal-tab-pill--active"),
-			iframeSrc: iframe?.getAttribute("src") || "",
-			panelText: (panel?.innerText || "").replace(/\s+/g, " ").trim(),
-			iframeBodyText: iframeBodyText.replace(/\s+/g, " ").trim(),
-		});
+async function previewFrameState(page: Page): Promise<{
+	bodyText: string;
+	parentReadable: boolean;
+	localStorageReadable: boolean;
+	sessionStorageReadable: boolean;
+}> {
+	return page.frameLocator(".goal-preview-panel iframe").first().locator("body").evaluate((body) => {
+		let parentReadable = true;
+		let localStorageReadable = true;
+		let sessionStorageReadable = true;
+		try { void parent.document.documentElement; } catch { parentReadable = false; }
+		try { void localStorage.length; } catch { localStorageReadable = false; }
+		try { void sessionStorage.length; } catch { sessionStorageReadable = false; }
+		return {
+			bodyText: ((body as HTMLElement).innerText || "").replace(/\s+/g, " ").trim(),
+			parentReadable,
+			localStorageReadable,
+			sessionStorageReadable,
+		};
 	});
 }
 
 async function expectPreviewIframeContains(page: Page, message: string, sessionId: string, artifactId: string): Promise<void> {
 	await expect.poll(
-		() => previewDiagnostics(page),
+		() => previewFrameState(page),
 		{
 			timeout: 15_000,
-			message: `${message}: expected preview iframe diagnostics to contain ${BODY_TEXT}; empty previews usually report "No preview yet."`,
+			message: `${message}: expected the opaque preview frame to render ${BODY_TEXT}`,
 		},
-	).toContain(BODY_TEXT);
+	).toEqual({
+		bodyText: expect.stringContaining(BODY_TEXT),
+		parentReadable: false,
+		localStorageReadable: false,
+		sessionStorageReadable: false,
+	});
 
 	const iframe = page.locator(".goal-preview-panel iframe").first();
+	await expect(iframe, `${message}: repository preview should remain opaque`).toHaveAttribute("sandbox", "allow-scripts");
 	await expect(iframe, `${message}: iframe should have an absolute preview content src`).toHaveAttribute("src", /^https?:\/\//, { timeout: 10_000 });
 	const src = new URL((await iframe.getAttribute("src"))!);
 	expect(src.origin, `${message}: iframe preview should stay on the gateway origin`).toBe(new URL(base()).origin);

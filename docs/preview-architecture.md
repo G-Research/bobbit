@@ -18,11 +18,12 @@ Five pieces, one mount, one URL shape:
 2. **Content origin** — the gateway serves the mount at `/preview/<sid>/<path>`.
    Same shape for the iframe `src`, the "Open in new tab" button, and any link
    the user clicks inside the preview.
-3. **Cookie auth** — after request admission accepts the authority and browser
-   context, a stateless signed `bobbit_session` HttpOnly cookie authenticates
-   the content request. It is issued only by a qualifying browser-signaled API
-   bootstrap or seven-day renewal. iframe loads, link navigation, and new-tab
-   opens below the gateway mount carry it automatically; no token-in-URL hacks.
+3. **Layered cookie auth** — a normally admitted browser first uses the signed
+   `bobbit_session` cookie. A successful primary-authenticated preview response
+   then issues a narrower signed `bobbit_preview` capability bound to that
+   session and URL path. Opaque iframe subresources use only that read-only
+   capability; no operator credential or token-in-URL workaround crosses into
+   repository content.
 4. **SSE hot reload** — `GET /api/sessions/:sid/preview-events` streams a
    `preview-changed` event whenever the gateway repopulates the mount. The panel
    bumps `#mtime=<n>` on the iframe `src` to force a reload.
@@ -334,10 +335,51 @@ is no size guard at read time — asset size is the agent's responsibility (see
 agent and the user.
 
 **Auth fallback for testing.** The route accepts an admin bearer token via
-`Authorization: Bearer …` or `?token=…`. Iframe loads always go through the
-cookie path; the bearer fallback is for `curl` and SSE callers.
+`Authorization: Bearer …` or `?token=…`. Normal iframe loads use browser
+cookies; the bearer fallback is for `curl` and SSE callers. A successful
+primary-authenticated content response may bootstrap the narrow preview
+capability described below.
+
+## Security boundary
+
+Repository-authored preview documents run in iframes with
+`sandbox="allow-scripts"`. Omitting `allow-same-origin` deliberately gives the
+document an opaque/null origin even though its URL is served by the gateway.
+The document can run its own JavaScript, but it cannot read the parent DOM,
+Bobbit application state, parent storage, the normal session cookie, or the MCP
+operator credential. It also has no authenticated same-origin API or WebSocket
+authority. Adding both `allow-scripts` and `allow-same-origin` would let
+same-origin authored code escape this boundary, so `allow-same-origin` must
+not be added to make a preview or test pass.
+
+Successful preview content also carries a CSP sandbox without
+`allow-same-origin`, `frame-ancestors 'self'`, `nosniff`, and `no-store`. The
+CSP applies to HTML, SVG and other assets, and `HEAD` responses, so opening a
+preview in a standalone tab does not silently remove server-side containment.
+Cross-site iframe navigation is rejected before redirects or content bytes,
+even if the browser happens to hold a preview cookie.
+
+The only host/child communication is a bounded `postMessage` protocol:
+
+- The host sends an exact-schema, versioned theme snapshot containing only an
+  explicit allowlist of cosmetic tokens, dark/palette state, and the font
+  family.
+- The child accepts theme messages only from its exact parent `WindowProxy` and
+  applies version, shape, length, and count checks before touching root styles.
+- The host accepts versioned ready/resize events only from a registered preview
+  iframe, and exact-shape swipe events only from the active side-panel preview;
+  numeric values are validated and resize/swipe effects are clamped.
+
+This bridge preserves theme, resizing, and mobile navigation without granting
+DOM access in either direction. A bridge failure is cosmetic and must not
+weaken the sandbox.
 
 ## Cookie auth
+
+The primary browser cookie and narrow preview resource cookie use the same
+stateless signing store but different claims and issuance rules. This first
+section describes `bobbit_session`; [Preview resource capability](#preview-resource-capability)
+describes the opaque-frame cookie.
 
 Sources of truth: `src/server/auth/cookie.ts` (wire format and in-memory
 signing/verification), `src/server/auth/cookie-signing-key.ts` (startup-only
@@ -457,6 +499,56 @@ credential bootstrap (mobile links, OAuth callback); it does not authenticate
 per-request UI traffic, and a query token alone does not bypass cookie
 eligibility. Cookies are not independently revocable because there is no
 registry; rotating the signing key invalidates all signed cookies.
+
+### Preview resource capability
+
+The opaque frame cannot rely on ordinary same-site semantics for follow-on
+asset requests: fetches from it can arrive with `Origin: null`. After primary
+authentication succeeds for a concrete preview session, the content route may
+issue:
+
+```
+Set-Cookie: bobbit_preview=<signed-capability>; HttpOnly; Secure; SameSite=None; Path=<gateway-mount>/preview/<sid>/; Max-Age=86400
+```
+
+This capability is read-only, session-bound, and scoped below exactly one
+preview mount (including its artifacts). It cannot authenticate generic APIs,
+WebSockets, preview mounts for another session, or MCP approval decisions. The
+primary session cookie remains the authority for the initial request; only a
+primary-authenticated response can mint or renew the preview capability.
+
+For an opaque follow-on request, the server accepts the capability only when it
+verifies for the session ID in the route. A successful request with
+`Origin: null` receives the narrow credentialed CORS response needed by the
+sandboxed document. Bobbit does not grant that CORS response to unrelated
+routes, mismatched sessions, failed authentication, or hostile cross-site
+navigation. Keeping the capability path-scoped limits what ambient browser
+state exposed to authored content can reach.
+
+### Isolation troubleshooting
+
+Opaque-origin behavior is expected. Browser developer tools may show
+`Origin: null`, unavailable `localStorage`, blocked `parent.document` access,
+or sandbox/CSP console messages. Do not “fix” these by removing `sandbox`,
+adding `allow-same-origin`, broadening CORS, or passing a parent credential into
+the frame.
+
+When an embedded preview is blank or assets fail:
+
+1. Inspect the document and failing asset responses under the exact
+   `/preview/<sid>/...` or artifact route. A `401` points to primary/preview
+   cookie admission or a mismatched session path; `403` commonly indicates
+   traversal or hostile embedding; `404` indicates a missing mount, artifact,
+   or asset.
+2. Check that the initial successful response set `bobbit_preview` for the
+   preview session and configured gateway base path. For an opaque asset fetch,
+   expect `Origin: null` and credentialed CORS only on a successful matching
+   preview response.
+3. Inspect the session's preview SSE connection separately. SSE uses the normal
+   session/admin authorization path and is not an opaque-frame subresource.
+4. Treat bridge errors as theme/resize/swipe problems. Content admission,
+   cookies, session-path binding, CSP, and the message bridge are independent
+   layers; weakening one does not repair another.
 
 ## SSE — `GET /api/sessions/:sid/preview-events`
 
@@ -711,8 +803,8 @@ contracts differ:
 
 | Surface | Injection and theme behaviour |
 |---|---|
-| Inline `.html` / `.htm` chat card | `HtmlRenderer` prepares the browser `srcdoc` with `PREVIEW_THEME_BRIDGE` only. It live-mirrors the host and never receives the side-panel swipe script or server snapshot. |
-| Embedded side-panel iframe | The preview content route injects a `<base>`, server snapshot, and `PREVIEW_BRIDGE_SCRIPTS` (theme plus swipe). The live bridge overrides the snapshot from the host. |
+| Inline `.html` / `.htm` chat card | `HtmlRenderer` prepares the browser `srcdoc` with a bounded initial theme assignment and `PREVIEW_THEME_BRIDGE`. It receives later cosmetic updates and sends bounded resize messages through the message-only bridge, but never receives the side-panel swipe script or server snapshot. |
+| Embedded side-panel iframe | The preview content route injects a `<base>`, server snapshot, and `PREVIEW_BRIDGE_SCRIPTS` (theme plus swipe). The host sends bounded live theme updates over `postMessage`; the child never reads the parent document. |
 | Standalone side-panel URL | The same server response carries the snapshot, but the live bridge returns when `parent === window`; its values remain fixed until the document is reloaded. |
 
 ### Inline chat-card path
@@ -723,39 +815,42 @@ generic code-preview path instead of passing an object to a source-string
 renderer; completed calls also retain the generic **Load full content** control.
 Ordinary source strings keep their normal extension dispatch: `.html` and `.htm`
 writes delegate to `HtmlRenderer`, including historical completed calls, while
-`.svg` writes delegate to `SvgRenderer`. During HTML streaming, prepared source
-is applied through the existing debounced `document.open()` / `write()` /
-`close()` path; completion switches to the declarative `srcdoc` binding. A
+`.svg` writes delegate to `SvgRenderer`. During HTML streaming, the existing
+1.5-second debounce assigns prepared source to the stable iframe's `srcdoc`;
+completed calls use Lit's declarative `srcdoc` property binding. Neither path
+uses `contentDocument` nor calls `document.open()`, `write()`, or `close()`. A
 successful `.html` or `.htm` edit fetches the resulting file snapshot and
 delegates to the same completed `HtmlRenderer`. Thus ordinary writes, successful
 edits, streaming, and completed HTML cards share one preparation helper rather
 than separate theme implementations.
 
 The helper parses authored input inertly with the browser HTML parser, inserts a
-parsed copy of the canonical bridge as the first node in `<head>`, and serializes the
-document with its doctype and document-level nodes. Parser-backed insertion is
-required: tag-shaped text inside scripts, comments, styles, textareas, and other
-raw-text content must not become an injection point. First-in-head execution
-also means an authored initialization script can synchronously read Bobbit's
-theme state while the document is parsing. The iframe receives the prepared
-payload, while the collapsed source view retains the original authored HTML.
-Authored script order and auto-resize behaviour are unchanged, and the iframe
-sandbox remains `allow-scripts allow-same-origin`.
+bounded initial-theme assignment followed by a parsed copy of the canonical
+bridge as the first nodes in `<head>`, and serializes the document with its
+doctype and document-level nodes. Parser-backed insertion is required:
+tag-shaped text inside scripts, comments, styles, textareas, and other raw-text
+content must not become an injection point. First-in-head execution also means
+an authored initialization script can synchronously read Bobbit's theme state
+while the document is parsing. The iframe receives the prepared payload, while
+the collapsed source view retains the original authored HTML. Authored script
+order and auto-resize behaviour are unchanged, and the iframe sandbox is
+`allow-scripts` without `allow-same-origin`.
 
-On initial execution and every relevant host-root mutation, the bridge mirrors
-the `dark` class, `data-palette`, font stack, and the computed values of all CSS
-custom properties declared by accessible host stylesheets. The existing iframe
-therefore follows light/dark and palette changes without recreating the tool
-call. Stylesheets whose rules cannot be read are skipped.
+On initial execution and every relevant host-root mutation, the host captures
+only the finite cosmetic-token allowlist plus bounded dark/palette/font state
+and sends it to the frame through `postMessage`. The existing iframe therefore
+follows light/dark and palette changes without recreating the tool call, while
+the opaque child never reads the parent DOM or arbitrary stylesheet content.
 
 Preparation and execution are idempotent. Preparation only accepts a marked
 script as already installed when its content and executable attributes match
 the canonical bridge; an unrelated authored marker does not suppress
-injection. At runtime, one observer is installed per document root. A streaming
-rewrite replaces the root, disconnects the old observer, and installs one for
-the replacement. Parser, serializer, parent-document, style, or observer
-failures are caught so authored HTML continues to render even when theming is
-unavailable.
+injection. At runtime the host owns one observer for relevant theme attributes,
+and registered frames receive validated bounded messages. A streaming rewrite
+replaces the child document root; the injected bridge disconnects its old
+resize observer and installs against the replacement. Parser, serializer,
+messaging, style, or observer failures are caught so authored HTML continues to
+render even when theming is unavailable.
 
 The inline iframe backdrop, streaming veil, and spinner use host surface and
 foreground tokens with browser-system fallbacks. This keeps the card chrome
@@ -794,12 +889,11 @@ app's theme tokens, injected into `<head>` alongside the `<base>` tag by
 preserved — no HTML parser).
 
 **Why.** The runtime theme bridge in `src/shared/preview-bridge-scripts.ts`
-(`PREVIEW_THEME_BRIDGE`) reads CSS custom properties from
-`parent.document.documentElement`. Inside the embedded panel iframe that
-works; in a standalone tab opened via "Open in new tab", `parent === window`
-and the preview document has no theme vars of its own, so every
-`var(--background)` / `var(--chart-N)` resolved to empty and the page
-rendered unstyled.
+(`PREVIEW_THEME_BRIDGE`) deliberately cannot read
+`parent.document.documentElement`: preview frames have an opaque origin. The
+embedded host instead sends the cosmetic allowlist through `postMessage`. In a
+standalone tab, `parent === window`, so no host exists to send that message and
+the preview needs safe theme defaults of its own.
 
 **How.** On first use, `theme-snapshot.ts` parses the `:root` and `.dark`
 blocks of `src/ui/app.css`, extracts every `--*` declaration, and caches
@@ -813,7 +907,7 @@ handle (open devtools → Elements → search the `<head>`).
 | Surface | Behaviour |
 |---|---|
 | Standalone tab (`parent === window`) | `PREVIEW_THEME_BRIDGE` early-returns. The inline snapshot governs — colours and fonts are fixed at the moment the request was served. Live host-app theme toggles do **not** propagate. This is an explicit, accepted trade: standalone tabs are snapshots. |
-| Embedded panel iframe (`parent !== window`) | Snapshot supplies defaults; the bridge runs and live-mirrors the host-app's `documentElement` custom properties on every theme toggle. |
+| Embedded panel iframe (`parent !== window`) | Snapshot supplies defaults; the bridge accepts bounded theme messages from the exact parent, and the host sends new cosmetic values on every relevant theme toggle. |
 
 No per-request CSS parsing in the hot path — the snapshot string is built
 once and reused for every response.
@@ -886,7 +980,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
 | `src/server/preview/events.ts` | Per-session `preview-changed` channel carrying mount identity payloads |
-| `src/server/auth/cookie.ts` | Stateless `bobbit_session` v1 signing + constant-memory verification (no filesystem capability) |
+| `src/server/auth/cookie.ts` | Stateless `bobbit_session` primary browser cookie plus session-bound, path-scoped `bobbit_preview` read capability |
 | `src/server/auth/cookie-signing-key.ts` | Startup-only load/create of `<serverSecretsDir>/cookie-signing-key` |
 | `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `src/server/server.ts` | `POST/GET /api/preview/mount`, SSE route, broadcast on success |
@@ -925,7 +1019,9 @@ back the preview tree sees the same bytes the gateway just wrote.
   live mount, and rolls back on failure.
 - Iframe link clicks navigate inside the preview origin; assets resolve via
   `<base href="/preview/<sid>/">`.
-- "Open in new tab" works because the cookie path covers the configured gateway mount.
+- "Open in new tab" works through primary browser authorization; successful content responses can then mint the narrower preview capability for follow-on resources below that exact session mount.
+- Repository previews use opaque-origin `allow-scripts` frames without `allow-same-origin`; neither inline nor side-panel authored HTML can read parent DOM/storage or operator credentials.
+- Null-origin credentialed CORS is emitted only for a successfully authenticated request to the matching preview session path, and hostile cross-site iframe navigation is rejected.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
 - The side-pane tab strip never contains a Chat pill; chat is rendered outside

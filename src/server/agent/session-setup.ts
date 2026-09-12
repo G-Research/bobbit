@@ -434,6 +434,10 @@ export interface PipelineContext {
 	roleManager: RoleManager | null;
 	toolManager: ToolManager | null;
 	mcpManager: McpManager | null;
+	/** Rebind MCP discovery after worktree provisioning finalizes the host execution cwd. */
+	rebindMcpManager?: (sessionId: string, projectId: string | undefined, cwd: string) => Promise<McpManager | null>;
+	/** Release a session-owned worktree manager after setup fails before normal termination. */
+	releaseMcpManager?: (sessionId: string) => Promise<void>;
 	marketplacePiExtensionResolver?: MarketplacePiExtensionResolver | null;
 	/** Server-bound project/pack resolver. It never receives cwd or worktree paths. */
 	packLocalDataBindingsResolver?: PackLocalDataBindingsResolver | null;
@@ -1610,6 +1614,13 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 	}
 
+	// MCP configuration is repository-controlled and must be discovered from the
+	// finalized host worktree, never from the registered root captured earlier.
+	// This happens before policy, proxy, guard, prompt, or agent activation.
+	if (ctx.rebindMcpManager) {
+		ctx.mcpManager = await ctx.rebindMcpManager(session.id, plan.projectId, plan.cwd);
+	}
+
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
 	if (!plan.sandboxed) await recoverAnthropicApiKeyRuntime(
@@ -2120,6 +2131,7 @@ export function handleSetupFailure(
 
 	// 3. Remove from in-memory map
 	ctx.sessions.delete(session.id);
+	const mcpCleanup = ctx.releaseMcpManager?.(session.id).catch(() => undefined) ?? Promise.resolve();
 
 	// 4. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);
@@ -2155,5 +2167,5 @@ export function handleSetupFailure(
 
 	// 8. S1: drop the per-session capability secret.
 	ctx.sessionSecretStore.remove(session.id);
-	return cleanupPromise;
+	return Promise.all([cleanupPromise, mcpCleanup]).then(() => undefined);
 }

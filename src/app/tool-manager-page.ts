@@ -3,15 +3,16 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
+import { decideMcpServerApproval, fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpApprovalDecision, type McpServerInfo, type McpOperationInfo, type McpServerRequestScope, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
-import { showConnectionError } from "./dialogs.js";
-import { state, renderApp } from "./state.js";
-import { setHashRoute } from "./routing.js";
+import { confirmAction, showConnectionError } from "./dialogs.js";
+import { state, renderApp, type GatewaySession, type Goal } from "./state.js";
+import { getRouteFromHash, setHashRoute, setMcpReviewToolsRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { hasMcpOperatorCredential, pairMcpOperatorBrowser } from "./mcp-operator-auth.js";
 
 // ============================================================================
 // CONSTANTS
@@ -254,6 +255,13 @@ let mcpServers: McpServerInfo[] = [];
 let expandedMcpServers = new Set<string>();
 /** Per-tool (sub-namespace) expansion. Key: `<server>::<sub>` (`<server>::` for flat). */
 let expandedMcpTools = new Set<string>();
+let busyMcpServers = new Set<string>();
+let mcpApprovalErrors = new Map<string, string>();
+let mcpApprovalAnnouncements = new Map<string, string>();
+let mcpPairingBusy = false;
+let mcpPairingError: string | null = null;
+let mcpPairingNotice: string | null = null;
+let mcpPairingWarning: string | null = null;
 let selectedTool: ToolInfo | null = null;
 let loading = true;
 let editDescription = "";
@@ -264,6 +272,77 @@ let editGrantPolicy = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
 let editTab: "access" | "context" | "renderer" = "access";
+let scopedRefreshRevision = 0;
+// A page/view lifetime is distinct from individual refreshes. Async actions
+// capture this epoch so their UI tail cannot act on a later route or scope.
+let toolPageViewEpoch = 0;
+let mcpRequestScope: McpServerRequestScope = { projectId: getConfigApiProjectId() };
+
+function requestScope(
+	projectId: string,
+	cwd: string | undefined,
+	owner: { sessionId: string } | { goalId: string },
+): McpServerRequestScope {
+	return { projectId, ...owner, ...(cwd ? { cwd } : {}) };
+}
+
+function localMcpReviewOwner(): GatewaySession | Goal | undefined {
+	const route = getRouteFromHash();
+	if (route.view !== "tools") return undefined;
+	if (route.mcpReviewSessionId) {
+		return state.gatewaySessions.find((session) => session.id === route.mcpReviewSessionId)
+			?? state.archivedSessions.find((session) => session.id === route.mcpReviewSessionId);
+	}
+	if (route.mcpReviewGoalId) return state.goals.find((goal) => goal.id === route.mcpReviewGoalId);
+	return undefined;
+}
+
+interface McpRequestScopeResolution {
+	scope: McpServerRequestScope;
+	projectScope?: string;
+	clearReviewOwner?: boolean;
+}
+
+async function resolveMcpRequestScope(): Promise<McpRequestScopeResolution> {
+	const route = getRouteFromHash();
+	if (route.view !== "tools" || (!route.mcpReviewSessionId && !route.mcpReviewGoalId)) {
+		return { scope: { projectId: getConfigApiProjectId() } };
+	}
+	let owner = localMcpReviewOwner();
+	if (!owner) {
+		const ownerPath = route.mcpReviewSessionId
+			? `/api/sessions/${encodeURIComponent(route.mcpReviewSessionId)}`
+			: `/api/goals/${encodeURIComponent(route.mcpReviewGoalId!)}`;
+		const response = await gatewayFetch(ownerPath);
+		if (response.ok) owner = await response.json() as GatewaySession | Goal;
+	}
+	if (owner && typeof owner.projectId === "string" && typeof owner.cwd === "string") {
+		return {
+			scope: route.mcpReviewSessionId
+				? requestScope(owner.projectId, owner.cwd, { sessionId: route.mcpReviewSessionId })
+				: requestScope(owner.projectId, owner.cwd, { goalId: route.mcpReviewGoalId! }),
+			projectScope: owner.projectId,
+		};
+	}
+	// A removed/invalid owner cannot retain path authority. Fall back to the
+	// selected project's root scope and make that durable in the current route.
+	return {
+		scope: { projectId: getConfigApiProjectId() },
+		clearReviewOwner: true,
+	};
+}
+
+function mcpScopeKey(scope: McpServerRequestScope): string {
+	return JSON.stringify([scope.projectId, scope.cwd ?? null, scope.sessionId ?? null, scope.goalId ?? null]);
+}
+
+function ownsMcpView(epoch: number, scopeKey: string): boolean {
+	return epoch === toolPageViewEpoch && scopeKey === mcpScopeKey(mcpRequestScope);
+}
+
+function mcpBusyKey(serverName: string, scope: McpServerRequestScope = mcpRequestScope): string {
+	return `${mcpScopeKey(scope)}\n${serverName}`;
+}
 
 // ============================================================================
 // POLICY HELPERS
@@ -405,33 +484,76 @@ async function fetchToolsScoped(): Promise<ToolInfo[]> {
 	return response.tools;
 }
 
+async function refreshScopedToolPageData(resetExpansion: boolean): Promise<boolean> {
+	const refreshViewEpoch = toolPageViewEpoch;
+	const scopedProjectId = getConfigApiProjectId();
+	const scopedMcpRequest = mcpRequestScope.projectId === scopedProjectId
+		? { ...mcpRequestScope }
+		: { projectId: scopedProjectId };
+	const scopedMcpKey = mcpScopeKey(scopedMcpRequest);
+	const refreshRevision = ++scopedRefreshRevision;
+	const [toolResponse, r, gp, mcp] = await Promise.all([
+		fetchToolsResponse(scopedProjectId),
+		fetchRoles(scopedProjectId),
+		fetchGroupPolicies(scopedProjectId),
+		fetchMcpServers({ ...scopedMcpRequest, ensure: true }),
+	]);
+	if (
+		refreshViewEpoch !== toolPageViewEpoch
+		|| refreshRevision !== scopedRefreshRevision
+		|| scopedProjectId !== getConfigApiProjectId()
+		|| scopedMcpKey !== mcpScopeKey(mcpRequestScope)
+	) return false;
+	tools = toolResponse.tools;
+	toolDiagnostics = toolResponse.diagnostics;
+	roles = r;
+	groupPolicies = gp;
+	mcpServers = mcp;
+	if (resetExpansion) {
+		expandedMcpServers = new Set();
+		expandedMcpTools = new Set();
+		collapsedGroups = new Set(TOOL_GROUPS);
+		for (const tool of tools) collapsedGroups.add(tool.group || "Other");
+	}
+	return true;
+}
+
 export async function loadToolPageData(): Promise<void> {
+	const loadViewEpoch = ++toolPageViewEpoch;
+	const loadRevision = ++scopedRefreshRevision;
 	currentView = "list";
 	selectedTool = null;
 	loading = true;
 	saving = false;
 	renderApp();
-	const scopedProjectId = getConfigApiProjectId();
-	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(scopedProjectId), fetchGroupPolicies(scopedProjectId), fetchMcpServers({ projectId: scopedProjectId })]);
-	tools = t;
-	roles = r;
-	groupPolicies = gp;
-	mcpServers = mcp;
-	// Start with all groups collapsed
-	collapsedGroups = new Set(TOOL_GROUPS);
-	// Also collapse any groups not in TOOL_GROUPS
-	for (const tool of tools) {
-		const g = tool.group || "Other";
-		collapsedGroups.add(g);
+	const resolvedMcpScope = await resolveMcpRequestScope();
+	if (loadViewEpoch !== toolPageViewEpoch || loadRevision !== scopedRefreshRevision) return;
+	if (resolvedMcpScope.projectScope) setConfigScope(resolvedMcpScope.projectScope);
+	if (resolvedMcpScope.clearReviewOwner) setMcpReviewToolsRoute(undefined, true, true);
+	mcpRequestScope = resolvedMcpScope.scope;
+	if (await refreshScopedToolPageData(true)) {
+		loading = false;
+		renderApp();
 	}
-	loading = false;
-	renderApp();
 }
 
 export function clearToolPageState(): void {
+	toolPageViewEpoch++;
+	scopedRefreshRevision++;
+	mcpRequestScope = { projectId: getConfigApiProjectId() };
 	currentView = "list";
 	selectedTool = null;
 	toolDiagnostics = [];
+	mcpServers = [];
+	expandedMcpServers = new Set();
+	expandedMcpTools = new Set();
+	busyMcpServers = new Set();
+	mcpApprovalErrors = new Map();
+	mcpApprovalAnnouncements = new Map();
+	mcpPairingBusy = false;
+	mcpPairingError = null;
+	mcpPairingNotice = null;
+	mcpPairingWarning = null;
 	loading = true;
 	saving = false;
 }
@@ -677,6 +799,228 @@ function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
 	return `${POLICY_LABELS[inherited.policy] || inherited.policy} (inherited from ${inherited.source})`;
 }
 
+const MCP_APPROVAL_LABELS = {
+	trusted: "Trusted",
+	pending: "Pending approval",
+	approved: "Approved",
+	rejected: "Rejected",
+	changed: "Configuration changed — review again",
+} as const;
+
+function mcpHealthLabel(server: McpServerInfo): string {
+	if (server.approval?.required && (server.approval.state === "pending" || server.approval.state === "rejected" || server.approval.state === "changed")) {
+		return "Not started";
+	}
+	if (server.status === "connecting") return "Connecting…";
+	if (server.status === "connected") return "Connected";
+	if (server.status === "error") return "Error";
+	return "Disconnected";
+}
+
+function mcpApprovalIsInvalid(server: McpServerInfo): boolean {
+	return server.diagnostics?.some((diagnostic) => diagnostic.code === "MCP_CONFIG_INVALID" || diagnostic.code === "MCP_CONFIG_PARSE_FAILED") ?? false;
+}
+
+function focusMcpReviewToggle(name: string, stillCurrent: () => boolean = () => true): void {
+	requestAnimationFrame(() => {
+		if (!stillCurrent()) return;
+		const rows = document.querySelectorAll<HTMLElement>('[data-testid="mcp-server-row"]');
+		for (const row of rows) {
+			if (row.dataset.serverName === name) {
+				row.querySelector<HTMLElement>('[data-testid="mcp-server-toggle"]')?.focus();
+				break;
+			}
+		}
+	});
+}
+
+function focusMcpPairingInput(stillCurrent: () => boolean = () => true): void {
+	requestAnimationFrame(() => {
+		if (stillCurrent()) document.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]')?.focus();
+	});
+}
+
+function mcpPairingErrorMessage(error: unknown): string {
+	const details = errorDetails(error);
+	if (details.code === "MCP_OPERATOR_PAIRING_REQUIRED") {
+		return "That pairing code is invalid, expired, or already used. Copy the current code from the gateway terminal and try again.";
+	}
+	if (details.code === "MCP_OPERATOR_PAIRING_RATE_LIMITED") {
+		return "Too many pairing attempts. Wait briefly, then use the current code from the gateway terminal.";
+	}
+	if (details.code === "MCP_OPERATOR_PERSIST_FAILED") {
+		return "The gateway could not save this browser authorization. Check the gateway terminal and try again.";
+	}
+	return details.message || "Could not pair this browser. Check the gateway terminal and try again.";
+}
+
+async function pairMcpBrowser(event: SubmitEvent): Promise<void> {
+	event.preventDefault();
+	if (mcpPairingBusy) return;
+	const form = event.currentTarget as HTMLFormElement;
+	const input = form.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]');
+	if (!input) return;
+	const code = input.value;
+	mcpPairingBusy = true;
+	mcpPairingError = null;
+	mcpPairingNotice = null;
+	mcpPairingWarning = null;
+	renderApp();
+	try {
+		const result = await pairMcpOperatorBrowser(code);
+		input.value = "";
+		mcpPairingNotice = "Browser paired. You can now approve or reject servers; no decision was made.";
+		mcpPairingWarning = result.warning || null;
+	} catch (error) {
+		mcpPairingError = mcpPairingErrorMessage(error);
+	} finally {
+		mcpPairingBusy = false;
+		renderApp();
+		if (mcpPairingError) focusMcpPairingInput();
+	}
+}
+
+function renderMcpPairingCallout(): TemplateResult | typeof nothing {
+	const paired = hasMcpOperatorCredential();
+	if (paired && !mcpPairingNotice && !mcpPairingWarning) return nothing;
+	return html`
+		<div class="mcp-pairing-callout" data-testid="mcp-pairing-callout">
+			${!paired ? html`
+				<div class="mcp-pairing-copy">Pair this browser to approve or reject project MCP servers.</div>
+				<form class="mcp-pairing-form" @submit=${pairMcpBrowser}>
+					<input id="mcp-pairing-code" class="mcp-pairing-input" data-testid="mcp-pairing-code" name="code" type="password" autocomplete="off" spellcheck="false" aria-label="MCP pairing code" placeholder="Gateway terminal pairing code" required ?disabled=${mcpPairingBusy}>
+					<button class="mcp-pairing-button" data-testid="mcp-pair-browser" type="submit" ?disabled=${mcpPairingBusy}>${mcpPairingBusy ? "Pairing…" : "Pair browser"}</button>
+				</form>
+			` : nothing}
+			${paired && mcpPairingNotice ? html`<div class="mcp-pairing-notice" data-testid="mcp-pairing-notice" role="status" aria-live="polite">${mcpPairingNotice}</div>` : nothing}
+			${paired && mcpPairingWarning ? html`<div class="mcp-pairing-warning" data-testid="mcp-pairing-warning" role="status">${mcpPairingWarning}</div>` : nothing}
+			${!paired && mcpPairingError ? html`<div class="mcp-pairing-error" data-testid="mcp-pairing-error" role="alert">${mcpPairingError}</div>` : nothing}
+		</div>
+	`;
+}
+
+async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDecision): Promise<void> {
+	const approval = server.approval;
+	const source = server.source;
+	const decisionViewEpoch = toolPageViewEpoch;
+	const decisionScope = { ...mcpRequestScope };
+	const decisionScopeKey = mcpScopeKey(decisionScope);
+	const decisionBusyKey = mcpBusyKey(server.name, decisionScope);
+	const stillOwnsView = () => ownsMcpView(decisionViewEpoch, decisionScopeKey);
+	if (!approval?.fingerprint || !source?.sourceId || !source.projectId || busyMcpServers.has(decisionBusyKey) || mcpApprovalIsInvalid(server)) return;
+	if (decision === "rejected" && approval.state === "approved") {
+		const confirmed = await confirmAction(
+			`Reject ${server.name}?`,
+			"Bobbit will disconnect this MCP server and remove its operations from agents. You can approve the current configuration again later.",
+			"Reject server",
+			true,
+		);
+		if (!confirmed || !stillOwnsView()) return;
+	}
+
+	busyMcpServers.add(decisionBusyKey);
+	mcpApprovalErrors.delete(server.name);
+	mcpApprovalAnnouncements.set(server.name, `${decision === "approved" ? "Approving" : "Rejecting"} ${server.name}…`);
+	renderApp();
+	let pairingRequired = false;
+	try {
+		await decideMcpServerApproval(server.name, {
+			decision,
+			fingerprint: approval.fingerprint,
+			sourceProjectId: source.projectId,
+			sourceId: source.sourceId,
+		}, decisionScope);
+		if (!stillOwnsView()) return;
+		await refreshScopedToolPageData(false);
+		if (!stillOwnsView()) return;
+		mcpApprovalAnnouncements.set(server.name, `${server.name} ${decision === "approved" ? "approved" : "rejected"}.`);
+	} catch (error) {
+		if (!stillOwnsView()) return;
+		const details = errorDetails(error);
+		if (details.code === "MCP_APPROVAL_STALE") {
+			await refreshScopedToolPageData(false);
+			if (!stillOwnsView()) return;
+			expandedMcpServers.add(server.name);
+			mcpApprovalErrors.set(server.name, "Configuration changed while you were reviewing it. Review the current configuration before deciding.");
+		} else if (details.code === "MCP_APPROVAL_HUMAN_REQUIRED") {
+			pairingRequired = true;
+			expandedMcpServers.add(server.name);
+			mcpPairingNotice = null;
+			mcpPairingWarning = null;
+			mcpPairingError = "This browser is not paired with the gateway. Enter the current pairing code from the gateway terminal.";
+			mcpApprovalErrors.set(server.name, "Pair this browser before approving or rejecting this server.");
+		} else {
+			mcpApprovalErrors.set(server.name, details.message || "Could not update server approval. Try again.");
+		}
+		mcpApprovalAnnouncements.set(server.name, `Approval for ${server.name} was not changed.`);
+	} finally {
+		busyMcpServers.delete(decisionBusyKey);
+		if (stillOwnsView()) {
+			renderApp();
+			if (pairingRequired) focusMcpPairingInput(stillOwnsView);
+			else focusMcpReviewToggle(server.name, stillOwnsView);
+		}
+	}
+}
+
+function renderMcpReviewValue(label: string, value: unknown): TemplateResult | typeof nothing {
+	if (value === undefined || value === null || value === "") return nothing;
+	return html`
+		<div class="mcp-review-field">
+			<dt>${label}</dt>
+			<dd>${Array.isArray(value) ? value.join(" ") : String(value)}</dd>
+		</div>
+	`;
+}
+
+function renderMcpReviewPanel(server: McpServerInfo): TemplateResult | typeof nothing {
+	const config = server.reviewConfig;
+	const source = server.source;
+	const approval = server.approval;
+	if (!config && !source && !server.diagnostics?.length) return nothing;
+	const fingerprint = approval?.fingerprint ? approval.fingerprint.slice(0, 12) : undefined;
+	return html`
+		<div class="mcp-review-panel" data-testid="mcp-review-panel">
+			<div class="mcp-review-copy">Startup approval controls whether Bobbit may start or connect to this server. <strong>Tool calls</strong> controls whether agents may invoke its operations.</div>
+			<dl class="mcp-review-grid">
+				${renderMcpReviewValue("Project", source?.projectName || source?.projectId)}
+				${renderMcpReviewValue("Source", source?.file)}
+				${renderMcpReviewValue("Transport", config?.transport)}
+				${renderMcpReviewValue("Command", config?.command)}
+				${renderMcpReviewValue("Arguments", config?.args)}
+				${renderMcpReviewValue("URL", config?.url)}
+				${renderMcpReviewValue("Working directory", config?.cwd)}
+				${renderMcpReviewValue("Environment", config?.env ? Object.entries(config.env).map(([key, value]) => `${key}=${value}`) : undefined)}
+				${renderMcpReviewValue("Headers", config?.headers ? Object.entries(config.headers).map(([key, value]) => `${key}: ${value}`) : undefined)}
+				${renderMcpReviewValue("Fingerprint", fingerprint)}
+			</dl>
+			${server.diagnostics?.length ? html`
+				<div class="mcp-review-diagnostics">
+					${server.diagnostics.map((diagnostic) => html`<p><code>${diagnostic.code}</code> ${diagnostic.message}</p>`)}
+				</div>
+			` : nothing}
+		</div>
+	`;
+}
+
+function renderMcpApprovalActions(server: McpServerInfo): TemplateResult | typeof nothing {
+	const state = server.approval?.state;
+	if (!server.approval?.required || state === "trusted" || mcpApprovalIsInvalid(server) || !server.approval.fingerprint || !server.source?.projectId) return nothing;
+	const busy = busyMcpServers.has(mcpBusyKey(server.name));
+	const rejectLabel = state === "approved" ? "Reject server" : "Reject";
+	const approveLabel = state === "pending" ? "Approve" : "Approve current configuration";
+	return html`
+		<div class="mcp-approval-actions">
+			${state !== "rejected" ? html`
+				<button class="mcp-approval-button mcp-approval-button--reject" data-testid="mcp-reject-server" ?disabled=${busy} @click=${() => decideMcpApproval(server, "rejected")}>${busy ? "Working…" : rejectLabel}</button>
+			` : nothing}
+			${state !== "approved" ? html`
+				<button class="mcp-approval-button mcp-approval-button--approve" data-testid="mcp-approve-server" ?disabled=${busy} @click=${() => decideMcpApproval(server, "approved")}>${busy ? "Working…" : approveLabel}</button>
+			` : nothing}
+		</div>
+	`;
+}
+
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
 	const scopedProjectId = getConfigApiProjectId();
 	await updateGroupPolicy(key, value || null, scopedProjectId);
@@ -730,29 +1074,30 @@ function renderMcpOperationRow(tool: ToolInfo, policyKey: string, emptyPolicyLab
 function renderMcpSection(): TemplateResult {
 	if (mcpServers.length === 0) return html``;
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
-	// Build a quick lookup so we can render per-op rows using existing tool data when available.
 	const toolByName = new Map<string, ToolInfo>();
-	for (const t of tools) toolByName.set(t.name, t);
+	for (const tool of tools) toolByName.set(tool.name, tool);
+	const reviewCount = mcpServers.filter((server) => server.approval?.state === "pending" || server.approval?.state === "changed").length;
 	return html`
 		<div class="tool-group" data-testid="mcp-section">
-			<div class="tool-group-header" style="cursor: default;">
+			<div class="tool-group-header mcp-section-header">
 				<span class="tool-group-name">MCP</span>
-				<span class="tool-group-count">${mcpServers.length} server${mcpServers.length !== 1 ? "s" : ""}</span>
+				<span class="tool-group-count">${mcpServers.length} server${mcpServers.length !== 1 ? "s" : ""}${reviewCount ? ` · ${reviewCount} need review` : ""}</span>
+				<span class="mcp-section-help">Startup approval is separate from <strong>Tool calls</strong> policy.</span>
 			</div>
+			${mcpServers.some((server) => server.approval?.required && server.source?.authority === "project" && !mcpApprovalIsInvalid(server)) ? renderMcpPairingCallout() : nothing}
 			<div class="tool-group-items">
 				${mcpServers.map((server) => {
 					const expanded = expandedMcpServers.has(server.name);
-					const statusClass = server.status === "connected"
-						? "text-emerald-600"
-						: server.status === "error"
-							? "text-red-600"
-							: "text-muted-foreground";
+					const healthLabel = mcpHealthLabel(server);
+					const healthText = healthLabel === "Not started" ? healthLabel : healthLabel.toLocaleLowerCase();
+					const statusClass = healthLabel === "Connected" ? "text-emerald-600" : healthLabel === "Error" ? "text-red-600" : "text-muted-foreground";
+					const approvalState = server.approval?.state;
+					const approvalLabel = approvalState ? MCP_APPROVAL_LABELS[approvalState] : undefined;
 					const serverPolicyKey = mcpServerPolicyKey(server);
 					const serverPolicy = groupPolicies[serverPolicyKey] || "";
 					const serverEmptyPolicyLabel = inheritedMcpPolicyLabel(["mcp__"]);
+					const panelId = `mcp-review-${encodeURIComponent(server.name).replaceAll("%", "-")}`;
 
-					// Group ops by sub-namespace. Flat servers with no
-					// `subNamespace` collapse into a single bucket keyed by `""`.
 					const bySub = new Map<string, McpOperationInfo[]>();
 					for (const op of server.tools) {
 						const parsed = parseMcpNameLocal(server.name, op);
@@ -765,67 +1110,62 @@ function renderMcpSection(): TemplateResult {
 
 					return html`
 						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name} data-policy-key=${serverPolicyKey}>
-							<div class="tool-group-header"
-								data-testid="mcp-server-toggle"
-								tabindex="0" role="button"
-								style="cursor: pointer;"
-								@click=${() => toggleMcpServer(server.name)}
-								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMcpServer(server.name); } }}>
-								<span style="display:inline-flex;transform:rotate(${expanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
-								<span class="tool-group-name">${server.name}</span>
-								<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
-								<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
-								<span class="tool-group-policy-label">Server Policy:</span>
-								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
+							<div class="mcp-server-summary">
+								<button class="mcp-server-disclosure" data-testid="mcp-server-toggle" aria-expanded=${expanded ? "true" : "false"} aria-controls=${panelId} @click=${() => toggleMcpServer(server.name)}>
+									<span class="mcp-server-chevron ${expanded ? "mcp-server-chevron--expanded" : ""}">${chevronSvg}</span>
+									<span class="tool-group-name">${server.name}</span>
+									${approvalLabel ? html`<span class="mcp-approval-status mcp-approval-status--${approvalState}" data-testid="mcp-approval-status">${approvalLabel}</span>` : nothing}
+									<span class="mcp-health-status text-xs ${statusClass}" data-testid="mcp-server-status" aria-label=${healthLabel}>${healthText}</span>
+									<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
+								</button>
+								<div class="mcp-tool-call-policy">
+									<span class="tool-group-policy-label">Tool calls:</span>
+									${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
+								</div>
+								${renderMcpApprovalActions(server)}
 							</div>
-							${server.status === "error" && server.error
-								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
-								: nothing}
-							${expanded
-								? html`<div class="tool-group-items" style="padding-left: 1rem;">
-										${subKeys.length === 0
-											? html`<div class="tools-note px-3 py-2">No operations available.</div>`
-											: subKeys.map((sub) => {
-													const ops = bySub.get(sub)!;
-													const hasSub = sub.length > 0;
-													const packagePolicyKey = mcpPackagePolicyKey(sub, ops, serverPolicyKey);
-													const packagePolicy = packagePolicyKey ? groupPolicies[packagePolicyKey] || "" : "";
-													const packageEmptyPolicyLabel = inheritedMcpPolicyLabel([serverPolicyKey, "mcp__"]);
-													const toolPolicyKey = packagePolicyKey ?? serverPolicyKey;
-													const toolPolicy = packagePolicyKey ? packagePolicy : serverPolicy;
-													const toolEmptyPolicyLabel = packagePolicyKey ? packageEmptyPolicyLabel : serverEmptyPolicyLabel;
-													const toolKey = `${server.name}::${sub}`;
-													const toolExpanded = expandedMcpTools.has(toolKey);
-													const toolLabel = hasSub ? sub : server.name;
-													return html`
-														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${toolPolicyKey}>
-															<div class="tool-group-header"
-																data-testid="mcp-tool-toggle"
-																tabindex="0" role="button"
-																style="cursor: pointer;"
-																@click=${() => toggleMcpTool(server.name, hasSub ? sub : undefined)}
-																@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMcpTool(server.name, hasSub ? sub : undefined); } }}>
-																<span style="display:inline-flex;transform:rotate(${toolExpanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
-																<span class="tool-group-name">${toolLabel}</span>
-																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
-																<span class="tool-group-policy-label">${hasSub ? "Package" : "Tool"} Policy:</span>
-																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel)}
-															</div>
-															${toolExpanded
-																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
-																		${ops.map((op) => {
-																			const operationPolicyKey = mcpOperationPolicyKey(server, op, serverPolicyKey, packagePolicyKey);
-																			const operationEmptyPolicyLabel = inheritedMcpPolicyLabel([packagePolicyKey, serverPolicyKey, "mcp__"]);
-																			const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
-																			return renderMcpOperationRow(tool, operationPolicyKey, operationEmptyPolicyLabel);
-																		})}
-																	</div>`
-																: nothing}
-														</div>
-													`;
-												})}
-									</div>`
-								: nothing}
+							<div class="mcp-approval-live" role="status" aria-live="polite" aria-atomic="true">${mcpApprovalAnnouncements.get(server.name) || nothing}</div>
+							${mcpApprovalErrors.has(server.name) ? html`<div class="mcp-approval-error" data-testid="mcp-approval-error" role="alert">${mcpApprovalErrors.get(server.name)}</div>` : nothing}
+							${server.status === "error" && server.error ? html`<div class="mcp-server-error" data-testid="mcp-server-error">${server.error}</div>` : nothing}
+							${expanded ? html`
+								<div class="mcp-server-details" id=${panelId}>
+									${renderMcpReviewPanel(server)}
+									<div class="tool-group-items mcp-operation-groups">
+										${subKeys.length === 0 ? html`<div class="tools-note mcp-no-operations">No operations available.</div>` : subKeys.map((sub) => {
+											const ops = bySub.get(sub)!;
+											const hasSub = sub.length > 0;
+											const packagePolicyKey = mcpPackagePolicyKey(sub, ops, serverPolicyKey);
+											const packagePolicy = packagePolicyKey ? groupPolicies[packagePolicyKey] || "" : "";
+											const packageEmptyPolicyLabel = inheritedMcpPolicyLabel([serverPolicyKey, "mcp__"]);
+											const toolPolicyKey = packagePolicyKey ?? serverPolicyKey;
+											const toolPolicy = packagePolicyKey ? packagePolicy : serverPolicy;
+											const toolEmptyPolicyLabel = packagePolicyKey ? packageEmptyPolicyLabel : serverEmptyPolicyLabel;
+											const toolKey = `${server.name}::${sub}`;
+											const toolExpanded = expandedMcpTools.has(toolKey);
+											const toolLabel = hasSub ? sub : server.name;
+											return html`
+												<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${toolPolicyKey}>
+													<div class="tool-group-header" data-testid="mcp-tool-toggle" tabindex="0" role="button" @click=${() => toggleMcpTool(server.name, hasSub ? sub : undefined)} @keydown=${(event: KeyboardEvent) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleMcpTool(server.name, hasSub ? sub : undefined); } }}>
+														<span class="mcp-server-chevron ${toolExpanded ? "mcp-server-chevron--expanded" : ""}">${chevronSvg}</span>
+														<span class="tool-group-name">${toolLabel}</span>
+														<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
+														<span class="tool-group-policy-label">${hasSub ? "Package" : "Tool"} Policy:</span>
+														${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel)}
+													</div>
+													${toolExpanded ? html`<div class="mcp-server-ops" data-testid="mcp-server-ops">
+														${ops.map((op) => {
+															const operationPolicyKey = mcpOperationPolicyKey(server, op, serverPolicyKey, packagePolicyKey);
+															const operationEmptyPolicyLabel = inheritedMcpPolicyLabel([packagePolicyKey, serverPolicyKey, "mcp__"]);
+															const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
+															return renderMcpOperationRow(tool, operationPolicyKey, operationEmptyPolicyLabel);
+														})}
+													</div>` : nothing}
+												</div>
+											`;
+										})}
+									</div>
+								</div>
+							` : nothing}
 						</div>
 					`;
 				})}
@@ -901,18 +1241,19 @@ function renderNavBar(): TemplateResult {
 // ============================================================================
 
 async function handleScopeChange(scope: string): Promise<void> {
+	toolPageViewEpoch++;
+	scopedRefreshRevision++;
 	setConfigScope(scope);
+	setMcpReviewToolsRoute(undefined, true, true);
+	mcpRequestScope = { projectId: getConfigApiProjectId() };
 	loading = true;
+	mcpApprovalErrors.clear();
+	mcpApprovalAnnouncements.clear();
 	renderApp();
-	tools = await fetchToolsScoped();
-	// Rebuild collapsed groups
-	collapsedGroups = new Set(TOOL_GROUPS);
-	for (const tool of tools) {
-		const g = tool.group || "Other";
-		collapsedGroups.add(g);
+	if (await refreshScopedToolPageData(true)) {
+		loading = false;
+		renderApp();
 	}
-	loading = false;
-	renderApp();
 }
 
 function firstDiagnosticString(diagnostic: ToolDiagnostic, keys: string[]): string | undefined {
@@ -1045,7 +1386,7 @@ function renderListView(): TemplateResult {
 
 	const diagnosticsPanel = renderToolDiagnosticsPanel(toolDiagnostics);
 
-	if (tools.length === 0) {
+	if (tools.length === 0 && mcpServers.length === 0) {
 		return html`
 			${diagnosticsPanel}
 			<div class="tools-empty">

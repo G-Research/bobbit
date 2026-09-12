@@ -6,9 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
-import { caCertPath } from "../auth/tls.js";
+import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir, serverSecretsDir } from "../bobbit-dir.js";
 import { activeAgentSessionsDir, sessionStateSessionsRoot, sessionTranscriptRoot } from "./agent-session-path.js";
+import { publishPublicAgentCaCert, sanitizeAgentProcessEnv } from "./agent-process-env.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { PiAssistantStreamNormalizer } from "../../shared/assistant-stream-delta.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
@@ -737,36 +737,39 @@ export class RpcBridge {
 		if (this.options.containerId) {
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
 		} else {
-			// Trust our self-signed CA cert if available; fall back to disabling TLS
-			// verification. TLS material moved to serverSecretsDir() after the S1
-			// relocation, so resolve via the tls helper rather than bobbitStateDir().
-			const caCert = caCertPath();
-			const tlsEnv = fs.existsSync(caCert)
-				? { NODE_EXTRA_CA_CERTS: caCert }
+			// Only a refreshed copy of the public CA certificate may cross the agent
+			// boundary. The source TLS directory shares the private server root with
+			// credentials and operator authorization state.
+			const privateRoot = serverSecretsDir();
+			const publicCaCert = publishPublicAgentCaCert(privateRoot);
+			const tlsEnv = publicCaCert
+				? { NODE_EXTRA_CA_CERTS: publicCaCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+			const directEnv = sanitizeAgentProcessEnv({
+				...process.env,
+				BOBBIT_DIR: bobbitDir(),
+				// Direct (non-sandbox) children need the gateway credentials in env so
+				// agent-side helpers (defaults/tools/_shared/gateway.ts,
+				// tool-guard-extension.ts, tool-activation.ts) can call back into the
+				// gateway. Sandbox sessions get these via `-e` in spawnDockerExec; the
+				// S1 secret relocation removed the token from a project-reachable file,
+				// so the on-disk fallback in those helpers no longer resolves. Inject
+				// from the relocation-aware helpers here — the token is never written to
+				// a project-reachable path. Placed before `this.options.env` so ordinary
+				// caller additions retain their established precedence; the final
+				// sanitizer below always wins for server-private locators.
+				...this._resolveDirectGatewayEnv(),
+				...tlsEnv,
+				...this.options.env,
+				// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
+				// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
+				PI_CODING_AGENT_DIR: globalAgentDir(),
+			}, { privateRoot, trustedCaPath: publicCaCert });
 			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
 			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
-				env: {
-					...process.env,
-					BOBBIT_DIR: bobbitDir(),
-					// Direct (non-sandbox) children need the gateway credentials in env so
-					// agent-side helpers (defaults/tools/_shared/gateway.ts,
-					// tool-guard-extension.ts, tool-activation.ts) can call back into the
-					// gateway. Sandbox sessions get these via `-e` in spawnDockerExec; the
-					// S1 secret relocation removed the token from a project-reachable file,
-					// so the on-disk fallback in those helpers no longer resolves. Inject
-					// from the relocation-aware helpers here — the token is never written to
-					// a project-reachable path. Placed before `this.options.env` so an
-					// explicit caller override still wins.
-					...this._resolveDirectGatewayEnv(),
-					...tlsEnv,
-					...this.options.env,
-					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
-					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
-					PI_CODING_AGENT_DIR: globalAgentDir(),
-				},
+				env: directEnv,
 			});
 		}
 	}
@@ -1098,12 +1101,13 @@ export class RpcBridge {
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
 		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
 
-		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
-		if (this.options.sandboxCredentials) {
-			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key === TOOL_EXTENSION_TARGETS_ENV) continue;
-				execArgs.push("-e", `${key}=${value}`);
-			}
+		// Pass sandbox credentials (API keys, etc.) via docker exec env vars. Apply
+		// the same final private-locator boundary as direct children before values
+		// reach the container process.
+		const sandboxCredentials = sanitizeAgentProcessEnv(this.options.sandboxCredentials ?? {});
+		for (const [key, value] of Object.entries(sandboxCredentials)) {
+			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key === TOOL_EXTENSION_TARGETS_ENV || value === undefined) continue;
+			execArgs.push("-e", `${key}=${value}`);
 		}
 
 		// Set the container process working directory via docker exec -w.
@@ -1114,8 +1118,15 @@ export class RpcBridge {
 		const containerCwd = this.options.cwd || "/workspace";
 		execArgs.push("-w", containerCwd);
 
+		const privateEnvUnsetArgs = ["env", "-u", "BOBBIT_SECRETS_DIR"];
+		if (!sandboxCredentials.NODE_EXTRA_CA_CERTS) privateEnvUnsetArgs.push("-u", "NODE_EXTRA_CA_CERTS");
 		execArgs.push(
 			containerId,
+			// A long-lived pool container may predate this boundary or carry a
+			// configured credential with one of these names. Remove private locators
+			// immediately before execing Node; an explicitly configured public CA
+			// remains available to preserve the existing sandbox TLS contract.
+			...privateEnvUnsetArgs,
 			"node", "--disable-warning=DEP0123", `/node_modules/${PI_CODING_AGENT_PACKAGE}/${PI_CODING_AGENT_CLI_RELATIVE_PATH}`,
 			...this.remapArgsForContainer(agentArgs),
 		);
@@ -1127,7 +1138,7 @@ export class RpcBridge {
 		const spawnDocker = this.startDeps.spawnDocker ?? spawn;
 		return spawnDocker("docker", execArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+			env: sanitizeAgentProcessEnv({ ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" }),
 		});
 	}
 

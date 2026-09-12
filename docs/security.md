@@ -43,8 +43,9 @@ A trusted `Host` is necessary in every row. A present `Origin` must be one exact
 | Top-level UI or preview document | Safe `GET`/`HEAD` navigation to a document with no `Origin`, including address-bar, bookmark, reload, external-link, and supported popup contexts; or an exact same-origin/Vite navigation | Users must be able to open trusted URLs normally, but the navigation exception must not grant API authority. |
 | UI static resource or manifest | Exact same-origin/Vite context, or coherent originless same-origin subresource metadata | Ordinary page loading remains usable without accepting sibling-origin embedding. |
 | API | Exact same-origin/Vite context; a same-origin browser fetch may omit `Origin` when its Fetch Metadata is coherent | Browsers do not send `Origin` on every same-origin request, so Host and Fetch Metadata must classify those requests without creating a cross-site bypass. |
-| Embedded preview iframe | Exact same-origin/Vite iframe navigation | Preview cookies and the direct-parent theme bridge require same-origin embedding. The top-level navigation exception never applies to iframes. |
-| Preview redirect, asset, or SSE stream | Exact same-origin/Vite browser context, with coherent originless same-origin metadata where browsers normally omit `Origin` | Every request in a preview load is admitted independently; authorizing the first HTML response does not authorize later resources. |
+| Embedded preview iframe | Exact same-origin/Vite iframe navigation | The top-level navigation exception never applies to iframes, and cross-site iframe navigation is rejected even when ambient preview state exists. The loaded frame then receives an opaque origin. |
+| Opaque preview redirect or asset | `Origin: null` or the coherent browser follow-on shape, only on the matching preview route | Every resource is authorized independently with the session-bound preview capability; authorizing the first HTML response does not authorize later resources or another session path. |
+| Preview SSE stream | Exact same-origin/Vite browser context, with coherent originless same-origin metadata where browsers normally omit `Origin` | SSE remains an application transport authenticated by the normal session/admin path, not an opaque-frame capability. |
 | WebSocket | Exact allowed browser `Origin`; supplied Fetch Metadata must describe a same-origin socket. Both the standard empty destination and WebKit's `websocket` destination are accepted. | Admission runs before either session/viewer upgrade and before first-frame authentication. |
 | CORS preflight | Exact configured origin, allowed requested method and headers, coherent metadata, and no private-network request | The response advertises only the capability that was actually approved. |
 
@@ -57,7 +58,7 @@ CORS responses come from the admission decision rather than route-local reflecti
 - `Access-Control-Allow-Origin` is the exact approved origin, never `*`.
 - `Vary: Origin` is added.
 - Preflights return only the requested allowed method and requested allowed headers, with a bounded cache lifetime.
-- Cross-origin cookies are not advertised: `Access-Control-Allow-Credentials` is omitted. API and WebSocket transports use bearer authentication across the finite Vite exception.
+- Cross-origin cookies are not advertised on general routes: `Access-Control-Allow-Credentials` is omitted. API and WebSocket transports use bearer authentication across the finite Vite exception. The only narrow exception is a successfully authenticated `Origin: null` request below the matching preview session route, where the read-only preview capability needs credentialed CORS for opaque-frame assets.
 - An unapproved preflight returns `403` without CORS capability headers.
 - Private Network Access preflights are denied. The gateway omits `Access-Control-Allow-Private-Network`; it never sends either an affirmative grant or a misleading `false` value.
 
@@ -67,25 +68,41 @@ CORS responses come from the admission decision rather than route-local reflecti
 
 Rejected requests log only a stable reason code, transport, method, coarse route context, and bounded remote address. Raw URLs, query strings, authorization values, cookies, and header contents are intentionally excluded so a security diagnostic cannot leak credentials.
 
-## Existing authored-HTML boundary
+## Authored HTML preview isolation
 
-Request admission prevents an unrelated web origin from reaching Bobbit; it does **not** isolate authored HTML that Bobbit already runs at its own origin.
+Request admission prevents an unrelated web origin from reaching Bobbit. A second boundary isolates repository- or agent-authored HTML that Bobbit intentionally renders.
 
-Inline `.html`/`.htm` chat cards remain browser-generated `srcdoc` documents and make no HTTP request for the document itself. Inline cards and side-panel preview iframes use `sandbox="allow-scripts allow-same-origin"`. Side-panel documents load from `/preview/<session>/...`; relative assets, redirects, SSE refresh, popouts, and restored previews remain on the gateway origin. The canonical theme bridge intentionally reads `parent.document` so embedded previews track live theme and palette changes, while standalone tabs use a server-injected theme snapshot.
+Inline `.html`/`.htm` chat cards and side-panel preview documents run in iframes with `sandbox="allow-scripts"` and no `allow-same-origin`. The resulting opaque/null origin prevents authored scripts from reading the parent DOM, application storage, browser-held MCP operator credential, and Bobbit session state. Preview responses also carry a CSP sandbox without same-origin permission; the policy applies to successful HTML, SVG/other assets, and `HEAD`, including content opened in a standalone tab.
 
-Because scripts plus same-origin access make this authored content part of Bobbit's browser trust domain, Host/Origin validation is not a sandbox against it. Changing that boundary would require a separate content-origin design and a `postMessage` theme/asset/navigation contract. It is deliberately outside request-admission hardening.
+Opaque assets cannot use normal same-site cookie behavior, so a successful primary-authenticated preview response mints a separate `bobbit_preview` cookie. It is HttpOnly, Secure, SameSite=None, read-only, bound to one session, and path-scoped below that session's preview mount. It does not authorize APIs, WebSockets, another session's preview, or an MCP decision. Credentialed `Origin: null` CORS is returned only after this capability verifies on the matching preview route; hostile cross-site iframe navigation is rejected before redirects or bytes.
 
-Pack panels and renderers likewise remain in the host document and use the app-owned authenticated REST and WebSocket transports. By contrast, artifact surfaces sandboxed without `allow-same-origin` retain an opaque origin and communicate through `postMessage`; their `Origin: null` or cross-site attempts to call the gateway are rejected.
+Theme, resize, and side-panel swipe compatibility use a bounded `postMessage` bridge instead of parent DOM access. The child accepts theme data only from its exact parent and validates an explicit cosmetic-token allowlist; theme/ready/resize messages use the expected protocol version. The host accepts child messages only from the registered or active preview frame and validates/clamps their exact shape; side-panel swipe messages are additionally limited to the active preview. Bridge failure costs cosmetics or gestures, never isolation.
+
+Pack panels and app-owned renderers that execute directly in the host document remain part of the Bobbit application trust domain and use its authenticated transports. Do not move repository-authored HTML into that domain or add `allow-same-origin` as a compatibility workaround.
+
+## Private MCP startup authority
+
+Project-controlled MCP definitions are inert until an operator approves their exact effective behavior. Pending, rejected, changed, and invalid definitions are not spawned, connected, initialized, sent data, or registered as tools. This startup gate is separate from `Allow` / `Ask` / `Never` operation policy, which controls calls only after a server is eligible.
+
+Approval and rejection require a dedicated operator credential obtained from a one-use terminal pairing code. General gateway cookies, bearer tokens, session secrets, and repository-controlled agents are deliberately insufficient. The browser sends the credential only with MCP decision requests; the server persists only its ID and one-way verifier in `serverSecretsDir()`. Approval decisions and their HMAC key also live in that private OS-user namespace rather than repository-reachable Headquarters state.
+
+Decisions bind the stable project, logical source, server name, and a keyed fingerprint of every execution- or connection-relevant field, including secret values before display redaction. Worktree review also binds a current owning session or goal to its validated project/execution scope; arbitrary paths, foreign or stale owners, and root-only review cannot authorize an external sibling worktree.
+
+Project Marketplace MCP contributions are pretrusted only with a private install attestation for the exact contribution configuration and complete installed pack. The pack measurement covers all directories, regular files, internal relative symlinks, paths, relevant mode bits, bytes, and link targets, with bounds and race rechecks. Unsafe, changed, missing, legacy, or unverifiable attestations fail closed into ordinary project review; packs without MCP contributions do not need this MCP-specific measurement.
+
+Review metadata exposes project-relative provenance and useful command structure while redacting environment/header values, URL credentials/query/fragment, credential-bearing arguments, configured secret substrings, private source paths, and attestation signals. Runtime health/error output has its own projection: configured environment/header values and URL credential components are removed, configured URLs become safe endpoints, and output is bounded. See [MCP server startup approvals](mcp-server-approvals.md) for source classes, persistence, lifecycle, API semantics, and recovery.
 
 ## Preview endpoint hardening
 
-The `GET/POST /api/preview` endpoints accept an optional `sessionId` query parameter to scope preview HTML per session. Security measures include:
+The preview mount API and `/preview/<session>/...` content routes scope rendered bytes per session. Security measures include:
 
-- **UUID validation:** `sessionId` is validated against a strict UUID-shaped expression. Values containing traversal syntax, backslashes, or colons return `400`, preventing sandbox agents from writing HTML outside the state directory.
+- **UUID validation:** `sessionId` is validated against a strict UUID-shaped expression. Values containing traversal syntax, backslashes, or colons return `400`, preventing sandbox agents from selecting an arbitrary state directory.
+- **Path and asset confinement:** mount input uses explicit asset opt-in, and content resolution rejects absolute paths, traversal, backslashes, NULs, and symlink escape.
+- **Opaque transport capability:** primary authentication can bootstrap only the session-bound preview cookie described above; every follow-on content request revalidates the route/session binding.
 - **Vite filesystem deny:** `server.fs.deny` rules block `.bobbit` and `node_modules/.vite`, preventing Vite's `/@fs/` route from serving sensitive files.
 - **Vite plugin hardening:** `blockDangerousGlobs` rejects `import.meta.glob` calls targeting `.bobbit` paths. `localhostGuard` rejects non-loopback peers when Vite is bound to localhost and blocks Docker bridge addresses in non-local development mode.
 
-See [Embedded HTML preview architecture](preview-architecture.md) for signed-cookie, mount, asset, SSE, theme, and artifact details.
+See [Embedded HTML preview architecture](preview-architecture.md#security-boundary) for cookie admission, opaque-origin symptoms, CSP, CORS, messaging, mount, asset, SSE, theme, and artifact details.
 
 ## AI Gateway discovery boundaries
 

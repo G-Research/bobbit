@@ -149,6 +149,17 @@ describe("parseCustomDirectories", () => {
 		// The second entry overwrites the first (Map behavior in iteration order)
 		assert.deepEqual(result[0].types, ["mcp"]);
 	});
+
+	it("retains the trimmed declaration separately from the runtime-resolved path", () => {
+		const store = mockStore({
+			config_directories: JSON.stringify([
+				{ path: "  ./relative/mcp  ", types: ["mcp"] },
+			]),
+		});
+		const [entry] = parseCustomDirectories(store);
+		assert.equal(entry.declaredPath, "./relative/mcp");
+		assert.equal(entry.path, path.resolve("./relative/mcp"));
+	});
 });
 
 // ── getAllConfigDirectories ──────────────────────────────────────────
@@ -285,5 +296,17 @@ describe("saveCustomDirectories", () => {
 		const saved = JSON.parse(store._raw["config_directories"]);
 		assert.deepEqual(saved, []);
 		assert.equal(store._raw["skill_directories"], undefined);
+	});
+
+	it("preserves a stable declared path when saving parsed directories", () => {
+		const store = mockStore();
+		saveCustomDirectories(store, [{
+			path: path.resolve("./relative/mcp"),
+			declaredPath: "./relative/mcp",
+			types: ["mcp"],
+		}]);
+
+		const saved = JSON.parse(store._raw["config_directories"]);
+		assert.equal(saved[0].path, "./relative/mcp");
 	});
 });

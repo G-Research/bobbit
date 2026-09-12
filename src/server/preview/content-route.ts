@@ -7,11 +7,9 @@
  *   the theme/swipe bridge scripts appended.
  * - All other MIME types stream as-is (no body rewrite).
  * - Path-traversal defence delegates to `path-guard.ts::resolveAssetPath`.
- * - Auth is cookie-based (`bobbit_session`); localhost mode short-circuits.
- *
- * Bearer-token auth is intentionally *not* honoured here: iframe navigations
- * cannot carry an `Authorization` header. The cookie is minted by the API
- * router on the user's first authenticated request.
+ * - Initial auth uses existing localhost/session/admin authority; opaque
+ *   follow-on resources require the exact session-bound preview capability.
+ * - Successful content is CSP-sandboxed, including non-HTML and HEAD.
  */
 
 import fs from "node:fs";
@@ -21,12 +19,21 @@ import { acquirePreviewDirectoryRead, isPreviewDirectoryAvailable, mountPath, re
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
-import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
+import {
+	issuePreviewCookieIfMissing,
+	tryAuth as cookieTryAuth,
+	tryPreviewAuth,
+	type CookieStore,
+} from "../auth/cookie.js";
 import { injectBaseAndScripts, PREVIEW_BRIDGE_SCRIPTS } from "../../shared/preview-bridge-scripts.js";
 import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base-path.js";
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+export const PREVIEW_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-top-navigation-by-user-activation; frame-ancestors 'self'";
+
+type PreviewAuthorization = "primary" | "preview";
 
 export interface ContentRouteOptions {
 	cookieStore: CookieStore;
@@ -42,7 +49,7 @@ function send(res: http.ServerResponse, status: number, body: string, contentTyp
 	res.end(body);
 }
 
-function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boolean {
+function primaryAuthorization(req: http.IncomingMessage, opts: ContentRouteOptions): boolean {
 	if (opts.isLocalhost) return true;
 	if (cookieTryAuth(req, opts.cookieStore)) return true;
 	// Optional admin bearer (?token= or Authorization: Bearer) — useful for
@@ -58,6 +65,46 @@ function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boo
 		} catch { /* ignore */ }
 	}
 	return false;
+}
+
+function authorizePreviewRequest(
+	req: http.IncomingMessage,
+	opts: ContentRouteOptions,
+	sessionId: string,
+): PreviewAuthorization | undefined {
+	const previewAuthorized = tryPreviewAuth(req, opts.cookieStore, sessionId);
+	const crossSiteIframeNavigation = req.headers["sec-fetch-site"] === "cross-site"
+		&& req.headers["sec-fetch-mode"] === "navigate"
+		&& req.headers["sec-fetch-dest"] === "iframe";
+	// A preview cookie is ambient browser state, not proof that a cross-site
+	// parent may embed the preview. Reject that navigation before redirects or
+	// bytes, while retaining the capability for opaque sandbox subresources.
+	if (crossSiteIframeNavigation) return undefined;
+	const opaqueFollowOn = req.headers.origin === "null"
+		|| (req.headers.origin === undefined
+			&& req.headers["sec-fetch-site"] === "cross-site"
+			&& req.headers["sec-fetch-mode"] !== "navigate");
+	if (opaqueFollowOn) return previewAuthorized ? "preview" : undefined;
+	return primaryAuthorization(req, opts) ? "primary" : undefined;
+}
+
+function successfulContentHeaders(
+	req: http.IncomingMessage,
+	contentType: string,
+	contentLength?: number,
+): Record<string, string> {
+	return {
+		"Content-Type": contentType,
+		...(contentLength === undefined ? {} : { "Content-Length": String(contentLength) }),
+		"Cache-Control": "no-store",
+		"X-Content-Type-Options": "nosniff",
+		"Content-Security-Policy": PREVIEW_CONTENT_SECURITY_POLICY,
+		...(req.headers.origin === "null" ? {
+			"Access-Control-Allow-Origin": "null",
+			"Access-Control-Allow-Credentials": "true",
+			Vary: "Origin",
+		} : {}),
+	};
 }
 
 /**
@@ -98,13 +145,7 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// Auth (must come before any disclosure).
-	if (!isAuthorized(req, opts)) {
-		send(res, 401, JSON.stringify({ error: "Unauthorized" }));
-		return true;
-	}
-
-	// Parse `/preview/<sid>(/<rel>)?`.
+	// Parse and validate the capability binding before consulting any cookie.
 	const remainder = pathname.slice("/preview/".length);
 	const slashIdx = remainder.indexOf("/");
 	const sid = slashIdx < 0 ? remainder : remainder.slice(0, slashIdx);
@@ -112,6 +153,13 @@ export async function handlePreviewRequest(
 
 	if (!sid || !VALID_SESSION_ID.test(sid)) {
 		send(res, 400, JSON.stringify({ error: "Invalid sessionId" }));
+		return true;
+	}
+
+	// Auth still precedes mount, artifact, entry, and file disclosure.
+	const authorization = authorizePreviewRequest(req, opts, sid);
+	if (!authorization) {
+		send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 		return true;
 	}
 
@@ -226,11 +274,10 @@ export async function handlePreviewRequest(
 		const publicBaseHref = withBasePath(internalBaseRoute, basePath);
 		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS);
-		res.writeHead(200, {
-			"Content-Type": contentType,
-			"Cache-Control": "no-store",
-			"X-Content-Type-Options": "nosniff",
-		});
+		if (authorization === "primary") {
+			issuePreviewCookieIfMissing(req, res, opts.cookieStore, sid, { basePath });
+		}
+		res.writeHead(200, successfulContentHeaders(req, contentType));
 		if (method === "HEAD") {
 			res.end();
 		} else {
@@ -240,12 +287,10 @@ export async function handlePreviewRequest(
 	}
 
 	// Stream other types as-is.
-	res.writeHead(200, {
-		"Content-Type": contentType,
-		"Content-Length": String(guard.size),
-		"Cache-Control": "no-store",
-		"X-Content-Type-Options": "nosniff",
-	});
+	if (authorization === "primary") {
+		issuePreviewCookieIfMissing(req, res, opts.cookieStore, sid, { basePath });
+	}
+	res.writeHead(200, successfulContentHeaders(req, contentType, guard.size));
 	if (method === "HEAD") {
 		res.end();
 		return true;

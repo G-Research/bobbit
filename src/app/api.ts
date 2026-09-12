@@ -17,6 +17,7 @@ import {
 // dependency-free) so utility modules like `fetch-tool-content.ts` can
 // import it without pulling the entire app-shell graph.
 import { activeGatewayConnection, appUrl, gatewayFetch, gatewayWsUrl } from "./gateway-fetch.js";
+import { forgetMcpOperatorCredential, mcpOperatorApprovalHeaders } from "./mcp-operator-auth.js";
 import { gatewayRoute } from "../shared/base-path.js";
 import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 export { gatewayFetch };
@@ -684,6 +685,12 @@ export function startSessionListPushSync(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "remote_state_snapshot") {
 				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
+			} else if (msg?.type === "mcp_approvals_changed") {
+				// Keep project banners current on non-session surfaces without adding
+				// the banner/render graph to this eager API module.
+				void import("./mcp-approval-banner.js")
+					.then((module) => module.handleMcpApprovalsChanged(msg))
+					.catch(() => {});
 			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
 				if (msg.type === "sessions_changed" && typeof msg.sessionId === "string" && Array.isArray(msg.user_tags)) {
 					// The payload may describe an earlier serialized write. Keep the
@@ -3178,11 +3185,50 @@ export interface McpOperationInfo {
 	op?: string;
 }
 
+export type McpApprovalState = "trusted" | "pending" | "approved" | "rejected" | "changed";
+export type McpApprovalDecision = "approved" | "rejected";
+
+export interface McpServerApprovalInfo {
+	required: boolean;
+	state: McpApprovalState;
+	/** Opaque, Headquarters-keyed identity. It contains no raw configuration values. */
+	fingerprint?: string;
+	decidedAt?: string;
+}
+
+export interface McpServerSourceInfo {
+	sourceId: string;
+	authority: "marketplace" | "headquarters" | "user-home" | "project";
+	projectId?: string;
+	projectName?: string;
+	/** Logical, safe-to-display source file. Physical paths remain server-internal. */
+	file: string;
+}
+
+export interface McpServerReviewConfig {
+	transport: "stdio" | "http";
+	command?: string;
+	args?: string[];
+	cwd?: string;
+	url?: string;
+	env?: Record<string, string>;
+	headers?: Record<string, string>;
+}
+
+export interface McpServerDiagnostic {
+	code: string;
+	message: string;
+}
+
 export interface McpServerInfo {
 	name: string;
-	status: "connected" | "disconnected" | "error";
+	status: "connected" | "connecting" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	approval?: McpServerApprovalInfo;
+	source?: McpServerSourceInfo;
+	reviewConfig?: McpServerReviewConfig;
+	diagnostics?: McpServerDiagnostic[];
 	/** Public server policy key (for gateway runtimes this differs from name). */
 	serverPolicyKey?: string;
 	policyKey?: string;
@@ -3192,12 +3238,27 @@ export interface McpServerInfo {
 	tools: McpOperationInfo[];
 }
 
-/** GET /api/mcp-servers — returns one entry per registered MCP server with its operations. */
-export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
+export interface McpServerRequestScope {
+	projectId: string;
+	cwd?: string;
+	/** Opaque server-owned worktree authority. At most one owner may be sent. */
+	sessionId?: string;
+	goalId?: string;
+}
+
+function appendMcpServerRequestScope(params: URLSearchParams, scope: Partial<McpServerRequestScope> | undefined): void {
+	if (scope?.sessionId && scope.goalId) throw new Error("MCP review scope cannot have both a session and goal owner");
+	if (scope?.cwd) params.set("cwd", scope.cwd);
+	if (scope?.sessionId) params.set("sessionId", scope.sessionId);
+	else if (scope?.goalId) params.set("goalId", scope.goalId);
+}
+
+/** GET /api/mcp-servers — returns effective servers, including definitions awaiting approval. */
+export async function fetchMcpServers(opts?: Partial<McpServerRequestScope> & { ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
 		const params = new URLSearchParams();
 		params.set("projectId", configApiProjectId(opts?.projectId));
-		if (opts?.cwd) params.set("cwd", opts.cwd);
+		appendMcpServerRequestScope(params, opts);
 		if (opts?.ensure) params.set("ensure", "true");
 		const qs = params.toString();
 		const res = await gatewayFetch(`/api/mcp-servers${qs ? `?${qs}` : ""}`);
@@ -3208,6 +3269,43 @@ export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string;
 	} catch {
 		return [];
 	}
+}
+
+export interface McpApprovalRequest {
+	decision: McpApprovalDecision;
+	fingerprint: string;
+	sourceProjectId: string;
+	sourceId: string;
+}
+
+/** Decide startup approval for one exact, currently effective project definition. */
+export async function decideMcpServerApproval(
+	serverName: string,
+	request: McpApprovalRequest,
+	scope?: string | McpServerRequestScope,
+): Promise<McpServerInfo> {
+	const projectId = typeof scope === "string" ? scope : scope?.projectId;
+	const params = new URLSearchParams({ projectId: configApiProjectId(projectId) });
+	if (typeof scope !== "string") appendMcpServerRequestScope(params, scope);
+	const approvalGatewayBaseUrl = activeGatewayConnection().baseUrl;
+	const res = await gatewayFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${params.toString()}`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			...mcpOperatorApprovalHeaders(),
+		},
+		body: JSON.stringify(request),
+	});
+	if (!res.ok) {
+		const error = await errorFromResponse(res, `Could not update MCP server approval (${res.status})`);
+		if (errorDetails(error).code === "MCP_APPROVAL_HUMAN_REQUIRED") forgetMcpOperatorCredential(approvalGatewayBaseUrl);
+		throw error;
+	}
+	const data = await res.json();
+	// Keep rolling-upgrade response-shape handling here, away from the page UI.
+	const server = data && typeof data === "object" && "server" in data ? (data as { server: unknown }).server : data;
+	if (!server || typeof server !== "object") throw new Error("Invalid MCP approval response");
+	return server as McpServerInfo;
 }
 
 export interface ToolProviderProvenance {

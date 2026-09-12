@@ -1,7 +1,7 @@
 import { render } from "lit";
 import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { clearToolPageState, loadToolPageData, renderToolManagerPage } from "../../src/app/tool-manager-page.js";
-import { setRenderApp } from "../../src/app/state.js";
+import { setRenderApp, state } from "../../src/app/state.js";
 
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
@@ -12,11 +12,16 @@ type FetchLogEntry = {
 	body: any;
 	credentials: RequestCredentials | null;
 	authorization: string | null;
+	mcpOperator: string | null;
 };
 
+const MCP_OPERATOR_CREDENTIAL = `v1.${"A".repeat(22)}.${"A".repeat(43)}`;
 let mcpServers: any[] = [];
+let tools: any[] = [{ name: "bash", description: "Run a shell command.", group: "Shell" }];
 let policies: Record<string, string> = {};
 let fetchLog: FetchLogEntry[] = [];
+let nextApprovalError: { status: number; code: string; error: string; servers?: any[] } | null = null;
+let nextPairingError: { status: number; code: string; error: string } | null = null;
 
 commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
 
@@ -57,12 +62,33 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		body,
 		credentials: init?.credentials ?? request?.credentials ?? null,
 		authorization: headers.get("Authorization"),
+		mcpOperator: headers.get("X-Bobbit-Mcp-Operator"),
 	});
 
-	if (route.startsWith("/api/tools")) return response({
-		tools: [{ name: "bash", description: "Run a shell command.", group: "Shell" }],
-	});
+	if (route === "/api/mcp-operator/pair" && method === "POST") {
+		if (nextPairingError) {
+			const failure = nextPairingError;
+			nextPairingError = null;
+			return response({ code: failure.code, error: failure.error }, failure.status);
+		}
+		return response({ credential: MCP_OPERATOR_CREDENTIAL });
+	}
+	if (route.startsWith("/api/tools")) return response({ tools });
 	if (route.startsWith("/api/roles")) return response([]);
+	const approvalMatch = route.match(/^\/api\/mcp-servers\/([^/?]+)\/approval(?:\?|$)/);
+	if (approvalMatch && method === "POST") {
+		if (nextApprovalError) {
+			const failure = nextApprovalError;
+			nextApprovalError = null;
+			if (failure.servers) mcpServers = failure.servers;
+			return response({ code: failure.code, error: failure.error }, failure.status);
+		}
+		const server = mcpServers.find((entry) => entry.name === decodeURIComponent(approvalMatch[1]));
+		if (!server) return response({ code: "MCP_APPROVAL_STALE", error: "Server changed" }, 409);
+		server.approval = { ...server.approval, state: body?.decision };
+		server.status = body?.decision === "approved" ? "connected" : "disconnected";
+		return response(server);
+	}
 	if (route.startsWith("/api/mcp-servers")) return response(mcpServers);
 	if (route.startsWith("/api/tool-group-policies") && method === "GET") {
 		const cascade: Record<string, { policy: string; origin: string }> = {};
@@ -87,12 +113,24 @@ function doRender(): void {
 
 setRenderApp(doRender);
 
-(window as any).__setMcpFixture = (opts: { servers: any[]; policies?: Record<string, string> }) => {
-	mcpServers = opts.servers;
+(window as any).__setMcpFixture = (opts: { servers: any[]; tools?: any[]; policies?: Record<string, string>; projects?: any[] }) => {
+	mcpServers = structuredClone(opts.servers);
+	tools = opts.tools === undefined ? [{ name: "bash", description: "Run a shell command.", group: "Shell" }] : structuredClone(opts.tools);
 	policies = { ...(opts.policies || {}) };
+	state.projects = structuredClone(opts.projects || []);
 	fetchLog = [];
+	nextApprovalError = null;
+	nextPairingError = null;
 	clearToolPageState();
 	doRender();
+};
+
+(window as any).__failNextMcpApproval = (failure: { status: number; code: string; error: string; servers?: any[] }) => {
+	nextApprovalError = structuredClone(failure);
+};
+
+(window as any).__failNextMcpPairing = (failure: { status: number; code: string; error: string }) => {
+	nextPairingError = structuredClone(failure);
 };
 
 (window as any).__loadToolManager = async () => {

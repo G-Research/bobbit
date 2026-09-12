@@ -8,10 +8,13 @@ const ENTRY = path.resolve("tests/ui-fixtures/tool-manager-mcp-section-entry.ts"
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "tool-manager-mcp-section-bundle.js");
 const TOOL_MANAGER_SRC = path.resolve("src/app/tool-manager-page.ts");
+const TOOL_MANAGER_CSS = path.resolve("src/app/tool-manager.css");
 const API_SRC = path.resolve("src/app/api.ts");
 const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
+const MCP_OPERATOR_AUTH_SRC = path.resolve("src/app/mcp-operator-auth.ts");
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
+const FIXTURE_MCP_OPERATOR_CREDENTIAL = `v1.${"A".repeat(22)}.${"A".repeat(43)}`;
 
 type FetchLogEntry = {
 	url: string;
@@ -19,15 +22,17 @@ type FetchLogEntry = {
 	body: any;
 	credentials: RequestCredentials | null;
 	authorization: string | null;
+	mcpOperator: string | null;
 };
 
-function expectedGatewayRequest(route: string, method = "GET", body: any = null): FetchLogEntry {
+function expectedGatewayRequest(route: string, method = "GET", body: any = null, mcpOperator: string | null = null): FetchLogEntry {
 	return {
 		url: `${FIXTURE_GATEWAY_BASE_URL}${route}`,
 		method,
 		body,
 		credentials: null,
 		authorization: `Bearer ${FIXTURE_GATEWAY_TOKEN}`,
+		mcpOperator,
 	};
 }
 
@@ -47,6 +52,38 @@ const FAKE_SERVERS = [
 		toolCount: 0,
 		error: "stdio transport: ENOENT spawn",
 		tools: [],
+	},
+];
+
+const APPROVAL_SERVERS = [
+	{
+		name: "local-project",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "pending", fingerprint: "0123456789abcdef" },
+		source: { sourceId: "project-file:.mcp.json", authority: "project", projectId: "project-a", projectName: "Acme Portal", file: ".mcp.json" },
+		reviewConfig: { transport: "stdio", command: "node", args: ["server.js", "--token", "[redacted]"], cwd: "./services/mcp", env: { API_TOKEN: "[redacted]" } },
+		diagnostics: [{ code: "MCP_APPROVAL_PENDING", message: "Review this project-defined server before Bobbit starts it." }],
+	},
+	{
+		name: "remote-changed",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "changed", fingerprint: "fedcba9876543210" },
+		source: { sourceId: "project-file:.claude/.mcp.json", authority: "project", projectId: "project-b", projectName: "Data Service", file: ".claude/.mcp.json" },
+		reviewConfig: { transport: "http", url: "https://mcp.example.test/events", headers: { Authorization: "[redacted]" } },
+		diagnostics: [{ code: "MCP_APPROVAL_CHANGED", message: "The server configuration changed." }],
+	},
+	{
+		name: "rejected-project",
+		status: "disconnected",
+		toolCount: 0,
+		tools: [],
+		approval: { required: true, state: "rejected", fingerprint: "aaaaaaaaaaaaaaaa" },
+		source: { sourceId: "project-file:.bobbit/config/mcp.json", authority: "project", projectId: "project-a", projectName: "Acme Portal", file: ".bobbit/config/mcp.json" },
+		reviewConfig: { transport: "stdio", command: "python", args: ["mcp.py"] },
 	},
 ];
 
@@ -77,12 +114,13 @@ test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, TOOL_MANAGER_SRC, API_SRC, GATEWAY_FETCH_SRC],
+		deps: [ENTRY, TOOL_MANAGER_SRC, API_SRC, GATEWAY_FETCH_SRC, MCP_OPERATOR_AUTH_SRC],
 	});
 });
 
 async function loadFixture(page: Page): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.addStyleTag({ path: TOOL_MANAGER_CSS });
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__toolMcpReady === true, null, { timeout: 10_000 });
 }
@@ -104,6 +142,13 @@ async function fetchLog(page: Page): Promise<FetchLogEntry[]> {
 	return await page.evaluate(() => (window as any).__getMcpFetchLog());
 }
 
+async function pairBrowser(page: Page, code = "terminal-pairing-code"): Promise<void> {
+	const callout = page.locator('[data-testid="mcp-pairing-callout"]');
+	await callout.locator('[data-testid="mcp-pairing-code"]').fill(code);
+	await callout.locator('[data-testid="mcp-pair-browser"]').click();
+	await expect(callout.locator('[data-testid="mcp-pairing-notice"]')).toBeVisible();
+}
+
 test.describe("Tools page → MCP section fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
@@ -115,7 +160,7 @@ test.describe("Tools page → MCP section fixture", () => {
 			expectedGatewayRequest("/api/tools?projectId=headquarters"),
 			expectedGatewayRequest("/api/roles?projectId=headquarters"),
 			expectedGatewayRequest("/api/tool-group-policies?projectId=headquarters"),
-			expectedGatewayRequest("/api/mcp-servers?projectId=headquarters"),
+			expectedGatewayRequest("/api/mcp-servers?projectId=headquarters&ensure=true"),
 		]);
 
 		const section = page.locator('[data-testid="mcp-section"]');
@@ -291,5 +336,287 @@ test.describe("Tools page → MCP section fixture", () => {
 
 		await reloadWithMcp(page, GATEWAY_SERVERS);
 		await expect(page.locator('[data-testid="mcp-section"] [data-server-name="gr"] [data-testid="mcp-server-policy"]').first()).toHaveValue("");
+	});
+
+	test("reviews safe project configuration with approval separate from health and tool calls", async ({ page }) => {
+		await setupMcp(page, APPROVAL_SERVERS);
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section.getByText("3 servers · 2 need review")).toBeVisible();
+		await expect(section.getByText(/Startup approval is separate from/)).toBeVisible();
+		await expect(section.getByText("Approve all", { exact: false })).toHaveCount(0);
+
+		const pending = section.locator('[data-server-name="local-project"]');
+		await expect(pending.locator('[data-testid="mcp-approval-status"]')).toHaveText("Pending approval");
+		await expect(pending.locator('[data-testid="mcp-server-status"]')).toHaveText("Not started");
+		await expect(pending.locator('[data-testid="mcp-server-policy"]')).toBeVisible();
+		await expect(pending.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "false");
+		await pending.locator('[data-testid="mcp-server-toggle"]').press("Enter");
+		await expect(pending.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "true");
+		const review = pending.locator('[data-testid="mcp-review-panel"]');
+		await expect(review).toContainText("Acme Portal");
+		await expect(review).toContainText(".mcp.json");
+		await expect(review).toContainText("node");
+		await expect(review).toContainText("server.js --token [redacted]");
+		await expect(review).toContainText("API_TOKEN=[redacted]");
+		await expect(review).toContainText("0123456789ab");
+		await expect(page.locator("body")).not.toContainText("super-secret-value");
+
+		const changed = section.locator('[data-server-name="remote-changed"]');
+		await expect(changed.locator('[data-testid="mcp-approval-status"]')).toHaveText("Configuration changed — review again");
+		await expect(changed.locator('[data-testid="mcp-approve-server"]')).toHaveText("Approve current configuration");
+		await changed.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(changed.locator('[data-testid="mcp-review-panel"]')).toContainText("Data Service");
+		await expect(changed.locator('[data-testid="mcp-review-panel"]')).toContainText("Authorization: [redacted]");
+
+		const rejected = section.locator('[data-server-name="rejected-project"]');
+		await expect(rejected.locator('[data-testid="mcp-approval-status"]')).toHaveText("Rejected");
+		await expect(rejected.locator('[data-testid="mcp-reject-server"]')).toHaveCount(0);
+		await expect(rejected.locator('[data-testid="mcp-approve-server"]')).toHaveText("Approve current configuration");
+	});
+
+	test("pairs explicitly without deciding and sends operator authority only on decisions", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		const callout = page.locator('[data-testid="mcp-pairing-callout"]');
+		const input = callout.locator('[data-testid="mcp-pairing-code"]');
+		await expect(callout).toContainText("Pair this browser to approve or reject project MCP servers.");
+		await expect(input).toHaveAttribute("type", "password");
+		await expect(input).toHaveAttribute("autocomplete", "off");
+		await expect(input).toHaveAttribute("spellcheck", "false");
+
+		await input.fill("  terminal-pairing-code  ");
+		await callout.locator('[data-testid="mcp-pair-browser"]').click();
+		await expect(callout.locator('[data-testid="mcp-pairing-notice"]')).toContainText("no decision was made");
+		const afterPair = await fetchLog(page);
+		expect(afterPair.filter((entry) => entry.url.includes("/approval?"))).toHaveLength(0);
+		expect(afterPair.find((entry) => entry.url.endsWith("/api/mcp-operator/pair"))).toEqual(
+			expectedGatewayRequest("/api/mcp-operator/pair", "POST", { code: "terminal-pairing-code" }),
+		);
+
+		await page.evaluate(() => (window as any).__loadToolManager());
+		await expect.poll(async () => (await fetchLog(page)).filter((entry) => entry.method === "GET").slice(-4).every((entry) => entry.mcpOperator === null)).toBe(true);
+		await page.locator('[data-server-name="local-project"] [data-testid="mcp-approve-server"]').click();
+		await expect.poll(async () => (await fetchLog(page)).some((entry) => entry.url.includes("/approval?") && entry.mcpOperator === FIXTURE_MCP_OPERATOR_CREDENTIAL)).toBe(true);
+	});
+
+	test("keeps tab pairing usable while warning when browser storage fails", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		await page.evaluate(() => {
+			const setItem = Storage.prototype.setItem;
+			Storage.prototype.setItem = function (key: string, value: string): void {
+				if (key === "mcp.operator.credentials.v1") throw new DOMException("Storage blocked", "SecurityError");
+				setItem.call(this, key, value);
+			};
+		});
+		await pairBrowser(page);
+		await expect(page.locator('[data-testid="mcp-pairing-warning"]')).toContainText("could not be saved");
+		await page.locator('[data-server-name="local-project"] [data-testid="mcp-approve-server"]').click();
+		await expect.poll(async () => (await fetchLog(page)).some((entry) => entry.url.includes("/approval?") && entry.mcpOperator === FIXTURE_MCP_OPERATOR_CREDENTIAL)).toBe(true);
+	});
+
+	test("keeps pairing failures inline and focuses the code input", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		await page.evaluate(() => (window as any).__failNextMcpPairing({
+			status: 403,
+			code: "MCP_OPERATOR_PAIRING_REQUIRED",
+			error: "Pairing failed",
+		}));
+		const input = page.locator('[data-testid="mcp-pairing-code"]');
+		await input.fill("used-or-wrong-code");
+		await page.locator('[data-testid="mcp-pair-browser"]').click();
+		await expect(page.locator('[data-testid="mcp-pairing-error"]')).toContainText("invalid, expired, or already used");
+		await expect(input).toBeFocused();
+		await expect(page.locator('[data-server-name="local-project"] [data-testid="mcp-approval-status"]')).toHaveText("Pending approval");
+	});
+
+	test("forgets rejected operator authority, expands the row, and returns to pairing", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		await pairBrowser(page);
+		await page.evaluate(() => (window as any).__failNextMcpApproval({
+			status: 403,
+			code: "MCP_APPROVAL_HUMAN_REQUIRED",
+			error: "Operator authorization required",
+		}));
+		const row = page.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "true");
+		await expect(row.locator('[data-testid="mcp-approval-error"]')).toContainText("Pair this browser");
+		await expect(page.locator('[data-testid="mcp-pairing-error"]')).toContainText("not paired");
+		await expect(page.locator('[data-testid="mcp-pairing-code"]')).toBeFocused();
+		await expect.poll(() => page.evaluate(() => localStorage.getItem("mcp.operator.credentials.v1"))).toBeNull();
+	});
+
+	test("approves and rejects individually, refetches state, and returns focus", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		await pairBrowser(page);
+		let row = page.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect.poll(async () => (await fetchLog(page)).find((entry) => entry.url.includes("/approval?"))).toEqual(
+			expectedGatewayRequest("/api/mcp-servers/local-project/approval?projectId=headquarters", "POST", {
+				decision: "approved",
+				fingerprint: "0123456789abcdef",
+				sourceProjectId: "project-a",
+				sourceId: "project-file:.mcp.json",
+			}, FIXTURE_MCP_OPERATOR_CREDENTIAL),
+		);
+		row = page.locator('[data-server-name="local-project"]');
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved");
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("connected");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toBeFocused();
+
+		await row.locator('[data-testid="mcp-reject-server"]').click();
+		await expect(page.getByText("Reject local-project?", { exact: true })).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Rejected");
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("Not started");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toBeFocused();
+	});
+
+	test("keeps review open and refreshes metadata after a stale decision", async ({ page }) => {
+		await setupMcp(page, [APPROVAL_SERVERS[0]]);
+		await pairBrowser(page);
+		const changed = structuredClone(APPROVAL_SERVERS[0]);
+		changed.approval = { ...changed.approval, state: "changed", fingerprint: "9999999999999999" };
+		changed.reviewConfig.args = ["server-v2.js"];
+		await page.evaluate((servers) => (window as any).__failNextMcpApproval({
+			status: 409,
+			code: "MCP_APPROVAL_STALE",
+			error: "Definition changed",
+			servers,
+		}), [changed]);
+		const row = page.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(row.locator('[data-testid="mcp-approval-error"]')).toHaveText("Configuration changed while you were reviewing it. Review the current configuration before deciding.");
+		await expect(row.locator('[data-testid="mcp-server-toggle"]')).toHaveAttribute("aria-expanded", "true");
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("server-v2.js");
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("999999999999");
+	});
+
+	test("renders zero-tool review rows and uses one-column review metadata at 767px", async ({ page }) => {
+		await page.setViewportSize({ width: 767, height: 800 });
+		await page.evaluate((servers) => (window as any).__setMcpFixture({ servers, tools: [] }), APPROVAL_SERVERS);
+		await page.evaluate(() => (window as any).__loadToolManager());
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section).toBeVisible();
+		await expect(page.getByText("No tools found")).toHaveCount(0);
+		const row = section.locator('[data-server-name="local-project"]');
+		await row.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(row.getByText("No operations available.")).toBeVisible();
+		await expect(row.locator(".mcp-review-grid")).toHaveCSS("grid-template-columns", /\d+(\.\d+)?px/);
+		const buttonBox = await row.locator('[data-testid="mcp-approve-server"]').boundingBox();
+		expect(buttonBox?.height).toBeGreaterThanOrEqual(44);
+	});
+
+	test("does not offer decisions for invalid definitions", async ({ page }) => {
+		const invalid = structuredClone(APPROVAL_SERVERS[0]);
+		invalid.name = "invalid-project";
+		invalid.diagnostics = [{ code: "MCP_CONFIG_INVALID", message: "A supported command or HTTP URL is required." }];
+		await setupMcp(page, [invalid]);
+		const row = page.locator('[data-server-name="invalid-project"]');
+		await expect(row.locator('[data-testid="mcp-approve-server"]')).toHaveCount(0);
+		await expect(row.locator('[data-testid="mcp-reject-server"]')).toHaveCount(0);
+		await row.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("MCP_CONFIG_INVALID");
+	});
+
+	test("reloads every scoped Tools resource when the project scope changes", async ({ page }) => {
+		await page.evaluate((servers) => (window as any).__setMcpFixture({
+			servers,
+			projects: [{ id: "project-a", name: "Acme Portal", rootPath: "C:/acme" }],
+		}), APPROVAL_SERVERS);
+		await page.evaluate(() => (window as any).__loadToolManager());
+		await page.getByRole("button", { name: "Acme Portal" }).click();
+		await expect.poll(async () => (await fetchLog(page)).slice(-4).map((entry) => entry.url)).toEqual([
+			`${FIXTURE_GATEWAY_BASE_URL}/api/tools?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/roles?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/tool-group-policies?projectId=project-a`,
+			`${FIXTURE_GATEWAY_BASE_URL}/api/mcp-servers?projectId=project-a&ensure=true`,
+		]);
+	});
+
+	test("discards a delayed Tools scope response after a newer project loads", async ({ page }) => {
+		const projectAServer = structuredClone(APPROVAL_SERVERS[0]);
+		projectAServer.name = "project-a-server";
+		projectAServer.source = { ...projectAServer.source, projectId: "project-a", projectName: "Project A" };
+		const projectBServer = structuredClone(APPROVAL_SERVERS[0]);
+		projectBServer.name = "project-b-server";
+		projectBServer.approval = { ...projectBServer.approval, fingerprint: "bbbbbbbbbbbbbbbb" };
+		projectBServer.source = { ...projectBServer.source, projectId: "project-b", projectName: "Project B" };
+
+		await page.evaluate(({ projects }) => (window as any).__setMcpFixture({ servers: [], projects }), {
+			projects: [
+				{ id: "project-a", name: "Project A", rootPath: "C:/project-a" },
+				{ id: "project-b", name: "Project B", rootPath: "C:/project-b" },
+			],
+		});
+		await page.evaluate(() => (window as any).__loadToolManager());
+		await page.evaluate(({ serverA, serverB }) => {
+			const originalFetch = window.fetch.bind(window);
+			let releaseProjectA = () => {};
+			const projectAGate = new Promise<void>((resolve) => { releaseProjectA = resolve; });
+			(window as any).__projectARequestCount = 0;
+			(window as any).__scopeApprovalRequests = [];
+			(window as any).__releaseProjectARequests = releaseProjectA;
+			window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+				const request = input instanceof Request ? input : null;
+				const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				const url = new URL(rawUrl, window.location.href);
+				const projectId = url.searchParams.get("projectId");
+				if (projectId !== "project-a" && projectId !== "project-b") return originalFetch(input, init);
+
+				const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+				const server = projectId === "project-a" ? serverA : serverB;
+				let body: unknown;
+				if (method === "POST" && url.pathname.endsWith("/approval")) {
+					const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+					(window as any).__scopeApprovalRequests.push({ projectId, body: requestBody });
+					server.approval = { ...server.approval, state: requestBody?.decision };
+					body = server;
+				} else if (url.pathname.endsWith("/api/tools")) {
+					body = { tools: [{ name: `${projectId}-tool`, description: projectId, group: "Fixture" }] };
+				} else if (url.pathname.endsWith("/api/roles")) {
+					body = [];
+				} else if (url.pathname.endsWith("/api/tool-group-policies")) {
+					body = {};
+				} else if (url.pathname.endsWith("/api/mcp-servers")) {
+					body = [server];
+				} else {
+					return originalFetch(input, init);
+				}
+
+				const scopedResponse = new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+				if (projectId === "project-a" && method === "GET") {
+					(window as any).__projectARequestCount++;
+					await projectAGate;
+				}
+				return scopedResponse;
+			}) as typeof window.fetch;
+		}, { serverA: projectAServer, serverB: projectBServer });
+
+		await page.getByRole("button", { name: "Project A" }).click();
+		await page.waitForFunction(() => (window as any).__projectARequestCount === 4);
+		await page.getByRole("button", { name: "Project B" }).click();
+		await expect(page.locator('[data-server-name="project-b-server"]')).toBeVisible();
+
+		await page.evaluate(async () => {
+			(window as any).__releaseProjectARequests();
+			await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		});
+		await expect(page.locator('[data-server-name="project-b-server"]')).toBeVisible();
+		await expect(page.locator('[data-server-name="project-a-server"]')).toHaveCount(0);
+		const projectBRow = page.locator('[data-server-name="project-b-server"]');
+		await projectBRow.locator('[data-testid="mcp-server-toggle"]').click();
+		await expect(projectBRow.locator('[data-testid="mcp-review-panel"]')).toContainText("Project B");
+		await expect(projectBRow.locator('[data-testid="mcp-review-panel"]')).toContainText("bbbbbbbbbbbb");
+		await pairBrowser(page);
+		await projectBRow.locator('[data-testid="mcp-approve-server"]').click();
+		await expect.poll(() => page.evaluate(() => (window as any).__scopeApprovalRequests)).toEqual([{
+			projectId: "project-b",
+			body: {
+				decision: "approved",
+				fingerprint: "bbbbbbbbbbbbbbbb",
+				sourceProjectId: "project-b",
+				sourceId: "project-file:.mcp.json",
+			},
+		}]);
 	});
 });

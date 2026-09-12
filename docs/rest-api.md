@@ -6,9 +6,10 @@ browser context; it does not authenticate or authorize the route. After
 admission, each gateway surface still requires one of its accepted
 authentication sources. Most programmatic API calls use
 `Authorization: Bearer <admin-token>`; routes that support it also accept
-`?token=`. Browser API requests and preview resources may instead authenticate
-with a valid `bobbit_session` cookie. Scoped sandbox and session credentials
-remain limited to their existing route allow-lists.
+`?token=`. Browser API requests and initial preview resources may instead
+authenticate with a valid `bobbit_session` cookie; matching opaque preview
+follow-ons may use the narrower `bobbit_preview` capability. Scoped sandbox and
+session credentials remain limited to their existing route allow-lists.
 
 `bobbit_session` is a stateless signed value:
 `v1.<iat>.<exp>.<nonce>.<signature>`. The canonical issuance and expiry Unix
@@ -35,9 +36,11 @@ request authenticated by the signed cookie and occurs only at or within the
 inclusive seven-day window. A fresh valid cookie is not issued repeatedly.
 Plain Bearer traffic without the required same-origin Fetch Metadata, sandbox
 or session-bound traffic, internal callbacks, preview content, and preview SSE
-do not receive `Set-Cookie`. The [preview cookie-auth reference](preview-architecture.md#cookie-auth)
+do not receive or renew `bobbit_session`. A primary-authorized preview content
+response may instead issue or renew the narrower `bobbit_preview` resource
+capability. The [preview cookie-auth reference](preview-architecture.md#cookie-auth)
 documents the exact Fetch Metadata, Origin, Vite, credential, header, and route
-exclusions.
+rules.
 
 Those browser headers classify issuance only; they do not establish authority
 or prove a human caller. Consequently, a holder of the shared admin token can
@@ -1977,23 +1980,29 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/mcp-servers` | List all discovered MCP servers with status, tool count, and tool names |
-| `POST` | `/api/mcp-servers/:name/restart` | Disconnect and reconnect an MCP server (also re-discovers from config files) |
+| `POST` | `/api/mcp-operator/pair` | Exchange `{ code }` from the gateway terminal for an MCP operator credential |
+| `GET` | `/api/mcp-servers?projectId=<id>` | Read safe status for one visible project scope |
+| `POST` | `/api/mcp-servers/:name/approval?projectId=<id>` | Approve or reject one current project-controlled definition |
+| `POST` | `/api/mcp-servers/:name/restart?projectId=<id>` | Rediscover the scoped configuration through the startup trust gate and return the named server |
 | `POST` | `/api/internal/mcp-call` | Proxy a tool call to an MCP server (`{ tool: "mcp__server__name", args: {...} }`) |
 | `POST` | `/api/internal/mcp-describe` | Return the JSON Schema for an MCP server's operations (`{ server, operation? }` → `{ tools: [...] }` or `{ tool: {...} }`); used by the `mcp_describe` discovery tool |
 
-**`GET /api/mcp-servers`** returns an array of server objects:
-```json
-[{
-  "name": "playwright",
-  "status": "connected",
-  "toolCount": 12,
-  "config": { "command": "npx", "args": ["@playwright/mcp@latest"] },
-  "tools": [{ "name": "mcp__playwright__browser_navigate", "description": "Navigate to URL" }]
-}]
-```
+Status, approval, and restart require `projectId`; an optional `cwd` is validated
+within that project. For status or approval of an external worktree, also supply
+exactly one owning `sessionId` or `goalId` (and the displayed `cwd` when
+present). `ensure=true` on status creates the scoped manager when needed and
+reconciles it before returning; without it, the endpoint reads only an existing
+manager and returns `[]` when none exists. Responses include safe rows for
+pending, rejected, changed, and invalid definitions even though those servers
+have no runtime connection or registered tools.
 
-**`POST /api/mcp-servers/:name/restart`** re-discovers servers from config files before connecting, so newly added servers can be started without a gateway restart.
+Approval mutations additionally require the terminal-paired credential in
+`X-Bobbit-Mcp-Operator`. The body is `{ decision: "approved" | "rejected",
+fingerprint, sourceProjectId, sourceId }`. A stale source or fingerprint returns
+`409 MCP_APPROVAL_STALE`, while a pretrusted or invalid definition returns the
+corresponding `422` outcome. Restart performs fresh discovery; it never bypasses
+startup approval. See [MCP server startup approvals](mcp-server-approvals.md#status-and-approval-api)
+for pairing, safe status fields, worktree ownership, and decision semantics.
 
 **`POST /api/internal/mcp-call`** is the internal proxy endpoint used by generated agent extensions. Returns the raw MCP `{ content, isError }` response. Enforces Layer B per-op `never`-policy denial via `resolveGrantPolicy` before dispatching. On error, the response body includes structured `{ error, server, operation }` fields when the tool name is parseable.
 
@@ -2003,7 +2012,7 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 The preview side-panel iframe is fed by a per-session content mount. Central request admission validates every preview document and asset request before the content route applies its signed-cookie authentication. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
 
-**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. After admission, the signed `bobbit_session` cookie authenticates the content request. It is HttpOnly, has a 30-day max-age, uses `/` as its path in root mode and `<base-path>/` when mounted, and is `Secure` outside the credential-free all-loopback HTTP mode. iframe loads, link navigation, and "Open in new tab" below the mount carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. After admission, initial navigation uses normal primary authorization and a successful response may issue or renew the exact-session, exact-path `bobbit_preview` cookie (`HttpOnly; Secure; SameSite=None`). Only matching opaque-origin `GET`/`HEAD` follow-on resources may use that capability and receive route-local credentialed `Origin: null` CORS. It grants no authority over APIs, SSE, WebSockets, MCP decisions, or another session's preview mount. Path-traversal escapes return `403`; missing files return `404`. Full cookie and isolation rules are in [Preview resource capability](preview-architecture.md#preview-resource-capability).
 
 #### Historical `preview_open` snapshot markers
 

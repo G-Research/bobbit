@@ -525,7 +525,7 @@ This is still one provider pack. The Installed tab toggles pack-local MCP entrie
 
 `McpManager` separates public policy/model identity from runtime client identity. Gateway contributions keep public server names such as `gr` / `gr-write` and package sub-namespaces such as `jira`, but their runtime client key includes source/install/fingerprint identity. This lets multiple gateway sources expose a union of selected operations without one `gr` config replacing another. Identical runtime config can still share a client; write providers group separately under `gr-write`. The model-facing tools stay sub-namespace meta-tools such as `mcp_gr__jira`, and the internal route id remains `mcp__gr__jira__<operation>`.
 
-`GET /api/mcp-servers` exposes the hierarchy the Tools page renders:
+`GET /api/mcp-servers?projectId=<id>&ensure=true` exposes the hierarchy the Tools page renders:
 
 ```json
 [
@@ -563,7 +563,7 @@ Marketplace MCP contributions are resolved by scope and then grouped into MCP cl
 
 `McpManager` builds a route map from public operation ids (for example, `mcp__gr__jira__jira_search`) to the selected runtime client and raw MCP operation. Distinct public names from different packages/sources are all exposed. If two sources expose the same public name, the deterministic contribution order keeps the first route and records a conflict diagnostic for the dropped route; manual JSON MCP routes are considered before Marketplace routes for compatibility.
 
-MCP runtime state is contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own their own clients, status, tool docs, and external tool registrations. `GET /api/mcp-servers?projectId=...` or `?cwd=...` reads that scoped manager; without parameters it reads the default manager. A status read does not create a scoped manager unless the UI asks with `ensure=true`.
+MCP runtime state is contextual. Managers are keyed by project identity and canonical execution directory and own their own clients, status, tool docs, and external tool registrations. The status API always requires `projectId`; `cwd` is an optional, validated execution coordinate and cannot select a project. Reviewing an external worktree also requires exactly one current owning `sessionId` or `goalId`. With `ensure=true`, `GET /api/mcp-servers` creates the scoped manager when needed and reconciles it before returning; without it, the route reads only an existing manager and returns an empty list when none exists. See [MCP server startup approvals — Status and approval API](mcp-server-approvals.md#status-and-approval-api).
 
 Install/update/uninstall, `pack_order`, and MCP activation mutations persist disk state first, invalidate Marketplace/pack-contribution caches, then ask the affected manager(s) to reload. Reloads are serialized per manager, disconnect removed servers, keep unchanged connections, connect changed servers into fresh state, and refresh `ToolManager` external MCP tools. Responses may include `mcpReload.status: "ok" | "partial" | "error" | "pending"`; a pending reload continues in the background and refreshes external MCP tools when it settles.
 

@@ -315,6 +315,43 @@ async function humanSessionCookie(): Promise<string> {
 		return cookie;
 	} catch { return ""; }
 }
+
+/** Return a genuine signed UI/operator cookie or fail the test setup explicitly. */
+export async function authenticatedOperatorCookie(): Promise<string> {
+	const cookie = await humanSessionCookie();
+	if (!cookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return cookie;
+}
+
+const _mcpOperatorCredentialCache: Record<string, string> = {};
+
+/** Create the same one-use MCP pairing code the controlling CLI prints. */
+export function createMcpOperatorPairingCode(): { code: string; expiresAt: string } {
+	return gw().createMcpOperatorPairingCode();
+}
+
+/** Exchange a current pairing code and retain the resulting gateway-scoped test credential. */
+export async function pairMcpOperatorBrowser(code: string): Promise<string> {
+	const response = await rawApiFetch("/api/mcp-operator/pair", {
+		method: "POST",
+		body: JSON.stringify({ code }),
+	});
+	const body = await response.json().catch(() => ({})) as { credential?: unknown; code?: unknown };
+	if (!response.ok) throw new Error(`MCP operator pairing failed (${response.status}): ${String(body.code ?? "unknown")}`);
+	if (typeof body.credential !== "string" || !/^v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/.test(body.credential)) {
+		throw new Error("MCP operator pairing returned an invalid credential");
+	}
+	_mcpOperatorCredentialCache[base()] = body.credential;
+	return body.credential;
+}
+
+/** Return approval-only headers backed by a real terminal-code exchange. */
+export async function authenticatedMcpOperatorHeaders(): Promise<Record<string, string>> {
+	let credential = _mcpOperatorCredentialCache[base()];
+	if (!credential) credential = await pairMcpOperatorBrowser(createMcpOperatorPairingCode().code);
+	return { "X-Bobbit-Mcp-Operator": credential };
+}
+
 async function withChildrenAuthzCookie(path: string, method: string, headers: Record<string, string>): Promise<Record<string, string>> {
 	const bare = path.split("?")[0];
 	const isChildCreate = method.toUpperCase() === "POST" && bare === "/api/goals";

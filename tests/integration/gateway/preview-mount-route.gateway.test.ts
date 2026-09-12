@@ -13,7 +13,7 @@ import { createHmac } from "node:crypto";
 import { Writable } from "node:stream";
 import type http from "node:http";
 import type { CookieStore } from "../../../src/server/auth/cookie.js";
-import { COOKIE_NAME } from "../../../src/server/auth/cookie.js";
+import { COOKIE_NAME, PREVIEW_COOKIE_NAME } from "../../../src/server/auth/cookie.js";
 import { handlePreviewRequest, pickEntry } from "../../../src/server/preview/content-route.js";
 import * as previewArtifacts from "../../../src/server/preview/artifacts.js";
 import * as previewMount from "../../../src/server/preview/mount.js";
@@ -46,6 +46,7 @@ interface RouteInit {
 
 class MemoryCookieStore {
 	private readonly values = new Set<string>();
+	private readonly previewValues = new Set<string>();
 	private readonly signingKey = Buffer.alloc(32, 0x5a);
 	private sequence = 1;
 
@@ -61,11 +62,38 @@ class MemoryCookieStore {
 		return value;
 	}
 
-	verify(value: string): { valid: true; issuedAt: number; expiresAt: number; needsRenewal: false } | undefined {
+	verify(value: string): { issuedAt: number; expiresAt: number; needsRenewal: false } | undefined {
 		if (!this.values.has(value)) return undefined;
 		const [, issuedAt, expiresAt] = value.split(".");
 		return {
-			valid: true,
+			issuedAt: Number(issuedAt),
+			expiresAt: Number(expiresAt),
+			needsRenewal: false,
+		};
+	}
+
+	mintPreviewResource(sessionId: string): string {
+		if (!VALID_SESSION_ID.test(sessionId)) throw new Error("Invalid preview session ID");
+		const canonicalSessionId = sessionId.toLowerCase();
+		const issuedAt = 1_700_000_000 + this.sequence;
+		const expiresAt = issuedAt + 86_400;
+		const nonceBytes = Buffer.alloc(16);
+		nonceBytes.writeUInt32BE(this.sequence++, 12);
+		const prefix = `pv1.${canonicalSessionId}.${issuedAt}.${expiresAt}.${nonceBytes.toString("base64url")}`;
+		const signature = createHmac("sha256", this.signingKey)
+			.update("bobbit-preview-resource\0", "ascii")
+			.update(prefix, "ascii")
+			.digest("base64url");
+		const value = `${prefix}.${signature}`;
+		this.previewValues.add(value);
+		return value;
+	}
+
+	verifyPreviewResource(value: string, sessionId: string): { issuedAt: number; expiresAt: number; needsRenewal: false } | undefined {
+		if (!VALID_SESSION_ID.test(sessionId) || !this.previewValues.has(value)) return undefined;
+		const [version, payloadSessionId, issuedAt, expiresAt] = value.split(".");
+		if (version !== "pv1" || payloadSessionId !== sessionId.toLowerCase()) return undefined;
+		return {
 			issuedAt: Number(issuedAt),
 			expiresAt: Number(expiresAt),
 			needsRenewal: false,
@@ -193,12 +221,21 @@ class PreviewMountRouteFixture {
 
 		if (url.pathname.startsWith("/preview/")) {
 			const response = new MemoryServerResponse();
+			const cookie = headerValue(init.headers, "cookie");
+			const origin = headerValue(init.headers, "origin");
+			const fetchSite = headerValue(init.headers, "sec-fetch-site");
+			const fetchMode = headerValue(init.headers, "sec-fetch-mode");
+			const fetchDest = headerValue(init.headers, "sec-fetch-dest");
 			const req = {
 				url: `${url.pathname}${url.search}`,
 				method,
 				headers: {
 					host: "preview.test",
-					...(init.headers?.Cookie ? { cookie: init.headers.Cookie } : {}),
+					...(cookie ? { cookie } : {}),
+					...(origin ? { origin } : {}),
+					...(fetchSite ? { "sec-fetch-site": fetchSite } : {}),
+					...(fetchMode ? { "sec-fetch-mode": fetchMode } : {}),
+					...(fetchDest ? { "sec-fetch-dest": fetchDest } : {}),
 				},
 			} as http.IncomingMessage;
 			await handlePreviewRequest(req, response as unknown as http.ServerResponse, url.pathname, {
@@ -621,6 +658,10 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 		});
 		expect(resp.status).toBe(200);
 		expect(resp.headers.get("content-type") || "").toMatch(/text\/html/);
+		const previewSetCookie = resp.headers.get("set-cookie");
+		expect(previewSetCookie).toContain(`${PREVIEW_COOKIE_NAME}=pv1.${sessionId}.`);
+		expect(previewSetCookie).toContain(`Path=/preview/${sessionId}/`);
+		expect(previewSetCookie).toContain("HttpOnly; Secure; SameSite=None");
 		const body = await resp.text();
 		// Marked <base> rewritten to the content-origin path.
 		expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
@@ -630,6 +671,14 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 		expect(body).toContain(".dark {");
 		// Bridge marker — any of the shared script substrings will do.
 		expect(body).toMatch(/preview-swipe-start|MutationObserver/);
+
+		const previewCookie = String(previewSetCookie).split(";", 1)[0]!;
+		const opaqueResp = await route.fetch(`${base()}/preview/${sessionId}/inline.html`, {
+			headers: { Cookie: previewCookie, Origin: "null" },
+		});
+		expect(opaqueResp.status).toBe(200);
+		expect(opaqueResp.headers.get("access-control-allow-origin")).toBe("null");
+		expect(opaqueResp.headers.get("access-control-allow-credentials")).toBe("true");
 	});
 
 	test("without cookie or bearer (forced auth) → 401", async () => {

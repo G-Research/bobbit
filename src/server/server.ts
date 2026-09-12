@@ -664,6 +664,10 @@ import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type San
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import {
+	McpOperatorAuthorizationError,
+	McpOperatorAuthorizer,
+} from "./auth/mcp-operator-authorizer.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
@@ -746,7 +750,11 @@ import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
-import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { MarketplaceMcpResolver, McpManager, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import {
+	MarketplaceMcpInstallAttestationStore,
+	measureMarketplaceMcpPackIntegrity,
+} from "./mcp/marketplace-mcp-install-attestation.js";
 import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -2815,6 +2823,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
+	const mcpOperatorAuthorizer = new McpOperatorAuthorizer({
+		secretsDir,
+		now: gatewayDeps.clock.now,
+	});
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
 	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
@@ -2905,11 +2917,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// physical Headquarters directory, global-user is the home dir, project is
 	// each project's rootPath.
 	const marketplaceSourceStore = new MarketplaceSourceStore(configDir, gatewayDeps.fsImpl);
+	const marketplaceMcpInstallAttestations = new MarketplaceMcpInstallAttestationStore(secretsDir);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
 		serverBase: headquartersDir(),
 		globalUserBase: os.homedir(),
+		mcpInstallAttestationStore: marketplaceMcpInstallAttestations,
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
@@ -3067,8 +3081,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const disabledOperations = activation.mcpOperations ?? {};
 			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
 			const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
+			const installSourceId = safeString(metaDetails.sourceId) ?? entry.meta?.sourceId ?? fallbackSourceId;
+			const projectRecord = entry.scope === "project" && projectId ? projectRegistry.get(projectId) : undefined;
 			try {
-				for (const mcp of loadPackContributions(entry.path, entry.manifest).mcp ?? []) {
+				const loadedMcp = loadPackContributions(entry.path, entry.manifest).mcp ?? [];
+				let marketplacePackIntegrity: string | undefined;
+				let marketplacePackIntegrityInvalid = false;
+				if (entry.scope === "project") {
+					try {
+						marketplacePackIntegrity = measureMarketplaceMcpPackIntegrity(entry.path);
+					} catch {
+						marketplacePackIntegrityInvalid = true;
+						console.warn(`[mcp] Marketplace pack integrity validation failed for ${entry.manifest.name}`);
+					}
+				}
+				for (const mcp of loadedMcp) {
 					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
 					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
 					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
@@ -3077,6 +3104,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const selectedOperations = metaDetails.sourceType === "mcp-gateway" && operationMetadata.length > 0
 						? operationMetadata.map((op) => op.name).filter((name) => !disabledOpsSet.has(name))
 						: (mcp.selectedOperations ? mcp.selectedOperations.filter((name) => !disabledOpsSet.has(name)) : undefined);
+					const projectAttestation = entry.scope === "project" && projectId && installSourceId
+						? marketplaceMcpInstallAttestations.classify({
+							projectId,
+							sourceId: installSourceId,
+							packName: entry.manifest.name,
+							contributionId: mcp.listName,
+							serverName: mcp.serverName,
+							config: mcp.config,
+							packIntegrity: marketplacePackIntegrity,
+						})
+						: "missing";
+					const projectControlled = entry.scope === "project" && projectAttestation !== "attested";
+					const fallbackFile = `.bobbit/config/market-packs/${entry.manifest.name}/mcp/${path.basename(mcp.sourceFile)}`;
+					const relativeFile = projectRecord
+						? path.relative(projectRecord.rootPath, mcp.sourceFile).replace(/\\/g, "/")
+						: fallbackFile;
+					const sourceFile = relativeFile && relativeFile !== ".." && !relativeFile.startsWith("../")
+						? relativeFile
+						: fallbackFile;
 					contributions.push({
 						listName: mcp.listName,
 						serverName: mcp.serverName,
@@ -3087,6 +3133,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						config: mcp.config,
 						origin: {
 							scope: entry.scope,
+							authority: projectControlled ? "project" : "marketplace",
+							trust: projectControlled ? "approval-required" : "pretrusted",
+							...(projectAttestation === "changed" ? { marketplaceAttestationChanged: true } : {}),
+							...(marketplacePackIntegrity ? { marketplacePackIntegrity } : {}),
+							...(marketplacePackIntegrityInvalid ? { marketplacePackIntegrityInvalid: true } : {}),
+							sourceId: `marketplace-pack:${installSourceId ?? "unattested"}:${entry.manifest.name}:${mcp.listName}`,
+							file: sourceFile,
+							...(entry.scope === "project" && projectId ? { projectId } : {}),
+							...(projectRecord?.name ? { projectName: projectRecord.name } : {}),
 							packName: entry.manifest.name,
 							packId: entry.id,
 							path: mcp.sourceFile,
@@ -4321,7 +4376,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode, mcpOperatorAuthorizer);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -4959,6 +5014,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	teamManager.setBroadcastToGoal(broadcastToGoal);
+	sessionManager.setOnMcpApprovalsChanged((event) => broadcastToAll(event));
 	const sessionKind = (session: SessionInfo): "general" | "assistant" | "goal" | "team" | "delegate" | "staff" | "child" => {
 		if (session.staffId) return "staff";
 		if (session.delegateOf) return "delegate";
@@ -5266,6 +5322,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		/** @internal Exposed for integration coverage of production hook wiring. */
 		hostInterceptorRouter,
+		createMcpOperatorPairingCode: () => mcpOperatorAuthorizer.createPairingCode(),
 		get extensionChannels() { return extensionChannelServices; },
 		/**
 		 * Coarse post-start result used by the CLI to mirror the compiled policy's
@@ -6097,6 +6154,7 @@ async function handleApiRoute(
 	remoteStateRoutes?: any,
 	hostInterceptorRouter?: HostInterceptorRouter,
 	trustedLocalRequest = false,
+	mcpOperatorAuthorizer?: McpOperatorAuthorizer,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -7708,6 +7766,7 @@ async function handleApiRoute(
 					console.warn(`[host-hooks] projectImported failed for ${project.id} (non-fatal)`);
 				}
 			}
+			await sessionManager.reloadMcpAfterProjectMutation(project.id);
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -7784,11 +7843,56 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const updated = projectRegistry.update(projectGetMatch[1], updates);
+			const projectId = projectGetMatch[1];
+			const current = projectRegistry.get(projectId)!;
+			const rootChanged = updates.rootPath !== undefined && !samePath(current.rootPath, updates.rootPath);
+			if (!rootChanged) {
+				json(projectRegistry.update(projectId, updates));
+				return;
+			}
+
+			const liveSessionIds = new Set([
+				...(projectContextManager.getExisting(projectId)?.sessionStore.getLive().map(session => session.id) ?? []),
+				...sessionManager.getAllSessionsRaw()
+					.filter(session => (sessionManager.getPersistedSession(session.id)?.projectId ?? session.projectId) === projectId)
+					.map(session => session.id),
+			]);
+			if (liveSessionIds.size > 0) {
+				json({
+					error: "Stop the project's active sessions before changing its root.",
+					code: "PROJECT_ROOT_MOVE_ACTIVE_SESSIONS",
+					sessionIds: [...liveSessionIds],
+				}, 409);
+				return;
+			}
+
+			const oldRoot = current.rootPath;
+			const updated = await sessionManager.runMcpProjectRootMutation(projectId, oldRoot, async () => {
+				const next = projectRegistry.update(projectId, updates);
+				const nextCtx = await projectContextManager.refreshAfterProjectRootChange(projectId);
+				if (!nextCtx) throw new Error(`Project context could not be refreshed: ${projectId}`);
+				nextCtx.gateStore.onStatusChange = () => {
+					nextCtx.goalStore.bumpGeneration();
+				};
+				wireGoalManagerResolvers(nextCtx, { sessionManager, projectContextManager, projectRegistry });
+				return next;
+			}, async () => {
+				const registered = projectRegistry.get(projectId);
+				if (registered && !samePath(registered.rootPath, oldRoot)) {
+					projectRegistry.update(projectId, { rootPath: oldRoot });
+				}
+				const restoredCtx = await projectContextManager.refreshAfterProjectRootChange(projectId);
+				if (!restoredCtx) throw new Error(`Project context could not be restored: ${projectId}`);
+				restoredCtx.gateStore.onStatusChange = () => {
+					restoredCtx.goalStore.bumpGeneration();
+				};
+				wireGoalManagerResolvers(restoredCtx, { sessionManager, projectContextManager, projectRegistry });
+			});
 			json(updated);
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			const status = err?.code === "PROJECT_ROOT_MOVE_IN_PROGRESS" ? 409 : 400;
+			jsonError(status, err);
 		}
 		return;
 	}
@@ -7841,6 +7945,7 @@ async function handleApiRoute(
 			} else {
 				projectRegistry.remove(projectId);
 			}
+			await sessionManager.reloadMcpAfterProjectMutation(projectId);
 			json({ ok: true });
 		} catch (err: any) {
 			if (err instanceof SharedWorktreeInUseError) {
@@ -8300,6 +8405,11 @@ async function handleApiRoute(
 				}
 			}
 
+			if ("config_directories" in migratedExtracted) {
+				// A controlling project declaration can introduce, replace, or remove
+				// project-owned MCP files even when their target path is elsewhere.
+				await sessionManager.reloadMcpAfterProjectMutation(ctx.project.id);
+			}
 			if (baseRefWarnings.length > 0) {
 				json({ ok: true, warnings: baseRefWarnings });
 				return;
@@ -12152,7 +12262,7 @@ async function handleApiRoute(
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
-				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
@@ -12181,7 +12291,7 @@ async function handleApiRoute(
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
-				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
@@ -12210,7 +12320,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
-				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
@@ -20685,57 +20795,228 @@ async function handleApiRoute(
 		return;
 	}
 
+	const serializeMcpServerStatus = (mcpManager: McpManager, status: ReturnType<McpManager["getServerStatuses"]>[number]) => {
+		const routeSnapshots = mcpManager.getToolRouteSnapshots();
+		const ownedRoutes = routeSnapshots.filter(tool => tool.runtimeServerKey === status.name);
+		const publicServerNames = new Set<string>([
+			...ownedRoutes.map(tool => tool.publicServerName),
+			...(status.ownerContributions ?? []).map(contribution => contribution.serverName),
+		].filter((name): name is string => typeof name === "string" && name.length > 0));
+		const publicServerName = publicServerNames.size === 1 ? [...publicServerNames][0] : undefined;
+		const serverPolicyKey = publicServerName ? `mcp__${publicServerName}` : `mcp__${status.name}`;
+		return {
+			...status,
+			serverPolicyKey,
+			policyKey: serverPolicyKey,
+			toolCount: ownedRoutes.length,
+			tools: ownedRoutes.map(tool => {
+				const parsed = parseMcpToolName(tool.name);
+				const subNamespace = tool.subNamespace ?? parsed?.sub;
+				const routeServerPolicyKey = `mcp__${tool.publicServerName}`;
+				const packagePolicyKey = subNamespace ? `${routeServerPolicyKey}__${subNamespace}` : undefined;
+				return {
+					name: tool.name,
+					description: tool.description,
+					serverPolicyKey: routeServerPolicyKey,
+					policyKey: tool.name,
+					operationPolicyKey: tool.name,
+					...(packagePolicyKey ? { packagePolicyKey, subNamespacePolicyKey: packagePolicyKey } : {}),
+					subNamespace,
+					op: parsed?.op ?? tool.mcpToolName,
+				};
+			}),
+		};
+	};
+
+	// POST /api/mcp-operator/pair
+	if (url.pathname === "/api/mcp-operator/pair" && req.method === "POST") {
+		res.setHeader("Cache-Control", "no-store");
+		const body = await readBody(req);
+		const code = body && typeof body === "object" && typeof body.code === "string"
+			? body.code
+			: "";
+		try {
+			json(await mcpOperatorAuthorizer!.pair(code, req.socket.remoteAddress || "unknown"));
+		} catch (error) {
+			const code = error instanceof McpOperatorAuthorizationError
+				? error.code
+				: "MCP_OPERATOR_PERSIST_FAILED";
+			if (code === "MCP_OPERATOR_PAIRING_RATE_LIMITED") {
+				json({
+					error: "Too many unsuccessful MCP operator pairing attempts. Try again later.",
+					code,
+				}, 429);
+				return;
+			}
+			if (code === "MCP_OPERATOR_PAIRING_REQUIRED") {
+				json({
+					error: "A current MCP operator pairing code is required.",
+					code,
+				}, 403);
+				return;
+			}
+			json({
+				error: "MCP operator authorization could not be saved.",
+				code: "MCP_OPERATOR_PERSIST_FAILED",
+			}, 500);
+		}
+		return;
+	}
+
+	type McpRequestCwdResolution = { ok: true; cwd?: string } | { ok: false };
+	const resolveMcpRequestCwd = (resolvedProjectId: string): McpRequestCwdResolution => {
+		const sessionIds = url.searchParams.getAll("sessionId");
+		const goalIds = url.searchParams.getAll("goalId");
+		const cwdValues = url.searchParams.getAll("cwd");
+		const invalidShape = sessionIds.length > 1 || goalIds.length > 1 || cwdValues.length > 1
+			|| (sessionIds.length > 0 && goalIds.length > 0);
+		const sessionId = sessionIds[0];
+		const goalId = goalIds[0];
+		const requestedCwd = cwdValues[0] || undefined;
+		const validOwnerId = (value: string | undefined): value is string =>
+			!!value && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+		if (invalidShape || (sessionIds.length > 0 && !validOwnerId(sessionId)) || (goalIds.length > 0 && !validOwnerId(goalId))) {
+			json({ error: "MCP review scope must contain at most one valid sessionId or goalId.", code: "MCP_REVIEW_SCOPE_INVALID" }, 400);
+			return { ok: false };
+		}
+
+		let source: CwdOwnershipSource = { kind: "user-input" };
+		let effectiveCwd = requestedCwd;
+		if (sessionId) {
+			const owner = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+			const reviewScope = sessionManager.resolveMcpReviewScopeForSession(sessionId);
+			if (!owner || !reviewScope || reviewScope.projectId !== resolvedProjectId || owner.projectId !== resolvedProjectId) {
+				json({ error: "The MCP review session does not belong to the selected project.", code: "CWD_OUTSIDE_PROJECT" }, 422);
+				return { ok: false };
+			}
+			source = { kind: "session", sessionId };
+			const claimedCwd = requestedCwd ?? owner.cwd ?? reviewScope.cwd;
+			const claimValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, claimedCwd, source);
+			if (!claimValidation.ok) { writeCwdValidationError(claimValidation); return { ok: false }; }
+			// The browser may display a sandbox path. Runtime discovery must stay on
+			// the exact authoritative host coordinate already bound/derivable for it.
+			effectiveCwd = reviewScope.cwd;
+		} else if (goalId) {
+			const goalContext = projectContextManager.getContextForGoal(goalId);
+			const goal = goalContext?.goalStore.get(goalId);
+			if (!goalContext || goalContext.project.id !== resolvedProjectId || !goal || (goal.projectId && goal.projectId !== resolvedProjectId)) {
+				json({ error: "The MCP review goal does not belong to the selected project.", code: "CWD_OUTSIDE_PROJECT" }, 422);
+				return { ok: false };
+			}
+			source = { kind: "goal", goalId };
+			effectiveCwd = requestedCwd ?? goal.cwd ?? goal.worktreePath;
+		}
+
+		if (!effectiveCwd) return { ok: true };
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, effectiveCwd, source);
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return { ok: false }; }
+		return { ok: true, cwd: cwdValidation.cwd };
+	};
+
 	// GET /api/mcp-servers
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		if (cwd) {
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-		}
+		const cwdResolution = resolveMcpRequestCwd(resolvedProject.projectId);
+		if (!cwdResolution.ok) return;
+		const effectiveCwd = cwdResolution.cwd;
 		const ensure = url.searchParams.get("ensure") === "true";
 		const resolvedProjectId = resolvedProject.projectId;
-		const mcpManager = ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId });
+		const managerScope = { projectId: resolvedProjectId, cwd: effectiveCwd };
+		let mcpManager = ensure ? await sessionManager.ensureMcpManager(managerScope) : sessionManager.getMcpManager(managerScope);
+		if (ensure && mcpManager) {
+			await sessionManager.reconcileMcpProject(resolvedProjectId, effectiveCwd);
+			mcpManager = sessionManager.getMcpManager(managerScope);
+		}
 		if (!mcpManager) {
 			json([]);
 			return;
 		}
-		const statuses = mcpManager.getServerStatuses();
-		const routeSnapshots = mcpManager.getToolRouteSnapshots();
-		const result = statuses.map(s => {
-			const ownedRoutes = routeSnapshots.filter(t => t.runtimeServerKey === s.name);
-			const publicServerNames = new Set<string>([
-				...ownedRoutes.map(t => t.publicServerName),
-				...(s.ownerContributions ?? []).map(c => c.serverName),
-			].filter((name): name is string => typeof name === "string" && name.length > 0));
-			const publicServerName = publicServerNames.size === 1 ? [...publicServerNames][0] : undefined;
-			const serverPolicyKey = publicServerName ? `mcp__${publicServerName}` : `mcp__${s.name}`;
-			return {
-				...s,
-				serverPolicyKey,
-				policyKey: serverPolicyKey,
-				toolCount: ownedRoutes.length,
-				tools: ownedRoutes.map(t => {
-					const parsed = parseMcpToolName(t.name);
-					const subNamespace = t.subNamespace ?? parsed?.sub;
-					const routeServerPolicyKey = `mcp__${t.publicServerName}`;
-					const packagePolicyKey = subNamespace ? `${routeServerPolicyKey}__${subNamespace}` : undefined;
-					return {
-						name: t.name,
-						description: t.description,
-						serverPolicyKey: routeServerPolicyKey,
-						policyKey: t.name,
-						operationPolicyKey: t.name,
-						...(packagePolicyKey ? { packagePolicyKey, subNamespacePolicyKey: packagePolicyKey } : {}),
-						subNamespace,
-						op: parsed?.op ?? t.mcpToolName,
-					};
-				}),
-			};
-		});
-		json(result);
+		json(mcpManager.getServerStatuses().map(status => serializeMcpServerStatus(mcpManager, status)));
+		return;
+	}
+
+	// POST /api/mcp-servers/:name/approval
+	const mcpApprovalMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/approval$/);
+	if (mcpApprovalMatch && req.method === "POST") {
+		// Gateway admission credentials, including the bearer token and generic UI
+		// cookie, are available to repository-controlled agents. MCP startup
+		// decisions therefore require the separate terminal-paired capability.
+		const rawCredential = req.headers["x-bobbit-mcp-operator"];
+		const credential = typeof rawCredential === "string" ? rawCredential : undefined;
+		const operatorClaim = mcpOperatorAuthorizer!.verify(credential);
+		if (operatorClaim?.purpose !== "mcp-approval:v1") {
+			json({
+				error: "MCP server approval decisions require a paired operator browser.",
+				code: "MCP_APPROVAL_HUMAN_REQUIRED",
+			}, 403);
+			return;
+		}
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const cwdResolution = resolveMcpRequestCwd(resolvedProject.projectId);
+		if (!cwdResolution.ok) return;
+		const effectiveCwd = cwdResolution.cwd;
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") {
+			json({ error: "Missing approval request body", code: "MCP_APPROVAL_INVALID_REQUEST" }, 400);
+			return;
+		}
+		const decision = body.decision;
+		const fingerprint = typeof body.fingerprint === "string" ? body.fingerprint : "";
+		const sourceProjectId = typeof body.sourceProjectId === "string" ? body.sourceProjectId : "";
+		const sourceId = typeof body.sourceId === "string" ? body.sourceId : "";
+		if ((decision !== "approved" && decision !== "rejected") || !fingerprint || !sourceProjectId || !sourceId) {
+			json({ error: "decision, fingerprint, sourceProjectId, and sourceId are required", code: "MCP_APPROVAL_INVALID_REQUEST" }, 400);
+			return;
+		}
+		if (!projectRegistry.get(sourceProjectId)) {
+			json({ error: "The source project is no longer registered.", code: "MCP_APPROVAL_STALE" }, 409);
+			return;
+		}
+		const serverName = decodeURIComponent(mcpApprovalMatch[1]);
+		const managerScope = { projectId: resolvedProject.projectId, cwd: effectiveCwd };
+		let mcpManager = await sessionManager.ensureMcpManager(managerScope);
+		if (!mcpManager) {
+			json({ error: "MCP not initialized", code: "MCP_NOT_INITIALIZED" }, 500);
+			return;
+		}
+		try {
+			const status = await sessionManager.decideMcpApproval(resolvedProject.projectId, {
+				projectId: sourceProjectId,
+				sourceId,
+				serverName,
+				fingerprint,
+			}, decision, effectiveCwd);
+			mcpManager = sessionManager.getMcpManager(managerScope) ?? mcpManager;
+			json({ server: serializeMcpServerStatus(mcpManager, status) });
+		} catch (error) {
+			const code = typeof (error as any)?.code === "string" ? (error as any).code : "MCP_APPROVAL_FAILED";
+			mcpManager = sessionManager.getMcpManager(managerScope) ?? mcpManager;
+			const current = mcpManager.getServerStatuses().find(status => status.name === serverName);
+			const safeCurrent = current ? serializeMcpServerStatus(mcpManager, current) : undefined;
+			if (code === "MCP_APPROVAL_STALE") {
+				json({ error: "The MCP server configuration changed while it was being reviewed.", code, ...(safeCurrent ? { server: safeCurrent } : {}) }, 409);
+				return;
+			}
+			if (code === "MCP_APPROVAL_NOT_REQUIRED" || code === "MCP_CONFIG_INVALID") {
+				json({
+					error: code === "MCP_APPROVAL_NOT_REQUIRED"
+						? "This MCP server source does not require approval."
+						: "This MCP server configuration is invalid and cannot be approved.",
+					code,
+					...(safeCurrent ? { server: safeCurrent } : {}),
+				}, 422);
+				return;
+			}
+			if (code === "MCP_APPROVAL_PERSIST_FAILED") {
+				json({ error: "Could not persist the MCP server approval decision.", code }, 500);
+				return;
+			}
+			json({ error: "Could not update the MCP server approval.", code }, 500);
+		}
 		return;
 	}
 
@@ -20746,39 +21027,27 @@ async function handleApiRoute(
 		const cwd = url.searchParams.get("cwd") || undefined;
 		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		let effectiveCwd: string | undefined;
 		if (cwd) {
 			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
 			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			effectiveCwd = cwdValidation.cwd;
 		}
 		const resolvedProjectId = resolvedProject.projectId;
-		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId });
+		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId, cwd: effectiveCwd });
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;
 		}
 		const serverName = decodeURIComponent(mcpRestartMatch[1]);
-		let statuses = mcpManager.getServerStatuses();
-		let existing = statuses.find(s => s.name === serverName);
-		if (!existing || !existing.config) {
-			// Re-discover servers in case config was added after startup
-			const discovered = mcpManager.discoverServers();
-			if (!discovered[serverName]) {
-				json({ error: `MCP server "${serverName}" not found` }, 404);
-				return;
-			}
-			// Connect the newly discovered server
-			await mcpManager.connectServer(serverName, discovered[serverName]);
-		} else {
-			await mcpManager.disconnectServer(serverName);
-			// Re-discover to pick up any config changes from disk
-			const refreshed = mcpManager.discoverServers();
-			const config = refreshed[serverName] || existing.config;
-			await mcpManager.connectServer(serverName, config);
+		const updated = await mcpManager.restartDiscoveredServer(serverName);
+		if (!updated) {
+			json({ error: `MCP server "${serverName}" not found` }, 404);
+			return;
 		}
-		// Re-register MCP tools with ToolManager across default and scoped managers.
+		// Re-register MCP tools only after the gated reconciliation is authoritative.
 		refreshMcpExternalTools();
-		const updated = mcpManager.getServerStatuses().find(s => s.name === serverName);
-		json({ ok: true, ...updated });
+		json({ ok: true, ...serializeMcpServerStatus(mcpManager, updated) });
 		return;
 	}
 

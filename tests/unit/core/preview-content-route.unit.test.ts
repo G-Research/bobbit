@@ -18,9 +18,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { handlePreviewRequest, pickEntry } from "../../../src/server/preview/content-route.ts";
+import {
+	handlePreviewRequest,
+	pickEntry,
+	PREVIEW_CONTENT_SECURITY_POLICY,
+} from "../../../src/server/preview/content-route.ts";
 import { setPreviewFsForTesting } from "../../../src/server/preview/mount.ts";
-import { COOKIE_NAME, CookieStore } from "../../../src/server/auth/cookie.ts";
+import { COOKIE_NAME, PREVIEW_COOKIE_NAME, CookieStore } from "../../../src/server/auth/cookie.ts";
 import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 // `mountDir(sid)` reads BOBBIT_DIR on demand, so one immutable in-memory tree
@@ -55,6 +59,7 @@ beforeAll(() => {
 	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>r</body></html>");
 	fs.writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
 	fs.writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+	fs.writeFileSync(path.join(mountRoot, "active.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><script>top.name="owned"</script></svg>`);
 	fs.writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
 	fs.writeFileSync(path.join(mountRoot, "subdir", "nested.html"), "<html><body>n</body></html>");
 
@@ -92,7 +97,16 @@ interface FakeRes {
 	emit(): boolean;
 }
 
-function fakeReq(opts: { url?: string; method?: string; cookie?: string; auth?: string } = {}): any {
+function fakeReq(opts: {
+	url?: string;
+	method?: string;
+	cookie?: string;
+	auth?: string;
+	origin?: string;
+	fetchSite?: string;
+	fetchMode?: string;
+	fetchDest?: string;
+} = {}): any {
 	return {
 		url: opts.url ?? "/",
 		method: opts.method ?? "GET",
@@ -100,6 +114,10 @@ function fakeReq(opts: { url?: string; method?: string; cookie?: string; auth?: 
 			host: "x",
 			...(opts.cookie ? { cookie: opts.cookie } : {}),
 			...(opts.auth ? { authorization: opts.auth } : {}),
+			...(opts.origin ? { origin: opts.origin } : {}),
+			...(opts.fetchSite ? { "sec-fetch-site": opts.fetchSite } : {}),
+			...(opts.fetchMode ? { "sec-fetch-mode": opts.fetchMode } : {}),
+			...(opts.fetchDest ? { "sec-fetch-dest": opts.fetchDest } : {}),
 		},
 		on() { /* no-op */ },
 	};
@@ -186,6 +204,91 @@ describe("handlePreviewRequest — auth", () => {
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
 		assert.equal(res.statusCode, 200);
+		assert.match(String(res.getHeader("Set-Cookie")), /; HttpOnly; Secure; SameSite=None;/);
+	});
+
+	it("mints the scoped preview cookie only after primary auth reaches successful content", async () => {
+		const o = makeOpts(false);
+		const primary = o.store.mint();
+		const res = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${primary}` }),
+			res as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		assert.equal(res.statusCode, 200);
+		assert.match(String(res.getHeader("Set-Cookie")), new RegExp(`^${PREVIEW_COOKIE_NAME}=`));
+		assert.match(String(res.getHeader("Set-Cookie")), /; HttpOnly; Secure; SameSite=None;/);
+		assert.match(String(res.getHeader("Set-Cookie")), new RegExp(`Path=/preview/${SID}/`));
+
+		for (const target of [`/preview/${SID}`, `/preview/${SID}/missing.html`]) {
+			const failed = fakeRes();
+			await handlePreviewRequest(fakeReq({ url: target, cookie: `${COOKIE_NAME}=${primary}` }), failed as any, target, o);
+			assert.equal(failed.getHeader("Set-Cookie"), undefined, target);
+		}
+	});
+
+	it("rejects cross-site iframe navigation before entry redirects despite ambient credentials", async () => {
+		const o = makeOpts(true);
+		const cookies = `${COOKIE_NAME}=${o.store.mint()}; ${PREVIEW_COOKIE_NAME}=${o.store.mintPreviewResource(SID)}`;
+		for (const target of [`/preview/${SID}/`, `/preview/${SID}/index.html`]) {
+			const denied = fakeRes();
+			await handlePreviewRequest(fakeReq({
+				url: target,
+				cookie: cookies,
+				fetchSite: "cross-site",
+				fetchMode: "navigate",
+				fetchDest: "iframe",
+			}), denied as any, target, o);
+			assert.equal(denied.statusCode, 401, target);
+			assert.equal(denied.headers.location, undefined, target);
+		}
+
+		const sameOrigin = fakeRes();
+		await handlePreviewRequest(fakeReq({
+			url: `/preview/${SID}/`,
+			cookie: cookies,
+			fetchSite: "same-origin",
+			fetchMode: "navigate",
+			fetchDest: "iframe",
+		}), sameOrigin as any, `/preview/${SID}/`, o);
+		assert.equal(sameOrigin.statusCode, 302);
+	});
+
+	it("accepts only an exact-session preview capability for opaque follow-on resources", async () => {
+		const o = makeOpts(false);
+		const preview = o.store.mintPreviewResource(SID);
+		const request = (cookie: string) => fakeReq({
+			url: `/preview/${SID}/data.json`,
+			cookie,
+			origin: "null",
+			fetchSite: "cross-site",
+			fetchMode: "cors",
+		});
+		const accepted = fakeRes();
+		await handlePreviewRequest(request(`${PREVIEW_COOKIE_NAME}=${preview}`), accepted as any, `/preview/${SID}/data.json`, o);
+		assert.equal(accepted.statusCode, 200);
+		assert.equal(accepted.getHeader("Set-Cookie"), undefined);
+
+		const initialWithoutPrimary = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${PREVIEW_COOKIE_NAME}=${preview}` }),
+			initialWithoutPrimary as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		assert.equal(initialWithoutPrimary.statusCode, 401);
+
+		for (const cookie of [
+			`${COOKIE_NAME}=${o.store.mint()}`,
+			`${PREVIEW_COOKIE_NAME}=${o.store.mintPreviewResource("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")}`,
+		]) {
+			const denied = fakeRes();
+			await handlePreviewRequest(request(cookie), denied as any, `/preview/${SID}/data.json`, o);
+			assert.equal(denied.statusCode, 401);
+			assert.equal(denied.getHeader("Access-Control-Allow-Origin"), undefined);
+		}
 	});
 
 	it("returns false for non-/preview paths", async () => {
@@ -240,6 +343,48 @@ describe("handlePreviewRequest — MIME table", () => {
 			assert.ok(ct.startsWith(expectedPrefix), `got ${ct}`);
 		});
 	}
+});
+
+describe("handlePreviewRequest — opaque response policy", () => {
+	it("sandboxes every successful HTML, static, SVG, and HEAD response without same-origin", async () => {
+		for (const [file, method] of [
+			["index.html", "GET"],
+			["styles.css", "GET"],
+			["active.svg", "GET"],
+			["active.svg", "HEAD"],
+		] as const) {
+			const o = makeOpts(true);
+			const res = fakeRes();
+			await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/${file}`, method }), res as any, `/preview/${SID}/${file}`, o);
+			assert.equal(res.statusCode, 200, `${method} ${file}`);
+			assert.equal(res.headers["content-security-policy"], PREVIEW_CONTENT_SECURITY_POLICY);
+			assert.doesNotMatch(String(res.headers["content-security-policy"]), /allow-same-origin/);
+			if (method === "HEAD") assert.equal(bodyText(res), "");
+		}
+	});
+
+	it("projects credentialed null-origin CORS only after exact route authorization", async () => {
+		const o = makeOpts(false);
+		const opaqueRequest = (cookie?: string) => fakeReq({
+			url: `/preview/${SID}/active.svg`,
+			cookie,
+			origin: "null",
+			fetchSite: "cross-site",
+			fetchMode: "cors",
+		});
+		const denied = fakeRes();
+		await handlePreviewRequest(opaqueRequest(), denied as any, `/preview/${SID}/active.svg`, o);
+		assert.equal(denied.statusCode, 401);
+		assert.equal(denied.headers["access-control-allow-origin"], undefined);
+
+		const capability = o.store.mintPreviewResource(SID);
+		const allowed = fakeRes();
+		await handlePreviewRequest(opaqueRequest(`${PREVIEW_COOKIE_NAME}=${capability}`), allowed as any, `/preview/${SID}/active.svg`, o);
+		assert.equal(allowed.statusCode, 200);
+		assert.equal(allowed.headers["access-control-allow-origin"], "null");
+		assert.equal(allowed.headers["access-control-allow-credentials"], "true");
+		assert.equal(allowed.headers.vary, "Origin");
+	});
 });
 
 describe("handlePreviewRequest — bridge injection", () => {

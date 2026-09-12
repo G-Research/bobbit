@@ -10,11 +10,16 @@ import {
 } from "../../support/harnesses/browser/e2e-setup.js";
 
 const COOKIE_NAME = "bobbit_session";
+const PREVIEW_COOKIE_NAME = "bobbit_preview";
 const LEGACY_COOKIE = "a".repeat(64);
 const ENTRY = "stateless-cookie-upgrade.html";
 const PREVIEW_TEXT = "STATELESS_COOKIE_PREVIEW_OK";
 const SSE_PREVIEW_TEXT = "STATELESS_COOKIE_SSE_UPDATE_OK";
 const SIGNED_COOKIE = /^v1\.\d+\.\d+\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
+
+function previewCookiePattern(sessionId: string): RegExp {
+	return new RegExp(`^pv1\\.${sessionId.toLowerCase()}\\.\\d+\\.\\d+\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$`);
+}
 
 interface CookieWrite {
 	url: string;
@@ -41,12 +46,13 @@ async function setCookieHeader(response: Response): Promise<string | null> {
 	return response.headerValue("set-cookie");
 }
 
-function cookieValueFromSetCookie(header: string): string {
-	return header.match(new RegExp(`${COOKIE_NAME}=([^;,\\s]+)`, "i"))?.[1] ?? "";
+function cookieValueFromSetCookie(header: string, name = COOKIE_NAME): string {
+	return header.match(new RegExp(`${name}=([^;,\\s]+)`, "i"))?.[1] ?? "";
 }
 
 function createCookieWriteRecorder(context: BrowserContext, origin: string) {
 	const writes: CookieWrite[] = [];
+	const previewWrites: CookieWrite[] = [];
 	const pending = new Set<Promise<void>>();
 	const attached = new Set<Page>();
 
@@ -55,13 +61,14 @@ function createCookieWriteRecorder(context: BrowserContext, origin: string) {
 		const work = (async () => {
 			try {
 				const header = await setCookieHeader(response);
-				if (header && new RegExp(`${COOKIE_NAME}=`, "i").test(header)) {
-					writes.push({
-						url: response.url(),
-						method: response.request().method(),
-						header,
-					});
-				}
+				if (!header) return;
+				const write = {
+					url: response.url(),
+					method: response.request().method(),
+					header,
+				};
+				if (new RegExp(`${COOKIE_NAME}=`, "i").test(header)) writes.push(write);
+				if (new RegExp(`${PREVIEW_COOKIE_NAME}=`, "i").test(header)) previewWrites.push(write);
 			} catch {
 				// A page may close while its response headers are being collected.
 			}
@@ -81,6 +88,7 @@ function createCookieWriteRecorder(context: BrowserContext, origin: string) {
 
 	return {
 		writes,
+		previewWrites,
 		async flush(): Promise<void> {
 			while (pending.size > 0) await Promise.all([...pending]);
 		},
@@ -100,7 +108,20 @@ async function expectCookieOnlyRequest(response: Response, cookieValue: string):
 	expect(await setCookieHeader(response), `${response.url()} must not issue another cookie`).toBeNull();
 }
 
-async function expectCookieAuthenticatedNavigation(response: Response): Promise<void> {
+function expectPreviewCookieHeader(header: string, sessionId: string): string {
+	expect(header).toContain(`${PREVIEW_COOKIE_NAME}=`);
+	expect(header).not.toContain(`${COOKIE_NAME}=`);
+	const value = cookieValueFromSetCookie(header, PREVIEW_COOKIE_NAME);
+	expect(value).toMatch(previewCookiePattern(sessionId));
+	expect(header).toMatch(/;\s*HttpOnly(?:;|$)/i);
+	expect(header).toMatch(/;\s*Secure(?:;|$)/i);
+	expect(header).toMatch(/;\s*SameSite=None(?:;|$)/i);
+	expect(header).toMatch(new RegExp(`;\\s*Path=/preview/${sessionId}/(?:;|$)`, "i"));
+	expect(header).toMatch(/;\s*Max-Age=86400(?:;|$)/i);
+	return value;
+}
+
+async function expectCookieAuthenticatedNavigation(response: Response, previewSessionId: string): Promise<string | undefined> {
 	// Playwright does not expose Chromium's Cookie header for document
 	// navigations. On this force-auth gateway, 200 with no Bearer/query token
 	// proves the already-asserted stored browser cookie authorized the request.
@@ -109,7 +130,11 @@ async function expectCookieAuthenticatedNavigation(response: Response): Promise<
 		`${response.url()} must authenticate with the browser cookie, not Bearer`,
 	).toBeNull();
 	expect(new URL(response.url()).searchParams.has("token"), `${response.url()} must not use a query token`).toBe(false);
-	expect(await setCookieHeader(response), `${response.url()} must not issue another cookie`).toBeNull();
+	const header = await setCookieHeader(response);
+	// Secure SameSite=None cookies may be rejected by a browser on this HTTP
+	// loopback fixture. Whenever one is issued, keep its identity and scope strict;
+	// when the browser stores it, later requests must reuse it without reissuance.
+	return header ? expectPreviewCookieHeader(header, previewSessionId) : undefined;
 }
 
 async function cookieOnlySessionFetch(page: Page, sessionId: string): Promise<Response> {
@@ -130,8 +155,8 @@ async function cookieOnlySessionFetch(page: Page, sessionId: string): Promise<Re
 	return response;
 }
 
-async function storedCookie(context: BrowserContext, origin: string) {
-	return (await context.cookies(origin)).find(cookie => cookie.name === COOKIE_NAME);
+async function storedCookie(context: BrowserContext, origin: string, name = COOKIE_NAME) {
+	return (await context.cookies(origin)).find(cookie => cookie.name === name);
 }
 
 test.describe("Stateless browser cookie upgrade", () => {
@@ -238,7 +263,8 @@ test.describe("Stateless browser cookie upgrade", () => {
 
 			const iframeResponse = await iframePromise;
 			expect(iframeResponse.status()).toBe(200);
-			await expectCookieAuthenticatedNavigation(iframeResponse);
+			const previewCookieValue = await expectCookieAuthenticatedNavigation(iframeResponse, sessionId);
+			expect(previewCookieValue, "the first preview document must issue its separate resource capability").toBeDefined();
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
 			await expect(iframe, "preview iframe should expose an absolute cookie-authenticated gateway URL").toHaveAttribute("src", /^https?:\/\//);
@@ -249,6 +275,16 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(iframeUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
 			expect(iframeUrl.hash).toBe("");
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(PREVIEW_TEXT, { timeout: 15_000 });
+			const initiallyStoredPreview = await storedCookie(context, browserOrigin, PREVIEW_COOKIE_NAME);
+			if (initiallyStoredPreview) {
+				expect(initiallyStoredPreview).toEqual(expect.objectContaining({
+					value: previewCookieValue,
+					httpOnly: true,
+					secure: true,
+					sameSite: "None",
+					path: `/preview/${sessionId}/`,
+				}));
+			}
 
 			const apiResponse = await cookieOnlySessionFetch(page, sessionId);
 			await expectCookieOnlyRequest(apiResponse, signedValue);
@@ -274,7 +310,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(sseMountBody.artifactId).toBeTruthy();
 			const sseIframeResponse = await sseIframePromise;
 			expect(sseIframeResponse.status()).toBe(200);
-			await expectCookieAuthenticatedNavigation(sseIframeResponse);
+			await expectCookieAuthenticatedNavigation(sseIframeResponse, sessionId);
 			await expect.poll(
 				() => page.evaluate(() => (window as any).bobbitState?.previewPanelContentHash ?? ""),
 				{ timeout: 15_000, message: "preview SSE should deliver the updated mount identity" },
@@ -296,13 +332,22 @@ test.describe("Stateless browser cookie upgrade", () => {
 			const popupReload = await popup.reload({ waitUntil: "domcontentloaded" });
 			expect(popupReload, "new-tab preview reload should return a response").not.toBeNull();
 			expect(popupReload!.status()).toBe(200);
-			await expectCookieAuthenticatedNavigation(popupReload!);
+			await expectCookieAuthenticatedNavigation(popupReload!, sessionId);
 			await popup.close();
 			popup = undefined;
 
 			await recorder.flush();
-			expect(recorder.writes, "upgrade and all post-upgrade traffic must produce exactly one cookie write").toHaveLength(1);
+			expect(recorder.writes, "bobbit_session must be upgraded exactly once").toHaveLength(1);
 			expect(cookieValueFromSetCookie(recorder.writes[0].header)).toBe(signedValue);
+			expect(recorder.previewWrites.length, "the preview document must issue a separate scoped capability").toBeGreaterThanOrEqual(1);
+			for (const write of recorder.previewWrites) {
+				expect(new URL(write.url).pathname).toMatch(new RegExp(`^/preview/${sessionId}/`));
+				expectPreviewCookieHeader(write.header, sessionId);
+			}
+			if (initiallyStoredPreview) {
+				expect(recorder.previewWrites, "a stored preview capability must not be repeatedly reissued").toHaveLength(1);
+				expect(cookieValueFromSetCookie(recorder.previewWrites[0].header, PREVIEW_COOKIE_NAME)).toBe(previewCookieValue);
+			}
 
 			const reloadHealthPromise = page.waitForResponse(
 				response => pathname(response) === "/api/health"
@@ -333,19 +378,26 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expectCookieOnlyRequest(reloadSse, signedValue);
 			const reloadIframe = await reloadIframePromise;
 			expect(reloadIframe.status()).toBe(200);
-			await expectCookieAuthenticatedNavigation(reloadIframe);
+			await expectCookieAuthenticatedNavigation(reloadIframe, sessionId);
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(SSE_PREVIEW_TEXT, { timeout: 15_000 });
 
 			const reloadedApi = await cookieOnlySessionFetch(page, sessionId);
 			await expectCookieOnlyRequest(reloadedApi, signedValue);
 			expect((await storedCookie(context, browserOrigin))?.value).toBe(signedValue);
+			const finallyStoredPreview = await storedCookie(context, browserOrigin, PREVIEW_COOKIE_NAME);
+			if (initiallyStoredPreview) expect(finallyStoredPreview?.value).toBe(previewCookieValue);
 			await recorder.flush();
-			expect(recorder.writes, "reload, API, preview, and SSE must not reissue the cookie").toHaveLength(1);
+			expect(recorder.writes, "reload, API, preview, and SSE must not reissue bobbit_session").toHaveLength(1);
+			for (const write of recorder.previewWrites) expectPreviewCookieHeader(write.header, sessionId);
+			if (finallyStoredPreview) {
+				expect(recorder.previewWrites, "reload, iframe, and popout traffic must reuse a stored bobbit_preview").toHaveLength(1);
+			}
 
 			await deleteSession(sessionId);
 			sessionId = undefined;
 			await context.clearCookies();
 			expect(await storedCookie(context, browserOrigin)).toBeUndefined();
+			expect(await storedCookie(context, browserOrigin, PREVIEW_COOKIE_NAME)).toBeUndefined();
 		} finally {
 			recorder.dispose();
 			if (popup && !popup.isClosed()) await popup.close().catch(() => {});

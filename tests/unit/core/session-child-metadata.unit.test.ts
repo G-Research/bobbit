@@ -50,10 +50,10 @@ describe("child session metadata wiring", () => {
 		assert.doesNotMatch(managerSrc, /Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0 \? ps\.allowedTools : undefined/, "restoreSession must NOT gate persisted allowedTools on length > 0 (empty `[]` must be preserved)");
 		const restoreRuntimePreparation = "const restoredToolRuntime = this.prepareScopedToolRuntime(ps.projectId, ps.cwd);";
 		const restoreRuntimePreparationIndex = managerSrc.indexOf(restoreRuntimePreparation);
-		const explicitRestoreClassification = /const effectiveAllowed: EffectiveTool\[\] = overrideAllowedTools\s*\? tagAllowedTools\(overrideAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*persistedAllowedTools\s*\? tagAllowedTools\(persistedAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*this\.resolveEffectiveAllowedTools\(restoredRole, ps\.projectId, ps\.cwd, restoredToolRuntime\);/;
+		const explicitRestoreClassification = /const effectiveAllowed: EffectiveTool\[\] = overrideAllowedTools\s*\? tagAllowedTools\(overrideAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*persistedAllowedTools\s*\? tagAllowedTools\(persistedAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*this\.resolveEffectiveAllowedTools\(restoredRole, ps\.projectId, ps\.cwd, restoredToolRuntime, \{ manager: restoredMcpManager \}\);/;
 		const explicitRestoreMatch = managerSrc.match(explicitRestoreClassification);
 		assert.ok(restoreRuntimePreparationIndex >= 0, "restoreSession must prepare the project-scoped tool runtime before classifying restored allowlists");
-		assert.ok(explicitRestoreMatch, "restoreSession must prefer persisted allowedTools before role defaults and classify explicit allowlists with the prepared runtime's ToolManager and ScopedToolContext");
+		assert.ok(explicitRestoreMatch, "restoreSession must prefer persisted allowedTools before role defaults and classify explicit allowlists with the prepared runtime's ToolManager, ScopedToolContext, and session-bound MCP manager");
 		assert.ok(restoreRuntimePreparationIndex < (explicitRestoreMatch.index ?? -1), "restoreSession must discover the prepared scoped runtime before tagging restored allowedTools");
 	});
 });

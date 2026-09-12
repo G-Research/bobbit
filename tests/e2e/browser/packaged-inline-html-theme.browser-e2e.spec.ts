@@ -242,17 +242,15 @@ async function iframeTheme(page: Page): Promise<{
 	swipeBridgeCount: number;
 	identity: string | null;
 }> {
-	return page.locator('iframe[title="theme-card.html"]').evaluate((element) => {
-		const iframe = element as HTMLIFrameElement;
-		const frameWindow = iframe.contentWindow as (Window & {
+	return page.frameLocator('iframe[title="theme-card.html"]').locator("html").evaluate(documentRoot => {
+		const frameWindow = window as Window & {
 			__packedThemeCapture?: ThemeState;
 			__packedFrameIdentity?: string;
-		}) | null;
-		const documentRoot = iframe.contentDocument!.documentElement;
-		const style = iframe.contentWindow!.getComputedStyle(documentRoot);
-		const scripts = [...iframe.contentDocument!.scripts];
+		};
+		const style = getComputedStyle(documentRoot);
+		const scripts = [...document.scripts];
 		return {
-			capture: frameWindow?.__packedThemeCapture ?? null,
+			capture: frameWindow.__packedThemeCapture ?? null,
 			current: {
 				background: style.getPropertyValue("--background").trim(),
 				foreground: style.getPropertyValue("--foreground").trim(),
@@ -266,7 +264,7 @@ async function iframeTheme(page: Page): Promise<{
 			authoredScriptRan: documentRoot.getAttribute("data-authored-script-ran") === "true",
 			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
 			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
-			identity: frameWindow?.__packedFrameIdentity ?? null,
+			identity: frameWindow.__packedFrameIdentity ?? null,
 		};
 	});
 }
@@ -739,11 +737,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expectThemeMatches(initialFrame.capture!, initialHost, "parse-time inline capture");
 			expectThemeMatches(initialFrame.current, initialHost, "initial inline computed theme");
 
-			await iframe.evaluate(element => {
-				const frameWindow = (element as HTMLIFrameElement).contentWindow as (Window & {
-					__packedFrameIdentity?: string;
-				}) | null;
-				if (frameWindow) frameWindow.__packedFrameIdentity = "same-packaged-iframe";
+			await page.frameLocator('iframe[title="theme-card.html"]').locator("html").evaluate(() => {
+				(window as Window & { __packedFrameIdentity?: string }).__packedFrameIdentity = "same-packaged-iframe";
 			});
 			await page.evaluate(() => {
 				const root = document.documentElement;
