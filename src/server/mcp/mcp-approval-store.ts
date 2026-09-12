@@ -105,7 +105,15 @@ export function validateMcpServerConfig(config: unknown): string | undefined {
   }
   if (value.cwd !== undefined && typeof value.cwd !== "string") return "Working directory must be a string.";
   if (value.env !== undefined && !validRecord(value.env)) return "Environment must contain only string values.";
-  if (value.headers !== undefined && !validRecord(value.headers)) return "Headers must contain only string values.";
+  if (value.headers !== undefined) {
+    if (!validRecord(value.headers)) return "Headers must contain only string values.";
+    const names = new Set<string>();
+    for (const name of Object.keys(value.headers)) {
+      const caseInsensitiveName = name.replace(/[A-Z]/g, (character) => character.toLowerCase());
+      if (names.has(caseInsensitiveName)) return "Header names must be unique case-insensitively.";
+      names.add(caseInsensitiveName);
+    }
+  }
   return undefined;
 }
 
