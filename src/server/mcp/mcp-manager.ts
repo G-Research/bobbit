@@ -843,11 +843,14 @@ export class McpManager {
     return this.approvalStore ??= new McpApprovalStore(serverSecretsDir());
   }
 
-  private _definitionForGroup(group: ResolvedMcpConnectionGroup): EffectiveMcpDefinition {
-    const origin = group.ownerContributions[0]?.origin ?? flatManualContribution(group.serverName, group.config).origin;
+  private _definitionForOwner(
+    group: ResolvedMcpConnectionGroup,
+    owner: ResolvedMcpContribution,
+  ): EffectiveMcpDefinition {
+    const origin = owner.origin;
     const trust = origin.trust ?? (origin.authority === "marketplace" ? "pretrusted" : "approval-required");
     const sourceId = origin.sourceId ?? `unattributed:${group.serverName}`;
-    const validationError = validateMcpServerConfig(group.config);
+    const validationError = validateMcpServerConfig(owner.config);
     const approval: McpApprovalClassification = trust === "pretrusted"
       ? { required: false, state: "trusted" }
       : validationError
@@ -858,7 +861,7 @@ export class McpManager {
             sourceId,
             serverName: group.serverName,
             trust,
-            config: group.config,
+            config: owner.config,
           });
           return origin.marketplaceAttestationChanged && classified.state === "pending"
             ? { ...classified, state: "changed" as const }
@@ -866,16 +869,34 @@ export class McpManager {
         })();
     return {
       name: group.serverName,
-      config: group.config,
+      config: owner.config,
       origin: { ...origin, trust, sourceId },
       approval,
       ...(validationError ? { validationError } : {}),
     };
   }
 
+  private _definitionsForGroup(group: ResolvedMcpConnectionGroup): EffectiveMcpDefinition[] {
+    const owners = group.ownerContributions.length > 0
+      ? group.ownerContributions
+      : [flatManualContribution(group.serverName, group.config)];
+    return owners.map((owner) => this._definitionForOwner(group, owner));
+  }
+
+  private _definitionForGroup(group: ResolvedMcpConnectionGroup): EffectiveMcpDefinition {
+    const definitions = this._definitionsForGroup(group);
+    // Contribution resolution order is stable and carries Marketplace precedence.
+    // Surface the first blocked owner so each source receives its own decision.
+    return definitions.find((definition) => !this._isDefinitionEligible(definition)) ?? definitions[0];
+  }
+
+  private _isDefinitionEligible(definition: EffectiveMcpDefinition): boolean {
+    return !definition.validationError
+      && (definition.approval.state === "trusted" || definition.approval.state === "approved");
+  }
+
   private _isEligible(group: ResolvedMcpConnectionGroup): boolean {
-    const definition = this._definitionForGroup(group);
-    return !definition.validationError && (definition.approval.state === "trusted" || definition.approval.state === "approved");
+    return this._definitionsForGroup(group).every((definition) => this._isDefinitionEligible(definition));
   }
 
   private _isStillEligible(group: ResolvedMcpConnectionGroup): boolean {
@@ -1036,14 +1057,24 @@ export class McpManager {
   }
 
   private _fingerprintGroup(group: ResolvedMcpConnectionGroup): string {
-    const origin = group.ownerContributions[0]?.origin;
     return stableFingerprint({
       runtimeServerKey: group.runtimeServerKey,
       config: group.config,
-      sourceId: origin?.sourceId,
-      projectId: origin?.projectId,
-      authority: origin?.authority,
-      trust: origin?.trust,
+      owners: group.ownerContributions.map((owner) => ({
+        listName: owner.listName,
+        serverName: owner.serverName,
+        runtimeServerKey: owner.runtimeServerKey,
+        contributionId: owner.contributionId,
+        subNamespace: owner.subNamespace,
+        selectedOperations: owner.selectedOperations,
+        disabledOperations: owner.disabledOperations,
+        config: owner.config,
+        sourceId: owner.origin.sourceId,
+        projectId: owner.origin.projectId,
+        authority: owner.origin.authority,
+        trust: owner.origin.trust,
+        marketplaceAttestationChanged: owner.origin.marketplaceAttestationChanged,
+      })),
     });
   }
 
@@ -1642,8 +1673,7 @@ export class McpManager {
       const config = group?.config ?? this.configs.get(name);
       if (!group || !config) continue;
       const definition = this._definitionForGroup(group);
-      const eligible = !definition.validationError
-        && (definition.approval.state === "trusted" || definition.approval.state === "approved");
+      const eligible = this._isEligible(group);
       const client = this.clients.get(name);
       const error = eligible ? this.errors.get(name) : undefined;
       const tools = eligible ? this.toolDefs.get(name) : undefined;
