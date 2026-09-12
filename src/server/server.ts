@@ -664,6 +664,10 @@ import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type San
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import {
+	McpOperatorAuthorizationError,
+	McpOperatorAuthorizer,
+} from "./auth/mcp-operator-authorizer.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
@@ -2815,6 +2819,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
+	const mcpOperatorAuthorizer = new McpOperatorAuthorizer({
+		secretsDir,
+		now: gatewayDeps.clock.now,
+	});
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
 	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
@@ -4321,7 +4329,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode, mcpOperatorAuthorizer);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -5267,6 +5275,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		/** @internal Exposed for integration coverage of production hook wiring. */
 		hostInterceptorRouter,
+		createMcpOperatorPairingCode: () => mcpOperatorAuthorizer.createPairingCode(),
 		get extensionChannels() { return extensionChannelServices; },
 		/**
 		 * Coarse post-start result used by the CLI to mirror the compiled policy's
@@ -6098,6 +6107,7 @@ async function handleApiRoute(
 	remoteStateRoutes?: any,
 	hostInterceptorRouter?: HostInterceptorRouter,
 	trustedLocalRequest = false,
+	mcpOperatorAuthorizer?: McpOperatorAuthorizer,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -20771,6 +20781,41 @@ async function handleApiRoute(
 		};
 	};
 
+	// POST /api/mcp-operator/pair
+	if (url.pathname === "/api/mcp-operator/pair" && req.method === "POST") {
+		res.setHeader("Cache-Control", "no-store");
+		const body = await readBody(req);
+		const code = body && typeof body === "object" && typeof body.code === "string"
+			? body.code
+			: "";
+		try {
+			json(await mcpOperatorAuthorizer!.pair(code, req.socket.remoteAddress || "unknown"));
+		} catch (error) {
+			const code = error instanceof McpOperatorAuthorizationError
+				? error.code
+				: "MCP_OPERATOR_PERSIST_FAILED";
+			if (code === "MCP_OPERATOR_PAIRING_RATE_LIMITED") {
+				json({
+					error: "Too many unsuccessful MCP operator pairing attempts. Try again later.",
+					code,
+				}, 429);
+				return;
+			}
+			if (code === "MCP_OPERATOR_PAIRING_REQUIRED") {
+				json({
+					error: "A current MCP operator pairing code is required.",
+					code,
+				}, 403);
+				return;
+			}
+			json({
+				error: "MCP operator authorization could not be saved.",
+				code: "MCP_OPERATOR_PERSIST_FAILED",
+			}, 500);
+		}
+		return;
+	}
+
 	// GET /api/mcp-servers
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -20799,12 +20844,15 @@ async function handleApiRoute(
 	// POST /api/mcp-servers/:name/approval
 	const mcpApprovalMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/approval$/);
 	if (mcpApprovalMatch && req.method === "POST") {
-		// Agents receive the global bearer credential, so it cannot authorize a
-		// repository server to cross the startup trust boundary. Only the existing
-		// server-verified UI/operator cookie may make an approval decision.
-		if (!cookieTryAuth(req, cookieStore!)) {
+		// Gateway admission credentials, including the bearer token and generic UI
+		// cookie, are available to repository-controlled agents. MCP startup
+		// decisions therefore require the separate terminal-paired capability.
+		const rawCredential = req.headers["x-bobbit-mcp-operator"];
+		const credential = typeof rawCredential === "string" ? rawCredential : undefined;
+		const operatorClaim = mcpOperatorAuthorizer!.verify(credential);
+		if (operatorClaim?.purpose !== "mcp-approval:v1") {
 			json({
-				error: "MCP server approval decisions require an authenticated operator.",
+				error: "MCP server approval decisions require a paired operator browser.",
 				code: "MCP_APPROVAL_HUMAN_REQUIRED",
 			}, 403);
 			return;

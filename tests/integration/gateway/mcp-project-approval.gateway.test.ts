@@ -4,8 +4,11 @@ import path from "node:path";
 import { McpApprovalStore } from "../../../src/server/mcp/mcp-approval-store.js";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
 import {
+	authenticatedMcpOperatorHeaders,
 	authenticatedOperatorCookie,
 	apiFetch,
+	createMcpOperatorPairingCode,
+	pairMcpOperatorBrowser,
 	rawApiFetch,
 } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
@@ -109,7 +112,7 @@ async function decide(
 ): Promise<Response> {
 	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?projectId=${encodeURIComponent(viewProjectId)}`, {
 		method: "POST",
-		headers: { Cookie: await authenticatedOperatorCookie() },
+		headers: await authenticatedMcpOperatorHeaders(),
 		body: JSON.stringify({
 			decision,
 			fingerprint: overrides.fingerprint ?? status.approval.fingerprint,
@@ -155,6 +158,35 @@ async function setToolPolicy(projectId: string, serverName: string, policy: "nev
 }
 
 test.describe("project MCP startup approval gateway boundary", () => {
+	test("operator approval header is exposed only to an admitted browser origin", async ({ gateway }) => {
+		const allowed = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: "http://127.0.0.1:5173",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "X-Bobbit-Mcp-Operator, Content-Type",
+			},
+		});
+		expect(allowed.status).toBe(204);
+		expect(allowed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain("x-bobbit-mcp-operator");
+		expect(allowed.headers.get("access-control-allow-credentials")).toBeNull();
+
+		const rejected = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: "https://repository-controlled.invalid",
+				"Sec-Fetch-Site": "cross-site",
+				"Sec-Fetch-Mode": "cors",
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "X-Bobbit-Mcp-Operator, Content-Type",
+			},
+		});
+		expect(rejected.status).toBe(403);
+		expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
+	});
+
 	test("stdio stays unspawned until exact approval and decisions survive manager/store reconstruction", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "stdio");
 		try {
@@ -179,20 +211,60 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			// The global admin bearer is available to direct agents and must not let
 			// repository instructions authorize their own MCP process. Authorization
 			// is checked before the body is parsed or any ledger/runtime mutation.
-			const bearerOnly = await rawApiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
+			const approvalPath = `/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`;
+			const approvalBody = JSON.stringify({
+				decision: "approved",
+				fingerprint: current.approval.fingerprint,
+				sourceProjectId: current.source.projectId,
+				sourceId: current.source.sourceId,
+			});
+			const bearerOnly = await rawApiFetch(approvalPath, {
 				method: "POST",
-				body: JSON.stringify({
-					decision: "approved",
-					fingerprint: current.approval.fingerprint,
-					sourceProjectId: current.source.projectId,
-					sourceId: current.source.sourceId,
-				}),
+				body: approvalBody,
 			});
 			expect(bearerOnly.status).toBe(403);
 			expect(await bearerOnly.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
+
+			const genericCookie = await rawApiFetch(approvalPath, {
+				method: "POST",
+				headers: { Cookie: await authenticatedOperatorCookie() },
+				body: approvalBody,
+			});
+			expect(genericCookie.status).toBe(403);
+			expect(await genericCookie.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
 			expect(existsSync(path.join(isolated.approvalDir, "mcp-server-approvals.json"))).toBe(false);
 			current = named(await statuses(project.id), serverName);
 			expect(current.approval.state).toBe("pending");
+			expect(appendCount(marker)).toBe(0);
+
+			const pairing = createMcpOperatorPairingCode();
+			const wrongPairing = await rawApiFetch("/api/mcp-operator/pair", {
+				method: "POST",
+				body: JSON.stringify({ code: Buffer.alloc(32, 0x5a).toString("base64url") }),
+			});
+			expect(wrongPairing.status).toBe(403);
+			expect(wrongPairing.headers.get("cache-control")).toBe("no-store");
+			expect(await wrongPairing.json()).toMatchObject({ code: "MCP_OPERATOR_PAIRING_REQUIRED" });
+
+			const firstCredential = await pairMcpOperatorBrowser(pairing.code);
+			expect(firstCredential).toMatch(/^v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+			const replay = await rawApiFetch("/api/mcp-operator/pair", {
+				method: "POST",
+				body: JSON.stringify({ code: pairing.code }),
+			});
+			expect(replay.status).toBe(403);
+			expect(replay.headers.get("cache-control")).toBe("no-store");
+			expect(await replay.json()).toMatchObject({ code: "MCP_OPERATOR_PAIRING_REQUIRED" });
+
+			const rotatedCredential = await pairMcpOperatorBrowser(createMcpOperatorPairingCode().code);
+			expect(rotatedCredential).not.toBe(firstCredential);
+			const revokedCredential = await rawApiFetch(approvalPath, {
+				method: "POST",
+				headers: { "X-Bobbit-Mcp-Operator": firstCredential },
+				body: approvalBody,
+			});
+			expect(revokedCredential.status).toBe(403);
+			expect(await revokedCredential.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
 			expect(appendCount(marker)).toBe(0);
 
 			const restart = await apiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/restart?projectId=${encodeURIComponent(project.id)}`, { method: "POST" });
