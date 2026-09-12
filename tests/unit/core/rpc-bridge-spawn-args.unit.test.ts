@@ -121,11 +121,13 @@ describe("RpcBridge Pi entrypoint selection", () => {
 
 		assert.equal(capturedCommand, "docker");
 		const containerIndex = capturedArgs.indexOf("container-123");
-		assert.deepEqual(capturedArgs.slice(containerIndex, containerIndex + 4), [
+		assert.deepEqual(capturedArgs.slice(containerIndex, containerIndex + 10), [
 			"container-123",
+			"env", "-u", "BOBBIT_SECRETS_DIR", "-u", "NODE_EXTRA_CA_CERTS",
 			"node",
 			"--disable-warning=DEP0123",
 			"/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+			"--mode",
 		]);
 	});
 });
