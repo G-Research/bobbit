@@ -4,6 +4,7 @@ import "../ui/components/CommentableMarkdown.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render, nothing } from "lit";
+import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -27,6 +28,7 @@ import {
 import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
 import { renderMcpApprovalBanner } from "./mcp-approval-banner.js";
+import { registerPreviewFrame } from "../ui/preview-frame-host.js";
 export { showHeaderToast } from "./header-toast.js";
 import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
@@ -2202,8 +2204,40 @@ function unifiedSlideX(index: number, count: number): number {
 	return -(index * 100) / count;
 }
 
-/** Listen for postMessage from the preview iframe and drive the slider track.
- *  Also handles touch swipes on the chat / content panes. */
+function activeSidePanelPreviewWindow(activeTabId: string): Window | null {
+	const activeTrack = document.querySelector<HTMLElement>('[data-mobile-pane-track][data-mobile-track-active="true"]');
+	if (activeTrack) {
+		const panes = activeTrack.querySelectorAll<HTMLElement>("[data-mobile-pane-key]");
+		for (const pane of panes) {
+			if (pane.dataset.mobilePaneKey !== activeTabId) continue;
+			const iframe = pane.querySelector<HTMLIFrameElement>('iframe[data-bobbit-preview-frame="side-panel"]');
+			return iframe?.isConnected ? iframe.contentWindow : null;
+		}
+		return null;
+	}
+	const iframe = document.querySelector<HTMLIFrameElement>(
+		'#side-panel-workspace:not([hidden]) iframe[data-bobbit-preview-frame="side-panel"]',
+	);
+	return iframe?.isConnected ? iframe.contentWindow : null;
+}
+
+function validPreviewSwipeMessage(data: unknown): { type: "preview-swipe-start" | "preview-swipe-move" | "preview-swipe-end"; dx?: number } | null {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+	const value = data as Record<string, unknown>;
+	const keys = Object.keys(value);
+	if (value.type === "preview-swipe-start" && keys.length === 1) return { type: value.type };
+	if (
+		(value.type === "preview-swipe-move" || value.type === "preview-swipe-end")
+		&& keys.length === 2
+		&& Object.prototype.hasOwnProperty.call(value, "dx")
+		&& typeof value.dx === "number"
+		&& Number.isFinite(value.dx)
+	) return { type: value.type, dx: value.dx };
+	return null;
+}
+
+/** Listen for bounded messages from the exact active preview iframe and drive
+ * the slider track. Also handles touch swipes on chat/content panes. */
 function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
@@ -2217,23 +2251,26 @@ function setupPreviewSwipe(): void {
 		const curIdx = unifiedMobilePaneIndex();
 		const activeTab = panes[curIdx];
 		if (activeTab?.kind !== "preview") return;
+		if (e.source !== activeSidePanelPreviewWindow(activeTab.id)) return;
+		const message = validPreviewSwipeMessage(e.data);
+		if (!message) return;
 		const track = getTrack();
 		if (!track) return;
 
-		const paneW = track.parentElement!.clientWidth;
+		const paneW = track.parentElement?.clientWidth ?? 0;
+		if (!Number.isFinite(paneW) || paneW <= 0) return;
 		const count = panes.length;
 		const baseX = unifiedSlideX(curIdx, count);
+		const dx = message.dx === undefined ? 0 : Math.max(-paneW, Math.min(paneW, message.dx));
 
-		if (e.data?.type === "preview-swipe-start") {
+		if (message.type === "preview-swipe-start") {
 			track.style.transition = "none";
-		} else if (e.data?.type === "preview-swipe-move") {
-			const dx: number = e.data.dx;
+		} else if (message.type === "preview-swipe-move") {
 			const dragPercent = (dx / paneW) * (100 / count);
 			const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
 			track.style.transform = `translateX(${target}%)`;
-		} else if (e.data?.type === "preview-swipe-end") {
+		} else {
 			track.style.transition = "transform 0.3s ease-out";
-			const dx: number = e.data.dx;
 			const threshold = paneW * 0.2;
 			let newIdx = curIdx;
 			if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
@@ -3246,12 +3283,23 @@ export function doRenderApp(): void {
 			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}?mtime=${v}`
 			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`);
 		const src = gatewayUrl(route);
+		let registeredIframe: HTMLIFrameElement | null = null;
+		let unregisterFrame: (() => void) | null = null;
+		const previewIframeRef = (element: Element | undefined) => {
+			const iframe = element as HTMLIFrameElement | undefined;
+			if (iframe === registeredIframe) return;
+			unregisterFrame?.();
+			registeredIframe = iframe ?? null;
+			unregisterFrame = iframe ? registerPreviewFrame(iframe, "side-panel") : null;
+		};
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
+					${ref(previewIframeRef)}
+					data-bobbit-preview-frame="side-panel"
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
-					sandbox="allow-scripts allow-same-origin"
+					sandbox="allow-scripts"
 					src=${src}
 				></iframe>
 			</div>

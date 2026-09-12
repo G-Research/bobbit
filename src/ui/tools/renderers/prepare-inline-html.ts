@@ -1,4 +1,9 @@
-import { PREVIEW_THEME_BRIDGE } from "../../../shared/preview-bridge-scripts.js";
+import {
+	createPreviewInitialThemeAssignment,
+	INLINE_PREVIEW_THEME_ATTRIBUTE,
+	PREVIEW_THEME_BRIDGE,
+} from "../../../shared/preview-bridge-scripts.js";
+import { capturePreviewTheme, previewThemeIdentity } from "../../preview-frame-host.js";
 
 /** Marker used to make canonical theme-bridge preparation idempotent. */
 export const INLINE_HTML_THEME_BRIDGE_ATTRIBUTE = "data-bobbit-inline-theme-bridge";
@@ -35,21 +40,21 @@ function retainedStringBytes(value: string): number {
 	return value.length * 2;
 }
 
-function cachedPreparation(content: string): string | undefined {
-	const entry = preparedHtmlCache.get(content);
+function cachedPreparation(cacheKey: string): string | undefined {
+	const entry = preparedHtmlCache.get(cacheKey);
 	if (!entry) return undefined;
 
 	// Refresh insertion order so active cards win over old transcript entries.
-	preparedHtmlCache.delete(content);
-	preparedHtmlCache.set(content, entry);
+	preparedHtmlCache.delete(cacheKey);
+	preparedHtmlCache.set(cacheKey, entry);
 	return entry.prepared;
 }
 
-function cachePreparation(content: string, prepared: string): void {
+function cachePreparation(cacheKey: string, content: string, prepared: string): void {
 	const contentBytes = retainedStringBytes(content);
 	if (contentBytes > INLINE_HTML_PREPARATION_CACHE_LIMITS.maxCacheableContentBytes) return;
 
-	const retainedBytes = contentBytes + retainedStringBytes(prepared);
+	const retainedBytes = retainedStringBytes(cacheKey) + retainedStringBytes(prepared);
 	if (retainedBytes > INLINE_HTML_PREPARATION_CACHE_LIMITS.maxRetainedBytes) return;
 
 	while (
@@ -63,7 +68,7 @@ function cachePreparation(content: string, prepared: string): void {
 		preparedHtmlCacheBytes -= oldest?.retainedBytes ?? 0;
 	}
 
-	preparedHtmlCache.set(content, { prepared, retainedBytes });
+	preparedHtmlCache.set(cacheKey, { prepared, retainedBytes });
 	preparedHtmlCacheBytes += retainedBytes;
 }
 
@@ -130,18 +135,21 @@ function isCanonicalMarkedBridge(
  *
  * DOMParser provides the insertion point rather than a raw closing-tag search,
  * so tag-shaped text inside scripts, comments, styles, and textareas remains
- * authored content. The canonical bridge is the first node in `<head>`, which
- * lets authored scripts synchronously observe the host theme while parsing.
+ * authored content. The bounded initial-theme assignment and canonical bridge
+ * are the first nodes in `<head>`, so authored scripts observe the theme while
+ * parsing without gaining access to the host document.
  * Any unavailable browser API or parser/serializer failure is fail-open and is
  * not cached, allowing a later render to recover when browser APIs return.
  */
 export function prepareInlineHtml(content: string): string {
-	const cached = cachedPreparation(content);
-	if (cached !== undefined) return cached;
-
 	try {
 		if (typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return content;
 
+		const cacheKey = `${previewThemeIdentity()}\u0000${content}`;
+		const cached = cachedPreparation(cacheKey);
+		if (cached !== undefined) return cached;
+
+		const initialTheme = capturePreviewTheme();
 		const canonicalBridge = getCanonicalBridgeDescriptor();
 		if (!canonicalBridge) return content;
 
@@ -152,18 +160,23 @@ export function prepareInlineHtml(content: string): string {
 			`script[${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}]`,
 		);
 		if (Array.from(markedBridges).some(candidate => isCanonicalMarkedBridge(candidate, canonicalBridge))) {
-			cachePreparation(content, content);
+			cachePreparation(cacheKey, content, content);
 			return content;
 		}
+
+		const initialThemeScript = document.createElement("script");
+		initialThemeScript.setAttribute(INLINE_PREVIEW_THEME_ATTRIBUTE, "");
+		initialThemeScript.textContent = createPreviewInitialThemeAssignment(initialTheme);
 
 		const bridge = document.createElement("script");
 		for (const [name, value] of canonicalBridge.attributes) bridge.setAttribute(name, value);
 		bridge.textContent = canonicalBridge.textContent;
 		bridge.setAttribute(INLINE_HTML_THEME_BRIDGE_ATTRIBUTE, "");
 		document.head.insertBefore(bridge, document.head.firstChild);
+		document.head.insertBefore(initialThemeScript, bridge);
 
 		const prepared = serializeHtmlDocument(document);
-		cachePreparation(content, prepared);
+		cachePreparation(cacheKey, content, prepared);
 		return prepared;
 	} catch {
 		return content;

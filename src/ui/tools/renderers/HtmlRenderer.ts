@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { AppWindow } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { registerPreviewFrame } from "../../preview-frame-host.js";
 import { prepareInlineHtml } from "./prepare-inline-html.js";
 
 interface HtmlWriteParams {
@@ -18,8 +19,8 @@ interface HtmlWriteParams {
  * the iframe — Lit only updates it if the value actually changes, preventing
  * spurious iframe reloads on parent re-renders.
  *
- * Streaming tool calls use imperative `document.open/write/close` via a ref
- * callback, with debounced updates (every 1.5s) to avoid flicker.
+ * Streaming tool calls replace prepared `srcdoc` via a stable ref callback,
+ * with debounced updates (every 1.5s) to avoid flicker.
  */
 export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 	// ── streaming-only state ──
@@ -28,43 +29,46 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 	private _pendingContent: string | null = null;
 	private _lastAppliedContent: string | null = null;
 	private _iframeReady = false;
+	private _streamingContent = "";
+	private _streamingFrameCleanup: (() => void) | null = null;
 
 	/** Throttled snapshot of code content for the code-block during streaming.
 	 *  Updated at most ~4x/sec so hljs.highlight() doesn't run every frame. */
 	private _throttledCode = "";
 	private _codeThrottleTimer: ReturnType<typeof setTimeout> | null = null;
 
-	private _autoResize(iframe: HTMLIFrameElement) {
-		requestAnimationFrame(() => {
-			try {
-				const doc = iframe.contentDocument;
-				const height = Math.min(
-					doc?.body?.scrollHeight ? doc.body.scrollHeight + 16 : 300,
-					600,
-				);
-				iframe.style.height = `${height}px`;
-			} catch { /* cross-origin fallback */ }
-		});
-	}
-
 	private _writeToIframe(content: string) {
 		const iframe = this._iframe;
-		if (!iframe) return;
-		const preparedContent = prepareInlineHtml(content);
-		try {
-			const doc = iframe.contentDocument;
-			if (doc) {
-				doc.open();
-				doc.write(preparedContent);
-				doc.close();
-				this._lastAppliedContent = content;
-				this._autoResize(iframe);
-			}
-		} catch {
-			iframe.srcdoc = preparedContent;
-			this._lastAppliedContent = content;
-		}
+		if (!iframe || content === this._lastAppliedContent) return;
+		iframe.srcdoc = prepareInlineHtml(content);
+		this._lastAppliedContent = content;
 	}
+
+	private readonly _streamingIframeRef = (element: Element | undefined) => {
+		if (!element) {
+			this._streamingFrameCleanup?.();
+			this._streamingFrameCleanup = null;
+			this._iframe = null;
+			this._iframeReady = false;
+			return;
+		}
+		const iframe = element as HTMLIFrameElement;
+		if (iframe === this._iframe) return;
+
+		this._streamingFrameCleanup?.();
+		this._iframe = iframe;
+		this._iframeReady = false;
+		this._lastAppliedContent = null;
+		this._streamingFrameCleanup = registerPreviewFrame(iframe, "inline");
+
+		const handler = () => {
+			iframe.removeEventListener("load", handler);
+			if (this._iframe !== iframe) return;
+			this._iframeReady = true;
+			this._writeToIframe(this._streamingContent);
+		};
+		iframe.addEventListener("load", handler);
+	};
 
 	private _scheduleUpdate(content: string) {
 		this._pendingContent = content;
@@ -91,10 +95,13 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 
 	/** Reset streaming state so the next tool call starts fresh. */
 	private _resetStreamingState() {
+		this._streamingFrameCleanup?.();
+		this._streamingFrameCleanup = null;
 		this._iframe = null;
 		this._lastAppliedContent = null;
 		this._pendingContent = null;
 		this._iframeReady = false;
+		this._streamingContent = "";
 		this._throttledCode = "";
 		if (this._debounceTimer) {
 			clearTimeout(this._debounceTimer);
@@ -153,10 +160,14 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 		if (isComplete) {
 			this._resetStreamingState();
 			const preparedHtml = prepareInlineHtml(htmlContent);
-
-			const onLoad = (e: Event) => {
-				const iframe = e.target as HTMLIFrameElement;
-				this._autoResize(iframe);
+			let registeredIframe: HTMLIFrameElement | null = null;
+			let unregisterFrame: (() => void) | null = null;
+			const completedIframeRef = (element: Element | undefined) => {
+				const iframe = element as HTMLIFrameElement | undefined;
+				if (iframe === registeredIframe) return;
+				unregisterFrame?.();
+				registeredIframe = iframe ?? null;
+				unregisterFrame = iframe ? registerPreviewFrame(iframe, "inline") : null;
 			};
 
 			return {
@@ -165,9 +176,9 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 						${renderCollapsibleHeader(state, AppWindow, headerText, contentRef, chevronRef, false)}
 						<div class="mt-3 rounded-lg border border-border overflow-hidden" style="position: relative;">
 							<iframe
+								${ref(completedIframeRef)}
 								.srcdoc=${preparedHtml}
-								sandbox="allow-scripts allow-same-origin"
-								@load=${onLoad}
+								sandbox="allow-scripts"
 								style="width: 100%; height: 300px; border: none; background: var(--background, Canvas);"
 								title=${params?.path || "HTML preview"}
 							></iframe>
@@ -181,32 +192,9 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 			};
 		}
 
-		// ── STREAMING: imperative document.write with debouncing ──
-		const streamingIframeSetup = (el: Element | undefined) => {
-			if (!el) return;
-			const iframe = el as HTMLIFrameElement;
-
-			// Same element — skip unless content changed
-			if (iframe === this._iframe) {
-				if (this._iframeReady && htmlContent !== this._lastAppliedContent) {
-					this._scheduleUpdate(htmlContent);
-				}
-				return;
-			}
-
-			// New iframe element — wait for about:blank load then write
-			this._iframe = iframe;
-			this._iframeReady = false;
-			this._lastAppliedContent = null;
-
-			const handler = () => {
-				iframe.removeEventListener("load", handler);
-				if (this._iframe !== iframe) return; // stale
-				this._iframeReady = true;
-				this._writeToIframe(htmlContent);
-			};
-			iframe.addEventListener("load", handler);
-		};
+		// ── STREAMING: prepared srcdoc replacement with debouncing ──
+		this._streamingContent = htmlContent;
+		if (this._iframeReady && htmlContent !== this._lastAppliedContent) this._scheduleUpdate(htmlContent);
 
 		return {
 			content: html`
@@ -214,8 +202,8 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 					${renderCollapsibleHeader(state, AppWindow, headerText, contentRef, chevronRef, false)}
 					<div class="mt-3 rounded-lg border border-border overflow-hidden" style="position: relative;">
 						<iframe
-							${ref(streamingIframeSetup)}
-							sandbox="allow-scripts allow-same-origin"
+							${ref(this._streamingIframeRef)}
+							sandbox="allow-scripts"
 							style="width: 100%; height: 300px; border: none; background: var(--background, Canvas);"
 							title=${params?.path || "HTML preview"}
 						></iframe>
