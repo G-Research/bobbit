@@ -47,6 +47,10 @@ export interface ResolvedMcpOrigin {
   path?: string;
   /** Internal signal that an explicitly installed project pack changed on disk. */
   marketplaceAttestationChanged?: boolean;
+  /** Internal complete-pack digest. Never expose this through status/review surfaces. */
+  marketplacePackIntegrity?: string;
+  /** Internal fail-closed signal for an unreadable/unsafe/incomplete pack measurement. */
+  marketplacePackIntegrityInvalid?: boolean;
 }
 
 export interface ResolvedMcpContribution {
@@ -416,7 +420,13 @@ export function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServe
 }
 
 function safeOrigin(origin: ResolvedMcpOrigin): ResolvedMcpOrigin {
-  const { path: _physicalPath, marketplaceAttestationChanged: _attestationChanged, ...safe } = origin;
+  const {
+    path: _physicalPath,
+    marketplaceAttestationChanged: _attestationChanged,
+    marketplacePackIntegrity: _packIntegrity,
+    marketplacePackIntegrityInvalid: _packIntegrityInvalid,
+    ...safe
+  } = origin;
   if (safe.sourceUrl) safe.sourceUrl = redactUrl(safe.sourceUrl);
   return safe;
 }
@@ -867,7 +877,9 @@ export class McpManager {
     const origin = owner.origin;
     const trust = origin.trust ?? (origin.authority === "marketplace" ? "pretrusted" : "approval-required");
     const sourceId = origin.sourceId ?? `unattributed:${group.serverName}`;
-    const validationError = validateMcpServerConfig(owner.config);
+    const validationError = origin.marketplacePackIntegrityInvalid
+      ? "Installed Marketplace pack integrity could not be verified."
+      : validateMcpServerConfig(owner.config);
     const approval: McpApprovalClassification = trust === "pretrusted"
       ? { required: false, state: "trusted" }
       : validationError
@@ -879,6 +891,7 @@ export class McpManager {
             serverName: group.serverName,
             trust,
             config: owner.config,
+            marketplacePackIntegrity: origin.marketplacePackIntegrity,
           });
           return origin.marketplaceAttestationChanged && classified.state === "pending"
             ? { ...classified, state: "changed" as const }
@@ -916,18 +929,21 @@ export class McpManager {
     return this._definitionsForGroup(group).every((definition) => this._isDefinitionEligible(definition));
   }
 
-  private _isStillEligible(group: ResolvedMcpConnectionGroup): boolean {
+  private _freshEligibleGroup(group: ResolvedMcpConnectionGroup): ResolvedMcpConnectionGroup | undefined {
     if (group.ownerContributions[0]?.origin.sourceId === "programmatic-manual") {
-      return this._isEligible(group);
+      return this._isEligible(group) ? group : undefined;
     }
-    // Connecting and listing tools both cross asynchronous trust boundaries.
-    // Rediscover here so an on-disk edit/removal during either operation cannot
-    // publish the stale definition before the normal reconciliation timer runs.
+    // Every asynchronous lifecycle boundary must return to fresh discovery.
+    // The caller may only use the returned group/config, never its earlier copy.
     this.discoverConnectionGroups();
     const current = this.discoveredConnectionGroups.get(group.serverName);
-    if (!current) return false;
-    if (this._fingerprintGroup(current) !== this._fingerprintGroup(group)) return false;
-    return this._isEligible(current);
+    if (!current) return undefined;
+    if (this._fingerprintGroup(current) !== this._fingerprintGroup(group)) return undefined;
+    return this._isEligible(current) ? current : undefined;
+  }
+
+  private _isStillEligible(group: ResolvedMcpConnectionGroup): boolean {
+    return this._freshEligibleGroup(group) !== undefined;
   }
 
   /** Freshly discover the effective winner used to validate an approval request. */
@@ -995,14 +1011,27 @@ export class McpManager {
   }
 
   private async _connectEligibleServer(name: string, desiredGroup: ResolvedMcpConnectionGroup): Promise<void> {
-    const config = desiredGroup.config;
-    if (this.clients.has(name)) await this.disconnectServer(name);
+    let currentGroup = this._freshEligibleGroup(desiredGroup);
+    if (!currentGroup) {
+      await this.disconnectServer(name, { runtimeOnly: true });
+      return;
+    }
+    if (this.clients.has(name)) {
+      await this.disconnectServer(name, { runtimeOnly: true });
+      // disconnect() is attacker-influenceable through transport shutdown and may
+      // yield long enough for the approved definition or pack bytes to change.
+      currentGroup = this._freshEligibleGroup(currentGroup);
+      if (!currentGroup) return;
+    }
 
+    const config = currentGroup.config;
     this.configs.set(name, config);
-    this.connectionGroups.set(name, desiredGroup);
-    this.serverFingerprints.set(name, this._fingerprintGroup(desiredGroup));
+    this.connectionGroups.set(name, currentGroup);
+    this.serverFingerprints.set(name, this._fingerprintGroup(currentGroup));
     this.errors.delete(name);
 
+    // Client construction is inert; the immediately preceding fresh group is the
+    // only configuration allowed to cross the process/network connect boundary.
     const client = this._createClient(name);
     try {
       // Guard for test-injected stubs that may pre-set connected=true.
@@ -1012,7 +1041,7 @@ export class McpManager {
       this.clients.set(name, client);
       // A concurrent rejection/configuration change during initialize must not
       // reach tools/list or publish a stale route.
-      if (!this._isStillEligible(desiredGroup)) {
+      if (!this._isStillEligible(currentGroup)) {
         await this.disconnectServer(name, { runtimeOnly: true });
         return;
       }
@@ -1027,6 +1056,10 @@ export class McpManager {
           `MCP server "${name}" tools/list`,
         );
       } catch (err) {
+        if (!this._isStillEligible(currentGroup)) {
+          await this.disconnectServer(name, { runtimeOnly: true });
+          return;
+        }
         const reason = (err as Error).message;
         console.error(`[mcp] tools/list failed for "${name}": ${reason}`);
         this.errors.set(name, reason);
@@ -1052,7 +1085,7 @@ export class McpManager {
         }
       }
 
-      if (!this._isStillEligible(desiredGroup)) {
+      if (!this._isStillEligible(currentGroup)) {
         await this.disconnectServer(name, { runtimeOnly: true });
         return;
       }
@@ -1103,6 +1136,8 @@ export class McpManager {
         authority: owner.origin.authority,
         trust: owner.origin.trust,
         marketplaceAttestationChanged: owner.origin.marketplaceAttestationChanged,
+        marketplacePackIntegrity: owner.origin.marketplacePackIntegrity,
+        marketplacePackIntegrityInvalid: owner.origin.marketplacePackIntegrityInvalid,
       })),
     });
   }

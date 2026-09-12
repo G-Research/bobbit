@@ -751,7 +751,10 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpManager, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
-import { MarketplaceMcpInstallAttestationStore } from "./mcp/marketplace-mcp-install-attestation.js";
+import {
+	MarketplaceMcpInstallAttestationStore,
+	measureMarketplaceMcpPackIntegrity,
+} from "./mcp/marketplace-mcp-install-attestation.js";
 import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -3081,7 +3084,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const installSourceId = safeString(metaDetails.sourceId) ?? entry.meta?.sourceId ?? fallbackSourceId;
 			const projectRecord = entry.scope === "project" && projectId ? projectRegistry.get(projectId) : undefined;
 			try {
-				for (const mcp of loadPackContributions(entry.path, entry.manifest).mcp ?? []) {
+				const loadedMcp = loadPackContributions(entry.path, entry.manifest).mcp ?? [];
+				let marketplacePackIntegrity: string | undefined;
+				let marketplacePackIntegrityInvalid = false;
+				if (entry.scope === "project") {
+					try {
+						marketplacePackIntegrity = measureMarketplaceMcpPackIntegrity(entry.path);
+					} catch {
+						marketplacePackIntegrityInvalid = true;
+						console.warn(`[mcp] Marketplace pack integrity validation failed for ${entry.manifest.name}`);
+					}
+				}
+				for (const mcp of loadedMcp) {
 					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
 					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
 					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
@@ -3098,6 +3112,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							contributionId: mcp.listName,
 							serverName: mcp.serverName,
 							config: mcp.config,
+							packIntegrity: marketplacePackIntegrity,
 						})
 						: "missing";
 					const projectControlled = entry.scope === "project" && projectAttestation !== "attested";
@@ -3121,6 +3136,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							authority: projectControlled ? "project" : "marketplace",
 							trust: projectControlled ? "approval-required" : "pretrusted",
 							...(projectAttestation === "changed" ? { marketplaceAttestationChanged: true } : {}),
+							...(marketplacePackIntegrity ? { marketplacePackIntegrity } : {}),
+							...(marketplacePackIntegrityInvalid ? { marketplacePackIntegrityInvalid: true } : {}),
 							sourceId: `marketplace-pack:${installSourceId ?? "unattested"}:${entry.manifest.name}:${mcp.listName}`,
 							file: sourceFile,
 							...(entry.scope === "project" && projectId ? { projectId } : {}),

@@ -36,6 +36,7 @@ class StubMcpClient {
 		private readonly options: {
 			tools?: McpToolDef[];
 			connectGate?: Promise<void>;
+			disconnectGate?: Promise<void>;
 			listToolsGate?: Promise<void>;
 		} = {},
 	) {}
@@ -49,6 +50,7 @@ class StubMcpClient {
 	async disconnect(): Promise<void> {
 		this.disconnectCount += 1;
 		this.connected = false;
+		if (this.options.disconnectGate) await this.options.disconnectGate;
 	}
 
 	async listTools(): Promise<McpToolDef[]> {
@@ -308,6 +310,35 @@ describe("MCP approval lifecycle gate", () => {
 		assert.equal(stub.connectCount, 1);
 		assert.equal(manager.getServerStatuses()[0].approval.state, "trusted");
 		assert.equal(manager.getServerStatuses()[0].approval.required, false);
+	});
+
+	it("revalidates after forced disconnect and never creates or connects a stale replacement", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });
+		let releaseDisconnect!: () => void;
+		const disconnectGate = new Promise<void>((resolve) => { releaseDisconnect = resolve; });
+		const stub = new StubMcpClient("repository", { disconnectGate });
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		assert.equal(manager.createCount, 1);
+		assert.equal(stub.connectCount, 1);
+
+		const forced = manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		while (stub.disconnectCount === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["changed.js"] } });
+		releaseDisconnect();
+		await forced;
+
+		assert.equal(manager.createCount, 1, "no replacement client is constructed from the stale group");
+		assert.equal(stub.connectCount, 1, "no stale stdio/network connect crosses the disconnect window");
+		assert.equal(stub.listToolsCount, 1);
+		assert.deepEqual(manager.getToolInfos(), []);
+		assert.equal(manager.getServerStatuses()[0].approval.state, "changed");
+		assert.equal(manager.getServerStatuses()[0].status, "disconnected");
 	});
 
 	it("rediscovers after initialize so a changed definition cannot list or publish tools", async () => {
