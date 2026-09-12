@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
 import {
-	authenticatedOperatorCookie,
+	authenticatedMcpOperatorHeaders,
 	apiFetch,
 } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 
@@ -135,7 +135,7 @@ test.describe("MCP approval API CLI redaction", () => {
 			writeConfig(root, "two");
 			const staleResponse = await apiFetch(`/api/mcp-servers/${encodeURIComponent(SERVER_NAME)}/approval?projectId=${encodeURIComponent(projectId)}`, {
 				method: "POST",
-				headers: { Cookie: await authenticatedOperatorCookie() },
+				headers: await authenticatedMcpOperatorHeaders(),
 				body: JSON.stringify({
 					decision: "approved",
 					fingerprint: pending.approval.fingerprint,
