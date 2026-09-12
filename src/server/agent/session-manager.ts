@@ -6865,10 +6865,17 @@ export class SessionManager {
 		return taskId;
 	}
 
+	private existingMcpProjectRoot(projectId: string): string | undefined {
+		const manager = this.projectContextManager;
+		return manager && typeof manager.getExisting === "function"
+			? manager.getExisting(projectId)?.project.rootPath
+			: undefined;
+	}
+
 	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
 		if (scope?.scopeKey) return scope.scopeKey;
 		if (scope?.projectId) {
-			const root = this.projectContextManager?.getExisting(scope.projectId)?.project.rootPath;
+			const root = this.existingMcpProjectRoot(scope.projectId);
 			if (!scope.cwd || !root || executionPathIdentity(scope.cwd) === executionPathIdentity(root)) {
 				return `project:${scope.projectId}`;
 			}
@@ -7025,7 +7032,7 @@ export class SessionManager {
 	}
 
 	private additionalMcpProjects(cwd: string, primaryProjectId?: string): Array<{ projectId: string; projectName: string; cwd: string; configStore: import("./project-config-store.js").ProjectConfigStore }> {
-		if (!this.projectContextManager) return [];
+		if (!this.projectContextManager || typeof this.projectContextManager.all !== "function") return [];
 		const primaryPath = executionPathIdentity(cwd);
 		return Array.from(this.projectContextManager.all())
 			.filter(ctx => !this.suspendedMcpProjects.has(ctx.project.id))
@@ -7048,7 +7055,7 @@ export class SessionManager {
 			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
 			approvalStore: this.getMcpApprovalStore(),
 			...(opts?.projectId ? { projectId: opts.projectId } : {}),
-			...(projectContext?.project.name ? { projectName: projectContext.project.name } : {}),
+			...(projectContext?.project?.name ? { projectName: projectContext.project.name } : {}),
 			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
 		});
 		mgr.setAdditionalProjects(this.additionalMcpProjects(cwd, opts?.projectId));
@@ -7095,10 +7102,11 @@ export class SessionManager {
 	}
 
 	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
-		const bound = this.mcpSessionScopes.get(sessionId);
+		const bound = this.mcpSessionScopes?.get(sessionId);
 		if (bound) return { projectId: bound.projectId, cwd: bound.cwd };
 		const live = this.sessions.get(sessionId);
-		const persisted = live ? null : this.getPersistedSession(sessionId);
+		const canSearchPersisted = !this.projectContextManager || typeof this.projectContextManager.all === "function";
+		const persisted = live || !canSearchPersisted ? null : this.getPersistedSession(sessionId);
 		const session = live ?? persisted;
 		if (!session) return {};
 		let cwd = session.cwd;
@@ -7109,7 +7117,7 @@ export class SessionManager {
 				const suffix = normalized.slice(branchRoot.length).replace(/^\/+/, "");
 				cwd = suffix ? path.join(session.worktreePath, ...suffix.split("/")) : session.worktreePath;
 			} else {
-				const projectRoot = this.projectContextManager?.getExisting(session.projectId)?.project.rootPath;
+				const projectRoot = this.existingMcpProjectRoot(session.projectId);
 				if (projectRoot && (normalized === "/workspace" || normalized.startsWith("/workspace/"))) {
 					const suffix = normalized.slice("/workspace".length).replace(/^\/+/, "");
 					cwd = suffix ? path.join(projectRoot, ...suffix.split("/")) : projectRoot;
@@ -7125,7 +7133,7 @@ export class SessionManager {
 			return null;
 		}
 		const canonicalCwd = canonicalExecutionCwd(cwd);
-		const manager = await this.ensureMcpManager({ projectId, cwd: canonicalCwd });
+		const manager = await this.ensureMcpManagerForContext(projectId, canonicalCwd);
 		if (!manager) return null;
 		this.mcpSessionScopes.set(sessionId, { projectId, cwd: canonicalCwd, scopeKey: manager.getScopeKey() });
 		return manager;
