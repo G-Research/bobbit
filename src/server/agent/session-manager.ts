@@ -7141,9 +7141,7 @@ export class SessionManager {
 
 	getMcpManagerForSession(sessionId: string): McpManager | null {
 		const bound = this.mcpSessionScopes.get(sessionId);
-		if (bound) return this.getMcpManager({ scopeKey: bound.scopeKey });
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
-		return this.getMcpManagerForContext(projectId, cwd);
+		return bound ? this.getMcpManager({ scopeKey: bound.scopeKey }) : null;
 	}
 
 	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
@@ -7271,23 +7269,28 @@ export class SessionManager {
 		if (!viewManager) {
 			throw Object.assign(new Error("MCP is not initialized for this project."), { code: "MCP_NOT_INITIALIZED" });
 		}
-		// Reload every active manager after the durable decision. Definitions can be
-		// introduced by additional registered projects, and their precedence may
-		// change while persistence is in flight; a process-wide pass closes that race.
-		const managers = new Set(this.getActiveMcpManagers());
-		managers.add(viewManager);
+		const activeManagers = (): Set<McpManager> => {
+			const managers = new Set(this.getActiveMcpManagers());
+			managers.add(viewManager);
+			return managers;
+		};
 		try {
 			await viewManager.decideApproval(identity, decision);
 		} catch (error) {
-			// A stale or newly-invalid winner may still have an old runtime. Reconcile
-			// before reporting the decision failure so no API race prolongs access.
-			await this.reloadMcpManagers(managers, {
+			// A stale or newly-invalid winner may still have an old runtime. Snapshot
+			// after the failed persistence attempt so managers published while it was
+			// in flight are reconciled before the decision failure is reported.
+			await this.reloadMcpManagers(activeManagers(), {
 				announce: true,
 				affectedProjectIds: [viewProjectId, identity.projectId],
 			});
 			throw error;
 		}
-		await this.reloadMcpManagers(managers, {
+		// A manager published before persistence completed may have connected under
+		// the old ledger. Taking this snapshot only after the durable decision makes
+		// that manager part of the reload; later managers observe the new decision
+		// during their own eligibility check.
+		await this.reloadMcpManagers(activeManagers(), {
 			announce: true,
 			affectedProjectIds: [viewProjectId, identity.projectId],
 		});
@@ -7298,9 +7301,9 @@ export class SessionManager {
 			|| current.origin.sourceId !== identity.sourceId
 			|| current.approval.fingerprint !== identity.fingerprint) {
 			// Fresh discovery above can observe a change made after the first reload.
-			// Reconcile that newly discovered winner before returning 409 so the old
-			// approved client, routes, and external registration cannot remain live.
-			await this.reloadMcpManagers(managers, {
+			// Reconcile that newly discovered winner and any manager published during
+			// the reload before returning 409 so no old runtime remains live.
+			await this.reloadMcpManagers(activeManagers(), {
 				announce: true,
 				affectedProjectIds: [viewProjectId, identity.projectId],
 			});
@@ -7723,6 +7726,7 @@ export class SessionManager {
 		projectId?: string,
 		cwd?: string,
 		preparedRuntime?: Pick<PreparedScopedToolRuntime, "toolManager" | "groupPolicyStore" | "toolScope">,
+		mcpBinding?: { manager: McpManager | null },
 	): EffectiveTool[] {
 		if (!role) return [];
 		const toolManager = preparedRuntime
@@ -7733,7 +7737,7 @@ export class SessionManager {
 				toolManager,
 				role,
 				preparedRuntime ? preparedRuntime.groupPolicyStore : this.getGroupPolicyProviderForProject(projectId),
-				this.getMcpManagerForContext(projectId, cwd) ?? undefined,
+				(mcpBinding ? mcpBinding.manager : this.getMcpManagerForContext(projectId, cwd)) ?? undefined,
 				preparedRuntime ? preparedRuntime.toolScope : scopedToolContext(projectId, cwd),
 			);
 		}
@@ -7862,7 +7866,10 @@ export class SessionManager {
 		const runtime = preparedRuntime ?? this.prepareScopedToolRuntime(projectId, cwd);
 		const { toolManager, groupPolicyStore, toolScope, piExtensionActivation } = runtime;
 
-		const mcpManager = this.getMcpManagerForSession(sessionId) ?? this.getMcpManagerForContext(projectId, cwd);
+		// Session activation must consume only the manager explicitly bound during
+		// setup/restore. Falling back through cwd can select the project-root manager
+		// for a sandbox whose live cwd is a container path.
+		const mcpManager = this.getMcpManagerForSession(sessionId);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
@@ -9053,7 +9060,7 @@ export class SessionManager {
 				if (restoreInFlight) {
 					await restoreCoordinator?.tail;
 				} else if (poisonedDormant) {
-					const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+					const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
 					await this._respawnAgentInPlace(session, ps, {
 						preserveSandboxRealm: session.sandboxed === true,
 						deferQueueDrain: true,
@@ -11847,7 +11854,7 @@ export class SessionManager {
 			const poisonRecoveryPromptDispatchQueueIds = current.poisonRecoveryPromptDispatchQueueIds?.slice();
 			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
 			const savedOneTimeGrantedTools = current.oneTimeGrantedTools?.slice();
-			const overrideAllowedTools = this.recomputeAllowedToolsForRestart(current, ps);
+			const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(current, ps);
 			const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
 			console.info(
@@ -12307,14 +12314,17 @@ export class SessionManager {
 		const role = this.resolveSessionRole(roleName, undefined, session.projectId);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
+		// The live cwd may already be rewritten to a sandbox container path. Resolve
+		// and retain the established host-worktree binding before any policy/group
+		// projection so grant validation and the restarted proxy use one manager.
+		const sessionMcpManager = await this.ensureMcpManagerForSession(session.id);
 		const grantScopeTools: string[] = [];
 		if (scope === "group" && group) {
 			// Approving a group covers tools in that group only. Do not use the full
 			// effective role surface here: ask-gated tools are registered there so the
 			// model can attempt them, but they are not approved grants yet.
-			const mcpManager = this.getMcpManagerForContext(session.projectId, session.cwd);
-			if (mcpManager) {
-				for (const info of mcpManager.getToolInfos()) {
+			if (sessionMcpManager) {
+				for (const info of sessionMcpManager.getToolInfos()) {
 					if (info.group !== group) continue;
 					grantScopeTools.push(info.name);
 
@@ -12446,7 +12456,13 @@ export class SessionManager {
 			if (!persistedGrant) {
 				session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			}
-			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole, session.projectId, session.cwd).map(e => e.name);
+			const updatedEffective = this.resolveEffectiveAllowedTools(
+				effectiveRole,
+				session.projectId,
+				session.cwd,
+				undefined,
+				{ manager: sessionMcpManager },
+			).map(e => e.name);
 			session.allowedTools = this.mergeToolNames(updatedEffective, persistedGrant ? undefined : approvedGrantTools) ?? updatedEffective;
 			resultTools = session.allowedTools;
 		}
@@ -12644,7 +12660,7 @@ export class SessionManager {
 		});
 	}
 
-	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
+	private async recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): Promise<string[] | undefined> {
 		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
 		// from absent (`undefined` = fall back to role/cascade). Only a missing /
 		// non-array value falls back; an emptied allowlist (recursion-stripped
@@ -12667,7 +12683,14 @@ export class SessionManager {
 		// respawn; the old live session.allowedTools is just a stale cache.
 		if (!sessionGrants) return undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
-		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd).map(t => t.name);
+		const sessionMcpManager = await this.ensureMcpManagerForSession(session.id);
+		const recomputedAllowed = this.resolveEffectiveAllowedTools(
+			restoredRole,
+			ps.projectId,
+			ps.cwd,
+			undefined,
+			{ manager: sessionMcpManager },
+		).map(t => t.name);
 		return this.mergeToolNames(recomputedAllowed, sessionGrants);
 	}
 
@@ -12683,7 +12706,7 @@ export class SessionManager {
 		// Save in-memory grant state that restoreSession doesn't persist.
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
 		// One-time grants authorize only the currently blocked invocation; do not
 		// pre-populate the guard's process-local cache across respawn/refresh.
 		const overrideGrantedTools = savedSessionOnlyGrantedTools;
@@ -12908,7 +12931,7 @@ export class SessionManager {
 
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
 		// One-time grants authorize only the currently blocked invocation; do not
 		// pre-populate the guard's process-local cache across respawn/refresh.
 		const overrideGrantedTools = savedSessionOnlyGrantedTools;
@@ -13992,6 +14015,7 @@ export class SessionManager {
 		// YAML generation shared by extension, policy, guard, provider, and prompt reads.
 		const restoredToolRuntime = this.prepareScopedToolRuntime(ps.projectId, ps.cwd);
 		if (restoredToolRuntime.toolManager) bridgeOptions.toolManager = restoredToolRuntime.toolManager;
+		const restoredMcpManager = await this.ensureMcpManagerForSession(ps.id);
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		const restoredAllowedNames = await this.withPreparedToolGeneration(restoredToolRuntime, async () => {
 			const requiredToolNames = requiredLifecycleToolNames({
@@ -14023,7 +14047,7 @@ export class SessionManager {
 				? tagAllowedTools(overrideAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
 				: persistedAllowedTools
 					? tagAllowedTools(persistedAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
-					: this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd, restoredToolRuntime);
+					: this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd, restoredToolRuntime, { manager: restoredMcpManager });
 			// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
 			// restored allowlist so the prompt tool-docs + persisted allowedTools stay
 			// consistent with what buildToolActivationArgs actually activates.
@@ -14048,7 +14072,6 @@ export class SessionManager {
 			const restoredAllowedTools: EffectiveTool[] | undefined =
 				(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 			const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-			await this.ensureMcpManagerForSession(ps.id);
 			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime, requiredToolNames);
 			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
@@ -17587,6 +17610,7 @@ export class SessionManager {
 		// Cold role replacement must discover project Pi tools before policy and
 		// prompt docs. The same snapshot is reused when activation argv is built.
 		const replacementToolRuntime = this.prepareScopedToolRuntime(replacementSession.projectId, replacementSession.cwd);
+		const replacementMcpManager = await this.ensureMcpManagerForSession(id);
 		let effectiveAllowedNames: string[] = [];
 		let bridgeOptions!: RpcBridgeOptions;
 		await this.withPreparedToolGeneration(replacementToolRuntime, async () => {
@@ -17595,7 +17619,13 @@ export class SessionManager {
 			// and the persisted allowedTools all agree after a role reassignment.
 			const respawnEffectiveGoalId = replacementSession.goalId ?? replacementSession.teamGoalId;
 			const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, replacementSession.projectId);
-			const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole, replacementSession.projectId, replacementSession.cwd, replacementToolRuntime);
+			const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(
+				fullRole,
+				replacementSession.projectId,
+				replacementSession.cwd,
+				replacementToolRuntime,
+				{ manager: replacementMcpManager },
+			);
 			const effectiveAllowed = respawnDisabled
 				? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 				: effectiveAllowedRaw;
@@ -17658,7 +17688,6 @@ export class SessionManager {
 			// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 			// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 			// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-			await this.ensureMcpManagerForSession(id);
 			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime, requiredToolNames);
 			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
@@ -20654,9 +20683,16 @@ export class SessionManager {
 				// canonical live allowlist. Prefer that post-terminal value so a stale
 				// persisted snapshot cannot re-grant a spent capability on replacement.
 				const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
+				const forceAbortMcpManager = await this.ensureMcpManagerForSession(id);
 				const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
 					? tagAllowedTools(forceAbortAllowedNames, forceAbortToolRuntime.toolManager, forceAbortToolRuntime.toolScope)
-					: this.resolveEffectiveAllowedTools(role, session.projectId, session.cwd, forceAbortToolRuntime);
+					: this.resolveEffectiveAllowedTools(
+						role,
+						session.projectId,
+						session.cwd,
+						forceAbortToolRuntime,
+						{ manager: forceAbortMcpManager },
+					);
 				// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 				// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
 				// collapse it to `undefined`, which would re-grant every tool. Only a
@@ -20665,7 +20701,6 @@ export class SessionManager {
 				const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 					? effective
 					: (effective.length > 0 ? effective : undefined);
-				await this.ensureMcpManagerForSession(id);
 				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime, requiredToolNames);
 				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
