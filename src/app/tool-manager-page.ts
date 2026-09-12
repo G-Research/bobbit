@@ -275,15 +275,8 @@ let editTab: "access" | "context" | "renderer" = "access";
 let scopedRefreshRevision = 0;
 let mcpRequestScope: McpServerRequestScope = { projectId: getConfigApiProjectId() };
 
-function normalizedScopePath(value: string | undefined): string {
-	return (value ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
 function requestScope(projectId: string, cwd: string | undefined): McpServerRequestScope {
-	const root = state.projects.find((project) => project.id === projectId)?.rootPath;
-	return normalizedScopePath(cwd) && normalizedScopePath(cwd) !== normalizedScopePath(root)
-		? { projectId, cwd }
-		: { projectId };
+	return cwd ? { projectId, cwd } : { projectId };
 }
 
 function localMcpReviewOwner(): GatewaySession | Goal | undefined {
@@ -321,7 +314,7 @@ async function resolveMcpRequestScope(): Promise<McpServerRequestScope> {
 }
 
 function mcpScopeKey(scope: McpServerRequestScope): string {
-	return `${scope.projectId}\u0000${normalizedScopePath(scope.cwd)}`;
+	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { fetchMcpServers, type McpServerRequestScope } from "./api.js";
-import { setConfigScope } from "./config-scope.js";
+import { getConfigApiProjectId, setConfigScope } from "./config-scope.js";
 import { getRouteFromHash, setHashRoute, setMcpReviewToolsRoute, type AppRoute } from "./routing.js";
 import { renderApp, state, type GatewaySession, type Goal, type Project } from "./state.js";
 
@@ -26,33 +26,19 @@ const countRevisionByScope = new Map<string, number>();
 let toolsRevalidationTimer: ReturnType<typeof setTimeout> | undefined;
 let toolsRevalidationScopeKey: string | undefined;
 
-function normalizedPath(value: string | undefined): string {
-	return (value ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
-function projectRoot(projectId: string, source: McpApprovalBannerState): string | undefined {
-	return source.projects.find((project) => project.id === projectId)?.rootPath;
-}
-
 function scopeForSession(sessionId: string | undefined, source: McpApprovalBannerState): McpApprovalReviewScope | undefined {
 	if (!sessionId) return undefined;
 	const session = source.gatewaySessions.find((candidate) => candidate.id === sessionId)
 		?? source.archivedSessions.find((candidate) => candidate.id === sessionId);
 	if (!session?.projectId) return undefined;
-	const cwd = normalizedPath(session.cwd) !== normalizedPath(projectRoot(session.projectId, source))
-		? session.cwd
-		: undefined;
-	return { projectId: session.projectId, ...(cwd ? { cwd, sessionId } : {}) };
+	return { projectId: session.projectId, ...(session.cwd ? { cwd: session.cwd, sessionId } : {}) };
 }
 
 function scopeForGoal(goalId: string | undefined, source: McpApprovalBannerState): McpApprovalReviewScope | undefined {
 	if (!goalId) return undefined;
 	const goal = source.goals.find((candidate) => candidate.id === goalId);
 	if (!goal?.projectId) return undefined;
-	const cwd = normalizedPath(goal.cwd) !== normalizedPath(projectRoot(goal.projectId, source))
-		? goal.cwd
-		: undefined;
-	return { projectId: goal.projectId, ...(cwd ? { cwd, goalId } : {}) };
+	return { projectId: goal.projectId, ...(goal.cwd ? { cwd: goal.cwd, goalId } : {}) };
 }
 
 /** Resolve the project and optional existing session/goal cwd represented by the current surface. */
@@ -71,7 +57,9 @@ export function resolveMcpApprovalBannerScope(
 	if (route.view === "tools") {
 		const reviewScope = scopeForSession(route.mcpReviewSessionId, source)
 			?? scopeForGoal(route.mcpReviewGoalId, source);
-		if (reviewScope) return reviewScope;
+		// Plain Tools is always the selected configuration project's root scope.
+		// Only an explicit opaque owner route may retain a session/goal cwd.
+		return reviewScope ?? { projectId: getConfigApiProjectId() };
 	}
 
 	const activeSessionScope = scopeForSession(source.selectedSessionId ?? undefined, source)
@@ -92,7 +80,9 @@ export function resolveMcpApprovalBannerProjectId(
 }
 
 function scopeKey(scope: McpServerRequestScope): string {
-	return `${scope.projectId}\u0000${normalizedPath(scope.cwd)}`;
+	// Cwd is server-authored. Preserve it byte-for-byte: client-side case or
+	// separator folding can conflate distinct POSIX execution directories.
+	return JSON.stringify([scope.projectId, scope.cwd ?? null]);
 }
 
 function scheduleToolsRevalidation(scope: McpApprovalReviewScope, route: AppRoute): void {
@@ -185,7 +175,7 @@ export function invalidateMcpApprovalBanner(projectIds?: readonly string[]): voi
 		...countRevisionByScope.keys(),
 	])];
 	const affected = ids?.length
-		? knownKeys.filter((key) => ids.some((projectId) => key.startsWith(`${projectId}\u0000`)))
+		? knownKeys.filter((key) => ids.some((projectId) => key.startsWith(`${JSON.stringify([projectId]).slice(0, -1)},`)))
 		: knownKeys;
 	for (const key of affected) {
 		reviewCountByScope.delete(key);

@@ -11,7 +11,9 @@ import {
 import {
 	invalidateMcpApprovalBanner,
 	renderMcpApprovalBanner,
+	resolveMcpApprovalBannerScope,
 } from "../../src/app/mcp-approval-banner.js";
+import { setConfigScope } from "../../src/app/config-scope.js";
 import { renderApp, setRenderApp, state } from "../../src/app/state.js";
 
 class ViewerPushSocket extends EventTarget {
@@ -45,6 +47,7 @@ const original = {
 };
 
 beforeEach(() => {
+	setConfigScope("system");
 	state.appView = "authenticated";
 	state.activeProjectId = "additional-project";
 	state.projects = [{ id: "additional-project", name: "Additional project" } as any];
@@ -69,6 +72,34 @@ afterEach(() => {
 });
 
 describe("viewer MCP approval push", () => {
+	it("keeps plain Tools root-scoped and preserves case-sensitive owner cwd", () => {
+		const source = {
+			projects: [{ id: "project-1", name: "Project", rootPath: "/Repo" }],
+			gatewaySessions: [{ id: "session-1", projectId: "project-1", cwd: "/repo" }],
+			archivedSessions: [],
+			goals: [],
+			selectedSessionId: "session-1",
+			remoteAgent: null,
+			goalDashboardId: null,
+			activeProjectId: "project-1",
+		} as any;
+		setConfigScope("project-1");
+
+		expect(resolveMcpApprovalBannerScope({ view: "tools" }, source)).toEqual({
+			projectId: "project-1",
+		});
+		expect(resolveMcpApprovalBannerScope({ view: "session", sessionId: "session-1" }, source)).toEqual({
+			projectId: "project-1",
+			cwd: "/repo",
+			sessionId: "session-1",
+		});
+		expect(resolveMcpApprovalBannerScope({ view: "tools", mcpReviewSessionId: "session-1" }, source)).toEqual({
+			projectId: "project-1",
+			cwd: "/repo",
+			sessionId: "session-1",
+		});
+	});
+
 	it("removes a non-session additional-project banner after an approval decision", async () => {
 		let pending = true;
 		let requests = 0;

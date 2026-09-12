@@ -50,7 +50,7 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		});
 		await banner.locator('[data-testid="mcp-review-servers"]').click();
 		await scopedMcpLoad;
-		await expect(page).toHaveURL(/#\/tools$/);
+		await expect(page).toHaveURL(new RegExp(`#\\/tools\\?reviewSession=${sessionId}$`));
 
 		const section = page.locator('[data-testid="mcp-section"]');
 		await expect(section).toBeVisible({ timeout: 20_000 });
