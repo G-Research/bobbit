@@ -7246,14 +7246,15 @@ export class SessionManager {
 	}
 
 	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
+		// Project Marketplace contributions are additional discovery sources for
+		// every active manager. Reuse the project-source lifecycle so removal or
+		// mutation tears down every stale client and route before returning, without
+		// creating managers for inactive projects.
+		if (scope === "project") return this.reloadMcpAfterProjectMutation(projectId);
+
 		const managers = new Set<McpManager>();
-		if (scope === "project") {
-			const mgr = await this.ensureMcpManager({ projectId });
-			if (mgr) managers.add(mgr);
-		} else {
-			if (this.mcpManager) managers.add(this.mcpManager);
-			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
-		}
+		if (this.mcpManager) managers.add(this.mcpManager);
+		for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
 		const results: McpReloadResult[] = [];
 		const pendingRefreshes: Promise<unknown>[] = [];
 		for (const mgr of managers) {
