@@ -73,13 +73,17 @@ function authorizePreviewRequest(
 	sessionId: string,
 ): PreviewAuthorization | undefined {
 	const previewAuthorized = tryPreviewAuth(req, opts.cookieStore, sessionId);
-	// Opaque sandbox subresources must prove the narrow capability even when a
-	// broader credential was synthetically attached. Request admission already
-	// limits this browser shape to preview GET/HEAD; this is the inner auth gate.
+	const crossSiteIframeNavigation = req.headers["sec-fetch-site"] === "cross-site"
+		&& req.headers["sec-fetch-mode"] === "navigate"
+		&& req.headers["sec-fetch-dest"] === "iframe";
+	// A preview cookie is ambient browser state, not proof that a cross-site
+	// parent may embed the preview. Reject that navigation before redirects or
+	// bytes, while retaining the capability for opaque sandbox subresources.
+	if (crossSiteIframeNavigation) return undefined;
 	const opaqueFollowOn = req.headers.origin === "null"
 		|| (req.headers.origin === undefined
 			&& req.headers["sec-fetch-site"] === "cross-site"
-			&& (req.headers["sec-fetch-mode"] !== "navigate" || req.headers["sec-fetch-dest"] === "iframe"));
+			&& req.headers["sec-fetch-mode"] !== "navigate");
 	if (opaqueFollowOn) return previewAuthorized ? "preview" : undefined;
 	return primaryAuthorization(req, opts) ? "primary" : undefined;
 }

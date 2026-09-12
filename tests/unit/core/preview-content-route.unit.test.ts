@@ -105,6 +105,7 @@ function fakeReq(opts: {
 	origin?: string;
 	fetchSite?: string;
 	fetchMode?: string;
+	fetchDest?: string;
 } = {}): any {
 	return {
 		url: opts.url ?? "/",
@@ -116,6 +117,7 @@ function fakeReq(opts: {
 			...(opts.origin ? { origin: opts.origin } : {}),
 			...(opts.fetchSite ? { "sec-fetch-site": opts.fetchSite } : {}),
 			...(opts.fetchMode ? { "sec-fetch-mode": opts.fetchMode } : {}),
+			...(opts.fetchDest ? { "sec-fetch-dest": opts.fetchDest } : {}),
 		},
 		on() { /* no-op */ },
 	};
@@ -225,6 +227,33 @@ describe("handlePreviewRequest — auth", () => {
 			await handlePreviewRequest(fakeReq({ url: target, cookie: `${COOKIE_NAME}=${primary}` }), failed as any, target, o);
 			assert.equal(failed.getHeader("Set-Cookie"), undefined, target);
 		}
+	});
+
+	it("rejects cross-site iframe navigation before entry redirects despite ambient credentials", async () => {
+		const o = makeOpts(true);
+		const cookies = `${COOKIE_NAME}=${o.store.mint()}; ${PREVIEW_COOKIE_NAME}=${o.store.mintPreviewResource(SID)}`;
+		for (const target of [`/preview/${SID}/`, `/preview/${SID}/index.html`]) {
+			const denied = fakeRes();
+			await handlePreviewRequest(fakeReq({
+				url: target,
+				cookie: cookies,
+				fetchSite: "cross-site",
+				fetchMode: "navigate",
+				fetchDest: "iframe",
+			}), denied as any, target, o);
+			assert.equal(denied.statusCode, 401, target);
+			assert.equal(denied.headers.location, undefined, target);
+		}
+
+		const sameOrigin = fakeRes();
+		await handlePreviewRequest(fakeReq({
+			url: `/preview/${SID}/`,
+			cookie: cookies,
+			fetchSite: "same-origin",
+			fetchMode: "navigate",
+			fetchDest: "iframe",
+		}), sameOrigin as any, `/preview/${SID}/`, o);
+		assert.equal(sameOrigin.statusCode, 302);
 	});
 
 	it("accepts only an exact-session preview capability for opaque follow-on resources", async () => {

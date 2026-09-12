@@ -462,12 +462,8 @@ function isOpaquePreviewFollowOn(
 	hasOpaqueOrigin: boolean,
 ): boolean {
 	if (!SAFE_METHODS.has(normalizeMethod(metadata.method)) || !fetch || fetch.site !== "cross-site") return false;
-	const isResource = context === "preview-resource" && (fetch.mode === "cors" || fetch.mode === "no-cors");
-	const isIframeContinuation = context === "preview-iframe"
-		&& !hasOpaqueOrigin
-		&& fetch.mode === "navigate"
-		&& fetch.dest === "iframe";
-	if ((!isResource && !isIframeContinuation) || !isCoherentFetchContext(context, fetch)) return false;
+	if (context !== "preview-resource" || (fetch.mode !== "cors" && fetch.mode !== "no-cors")
+		|| !isCoherentFetchContext(context, fetch)) return false;
 	if (!hasOpaqueOrigin && readRawHeader(metadata.rawHeaders, "origin").kind !== "missing") return false;
 	return hasNamedCookie(metadata.rawHeaders, PREVIEW_COOKIE_NAME);
 }
