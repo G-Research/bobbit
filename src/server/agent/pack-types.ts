@@ -105,6 +105,8 @@ export interface PackManifest {
 
 /** Generated `.pack-meta.yaml` — install provenance. Never authored by hand. */
 export interface PackMeta {
+	/** Marketplace source-store identity recorded as an untrusted locator. */
+	sourceId?: string;
 	sourceUrl: string;
 	sourceRef: string;
 	commit: string;

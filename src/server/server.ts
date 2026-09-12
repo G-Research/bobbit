@@ -751,6 +751,7 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpManager, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import { MarketplaceMcpInstallAttestationStore } from "./mcp/marketplace-mcp-install-attestation.js";
 import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -2913,11 +2914,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// physical Headquarters directory, global-user is the home dir, project is
 	// each project's rootPath.
 	const marketplaceSourceStore = new MarketplaceSourceStore(configDir, gatewayDeps.fsImpl);
+	const marketplaceMcpInstallAttestations = new MarketplaceMcpInstallAttestationStore(secretsDir);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
 		serverBase: headquartersDir(),
 		globalUserBase: os.homedir(),
+		mcpInstallAttestationStore: marketplaceMcpInstallAttestations,
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
@@ -3075,6 +3078,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const disabledOperations = activation.mcpOperations ?? {};
 			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
 			const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
+			const installSourceId = safeString(metaDetails.sourceId) ?? entry.meta?.sourceId ?? fallbackSourceId;
+			const projectRecord = entry.scope === "project" && projectId ? projectRegistry.get(projectId) : undefined;
 			try {
 				for (const mcp of loadPackContributions(entry.path, entry.manifest).mcp ?? []) {
 					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
@@ -3085,6 +3090,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const selectedOperations = metaDetails.sourceType === "mcp-gateway" && operationMetadata.length > 0
 						? operationMetadata.map((op) => op.name).filter((name) => !disabledOpsSet.has(name))
 						: (mcp.selectedOperations ? mcp.selectedOperations.filter((name) => !disabledOpsSet.has(name)) : undefined);
+					const projectAttestation = entry.scope === "project" && projectId && installSourceId
+						? marketplaceMcpInstallAttestations.classify({
+							projectId,
+							sourceId: installSourceId,
+							packName: entry.manifest.name,
+							contributionId: mcp.listName,
+							serverName: mcp.serverName,
+							config: mcp.config,
+						})
+						: "missing";
+					const projectControlled = entry.scope === "project" && projectAttestation !== "attested";
+					const fallbackFile = `.bobbit/config/market-packs/${entry.manifest.name}/mcp/${path.basename(mcp.sourceFile)}`;
+					const relativeFile = projectRecord
+						? path.relative(projectRecord.rootPath, mcp.sourceFile).replace(/\\/g, "/")
+						: fallbackFile;
+					const sourceFile = relativeFile && relativeFile !== ".." && !relativeFile.startsWith("../")
+						? relativeFile
+						: fallbackFile;
 					contributions.push({
 						listName: mcp.listName,
 						serverName: mcp.serverName,
@@ -3095,6 +3118,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						config: mcp.config,
 						origin: {
 							scope: entry.scope,
+							authority: projectControlled ? "project" : "marketplace",
+							trust: projectControlled ? "approval-required" : "pretrusted",
+							...(projectAttestation === "changed" ? { marketplaceAttestationChanged: true } : {}),
+							sourceId: `marketplace-pack:${installSourceId ?? "unattested"}:${entry.manifest.name}:${mcp.listName}`,
+							file: sourceFile,
+							...(entry.scope === "project" && projectId ? { projectId } : {}),
+							...(projectRecord?.name ? { projectName: projectRecord.name } : {}),
 							packName: entry.manifest.name,
 							packId: entry.id,
 							path: mcp.sourceFile,
@@ -12215,7 +12245,7 @@ async function handleApiRoute(
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
-				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
@@ -12244,7 +12274,7 @@ async function handleApiRoute(
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
-				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
@@ -12273,7 +12303,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
-				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, projectId: targetProjectId, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
