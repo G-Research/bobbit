@@ -93,7 +93,7 @@ knowledge of the meta-tool format.
 
 ## Marketplace MCP and scoped managers
 
-Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above. Marketplace installations are pretrusted through their explicit install/activation flow; repository-controlled definitions must separately pass [MCP server startup approval](mcp-server-approvals.md) before any meta-tool is published.
+Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Installed schema-2 packs and MCP Gateway provider packs contribute MCP server definitions that are grouped into the same `mcp_<server>` / `mcp_<server>__<sub>` meta-tools described above. Server- and global-user-scoped Marketplace contributions are pretrusted through their explicit install/activation flow. A project-scoped contribution is pretrusted only when it matches an exact private attestation recorded by Bobbit's Marketplace install/update flow; copied content, a missing or corrupt attestation, or a behavioral change requires approval before any meta-tool is published. See the canonical guide's [source trust classes](mcp-server-approvals.md#which-sources-require-approval) and [Marketplace install attestation](mcp-server-approvals.md#marketplace-install-attestations).
 
 Key rules:
 
