@@ -3241,6 +3241,16 @@ export interface McpServerInfo {
 export interface McpServerRequestScope {
 	projectId: string;
 	cwd?: string;
+	/** Opaque server-owned worktree authority. At most one owner may be sent. */
+	sessionId?: string;
+	goalId?: string;
+}
+
+function appendMcpServerRequestScope(params: URLSearchParams, scope: Partial<McpServerRequestScope> | undefined): void {
+	if (scope?.sessionId && scope.goalId) throw new Error("MCP review scope cannot have both a session and goal owner");
+	if (scope?.cwd) params.set("cwd", scope.cwd);
+	if (scope?.sessionId) params.set("sessionId", scope.sessionId);
+	else if (scope?.goalId) params.set("goalId", scope.goalId);
 }
 
 /** GET /api/mcp-servers — returns effective servers, including definitions awaiting approval. */
@@ -3248,7 +3258,7 @@ export async function fetchMcpServers(opts?: Partial<McpServerRequestScope> & { 
 	try {
 		const params = new URLSearchParams();
 		params.set("projectId", configApiProjectId(opts?.projectId));
-		if (opts?.cwd) params.set("cwd", opts.cwd);
+		appendMcpServerRequestScope(params, opts);
 		if (opts?.ensure) params.set("ensure", "true");
 		const qs = params.toString();
 		const res = await gatewayFetch(`/api/mcp-servers${qs ? `?${qs}` : ""}`);
@@ -3276,7 +3286,7 @@ export async function decideMcpServerApproval(
 ): Promise<McpServerInfo> {
 	const projectId = typeof scope === "string" ? scope : scope?.projectId;
 	const params = new URLSearchParams({ projectId: configApiProjectId(projectId) });
-	if (typeof scope !== "string" && scope?.cwd) params.set("cwd", scope.cwd);
+	if (typeof scope !== "string") appendMcpServerRequestScope(params, scope);
 	const approvalGatewayBaseUrl = activeGatewayConnection().baseUrl;
 	const res = await gatewayFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${params.toString()}`, {
 		method: "POST",
