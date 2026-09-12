@@ -8,7 +8,7 @@ import {
 	readE2ETokenAsync,
 } from "../../support/harnesses/browser/e2e-setup.js";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -41,6 +41,7 @@ function inlineDocument(marker: string): string {
 	return `<!doctype html><html><head><script>
 		window.__admissionInlineAuthored = {
 			marker: ${JSON.stringify(marker)},
+			runs: (window.__admissionInlineAuthored && window.__admissionInlineAuthored.runs || 0) + 1,
 			dark: document.documentElement.classList.contains("dark"),
 			palette: document.documentElement.getAttribute("data-palette"),
 			tokens: {
@@ -76,27 +77,6 @@ function draw(renderer, host, content, complete) {
 	const output = renderer.render({ path: "request-admission-card.html", content }, complete ? ok : undefined, !complete);
 	render(output.content, host);
 }
-function frameState(hostId) {
-	const iframe = document.querySelector("#" + hostId + " iframe");
-	const root = iframe && iframe.contentDocument && iframe.contentDocument.documentElement;
-	const styles = root ? getComputedStyle(root) : null;
-	return {
-		identity: iframe && iframe.dataset.identity || "",
-		sandbox: iframe && iframe.getAttribute("sandbox"),
-		src: iframe && iframe.getAttribute("src"),
-		srcdoc: iframe && iframe.srcdoc || "",
-		location: iframe && iframe.contentWindow && iframe.contentWindow.location.href || "",
-		dark: root ? root.classList.contains("dark") : false,
-		palette: root ? root.getAttribute("data-palette") : null,
-		tokens: styles ? {
-			background: styles.getPropertyValue("--background").trim(),
-			foreground: styles.getPropertyValue("--foreground").trim(),
-			chart: styles.getPropertyValue("--chart-1").trim(),
-		} : {},
-		authored: iframe && iframe.contentWindow && iframe.contentWindow.__admissionInlineAuthored || null,
-		streamingChrome: !!(iframe && iframe.nextElementSibling),
-	};
-}
 window.__requestAdmissionInline = {
 	setTheme(dark, palette, tokens) {
 		const root = document.documentElement;
@@ -109,7 +89,6 @@ window.__requestAdmissionInline = {
 	renderComplete(content) { draw(completeRenderer, completeHost, content, true); },
 	renderStream(content, complete = false) { draw(streamingRenderer, streamingHost, content, complete); },
 	tag(hostId, identity) { document.querySelector("#" + hostId + " iframe").dataset.identity = identity; },
-	state: frameState,
 };
 window.__requestAdmissionInlineReady = true;
 `, "utf8");
@@ -151,16 +130,40 @@ function previewHtml(marker: string): string {
 <html><head>
 	<link rel="stylesheet" href="./assets/site.css">
 	<script>
+		function readable(read) { try { read(); return true; } catch { return false; } }
 		window.__previewAdmissionState = {
 			marker: ${JSON.stringify(marker)},
-			parentReadable: !!parent.document.documentElement,
-			parentIsSelf: parent === window
+			parentReadable: readable(function () { return parent.document.documentElement; }),
+			parentIsSelf: parent === window,
+			localStorageReadable: readable(function () { return localStorage.getItem("preview-parent-secret"); }),
+			sessionStorageReadable: readable(function () { return sessionStorage.getItem("preview-parent-secret"); }),
+			classic: null,
+			module: null,
+			json: null,
+			font: null
 		};
 	<\/script>
+	<script src="./assets/classic.js"><\/script>
+	<script type="module" crossorigin="use-credentials" src="./assets/module.js"><\/script>
 </head><body>
 	<main id="preview-marker">${marker}</main>
 	<div id="relative-css">relative stylesheet loaded</div>
+	<div id="font-probe">relative font requested</div>
 	<img id="relative-image" src="./assets/pixel.svg" alt="relative asset">
+	<script>
+		fetch("./assets/data.json", { credentials: "include" })
+			.then(function (response) { return response.json(); })
+			.then(function (value) { window.__previewAdmissionState.json = value.marker; })
+			.catch(function () { window.__previewAdmissionState.json = "fetch-failed"; });
+		fetch("./assets/font.woff2", { credentials: "include" })
+			.then(function (response) { return response.arrayBuffer(); })
+			.then(function (bytes) { return new FontFace("AdmissionFixture", bytes).load(); })
+			.then(function (face) {
+				document.fonts.add(face);
+				window.__previewAdmissionState.font = document.fonts.check('16px "AdmissionFixture"');
+			})
+			.catch(function () { window.__previewAdmissionState.font = false; });
+	<\/script>
 </body></html>`;
 }
 
@@ -189,7 +192,18 @@ async function enablePreview(sessionId: string): Promise<void> {
 async function mountFilePreview(sessionId: string, htmlPath: string): Promise<{ artifactId: string; contentHash: string }> {
 	const response = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 		method: "POST",
-		body: JSON.stringify({ file: htmlPath, assets: ["assets/site.css", "assets/pixel.svg"] }),
+		body: JSON.stringify({
+			file: htmlPath,
+			assets: [
+				"assets/site.css",
+				"assets/pixel.svg",
+				"assets/classic.js",
+				"assets/module.js",
+				"assets/module-dependency.js",
+				"assets/data.json",
+				"assets/font.woff2",
+			],
+		}),
 	});
 	const text = await response.text();
 	expect(response.status, `mount preview failed: ${text}`).toBe(200);
@@ -205,12 +219,54 @@ function isPreviewResponse(response: Response, sessionId: string): boolean {
 
 async function waitForPreview(page: Page, marker: string): Promise<void> {
 	const frame = page.frameLocator(".goal-preview-panel iframe").first();
-	await expect(frame.locator("#preview-marker"), "same-origin preview iframe should be admitted").toHaveText(marker, { timeout: 20_000 });
+	await expect(frame.locator("#preview-marker"), "opaque preview iframe should be admitted").toHaveText(marker, { timeout: 20_000 });
 	await expect(frame.locator("#relative-css"), "relative CSS should load through preview admission").toHaveCSS("color", "rgb(12, 34, 56)", { timeout: 15_000 });
 	await expect.poll(
 		() => frame.locator("#relative-image").evaluate((image: HTMLImageElement) => ({ complete: image.complete, width: image.naturalWidth })),
 		{ timeout: 15_000, message: "relative image should load through preview admission" },
 	).toEqual({ complete: true, width: 4 });
+	await expect.poll(
+		() => frame.locator("body").evaluate(() => {
+			const state = (window as any).__previewAdmissionState;
+			return { classic: state?.classic, module: state?.module, json: state?.json, font: state?.font };
+		}),
+		{ timeout: 15_000, message: "classic script, CORS module dependency, credentialed JSON, and font should load from the opaque preview mount" },
+	).toEqual({ classic: "classic-loaded", module: "module-dependency-loaded", json: "json-loaded", font: true });
+}
+
+async function inlineFrameState(page: Page, hostId: "request-admission-inline-complete" | "request-admission-inline-streaming"): Promise<any> {
+	const host = await page.evaluate((id) => {
+		const iframe = document.querySelector(`#${id} iframe`) as HTMLIFrameElement | null;
+		return {
+			identity: iframe?.dataset.identity || "",
+			sandbox: iframe?.getAttribute("sandbox") ?? null,
+			src: iframe?.getAttribute("src") ?? null,
+			srcdoc: iframe?.srcdoc || "",
+			streamingChrome: iframe?.nextElementSibling instanceof HTMLDivElement,
+		};
+	}, hostId);
+	const child = await page.frameLocator(`#${hostId} iframe`).locator("html").evaluate((root) => {
+		const styles = getComputedStyle(root);
+		let parentReadable = true;
+		let localStorageReadable = true;
+		let sessionStorageReadable = true;
+		try { void parent.document.documentElement; } catch { parentReadable = false; }
+		try { void localStorage.getItem("preview-parent-secret"); } catch { localStorageReadable = false; }
+		try { void sessionStorage.getItem("preview-parent-secret"); } catch { sessionStorageReadable = false; }
+		return {
+			location: location.href,
+			dark: root.classList.contains("dark"),
+			palette: root.getAttribute("data-palette"),
+			tokens: {
+				background: styles.getPropertyValue("--background").trim(),
+				foreground: styles.getPropertyValue("--foreground").trim(),
+				chart: styles.getPropertyValue("--chart-1").trim(),
+			},
+			authored: (window as any).__admissionInlineAuthored ?? null,
+			opacity: { parentReadable, localStorageReadable, sessionStorageReadable },
+		};
+	});
+	return { ...host, ...child };
 }
 
 async function addExternalLink(page: Page, id: string, href: string): Promise<void> {
@@ -256,10 +312,16 @@ test.describe("Request admission preview compatibility", () => {
 		let popup: Page | undefined;
 		let attacker: Page | undefined;
 		const previewFailures: string[] = [];
+		const successfulPreviewResponses = new Map<string, { csp: string; allowOrigin: string; allowCredentials: string }>();
 
 		mkdirSync(assetsDir, { recursive: true });
-		writeFileSync(join(assetsDir, "site.css"), "#relative-css { color: rgb(12, 34, 56); }", "utf8");
+		writeFileSync(join(assetsDir, "site.css"), '#relative-css { color: rgb(12, 34, 56); } #font-probe { font-family: "AdmissionFixture"; }', "utf8");
 		writeFileSync(join(assetsDir, "pixel.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3" viewBox="0 0 4 3"><rect width="4" height="3" fill="currentColor"/></svg>', "utf8");
+		writeFileSync(join(assetsDir, "classic.js"), 'window.__previewAdmissionState.classic = "classic-loaded";', "utf8");
+		writeFileSync(join(assetsDir, "module-dependency.js"), 'export const marker = "module-dependency-loaded";', "utf8");
+		writeFileSync(join(assetsDir, "module.js"), 'import { marker } from "./module-dependency.js"; window.__previewAdmissionState.module = marker;', "utf8");
+		writeFileSync(join(assetsDir, "data.json"), JSON.stringify({ marker: "json-loaded" }), "utf8");
+		copyFileSync(resolve("node_modules/katex/dist/fonts/KaTeX_Main-Regular.woff2"), join(assetsDir, "font.woff2"));
 		writeFileSync(htmlPath, previewHtml(INITIAL_MARKER), "utf8");
 
 		try {
@@ -268,8 +330,17 @@ test.describe("Request admission preview compatibility", () => {
 			const initialMount = await mountFilePreview(sessionId, htmlPath);
 
 			page.on("response", response => {
-				if (isPreviewResponse(response, sessionId!) && response.status() >= 400) {
-					previewFailures.push(`${response.status()} ${new URL(response.url()).pathname}`);
+				if (!isPreviewResponse(response, sessionId!)) return;
+				const pathname = new URL(response.url()).pathname;
+				if (response.status() >= 400) {
+					previewFailures.push(`${response.status()} ${pathname}`);
+				} else if (response.status() === 200) {
+					const headers = response.headers();
+					successfulPreviewResponses.set(pathname, {
+						csp: headers["content-security-policy"] || "",
+						allowOrigin: headers["access-control-allow-origin"] || "",
+						allowCredentials: headers["access-control-allow-credentials"] || "",
+					});
 				}
 			});
 			page.on("requestfailed", request => {
@@ -279,11 +350,28 @@ test.describe("Request admission preview compatibility", () => {
 			});
 
 			await openAuthenticatedApp(page, gateway.baseURL, sessionId);
+			await page.evaluate(() => {
+				localStorage.setItem("preview-parent-secret", "must-not-cross-preview-boundary");
+				sessionStorage.setItem("preview-parent-secret", "must-not-cross-preview-boundary");
+			});
 			await waitForPreview(page, INITIAL_MARKER);
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toHaveAttribute("src", new RegExp(`/preview/${sessionId}/_artifact/${initialMount.artifactId}/${ENTRY.replace(".", "\\.")}\\?mtime=\\d+$`));
+			await expect(iframe, "repository previews must have no same-origin sandbox capability").toHaveAttribute("sandbox", "allow-scripts");
 			const embeddedState = await page.frameLocator(".goal-preview-panel iframe").locator("body").evaluate(() => (window as any).__previewAdmissionState);
-			expect(embeddedState).toEqual({ marker: INITIAL_MARKER, parentReadable: true, parentIsSelf: false });
+			expect(embeddedState).toMatchObject({
+				marker: INITIAL_MARKER,
+				parentReadable: false,
+				parentIsSelf: false,
+				localStorageReadable: false,
+				sessionStorageReadable: false,
+				classic: "classic-loaded",
+				module: "module-dependency-loaded",
+				json: "json-loaded",
+				font: true,
+			});
+			const injectedBase = await page.frameLocator(".goal-preview-panel iframe").locator("base[data-bobbit-preview-base]").getAttribute("href");
+			expect(injectedBase, "artifact-relative resources must retain the canonical preview base").toBe(`/preview/${sessionId}/_artifact/${initialMount.artifactId}/`);
 			await page.evaluate(() => {
 				const root = document.documentElement;
 				root.classList.add("dark");
@@ -296,7 +384,7 @@ test.describe("Request admission preview compatibility", () => {
 					palette: root.getAttribute("data-palette"),
 					chart: getComputedStyle(root).getPropertyValue("--chart-1").trim(),
 				})),
-				{ timeout: 10_000, message: "same-origin preview bridge should mirror live parent theme and palette changes" },
+				{ timeout: 10_000, message: "opaque preview bridge should mirror live parent theme and palette changes" },
 			).toEqual({ dark: true, palette: "request-admission-preview", chart: "rgb(41, 91, 141)" });
 
 			// A different-site iframe must not gain gateway preview access. Authentication
@@ -332,7 +420,13 @@ test.describe("Request admission preview compatibility", () => {
 			await addExternalLink(attacker, "external-preview", `${gateway.baseURL}/preview/${encodeURIComponent(sessionId)}`);
 			popup = await openExternalLink(attacker, "external-preview");
 			await expect(popup.locator("#preview-marker"), "external top-level preview redirect chain should be admitted").toHaveText(INITIAL_MARKER, { timeout: 15_000 });
-			expect(await popup.evaluate(() => (window as any).__previewAdmissionState)).toEqual({ marker: INITIAL_MARKER, parentReadable: true, parentIsSelf: true });
+			expect(await popup.evaluate(() => (window as any).__previewAdmissionState)).toMatchObject({
+				marker: INITIAL_MARKER,
+				parentReadable: true,
+				parentIsSelf: true,
+				localStorageReadable: false,
+				sessionStorageReadable: false,
+			});
 			await popup.close();
 			popup = undefined;
 
@@ -352,6 +446,13 @@ test.describe("Request admission preview compatibility", () => {
 			popup = await popoutPromise;
 			await popup.waitForLoadState("domcontentloaded");
 			await expect(popup.locator("#preview-marker"), "standalone artifact popout should be admitted").toHaveText(UPDATED_MARKER, { timeout: 15_000 });
+			await expect.poll(
+				() => popup!.evaluate(() => {
+					const state = (window as any).__previewAdmissionState;
+					return { localStorageReadable: state?.localStorageReadable, sessionStorageReadable: state?.sessionStorageReadable };
+				}),
+				{ timeout: 10_000, message: "response CSP must keep a raw popout opaque without an iframe sandbox" },
+			).toEqual({ localStorageReadable: false, sessionStorageReadable: false });
 			const popoutTheme = await popup.evaluate(() => {
 				const styles = getComputedStyle(document.documentElement);
 				return {
@@ -377,6 +478,31 @@ test.describe("Request admission preview compatibility", () => {
 			).toBe(sessionId);
 			await waitForPreview(page, UPDATED_MARKER);
 
+			const requiredResourceSuffixes = [
+				`/${ENTRY}`,
+				"/assets/site.css",
+				"/assets/pixel.svg",
+				"/assets/classic.js",
+				"/assets/module.js",
+				"/assets/module-dependency.js",
+				"/assets/data.json",
+				"/assets/font.woff2",
+			];
+			for (const suffix of requiredResourceSuffixes) {
+				const matches = [...successfulPreviewResponses.entries()].filter(([pathname]) => pathname.endsWith(suffix));
+				expect(matches.length, `opaque preview resource ${suffix} should receive a successful response`).toBeGreaterThan(0);
+				for (const [, headers] of matches) {
+					expect(headers.csp, `successful preview response ${suffix} must be response-sandboxed`).toContain("sandbox allow-scripts");
+					expect(headers.csp, `successful preview response ${suffix} must remain opaque`).not.toContain("allow-same-origin");
+				}
+			}
+			for (const suffix of ["/assets/module.js", "/assets/module-dependency.js", "/assets/data.json", "/assets/font.woff2"]) {
+				const matches = [...successfulPreviewResponses.entries()].filter(([pathname]) => pathname.endsWith(suffix));
+				for (const [, headers] of matches) {
+					expect(headers.allowOrigin, `opaque CORS resource ${suffix} must admit only the null origin`).toBe("null");
+					expect(headers.allowCredentials, `opaque CORS resource ${suffix} must require the scoped preview credential`).toBe("true");
+				}
+			}
 			expect(previewFailures, `trusted preview traffic must not fail admission: ${previewFailures.join(", ")}`).toEqual([]);
 		} finally {
 			if (popup && !popup.isClosed()) await popup.close().catch(() => {});
@@ -401,6 +527,10 @@ test.describe("Request admission preview compatibility", () => {
 		});
 		await page.addScriptTag({ path: bundlePath });
 		await page.waitForFunction(() => (window as any).__requestAdmissionInlineReady === true, undefined, { timeout: 15_000 });
+		await page.evaluate(() => {
+			localStorage.setItem("preview-parent-secret", "must-not-cross-preview-boundary");
+			sessionStorage.setItem("preview-parent-secret", "must-not-cross-preview-boundary");
+		});
 
 		const completed = inlineDocument("completed-inline-html");
 		await page.evaluate(({ content, tokens }) => {
@@ -409,68 +539,75 @@ test.describe("Request admission preview compatibility", () => {
 			fixture.renderComplete(content);
 		}, { content: completed, tokens: INLINE_LIGHT });
 		await expect.poll(
-			() => page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-complete").authored?.marker ?? ""),
+			async () => (await inlineFrameState(page, "request-admission-inline-complete")).authored?.marker ?? "",
 			{ timeout: 10_000, message: "completed HtmlRenderer srcdoc should execute" },
 		).toBe("completed-inline-html");
 		await page.evaluate(() => (window as any).__requestAdmissionInline.tag("request-admission-inline-complete", "same-completed-frame"));
-		let completedState = await page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-complete"));
+		const completedState = await inlineFrameState(page, "request-admission-inline-complete");
 		expect(completedState).toMatchObject({
 			identity: "same-completed-frame",
-			sandbox: "allow-scripts allow-same-origin",
+			sandbox: "allow-scripts",
 			src: null,
 			location: "about:srcdoc",
 			dark: false,
 			palette: "admission-light",
 			tokens: INLINE_LIGHT,
+			authored: { marker: "completed-inline-html", runs: 1 },
+			opacity: { parentReadable: false, localStorageReadable: false, sessionStorageReadable: false },
 		});
 
 		await page.evaluate(tokens => (window as any).__requestAdmissionInline.setTheme(true, "admission-dark", tokens), INLINE_DARK);
 		await expect.poll(
-			() => page.evaluate(() => {
-				const state = (window as any).__requestAdmissionInline.state("request-admission-inline-complete");
-				return { identity: state.identity, dark: state.dark, palette: state.palette, tokens: state.tokens };
-			}),
-			{ timeout: 10_000, message: "completed srcdoc should mirror live theme and palette mutations without reloading" },
-		).toEqual({ identity: "same-completed-frame", dark: true, palette: "admission-dark", tokens: INLINE_DARK });
+			async () => {
+				const state = await inlineFrameState(page, "request-admission-inline-complete");
+				return { identity: state.identity, dark: state.dark, palette: state.palette, tokens: state.tokens, authoredRuns: state.authored?.runs };
+			},
+			{ timeout: 10_000, message: "completed srcdoc should mirror live theme and palette mutations without reloading or rerunning authored code" },
+		).toEqual({ identity: "same-completed-frame", dark: true, palette: "admission-dark", tokens: INLINE_DARK, authoredRuns: 1 });
 
 		const streamInitial = inlineDocument("streaming-inline-initial");
 		await page.evaluate(content => (window as any).__requestAdmissionInline.renderStream(content), streamInitial);
 		await expect.poll(
-			() => page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-streaming").authored?.marker ?? ""),
-			{ timeout: 10_000, message: "streaming HtmlRenderer should write its initial about:blank document" },
+			async () => (await inlineFrameState(page, "request-admission-inline-streaming")).authored?.marker ?? "",
+			{ timeout: 10_000, message: "streaming HtmlRenderer should assign its initial opaque srcdoc document" },
 		).toBe("streaming-inline-initial");
 		await page.evaluate(() => (window as any).__requestAdmissionInline.tag("request-admission-inline-streaming", "same-streaming-frame"));
 		const streamUpdated = inlineDocument("streaming-inline-updated");
 		await page.evaluate(content => (window as any).__requestAdmissionInline.renderStream(content), streamUpdated);
 		await expect.poll(
-			() => page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-streaming").authored?.marker ?? ""),
+			async () => (await inlineFrameState(page, "request-admission-inline-streaming")).authored?.marker ?? "",
 			{ timeout: 5_000, intervals: [250], message: "debounced streaming update should remain browser-generated and admitted" },
 		).toBe("streaming-inline-updated");
-		let streamingState = await page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-streaming"));
+		let streamingState = await inlineFrameState(page, "request-admission-inline-streaming");
 		expect(streamingState).toMatchObject({
 			identity: "same-streaming-frame",
-			sandbox: "allow-scripts allow-same-origin",
+			sandbox: "allow-scripts",
 			src: null,
+			location: "about:srcdoc",
 			dark: true,
 			palette: "admission-dark",
 			tokens: INLINE_DARK,
+			authored: { marker: "streaming-inline-updated", runs: 1 },
+			opacity: { parentReadable: false, localStorageReadable: false, sessionStorageReadable: false },
 			streamingChrome: true,
 		});
 
 		const streamComplete = inlineDocument("streaming-inline-complete");
 		await page.evaluate(content => (window as any).__requestAdmissionInline.renderStream(content, true), streamComplete);
 		await expect.poll(
-			() => page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-streaming").authored?.marker ?? ""),
-			{ timeout: 10_000, message: "stream completion should switch to the canonical srcdoc path" },
+			async () => (await inlineFrameState(page, "request-admission-inline-streaming")).authored?.marker ?? "",
+			{ timeout: 10_000, message: "stream completion should keep the canonical opaque srcdoc path" },
 		).toBe("streaming-inline-complete");
-		streamingState = await page.evaluate(() => (window as any).__requestAdmissionInline.state("request-admission-inline-streaming"));
+		streamingState = await inlineFrameState(page, "request-admission-inline-streaming");
 		expect(streamingState).toMatchObject({
-			sandbox: "allow-scripts allow-same-origin",
+			sandbox: "allow-scripts",
 			src: null,
 			location: "about:srcdoc",
 			dark: true,
 			palette: "admission-dark",
 			tokens: INLINE_DARK,
+			authored: { marker: "streaming-inline-complete", runs: 1 },
+			opacity: { parentReadable: false, localStorageReadable: false, sessionStorageReadable: false },
 			streamingChrome: false,
 		});
 		expect(streamingState.srcdoc).toContain("data-bobbit-inline-theme-bridge");

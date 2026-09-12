@@ -11,6 +11,7 @@ const WRITE_RENDERER_SRC = path.resolve("src/ui/tools/renderers/WriteRenderer.ts
 const EDIT_RENDERER_SRC = path.resolve("src/ui/tools/renderers/EditRenderer.ts");
 const HTML_RENDERER_SRC = path.resolve("src/ui/tools/renderers/HtmlRenderer.ts");
 const THEME_BRIDGE_SRC = path.resolve("src/shared/preview-bridge-scripts.ts");
+const PREVIEW_FRAME_HOST_SRC = path.resolve("src/ui/preview-frame-host.ts");
 
 const LIGHT_TOKENS = {
 	background: "#f8fafc",
@@ -87,10 +88,61 @@ async function loadFixture(page: Page): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__inlineThemeFixtureReady === true, null, { timeout: 10_000 });
+	await page.evaluate(() => {
+		localStorage.setItem("inline-parent-secret", "must-not-cross-preview-boundary");
+		sessionStorage.setItem("inline-parent-secret", "must-not-cross-preview-boundary");
+	});
 }
 
 async function frameState(page: Page, hostId: "write-host" | "edit-host"): Promise<any> {
-	return page.evaluate((id) => (window as any).__inlineThemeFrameState(id), hostId);
+	const host = await page.evaluate((id) => {
+		const container = document.getElementById(id);
+		const iframe = container?.querySelector("iframe") as HTMLIFrameElement | null;
+		const source = container?.querySelector("code-block") as (HTMLElement & { code?: string }) | null;
+		return {
+			identity: iframe?.dataset.fixtureIdentity || "",
+			sandbox: iframe?.getAttribute("sandbox") ?? null,
+			srcdoc: iframe?.srcdoc || "",
+			source: source?.code ?? null,
+			sourceCollapsed: source?.parentElement?.classList.contains("max-h-0") ?? null,
+			streamingChrome: iframe?.nextElementSibling instanceof HTMLDivElement,
+		};
+	}, hostId);
+	const child = await page.frameLocator(`#${hostId} iframe`).locator("html").evaluate((root) => {
+		const card = document.getElementById("theme-card");
+		const semantic = document.getElementById("semantic-probe");
+		const styles = getComputedStyle(root);
+		let parentReadable = true;
+		let localStorageReadable = true;
+		let sessionStorageReadable = true;
+		try { void parent.document.documentElement; } catch { parentReadable = false; }
+		try { void localStorage.getItem("inline-parent-secret"); } catch { localStorageReadable = false; }
+		try { void sessionStorage.getItem("inline-parent-secret"); } catch { sessionStorageReadable = false; }
+		return {
+			location: location.href,
+			dark: root.classList.contains("dark"),
+			palette: root.getAttribute("data-palette"),
+			font: styles.fontFamily,
+			tokens: {
+				background: styles.getPropertyValue("--background").trim(),
+				foreground: styles.getPropertyValue("--foreground").trim(),
+				card: styles.getPropertyValue("--card").trim(),
+				positive: styles.getPropertyValue("--positive").trim(),
+				chart: styles.getPropertyValue("--chart-1").trim(),
+			},
+			resolved: card && semantic ? {
+				background: styles.backgroundColor,
+				foreground: styles.color,
+				card: getComputedStyle(card).backgroundColor,
+				cardForeground: getComputedStyle(card).color,
+				positive: getComputedStyle(semantic).color,
+				chart: getComputedStyle(card).borderTopColor,
+			} : null,
+			authored: (window as any).__inlineThemeAuthored ?? null,
+			opacity: { parentReadable, localStorageReadable, sessionStorageReadable },
+		};
+	});
+	return { ...host, ...child };
 }
 
 async function waitForAuthoredMarker(page: Page, hostId: "write-host" | "edit-host", marker: string): Promise<void> {
@@ -116,6 +168,7 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		expect(normalized, "fixture must import the real EditRenderer source module").toContain(path.normalize(EDIT_RENDERER_SRC));
 		expect(normalized, "WriteRenderer/EditRenderer must statically reach the real HtmlRenderer").toContain(path.normalize(HTML_RENDERER_SRC));
 		expect(normalized, "HtmlRenderer's browser import graph must reach the canonical PREVIEW_THEME_BRIDGE module").toContain(path.normalize(THEME_BRIDGE_SRC));
+		expect(normalized, "HtmlRenderer's browser import graph must reach the exact-frame message host").toContain(path.normalize(PREVIEW_FRAME_HOST_SRC));
 
 		const bundle = fs.readFileSync(BUNDLE, "utf8");
 		expect(bundle, "the executed source fixture bundle must carry the canonical bridge module").toContain("src/shared/preview-bridge-scripts.ts");
@@ -132,7 +185,13 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "write-host", "write-complete");
 
 		const light = await frameState(page, "write-host");
-		expect(light.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(light.sandbox).toBe("allow-scripts");
+		expect(light.location).toBe("about:srcdoc");
+		expect(light.opacity, "inline repository HTML must not inherit parent or storage authority").toEqual({
+			parentReadable: false,
+			localStorageReadable: false,
+			sessionStorageReadable: false,
+		});
 		expect(light.dark).toBe(false);
 		expect(light.palette).toBe("azure");
 		expect(light.font).toContain("Fixture Source Sans");
@@ -168,8 +227,7 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 			parse: { dark: false, palette: "azure", tokens: LIGHT_TOKENS },
 		});
 
-		const swipeMessages = await page.evaluate(() => (window as any).__dispatchInlineThemeSwipe("write-host"));
-		expect(swipeMessages, "inline chat iframe gestures must not emit side-panel swipe messages").toEqual([]);
+		expect(dark.srcdoc, "inline chat cards must not install the side-panel swipe bridge").not.toContain("preview-swipe-start");
 
 		await page.locator("#write-host button").first().click();
 		expect((await frameState(page, "write-host")).sourceCollapsed).toBe(false);
@@ -205,7 +263,8 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "write-host", "stream-complete");
 		const complete = await frameState(page, "write-host");
 		expect(complete.streamingChrome).toBe(false);
-		expect(complete.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(complete.sandbox).toBe("allow-scripts");
+		expect(complete.opacity).toEqual({ parentReadable: false, localStorageReadable: false, sessionStorageReadable: false });
 		expect(complete.dark).toBe(true);
 		expect(complete.palette).toBe("rose");
 		expect(complete.tokens).toEqual(DARK_ROSE_TOKENS);
@@ -224,7 +283,8 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "edit-host", "edit-complete");
 
 		const edit = await frameState(page, "edit-host");
-		expect(edit.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(edit.sandbox).toBe("allow-scripts");
+		expect(edit.opacity).toEqual({ parentReadable: false, localStorageReadable: false, sessionStorageReadable: false });
 		expect(edit.tokens).toEqual(LIGHT_TOKENS);
 		expect(edit.resolved).toEqual(LIGHT_RESOLVED);
 		expect(edit.authored).toMatchObject({
@@ -243,6 +303,5 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 
 		await page.locator("#edit-host button").first().click();
 		expect((await frameState(page, "edit-host")).sourceCollapsed).toBe(false);
-		expect(await page.evaluate(() => (window as any).__dispatchInlineThemeSwipe("edit-host"))).toEqual([]);
 	});
 });
