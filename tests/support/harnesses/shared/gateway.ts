@@ -124,6 +124,8 @@ export interface GatewayFixture {
 	readonly bgProcessManager: any;
 	readonly projectContextManager: any;
 	readonly hostInterceptorRouter: any;
+	/** Create a terminal-equivalent one-use MCP operator pairing code in process. */
+	createMcpOperatorPairingCode(): { code: string; expiresAt: string };
 	/** Authed fetch against the gateway; `path` starts with `/`. */
 	api(path: string, init?: RequestInit): Promise<Response>;
 	/** Authed fetch returning parsed JSON, throwing on non-2xx. */
@@ -411,6 +413,7 @@ async function boot(): Promise<BootedGateway> {
 		bgProcessManager: gw.bgProcessManager,
 		projectContextManager: gw.projectContextManager,
 		hostInterceptorRouter: (gw as any).hostInterceptorRouter,
+		createMcpOperatorPairingCode: () => gw.createMcpOperatorPairingCode(),
 		restoreAgentDirRuntime,
 		async api(path, init) {
 			restoreAgentDirRuntime();
