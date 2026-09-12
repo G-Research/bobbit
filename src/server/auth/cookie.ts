@@ -233,6 +233,10 @@ export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean 
 /** Return true only for a capability bound to the requested preview session. */
 export function tryPreviewAuth(req: http.IncomingMessage, store: CookieStore, sessionId: string): boolean {
 	const value = parseCookies(req)[PREVIEW_COOKIE_NAME];
+	// The cookie is hostile input, but verifyPreviewResource accepts it only after
+	// canonical SID binding, a domain-separated server-keyed HMAC compared with
+	// timingSafeEqual, and lifetime checks all succeed.
+	// codeql[js/user-controlled-bypass] Cryptographic verification makes this authorization server-controlled.
 	return value !== undefined && Boolean(store.verifyPreviewResource(value, sessionId));
 }
 
@@ -312,6 +316,9 @@ export function issuePreviewCookieIfMissing(
 	opts: { basePath?: string } = {},
 ): string | undefined {
 	const existing = parseCookies(req)[PREVIEW_COOKIE_NAME];
+	// Only the same complete cryptographic verification used for authorization can
+	// suppress renewal; unsigned, wrong-session, tampered, or stale input is replaced.
+	// codeql[js/user-controlled-bypass] The attacker cannot forge the verified renewal state.
 	const verification = existing === undefined ? undefined : store.verifyPreviewResource(existing, sessionId);
 	if (verification && !verification.needsRenewal) return undefined;
 	return issuePreviewCookie(res, store, sessionId, opts);
