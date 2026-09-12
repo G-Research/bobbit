@@ -579,6 +579,10 @@ export class MarketplaceInstaller {
 		expectedPackIntegrity?: string,
 	): void {
 		if (ctx.scope !== "project" || !ctx.projectId || !this.opts.mcpInstallAttestationStore) return;
+		if ((manifest.contents.mcp ?? []).length === 0) {
+			this.opts.mcpInstallAttestationStore.removePack(ctx.projectId, manifest.name);
+			return;
+		}
 		const definitions = (loadPackContributions(packRoot, manifest).mcp ?? []).map((mcp) => ({
 			contributionId: mcp.listName,
 			serverName: mcp.serverName,

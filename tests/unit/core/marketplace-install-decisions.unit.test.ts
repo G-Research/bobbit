@@ -31,6 +31,30 @@ function writeMinimalPack(root: string): void {
 	);
 }
 
+function writeProjectPack(root: string, opts: { mcp: boolean; version: string }): void {
+	write(
+		path.join(root, "decision-pack", "pack.yaml"),
+		[
+			"schema: 2",
+			"name: decision-pack",
+			"description: project attestation fixture",
+			`version: ${opts.version}`,
+			"contents:",
+			"  roles: []",
+			"  tools: []",
+			"  skills: []",
+			"  entrypoints: []",
+			`  mcp: ${opts.mcp ? "[runtime]" : "[]"}`,
+		].join("\n") + "\n",
+	);
+	if (opts.mcp) {
+		write(
+			path.join(root, "decision-pack", "mcp", "runtime.yaml"),
+			"server: runtime\ntransport:\n  type: http\n  url: https://mcp.example.invalid/runtime\n",
+		);
+	}
+}
+
 function memoryPackOrder() {
 	const order: string[] = [];
 	return {
@@ -138,6 +162,85 @@ describe("MarketplaceInstaller injected-runner decisions", () => {
 		assert.equal(installed.meta.commit, "gateway-fingerprint-v2");
 		assert.deepEqual(order._order, [installed.packName]);
 		assert.equal(sourceStore.get(source.id)!.lastCommit, "gateway-fingerprint-v2");
+	});
+
+	it("installs a non-MCP project pack without MCP integrity attestation", async () => {
+		const root = tempRoot();
+		const projectBase = path.join(root, "project");
+		const sourceRoot = path.join(root, "source");
+		writeMinimalPack(sourceRoot);
+		const sourceStore = new MarketplaceSourceStore(path.join(root, "config"));
+		const source = sourceStore.add({ url: sourceRoot });
+		const attestationStore = new MarketplaceMcpInstallAttestationStore(path.join(root, "secrets"));
+		const replace = vi.spyOn(attestationStore, "replacePack").mockImplementation(() => {
+			throw new Error("non-MCP packs must not be measured or attested");
+		});
+		const remove = vi.spyOn(attestationStore, "removePack");
+		const subject = installer(root, sourceStore, { mcpInstallAttestationStore: attestationStore });
+		const order = memoryPackOrder();
+
+		const installed = await subject.installMarketplacePack({
+			sourceId: source.id,
+			dirName: "decision-pack",
+			scope: "project",
+			projectBase,
+			projectId: "project-1",
+			packOrderStore: order,
+		});
+
+		assert.equal(installed.packName, "decision-pack");
+		assert.deepEqual(order._order, ["decision-pack"]);
+		assert.equal(replace.mock.calls.length, 0);
+		assert.deepEqual(remove.mock.calls, [["project-1", "decision-pack"]]);
+	});
+
+	it("removes obsolete attestations when a project pack update drops MCP", () => {
+		const root = tempRoot();
+		const projectBase = path.join(root, "project");
+		const sourceRoot = path.join(root, "source");
+		writeProjectPack(sourceRoot, { mcp: true, version: "1.0.0" });
+		const sourceStore = new MarketplaceSourceStore(path.join(root, "config"));
+		const source = sourceStore.add({ url: sourceRoot });
+		const attestationStore = new MarketplaceMcpInstallAttestationStore(path.join(root, "secrets"));
+		const subject = installer(root, sourceStore, { mcpInstallAttestationStore: attestationStore });
+		const order = memoryPackOrder();
+		const installed = subject.installPack({
+			sourceId: source.id,
+			dirName: "decision-pack",
+			scope: "project",
+			projectBase,
+			projectId: "project-1",
+			packOrderStore: order,
+		});
+		const packRoot = path.join(projectBase, ".bobbit", "config", "market-packs", installed.packName);
+		const oldIdentity = {
+			projectId: "project-1",
+			sourceId: source.id,
+			packName: "decision-pack",
+			contributionId: "runtime",
+			serverName: "runtime",
+			config: { url: "https://mcp.example.invalid/runtime" },
+			packIntegrity: measureMarketplaceMcpPackIntegrity(packRoot),
+		};
+		assert.equal(attestationStore.classify(oldIdentity), "attested");
+
+		writeProjectPack(sourceRoot, { mcp: false, version: "2.0.0" });
+		const replace = vi.spyOn(attestationStore, "replacePack").mockImplementation(() => {
+			throw new Error("non-MCP updates must not be measured or attested");
+		});
+		const remove = vi.spyOn(attestationStore, "removePack");
+		const updated = subject.updatePack({
+			packName: installed.packName,
+			scope: "project",
+			projectBase,
+			projectId: "project-1",
+			packOrderStore: order,
+		});
+
+		assert.equal(updated.manifest.version, "2.0.0");
+		assert.equal(replace.mock.calls.length, 0);
+		assert.deepEqual(remove.mock.calls, [["project-1", "decision-pack"]]);
+		assert.equal(attestationStore.classify(oldIdentity), "missing");
 	});
 
 	it("rolls a project gateway update back when final-tree attestation cannot commit", async () => {
