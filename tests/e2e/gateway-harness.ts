@@ -198,6 +198,8 @@ export interface GatewayInfo {
 	serverRoot: string;
 	sessionManager?: any;
 	teamManager?: any;
+	/** Create the same one-use MCP pairing code printed by the controlling CLI. */
+	createMcpOperatorPairingCode(): { code: string; expiresAt: string };
 	/**
 	 * Arm one command-matched background-process spawn failure. The returned
 	 * cleanup disarms the occurrence if it has not yet been consumed.
@@ -730,6 +732,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			serverRoot,
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
+			createMcpOperatorPairingCode: () => gw.createMcpOperatorPairingCode(),
 			armBgProcessSpawnError(command: string) {
 				if (bgProcessSpawnErrorArm) throw new Error("a background-process spawn failure is already armed");
 				const armed = { command, token: Symbol(command) };
