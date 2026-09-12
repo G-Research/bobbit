@@ -242,7 +242,24 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 	try {
 		const project = await registerProject({ name: projectName, rootPath: fixture.projectRoot, seedWorkflows: false });
 		projectId = project.id;
-		sessionId = await createSession({ projectId, cwd: fixture.worktreeRoot });
+		// Create through the ordinary API, then model the server-owned worktree
+		// coordinates that real session provisioning persists outside projectRoot.
+		sessionId = await createSession({ projectId, cwd: fixture.projectRoot });
+		const sessionManager = gateway.sessionManager as any;
+		const liveSession = sessionManager.getSession(sessionId);
+		const persistedSession = sessionManager.getPersistedSession(sessionId);
+		expect(liveSession).toBeTruthy();
+		expect(persistedSession?.projectId).toBe(projectId);
+		const worktreeCoordinates = {
+			cwd: fixture.worktreeRoot,
+			worktreePath: fixture.worktreeRoot,
+			repoPath: fixture.projectRoot,
+			branch: "session/approval-browser",
+		};
+		Object.assign(liveSession, worktreeCoordinates);
+		sessionManager.getSessionStore(projectId).update(sessionId, worktreeCoordinates);
+		sessionManager.mcpSessionScopes.delete(sessionId);
+		const worktreeScope = `projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}`;
 
 		await openApp(page);
 		await navigateToHash(page, `#/session/${sessionId}`);
@@ -254,6 +271,8 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 			const url = new URL(response.url());
 			return url.pathname.endsWith("/api/mcp-servers")
 				&& url.searchParams.get("projectId") === projectId
+				&& url.searchParams.get("sessionId") === sessionId
+				&& url.searchParams.get("goalId") === null
 				&& url.searchParams.get("cwd") === fixture.worktreeRoot;
 		});
 		await banner.locator('[data-testid="mcp-review-servers"]').click();
@@ -276,10 +295,21 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		expect(approvalRequests).toHaveLength(1);
 		const approvalUrl = new URL(approvalRequests[0]);
 		expect(approvalUrl.searchParams.get("projectId")).toBe(projectId);
+		expect(approvalUrl.searchParams.get("sessionId")).toBe(sessionId);
+		expect(approvalUrl.searchParams.get("goalId")).toBeNull();
 		expect(approvalUrl.searchParams.get("cwd")).toBe(fixture.worktreeRoot);
 
 		// The opaque owner id in the route recovers the authoritative cwd after reload.
+		const reloadScope = page.waitForResponse((response) => {
+			const url = new URL(response.url());
+			return url.pathname.endsWith("/api/mcp-servers")
+				&& url.searchParams.get("projectId") === projectId
+				&& url.searchParams.get("sessionId") === sessionId
+				&& url.searchParams.get("goalId") === null
+				&& url.searchParams.get("cwd") === fixture.worktreeRoot;
+		});
 		await page.reload();
+		await reloadScope;
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		await expect(page).toHaveURL(new RegExp(`#\\/tools\\?reviewSession=${sessionId}$`));
 		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
@@ -287,7 +317,7 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveText("connected");
 
 		fixture.writeWorktree("v2");
-		const changed = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		const changed = await apiFetch(`/api/mcp-servers?${worktreeScope}&ensure=true`);
 		expect(changed.status).toBe(200);
 		await page.reload();
 		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
@@ -303,7 +333,7 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		// switches from a worktree review to plain project Tools. Its old-view UI
 		// tail must not refresh worktree data over the new root view.
 		fixture.writeWorktree("v3");
-		const actionChange = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		const actionChange = await apiFetch(`/api/mcp-servers?${worktreeScope}&ensure=true`);
 		expect(actionChange.status).toBe(200);
 		await page.reload();
 		row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${WORKTREE_SERVER_NAME}"]`);
@@ -321,6 +351,9 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 			const request = route.request();
 			const url = new URL(request.url());
 			if (request.method() === "POST" && url.searchParams.get("cwd") === fixture.worktreeRoot) {
+				expect(url.searchParams.get("projectId")).toBe(projectId);
+				expect(url.searchParams.get("sessionId")).toBe(sessionId);
+				expect(url.searchParams.get("goalId")).toBeNull();
 				markApprovalStarted();
 				await approvalGate;
 			}
@@ -357,7 +390,7 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		// A late worktree response cannot overwrite the root project scope chosen
 		// while it is in flight. The behaviorally different root definition stays unapproved.
 		fixture.writeWorktree("v4");
-		const racedChange = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}&cwd=${encodeURIComponent(fixture.worktreeRoot)}&ensure=true`);
+		const racedChange = await apiFetch(`/api/mcp-servers?${worktreeScope}&ensure=true`);
 		expect(racedChange.status).toBe(200);
 		await navigateToHash(page, `#/session/${sessionId}`);
 		await expect(banner).toBeVisible({ timeout: 20_000 });
@@ -365,6 +398,9 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		await page.route("**/api/mcp-servers?**", async (route) => {
 			const url = new URL(route.request().url());
 			if (delayWorktree && url.searchParams.get("cwd") === fixture.worktreeRoot) {
+				expect(url.searchParams.get("projectId")).toBe(projectId);
+				expect(url.searchParams.get("sessionId")).toBe(sessionId);
+				expect(url.searchParams.get("goalId")).toBeNull();
 				delayWorktree = false;
 				await new Promise((resolve) => setTimeout(resolve, 750));
 			}

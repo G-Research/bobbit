@@ -34,7 +34,10 @@ export function createMcpWorktreeApprovalFixture(): McpWorktreeApprovalFixture {
 	if (!runRoot) throw new Error("BOBBIT_E2E_TMP_ROOT must identify the browser run root");
 	const root = mkdtempSync(join(runRoot, "mcp-worktree-approval-"));
 	const projectRoot = join(root, "project");
-	const worktreeRoot = join(projectRoot, "worktree");
+	// Match Bobbit's real host layout: worktrees are siblings of the registered
+	// repository, never descendants that user-input cwd validation would admit.
+	const worktreeRoot = join(root, "project-wt", "session", "approval-browser");
+	mkdirSync(projectRoot, { recursive: true });
 	mkdirSync(worktreeRoot, { recursive: true });
 	const config = (variant: string) => JSON.stringify({
 		mcpServers: {

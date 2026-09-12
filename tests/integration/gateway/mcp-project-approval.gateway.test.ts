@@ -10,6 +10,10 @@ import {
 	createMcpOperatorPairingCode,
 	pairMcpOperatorBrowser,
 	rawApiFetch,
+	createSession,
+	deleteSession,
+	createGoal,
+	deleteGoal,
 } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
 import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
@@ -92,9 +96,19 @@ async function createProject(gateway: GatewayFixture, state: IsolatedMcpState, n
 	return { id: project.id, root };
 }
 
-async function statuses(projectId: string, cwd?: string): Promise<ServerStatus[]> {
-	const params = new URLSearchParams({ projectId, ensure: "true" });
+type McpReviewOwner = { sessionId?: string; goalId?: string };
+
+function mcpReviewParams(projectId: string, cwd?: string, owner: McpReviewOwner = {}): URLSearchParams {
+	const params = new URLSearchParams({ projectId });
 	if (cwd) params.set("cwd", cwd);
+	if (owner.sessionId) params.set("sessionId", owner.sessionId);
+	if (owner.goalId) params.set("goalId", owner.goalId);
+	return params;
+}
+
+async function statuses(projectId: string, cwd?: string, owner: McpReviewOwner = {}): Promise<ServerStatus[]> {
+	const params = mcpReviewParams(projectId, cwd, owner);
+	params.set("ensure", "true");
 	const response = await apiFetch(`/api/mcp-servers?${params.toString()}`);
 	expect(response.status).toBe(200);
 	return response.json();
@@ -112,9 +126,9 @@ async function decide(
 	decision: "approved" | "rejected",
 	overrides: Partial<{ fingerprint: string; sourceProjectId: string; sourceId: string }> = {},
 	cwd?: string,
+	owner: McpReviewOwner = {},
 ): Promise<Response> {
-	const params = new URLSearchParams({ projectId: viewProjectId });
-	if (cwd) params.set("cwd", cwd);
+	const params = mcpReviewParams(viewProjectId, cwd, owner);
 	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?${params.toString()}`, {
 		method: "POST",
 		headers: await authenticatedMcpOperatorHeaders(),
@@ -129,6 +143,34 @@ async function decide(
 
 function rpcCount(server: RecordingMcpServer, method: string): number {
 	return server.requests.filter(request => request.method === method).length;
+}
+
+async function seedOwnedSession(
+	gateway: GatewayFixture,
+	project: { id: string; root: string },
+	hostWorktree: string,
+	opts: { sandboxed?: boolean } = {},
+): Promise<{ id: string; requestCwd: string }> {
+	const id = await createSession({ projectId: project.id, cwd: project.root });
+	const branch = `session/mcp-owner-${randomUUID().slice(0, 8)}`;
+	const requestCwd = opts.sandboxed ? `/workspace-wt/${branch}` : hostWorktree;
+	const coordinates = {
+		cwd: requestCwd,
+		worktreePath: hostWorktree,
+		repoPath: project.root,
+		branch,
+		...(opts.sandboxed ? { sandboxed: true, containerId: `mcp-owner-${randomUUID()}` } : {}),
+	};
+	const sessionManager = gateway.sessionManager as any;
+	const live = sessionManager.getSession(id);
+	const persisted = sessionManager.getPersistedSession(id);
+	expect(live, "owned MCP fixture session must be live").toBeTruthy();
+	expect(persisted?.projectId, "owned MCP fixture session must be persisted").toBe(project.id);
+	Object.assign(live, coordinates);
+	sessionManager.getSessionStore(project.id).update(id, coordinates);
+	sessionManager.mcpSessionScopes.delete(id);
+	expect(sessionManager.getPersistedSession(id)).toMatchObject({ projectId: project.id, ...coordinates });
+	return { id, requestCwd };
 }
 
 async function installSpawnRecordingManager(
@@ -437,6 +479,181 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect(sessionManager.getMcpManager({ projectId: project.id, cwd: worktreeRoot })).toBeNull();
 		} finally {
 			await Promise.allSettled([rootServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
+	test("external sibling worktree review requires an exact session owner and stays fail-closed", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "external-session-owner");
+		const rootServer = await startRecordingMcpServer("root_probe");
+		const worktreeServer = await startRecordingMcpServer("worktree_probe");
+		const changedServer = await startRecordingMcpServer("changed_probe");
+		let ownerSessionId: string | undefined;
+		let foreignSessionId: string | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-external-owner-${randomUUID().slice(0, 8)}`);
+			const foreignProject = await createProject(gateway, isolated, `mcp-external-foreign-${randomUUID().slice(0, 8)}`);
+			const worktreeRoot = path.join(`${project.root}-wt`, "session", "external-owner");
+			expect(path.relative(project.root, worktreeRoot).startsWith("..")).toBe(true);
+			const serverName = `external-owner-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: rootServer.url, headers: { "X-Scope": "root" } });
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: worktreeServer.url, headers: { "X-Scope": "worktree" } });
+
+			const owner = await seedOwnedSession(gateway, project, worktreeRoot);
+			ownerSessionId = owner.id;
+			const foreign = await seedOwnedSession(gateway, foreignProject, path.join(`${foreignProject.root}-wt`, "session", "foreign"));
+			foreignSessionId = foreign.id;
+			const sessionManager = gateway.sessionManager as any;
+			const managerCountBeforeRejections = sessionManager.scopedMcpManagers.size;
+			const encodedProject = encodeURIComponent(project.id);
+			const encodedCwd = encodeURIComponent(worktreeRoot);
+			const rejectedCases = [
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&ensure=true`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=bad%20owner&ensure=true`, status: 400, code: "MCP_REVIEW_SCOPE_INVALID" },
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=${owner.id}&sessionId=${owner.id}&ensure=true`, status: 400, code: "MCP_REVIEW_SCOPE_INVALID" },
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=${owner.id}&goalId=conflicting-owner&ensure=true`, status: 400, code: "MCP_REVIEW_SCOPE_INVALID" },
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=missing-owner&ensure=true`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
+				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=${foreign.id}&ensure=true`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
+			];
+			const operatorHeaders = await authenticatedMcpOperatorHeaders();
+			for (const rejected of rejectedCases) {
+				for (const request of [
+					{ path: `/api/mcp-servers?${rejected.query}`, init: undefined },
+					{
+						path: `/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${rejected.query}`,
+						init: {
+							method: "POST",
+							headers: operatorHeaders,
+							body: JSON.stringify({
+								decision: "approved",
+								fingerprint: "unreachable",
+								sourceProjectId: project.id,
+								sourceId: "unreachable",
+							}),
+						},
+					},
+				] satisfies Array<{ path: string; init: RequestInit | undefined }>) {
+					const response = await apiFetch(request.path, request.init);
+					expect(response.status).toBe(rejected.status);
+					expect(await response.json()).toMatchObject({ code: rejected.code });
+					expect(sessionManager.getMcpManager({ projectId: project.id, cwd: worktreeRoot })).toBeNull();
+					expect(sessionManager.scopedMcpManagers.size).toBe(managerCountBeforeRejections);
+					expect([...rootServer.requests, ...worktreeServer.requests, ...changedServer.requests]).toHaveLength(0);
+				}
+			}
+
+			let current = named(await statuses(project.id, worktreeRoot, { sessionId: owner.id }), serverName);
+			expect(current).toMatchObject({
+				status: "disconnected",
+				toolCount: 0,
+				approval: { state: "pending" },
+				reviewConfig: { url: worktreeServer.url },
+			});
+			expect(worktreeServer.requests).toHaveLength(0);
+			expect(rootServer.requests).toHaveLength(0);
+
+			let response = await decide(project.id, current, "approved", {}, worktreeRoot, { sessionId: owner.id });
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(rpcCount(worktreeServer, "initialize")).toBe(1);
+			expect(rootServer.requests).toHaveLength(0);
+			expect(named(await statuses(project.id), serverName).approval.state).toBe("changed");
+
+			const worktreeManager = sessionManager.getMcpManager({ projectId: project.id, cwd: worktreeRoot });
+			const worktreeClient = worktreeManager.clients.get(serverName);
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: changedServer.url, headers: { "X-Scope": "changed" } });
+			current = named(await statuses(project.id, worktreeRoot, { sessionId: owner.id }), serverName);
+			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "changed" } });
+			expect(worktreeClient.connected).toBe(false);
+			expect(changedServer.requests).toHaveLength(0);
+			expect(rootServer.requests).toHaveLength(0);
+		} finally {
+			if (ownerSessionId) await deleteSession(ownerSessionId).catch(() => undefined);
+			if (foreignSessionId) await deleteSession(foreignSessionId).catch(() => undefined);
+			await Promise.allSettled([rootServer.close(), worktreeServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
+	test("goal ownership authorizes only its external sibling worktree", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "external-goal-owner");
+		const remote = await startRecordingMcpServer("goal_probe");
+		let goalId: string | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-goal-owner-${randomUUID().slice(0, 8)}`);
+			const worktreeRoot = path.join(`${project.root}-wt`, "goal", "external-owner");
+			const serverName = `goal-owner-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(worktreeRoot, serverName, { url: remote.url });
+			const goal = await createGoal({
+				title: `MCP external owner ${randomUUID()}`,
+				projectId: project.id,
+				cwd: project.root,
+				worktree: false,
+				autoStartTeam: false,
+			});
+			goalId = String(goal.id);
+			const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
+			expect(goalStore.update(goalId, {
+				cwd: worktreeRoot,
+				worktreePath: worktreeRoot,
+				repoPath: project.root,
+				branch: "goal/mcp-external-owner",
+				setupStatus: "ready",
+			})).toBe(true);
+
+			let current = named(await statuses(project.id, worktreeRoot, { goalId }), serverName);
+			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "pending" } });
+			expect(remote.requests).toHaveLength(0);
+			const response = await decide(project.id, current, "approved", {}, worktreeRoot, { goalId });
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(rpcCount(remote, "initialize")).toBe(1);
+		} finally {
+			if (goalId) await deleteGoal(goalId).catch(() => undefined);
+			await remote.close();
+			await isolated.cleanup();
+		}
+	});
+
+	test("sandbox session review maps its opaque owner to the authoritative host worktree", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "sandbox-host-worktree");
+		const rootServer = await startRecordingMcpServer("root_probe");
+		const hostServer = await startRecordingMcpServer("host_probe");
+		let sessionId: string | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-sandbox-owner-${randomUUID().slice(0, 8)}`);
+			const hostWorktree = path.join(`${project.root}-wt`, "session", "sandbox-owner");
+			const serverName = `sandbox-owner-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(project.root, serverName, { url: rootServer.url });
+			writeProjectMcpConfig(hostWorktree, serverName, { url: hostServer.url });
+			const owner = await seedOwnedSession(gateway, project, hostWorktree, { sandboxed: true });
+			sessionId = owner.id;
+			expect(owner.requestCwd).toMatch(/^\/workspace-wt\//);
+
+			let current = named(await statuses(project.id, owner.requestCwd, { sessionId: owner.id }), serverName);
+			expect(current).toMatchObject({
+				status: "disconnected",
+				approval: { state: "pending" },
+				reviewConfig: { url: hostServer.url },
+			});
+			const sessionManager = gateway.sessionManager as any;
+			const selected = sessionManager.getMcpManager({ projectId: project.id, cwd: hostWorktree });
+			expect(selected).toBeTruthy();
+			expect(sessionManager.getMcpManager({ projectId: project.id, cwd: owner.requestCwd })).toBeNull();
+			expect(selected).not.toBe(sessionManager.getMcpManager({ projectId: project.id }));
+			expect([...rootServer.requests, ...hostServer.requests]).toHaveLength(0);
+
+			const response = await decide(project.id, current, "approved", {}, owner.requestCwd, { sessionId: owner.id });
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", approval: { state: "approved" } });
+			expect(rpcCount(hostServer, "initialize")).toBe(1);
+			expect(rootServer.requests).toHaveLength(0);
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
+			await Promise.allSettled([rootServer.close(), hostServer.close()]);
 			await isolated.cleanup();
 		}
 	});
