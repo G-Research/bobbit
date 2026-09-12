@@ -20627,6 +20627,7 @@ export class SessionManager {
 			// allowlist/tag/guard calculation and reuse one Pi discovery snapshot.
 			const forceAbortToolRuntime = this.prepareScopedToolRuntime(session.projectId, session.cwd);
 			if (forceAbortToolRuntime.toolManager) bridgeOptions.toolManager = forceAbortToolRuntime.toolManager;
+			const forceAbortMcpManager = await this.ensureMcpManagerForSession(id);
 			bridgeOptions.env = {
 				BOBBIT_SESSION_ID: id,
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
@@ -20683,7 +20684,6 @@ export class SessionManager {
 				// canonical live allowlist. Prefer that post-terminal value so a stale
 				// persisted snapshot cannot re-grant a spent capability on replacement.
 				const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
-				const forceAbortMcpManager = await this.ensureMcpManagerForSession(id);
 				const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
 					? tagAllowedTools(forceAbortAllowedNames, forceAbortToolRuntime.toolManager, forceAbortToolRuntime.toolScope)
 					: this.resolveEffectiveAllowedTools(
