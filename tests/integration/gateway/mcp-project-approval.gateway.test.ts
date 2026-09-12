@@ -154,6 +154,42 @@ async function installSpawnRecordingManager(
 	return manager;
 }
 
+async function installSharedOwnerManager(
+	gateway: GatewayFixture,
+	viewProject: { id: string; root: string },
+	owners: Array<{ id: string; root: string }>,
+	state: IsolatedMcpState,
+	runtimeServerKey: string,
+	url: string,
+): Promise<any> {
+	const { McpManager } = (await loadServerTestRuntime()).mcpManager;
+	const config = { url };
+	const manager = new McpManager(viewProject.root, undefined, state.approvalDir, {
+		projectId: viewProject.id,
+		projectName: path.basename(viewProject.root),
+		approvalStore: (gateway.sessionManager as any).mcpApprovalStore,
+		scopeKey: `project:${viewProject.id}`,
+		marketplaceResolver: () => owners.map((owner, index) => ({
+			listName: `owner-${index}`,
+			serverName: `owner-${index}`,
+			runtimeServerKey,
+			contributionId: `project-owner:${owner.id}`,
+			config,
+			origin: {
+				scope: "project",
+				authority: "project",
+				trust: "approval-required",
+				projectId: owner.id,
+				projectName: path.basename(owner.root),
+				sourceId: `project-pack:${owner.id}`,
+				file: `.bobbit/config/packs/owner-${index}/mcp/shared.yaml`,
+			},
+		})),
+	});
+	(gateway.sessionManager as any).scopedMcpManagers.set(`project:${viewProject.id}`, manager);
+	return manager;
+}
+
 async function setToolPolicy(projectId: string, serverName: string, policy: "never" | null): Promise<void> {
 	const response = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(`mcp__${serverName}`)}?projectId=${encodeURIComponent(projectId)}`, {
 		method: "PUT",
@@ -513,6 +549,52 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("shared runtime owners advance one at a time without reporting the persisted decision as stale", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "shared-owner-decision");
+		const remote = await startRecordingMcpServer("shared_owner_probe");
+		try {
+			const projectA = await createProject(gateway, isolated, `mcp-owner-a-${randomUUID().slice(0, 8)}`);
+			const projectB = await createProject(gateway, isolated, `mcp-owner-b-${randomUUID().slice(0, 8)}`);
+			const runtimeServerKey = `shared-runtime-${randomUUID().slice(0, 8)}`;
+			await installSharedOwnerManager(gateway, projectA, [projectA, projectB], isolated, runtimeServerKey, remote.url);
+
+			let current = named(await statuses(projectA.id), runtimeServerKey);
+			expect(current).toMatchObject({
+				status: "disconnected",
+				approval: { state: "pending" },
+				source: { projectId: projectA.id, sourceId: `project-pack:${projectA.id}` },
+			});
+
+			const ownerA = current;
+			let response = await decide(projectA.id, current, "approved");
+			expect(response.status).toBe(200);
+			expect(isolated.store.classify({
+				projectId: ownerA.source.projectId,
+				sourceId: ownerA.source.sourceId,
+				serverName: ownerA.name,
+				trust: "approval-required",
+				config: { url: remote.url },
+			}).state).toBe("approved");
+			current = (await response.json()).server;
+			expect(current).toMatchObject({
+				status: "disconnected",
+				approval: { state: "pending" },
+				source: { projectId: projectB.id, sourceId: `project-pack:${projectB.id}` },
+			});
+			expect(remote.requests).toHaveLength(0);
+
+			response = await decide(projectA.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", toolCount: 2, approval: { state: "approved" } });
+			expect(rpcCount(remote, "initialize")).toBe(1);
+			expect(rpcCount(remote, "tools/list")).toBe(1);
+		} finally {
+			await remote.close();
+			await isolated.cleanup();
+		}
+	});
+
 	test("a change in the post-reload freshness window disconnects the approved runtime before returning stale", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "post-reload-stale");
 		const approvedServer = await startRecordingMcpServer("post_reload_probe");
@@ -540,29 +622,26 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			let tools = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(project.id)}`)).json();
 			expect(tools.tools.some((tool: any) => tool.name === externalToolName)).toBe(true);
 
-			// decideApproval performs one freshness read before persistence. Change the
-			// file only on SessionManager's final read, after its first scoped reload,
-			// to deterministically exercise the last stale-decision window.
-			const originalGetEffectiveDefinition = manager.getEffectiveDefinitionForDecision.bind(manager);
-			let decisionReads = 0;
-			manager.getEffectiveDefinitionForDecision = (name: string) => {
-				decisionReads += 1;
-				if (decisionReads === 2) {
-					writeProjectMcpConfig(project.root, serverName, {
-						url: changedServer.url,
-						headers: { Authorization: "Bearer replacement-secret" },
-					});
-				}
-				return originalGetEffectiveDefinition(name);
+			// Change the file only when SessionManager revalidates the exact decided
+			// owner, after its first scoped reload, to exercise the final stale window.
+			const originalIsApprovalIdentityCurrent = manager.isApprovalIdentityCurrent.bind(manager);
+			let revalidationReads = 0;
+			manager.isApprovalIdentityCurrent = (identity: unknown) => {
+				revalidationReads += 1;
+				writeProjectMcpConfig(project.root, serverName, {
+					url: changedServer.url,
+					headers: { Authorization: "Bearer replacement-secret" },
+				});
+				return originalIsApprovalIdentityCurrent(identity);
 			};
 			const approvedRequestCount = approvedServer.requests.length;
 			try {
 				response = await decide(project.id, current, "approved");
 			} finally {
-				manager.getEffectiveDefinitionForDecision = originalGetEffectiveDefinition;
+				manager.isApprovalIdentityCurrent = originalIsApprovalIdentityCurrent;
 			}
 
-			expect(decisionReads).toBe(2);
+			expect(revalidationReads).toBe(1);
 			expect(response.status).toBe(409);
 			const stale = await response.json();
 			expect(stale).toMatchObject({

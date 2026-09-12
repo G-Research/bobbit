@@ -937,6 +937,18 @@ export class McpManager {
     return group ? this._definitionForGroup(group) : undefined;
   }
 
+  /** Freshly confirm that one exact approval owner still exists after persistence/reload. */
+  isApprovalIdentityCurrent(identity: McpApprovalIdentity): boolean {
+    this.discoverConnectionGroups();
+    const group = this.discoveredConnectionGroups.get(identity.serverName);
+    if (!group) return false;
+    return this._definitionsForGroup(group).some((definition) =>
+      definition.origin.projectId === identity.projectId
+      && definition.origin.sourceId === identity.sourceId
+      && definition.approval.fingerprint === identity.fingerprint,
+    );
+  }
+
   async decideApproval(identity: McpApprovalIdentity, decision: McpApprovalDecision): Promise<EffectiveMcpDefinition> {
     const current = this.getEffectiveDefinitionForDecision(identity.serverName);
     if (!current || current.origin.projectId !== identity.projectId || current.origin.sourceId !== identity.sourceId) {

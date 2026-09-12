@@ -7294,12 +7294,9 @@ export class SessionManager {
 			announce: true,
 			affectedProjectIds: [viewProjectId, identity.projectId],
 		});
-		const current = viewManager.getEffectiveDefinitionForDecision(identity.serverName);
+		const decidedOwnerIsCurrent = viewManager.isApprovalIdentityCurrent(identity);
 		const status = viewManager.getServerStatuses().find(entry => entry.name === identity.serverName);
-		if (!current || !status
-			|| current.origin.projectId !== identity.projectId
-			|| current.origin.sourceId !== identity.sourceId
-			|| current.approval.fingerprint !== identity.fingerprint) {
+		if (!decidedOwnerIsCurrent || !status) {
 			// Fresh discovery above can observe a change made after the first reload.
 			// Reconcile that newly discovered winner and any manager published during
 			// the reload before returning 409 so no old runtime remains live.
