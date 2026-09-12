@@ -1440,7 +1440,7 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 ## Tools page "MCP" section missing or empty
 
-`GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
+Inspect the same scoped request as the UI: `GET /api/mcp-servers?projectId=<id>&ensure=true`. `projectId` is required; `cwd` is optional but validated, and an external worktree review must also carry exactly one current owning `sessionId` or `goalId`. `ensure=true` creates the scoped manager when needed and reconciles current discovery before returning. An empty list without `ensure=true` may only mean that no manager exists yet; after ensured reconciliation, check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`. Pending, rejected, changed, and invalid definitions should still appear as safe status rows. See [MCP server startup approvals — Status and approval API](mcp-server-approvals.md#status-and-approval-api).
 
 ## MCP group changed from `never`, but refreshed agent still cannot use it
 

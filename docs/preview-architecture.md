@@ -815,9 +815,10 @@ generic code-preview path instead of passing an object to a source-string
 renderer; completed calls also retain the generic **Load full content** control.
 Ordinary source strings keep their normal extension dispatch: `.html` and `.htm`
 writes delegate to `HtmlRenderer`, including historical completed calls, while
-`.svg` writes delegate to `SvgRenderer`. During HTML streaming, prepared source
-is applied through the existing debounced `document.open()` / `write()` /
-`close()` path; completion switches to the declarative `srcdoc` binding. A
+`.svg` writes delegate to `SvgRenderer`. During HTML streaming, the existing
+1.5-second debounce assigns prepared source to the stable iframe's `srcdoc`;
+completed calls use Lit's declarative `srcdoc` property binding. Neither path
+uses `contentDocument` nor calls `document.open()`, `write()`, or `close()`. A
 successful `.html` or `.htm` edit fetches the resulting file snapshot and
 delegates to the same completed `HtmlRenderer`. Thus ordinary writes, successful
 edits, streaming, and completed HTML cards share one preparation helper rather
