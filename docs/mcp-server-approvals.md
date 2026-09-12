@@ -15,7 +15,7 @@ When the currently relevant project has definitions to review, Bobbit shows a co
 
 Use **Tools → MCP** to manage definitions:
 
-1. Select the project whose MCP view you want to inspect.
+1. Select the project whose MCP view you want to inspect. A **Review servers** action opened from a session or goal retains that owner's execution scope, so Tools reviews the same worktree definition as the runtime; opening Tools directly reviews the registered project root.
 2. If the browser is not paired, enter the current MCP pairing code from the gateway terminal and choose **Pair browser**.
 3. Expand one server row. Review the introducing project and logical source file, transport, command and arguments or remote URL, working directory, environment/header names, and fingerprint.
 4. Choose **Approve**, **Reject**, or, after a prior decision, **Approve current configuration**. There is intentionally no approve-all action.
@@ -45,7 +45,7 @@ At gateway startup, the terminal prints an MCP pairing code. The code:
 
 The UI stores the complete credential per normalized gateway base URL in browser local storage and keeps an in-memory copy for the current tab. Pair only a trusted browser profile: same-origin script can read local storage, and anyone holding the credential can submit decisions. If local storage is unavailable, the tab remains paired and shows a warning, but it must be paired again after reload. A rejected or obsolete credential is forgotten for that gateway.
 
-The browser sends the credential only as `X-Bobbit-Mcp-Operator` on an approval or rejection request. It is not attached to pairing, status, or generic API requests. This narrow use prevents a general Bobbit credential from becoming MCP approval authority.
+The browser sends the credential only as `X-Bobbit-Mcp-Operator` on an approval or rejection request. It is not attached to pairing, status, or generic API requests. This narrow use prevents a general Bobbit credential from becoming MCP approval authority. Repository previews are also opaque-origin sandboxed frames: they cannot read the parent document, browser storage, operator credential, or pairing controls. See [Preview architecture](preview-architecture.md#security-boundary).
 
 ## Which sources require approval
 
@@ -66,14 +66,16 @@ Existing project definitions are not grandfathered during upgrade. A definition 
 
 ### Marketplace install attestations
 
-Project-scoped Marketplace installation is a special case because its files live under the project but installation is an explicit Bobbit action. At the end of a successful install or update, Bobbit atomically records a private attestation binding:
+Project-scoped Marketplace installation is a special case because its files live under the project but installation is an explicit Bobbit action. For a project pack that declares MCP contributions, Bobbit measures the complete pack: every directory, regular file, and internal relative symlink contributes its relative path, entry type, executable/search bits, bytes or link target. Traversal and opened files are rechecked so a partial or concurrent replacement cannot inherit install trust. Unsafe entry types or links, cycles, changed snapshots, and enforced entry, byte, or path bounds fail closed. Packs without MCP contributions skip this pass because they cannot introduce an MCP runtime through this path.
+
+The install flow requires the staged and published pack measurements to match before it atomically records a private attestation binding:
 
 - project and Marketplace source identity;
 - pack and contribution identity;
 - server name; and
-- a fingerprint of the exact execution or connection configuration.
+- a keyed fingerprint of the exact configuration and complete-pack measurement.
 
-Discovery treats a project contribution as Marketplace-pretrusted only when that complete tuple and fingerprint match. Copied pack metadata, a missing/corrupt attestation ledger, or an on-disk behavioral change falls back to project-controlled approval. A changed attested contribution appears as **Configuration changed — review again** when it has no matching decision. Uninstall removes the pack's attestations.
+The raw pack measurement is not persisted or exposed. Discovery treats a project contribution as Marketplace-pretrusted only when that complete tuple and fingerprint match. The current attestation ledger is schema 2; legacy configuration-only ledgers are not accepted after this upgrade. Copied pack metadata, an old/missing/corrupt attestation ledger, or any on-disk pack change falls back to project-controlled approval. A changed attested contribution appears as **Configuration changed — review again** when it has no matching decision. Its manual approval fingerprint also includes the complete-pack measurement, so another pack edit invalidates that decision even if the MCP JSON is unchanged. Uninstall removes the pack's attestations.
 
 Reinstalling or updating through Marketplace records the newly installed definitions. Alternatively, an operator can review and decide the currently effective project-controlled definition in **Tools → MCP**. MCP Gateway materializations follow the same project-scope attestation rule.
 
@@ -118,6 +120,7 @@ Status and stale-decision responses are built from the live effective definition
 - Credential-shaped CLI forms are redacted for separated, `--flag=value`, quoted, header (`-H`), and attached-header syntax. Benign text remains visible where possible so the operator can still identify the command.
 - Physical source paths and internal Marketplace attestation signals are omitted. Source URLs receive the same URL redaction; logical source files and introducing project attribution remain visible.
 - Parse and validation diagnostics do not echo configuration contents.
+- Connection, initialization, stderr, and other runtime error text is separately sanitized before it reaches status or API responses: configured environment/header values and URL credential/query/fragment components are removed, complete configured URLs are reduced to a safe endpoint, and output is bounded.
 
 Redaction is a display boundary, not the approval identity. The fingerprint uses the complete canonical behavior before redaction, so two different secret values produce different fingerprints even though both display as `[redacted]`. Approval fingerprints use a private HMAC key so the displayed digest is not a direct hash that can be used to guess a low-entropy secret.
 
@@ -160,7 +163,11 @@ The project selected in Tools is the *view scope*. The introducing project's ID 
 
 Some Marketplace contributions share one physical runtime connection when they resolve to the same runtime key and identical configuration. Every owner of that connection must be trusted or approved before Bobbit connects it. If several project-controlled owners are pending, the row surfaces the first blocked owner; after deciding it, review the next owner until all are eligible. Adding, changing, removing, or rejecting any owner tears down the shared connection and all of its routes before further calls.
 
-A gateway can also have multiple active MCP managers for different project/session scopes. They share one approval store. After a successful decision Bobbit reloads every active manager, because a server introduced by one registered project may be active in another project's view. Project registration, removal, root moves, and project Marketplace mutations likewise reconcile all affected active managers. Managers created later read the same durable decision.
+A gateway can also have multiple active MCP managers keyed by logical project and canonical host execution directory. Each session binds to the manager for the project root or worktree content it actually executes, including the host coordinate behind a sandbox path. Sessions on the same exact project/worktree scope may share that manager; Bobbit disconnects a non-root manager after its last bound session releases it. All managers share one approval store.
+
+Review of a worktree outside the registered root is owner-scoped, not path-scoped. Status and decision requests must name one current session or goal owned by the selected project, and the claimed directory must validate against that owner's execution scope. A bare/arbitrary `cwd`, missing or stale owner, foreign session/project, or root-only Tools view cannot authorize an external sibling worktree. Invalid scope is rejected before creating a manager or discovering its repository-controlled content.
+
+After a successful decision Bobbit reloads every active manager, because a server introduced by one registered project may be active in another project's view. Project registration, removal, root moves, and project Marketplace mutations likewise reconcile all affected active managers. Managers created later read the same durable decision.
 
 Runtime checks close configuration-change races at every data-bearing boundary:
 
@@ -190,7 +197,7 @@ A successful response contains an opaque `credential`. Pairing responses use `Ca
 
 ### Read status
 
-`GET /api/mcp-servers?projectId=<view-project>&ensure=true` returns effective definitions even when they expose zero operations because they are pending, rejected, changed, or invalid. Each server can include:
+`GET /api/mcp-servers?projectId=<view-project>&ensure=true` returns effective definitions even when they expose zero operations because they are pending, rejected, changed, or invalid. A session/goal review carries exactly one `sessionId` or `goalId` query parameter, plus its displayed `cwd` when present, through both status and decision requests; a direct Tools view omits owner scope and remains at the registered root. Each server can include:
 
 - `approval`: whether approval is required, its state, current opaque fingerprint, and optional decision time;
 - `source`: safe source ID, authority, introducing project ID/name, and logical file;
@@ -203,7 +210,7 @@ Reading status does not require or receive the MCP operator credential.
 ### Submit one decision
 
 ```http
-POST /api/mcp-servers/<server>/approval?projectId=<view-project>
+POST /api/mcp-servers/<server>/approval?projectId=<view-project>[&sessionId=<owner>&cwd=<displayed-cwd>]
 Content-Type: application/json
 X-Bobbit-Mcp-Operator: <paired operator credential>
 
@@ -237,6 +244,9 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 | Invalid server definition | `MCP_CONFIG_INVALID` | Configure exactly one non-empty command or HTTP(S) URL and valid string arguments, working directory, environment, and headers. Remove case-insensitive duplicate header names. Invalid definitions cannot be approved. |
 | A configuration source is omitted after JSON parsing fails | `MCP_CONFIG_PARSE_FAILED` | Correct the attributed logical file and reload the MCP view. Other valid sources continue to be discovered; logs do not include file contents. |
 | Definition changed, disappeared, or changed owner during submission | `MCP_APPROVAL_STALE` (HTTP 409) | Review the safe current status returned by the server and submit a decision for its current source and fingerprint. If the source project was removed, no decision is needed. |
+| Worktree review is rejected as invalid scope or outside the project | `MCP_REVIEW_SCOPE_INVALID` or `CWD_OUTSIDE_PROJECT` | Return to the owning session or goal and use its **Review servers** action. Do not retry with a hand-written `cwd`; the owner binding is the authority for an external sibling worktree. |
+| An agent cannot see a server that looks approved at the project root | No operation in that session's MCP scope | Review connection/approval state from that session's worktree scope, then check **Tool calls** policy. Root and worktree managers can discover different content. |
+| A displayed runtime error appears to contain secret material | Sanitization failure | Preserve only a redacted reproduction and treat it as a security defect. Status, approval responses, and Tools diagnostics must not expose configured secrets or URL credentials. |
 | Decision could not be saved | `MCP_APPROVAL_PERSIST_FAILED` | Check ownership, permissions, and free space for the private `mcp-approvals` directory, then retry. The previous decision and runtime state remain unchanged. |
 | Approval key is unavailable, lost, or corrupt | `MCP_APPROVAL_KEY_UNAVAILABLE` when no replacement can be created; otherwise definitions return to pending | Restore private storage access and review each pending definition again. Do not reconstruct fingerprints or ledger rows manually. |
 | Bobbit cannot remove decisions that no longer match the key | `MCP_APPROVAL_LEDGER_RESET_FAILED` | Restore write/delete access to the private `mcp-approvals` directory, then make fresh per-server decisions. Unauthenticated old rows do not authorize current fingerprints. |
