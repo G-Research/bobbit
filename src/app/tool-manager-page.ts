@@ -12,6 +12,7 @@ import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { hasMcpOperatorCredential, pairMcpOperatorBrowser } from "./mcp-operator-auth.js";
 
 // ============================================================================
 // CONSTANTS
@@ -257,6 +258,10 @@ let expandedMcpTools = new Set<string>();
 let busyMcpServers = new Set<string>();
 let mcpApprovalErrors = new Map<string, string>();
 let mcpApprovalAnnouncements = new Map<string, string>();
+let mcpPairingBusy = false;
+let mcpPairingError: string | null = null;
+let mcpPairingNotice: string | null = null;
+let mcpPairingWarning: string | null = null;
 let selectedTool: ToolInfo | null = null;
 let loading = true;
 let editDescription = "";
@@ -456,6 +461,10 @@ export function clearToolPageState(): void {
 	busyMcpServers = new Set();
 	mcpApprovalErrors = new Map();
 	mcpApprovalAnnouncements = new Map();
+	mcpPairingBusy = false;
+	mcpPairingError = null;
+	mcpPairingNotice = null;
+	mcpPairingWarning = null;
 	loading = true;
 	saving = false;
 }
@@ -735,6 +744,69 @@ function focusMcpReviewToggle(name: string): void {
 	});
 }
 
+function focusMcpPairingInput(): void {
+	requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]')?.focus());
+}
+
+function mcpPairingErrorMessage(error: unknown): string {
+	const details = errorDetails(error);
+	if (details.code === "MCP_OPERATOR_PAIRING_REQUIRED") {
+		return "That pairing code is invalid, expired, or already used. Copy the current code from the gateway terminal and try again.";
+	}
+	if (details.code === "MCP_OPERATOR_PAIRING_RATE_LIMITED") {
+		return "Too many pairing attempts. Wait briefly, then use the current code from the gateway terminal.";
+	}
+	if (details.code === "MCP_OPERATOR_PERSIST_FAILED") {
+		return "The gateway could not save this browser authorization. Check the gateway terminal and try again.";
+	}
+	return details.message || "Could not pair this browser. Check the gateway terminal and try again.";
+}
+
+async function pairMcpBrowser(event: SubmitEvent): Promise<void> {
+	event.preventDefault();
+	if (mcpPairingBusy) return;
+	const form = event.currentTarget as HTMLFormElement;
+	const input = form.querySelector<HTMLInputElement>('[data-testid="mcp-pairing-code"]');
+	if (!input) return;
+	const code = input.value;
+	mcpPairingBusy = true;
+	mcpPairingError = null;
+	mcpPairingNotice = null;
+	mcpPairingWarning = null;
+	renderApp();
+	try {
+		const result = await pairMcpOperatorBrowser(code);
+		input.value = "";
+		mcpPairingNotice = "Browser paired. You can now approve or reject servers; no decision was made.";
+		mcpPairingWarning = result.warning || null;
+	} catch (error) {
+		mcpPairingError = mcpPairingErrorMessage(error);
+	} finally {
+		mcpPairingBusy = false;
+		renderApp();
+		if (mcpPairingError) focusMcpPairingInput();
+	}
+}
+
+function renderMcpPairingCallout(): TemplateResult | typeof nothing {
+	const paired = hasMcpOperatorCredential();
+	if (paired && !mcpPairingNotice && !mcpPairingWarning) return nothing;
+	return html`
+		<div class="mcp-pairing-callout" data-testid="mcp-pairing-callout">
+			${!paired ? html`
+				<div class="mcp-pairing-copy">Pair this browser to approve or reject project MCP servers.</div>
+				<form class="mcp-pairing-form" @submit=${pairMcpBrowser}>
+					<input id="mcp-pairing-code" class="mcp-pairing-input" data-testid="mcp-pairing-code" name="code" type="password" autocomplete="off" spellcheck="false" aria-label="MCP pairing code" placeholder="Gateway terminal pairing code" required ?disabled=${mcpPairingBusy}>
+					<button class="mcp-pairing-button" data-testid="mcp-pair-browser" type="submit" ?disabled=${mcpPairingBusy}>${mcpPairingBusy ? "Pairing…" : "Pair browser"}</button>
+				</form>
+			` : nothing}
+			${paired && mcpPairingNotice ? html`<div class="mcp-pairing-notice" data-testid="mcp-pairing-notice" role="status" aria-live="polite">${mcpPairingNotice}</div>` : nothing}
+			${paired && mcpPairingWarning ? html`<div class="mcp-pairing-warning" data-testid="mcp-pairing-warning" role="status">${mcpPairingWarning}</div>` : nothing}
+			${!paired && mcpPairingError ? html`<div class="mcp-pairing-error" data-testid="mcp-pairing-error" role="alert">${mcpPairingError}</div>` : nothing}
+		</div>
+	`;
+}
+
 async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDecision): Promise<void> {
 	const approval = server.approval;
 	const source = server.source;
@@ -753,6 +825,7 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 	mcpApprovalErrors.delete(server.name);
 	mcpApprovalAnnouncements.set(server.name, `${decision === "approved" ? "Approving" : "Rejecting"} ${server.name}…`);
 	renderApp();
+	let pairingRequired = false;
 	try {
 		await decideMcpServerApproval(server.name, {
 			decision,
@@ -768,6 +841,13 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 			await refreshScopedToolPageData(false);
 			expandedMcpServers.add(server.name);
 			mcpApprovalErrors.set(server.name, "Configuration changed while you were reviewing it. Review the current configuration before deciding.");
+		} else if (details.code === "MCP_APPROVAL_HUMAN_REQUIRED") {
+			pairingRequired = true;
+			expandedMcpServers.add(server.name);
+			mcpPairingNotice = null;
+			mcpPairingWarning = null;
+			mcpPairingError = "This browser is not paired with the gateway. Enter the current pairing code from the gateway terminal.";
+			mcpApprovalErrors.set(server.name, "Pair this browser before approving or rejecting this server.");
 		} else {
 			mcpApprovalErrors.set(server.name, details.message || "Could not update server approval. Try again.");
 		}
@@ -775,7 +855,8 @@ async function decideMcpApproval(server: McpServerInfo, decision: McpApprovalDec
 	} finally {
 		busyMcpServers.delete(server.name);
 		renderApp();
-		focusMcpReviewToggle(server.name);
+		if (pairingRequired) focusMcpPairingInput();
+		else focusMcpReviewToggle(server.name);
 	}
 }
 
@@ -900,6 +981,7 @@ function renderMcpSection(): TemplateResult {
 				<span class="tool-group-count">${mcpServers.length} server${mcpServers.length !== 1 ? "s" : ""}${reviewCount ? ` · ${reviewCount} need review` : ""}</span>
 				<span class="mcp-section-help">Startup approval is separate from <strong>Tool calls</strong> policy.</span>
 			</div>
+			${mcpServers.some((server) => server.approval?.required && server.source?.authority === "project" && !mcpApprovalIsInvalid(server)) ? renderMcpPairingCallout() : nothing}
 			<div class="tool-group-items">
 				${mcpServers.map((server) => {
 					const expanded = expandedMcpServers.has(server.name);
