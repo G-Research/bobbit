@@ -46,12 +46,11 @@ const KEY_BYTES = 32;
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const child = (value as Record<string, unknown>)[key];
-      if (child !== undefined) out[key] = stableValue(child);
-    }
-    return out;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().flatMap((key) => {
+      const child = record[key];
+      return child === undefined ? [] : [[key, stableValue(child)]];
+    }));
   }
   return value;
 }
@@ -65,10 +64,10 @@ function validRecord(value: unknown): value is Record<string, string> {
 export function canonicalMcpServerConfig(config: McpServerConfig): unknown {
   const record = config as Record<string, unknown>;
   const known = new Set(["command", "args", "cwd", "env", "url", "headers", "transport"]);
-  const unknownOwnFields: Record<string, unknown> = {};
-  for (const key of Object.keys(record)) {
-    if (!known.has(key) && record[key] !== undefined) unknownOwnFields[key] = record[key];
-  }
+  const unknownOwnFields = Object.fromEntries(Object.keys(record).flatMap((key) => {
+    const value = record[key];
+    return known.has(key) || value === undefined ? [] : [[key, value]];
+  }));
   const env = validRecord(config.env) ? expandEnvRecord(config.env) : config.env;
   return stableValue({
     schema: 1,
