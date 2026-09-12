@@ -139,6 +139,23 @@ export function formatStartupBanner(input: {
 	return lines.join("\n");
 }
 
+export function formatMcpPairingCodeBanner(code: string): string {
+	return [
+		`MCP pairing code: ${code}`,
+		"Paste this in Tools → MCP to pair one browser for approvals.",
+		"One use; expires in 10 minutes. Pairing replaces the previous browser authorization.",
+	].join("\n");
+}
+
+export async function startGatewayAndCreateMcpPairingCode(gateway: {
+	start(): Promise<number>;
+	createMcpOperatorPairingCode(): { code: string; expiresAt: string };
+}): Promise<{ actualPort: number; pairingCode: string }> {
+	const actualPort = await gateway.start();
+	const { code: pairingCode } = gateway.createMcpOperatorPairingCode();
+	return { actualPort, pairingCode };
+}
+
 /** Find the NordLynx (NordVPN mesh) interface IPv4 address, or null if not found. */
 function findNordLynxIp(): string | null {
 	const interfaces = os.networkInterfaces();
@@ -516,7 +533,7 @@ async function main() {
 	bootLog(`[boot] createGateway construction in ${Date.now() - ctorT0}ms`);
 
 	const startT0 = Date.now();
-	const actualPort = await gateway.start();
+	const { actualPort, pairingCode } = await startGatewayAndCreateMcpPairingCode(gateway);
 	bootLog(`[boot] gateway.start() (pre-listen critical path) in ${Date.now() - startT0}ms`);
 	bootLog(`[boot] TOTAL process-start \u2192 listening in ${Date.now() - bootWallT0}ms`);
 
@@ -555,6 +572,7 @@ async function main() {
 		staticDir: args.staticDir,
 		addresses,
 	}));
+	console.log(formatMcpPairingCodeBanner(pairingCode));
 
 	// Auto-open browser when serving the UI, passing token so the UI auto-connects.
 	// Skipped when:
