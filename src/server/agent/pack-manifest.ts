@@ -344,6 +344,7 @@ export function validateMeta(data: unknown, problems?: string[]): PackMeta | nul
 		return fail(`.pack-meta.yaml: invalid scope ${JSON.stringify(d.scope)}`);
 	}
 	return {
+		...(typeof d.sourceId === "string" && d.sourceId.length > 0 ? { sourceId: d.sourceId } : {}),
 		sourceUrl: typeof d.sourceUrl === "string" ? d.sourceUrl : "",
 		sourceRef: typeof d.sourceRef === "string" ? d.sourceRef : "",
 		commit: typeof d.commit === "string" ? d.commit : "",

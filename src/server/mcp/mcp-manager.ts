@@ -17,7 +17,7 @@ import type {
   McpToolResult,
   McpToolDocCache,
 } from "./mcp-types.js";
-import { bobbitConfigDir, bobbitStateDir, headquartersDir, normalProjectBobbitDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitStateDir, headquartersDir, normalProjectBobbitDir, serverSecretsDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
 import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "../agent/project-registry.js";
@@ -45,6 +45,8 @@ export interface ResolvedMcpOrigin {
   sourceUrl?: string;
   /** Internal physical path. Never persist or expose it as review metadata. */
   path?: string;
+  /** Internal signal that an explicitly installed project pack changed on disk. */
+  marketplaceAttestationChanged?: boolean;
 }
 
 export interface ResolvedMcpContribution {
@@ -397,7 +399,7 @@ export function redactMcpServerConfig(config: McpServerConfig): RedactedMcpServe
 }
 
 function safeOrigin(origin: ResolvedMcpOrigin): ResolvedMcpOrigin {
-  const { path: _physicalPath, ...safe } = origin;
+  const { path: _physicalPath, marketplaceAttestationChanged: _attestationChanged, ...safe } = origin;
   if (safe.sourceUrl) safe.sourceUrl = redactUrl(safe.sourceUrl);
   return safe;
 }
@@ -447,10 +449,11 @@ function customDirectorySourceId(declaredPath: string): string {
 
 function normalizedMarketplaceOrigin(contribution: ResolvedMcpContribution): ResolvedMcpOrigin {
   const origin = contribution.origin ?? { scope: "manual" };
+  const authority = origin.authority ?? "marketplace";
   return {
     ...origin,
-    authority: "marketplace",
-    trust: "pretrusted",
+    authority,
+    trust: origin.trust ?? (authority === "project" ? "approval-required" : "pretrusted"),
     sourceId: origin.sourceId ?? contribution.contributionId ?? origin.packId ?? `marketplace:${contribution.listName}`,
     file: origin.file ?? `${origin.packName ?? "Marketplace pack"}/${origin.path ? path.basename(origin.path) : contribution.listName}`,
   };
@@ -835,7 +838,9 @@ export class McpManager {
   // ── Connection lifecycle ───────────────────────────────────────────
 
   private _getApprovalStore(): McpApprovalStore {
-    return this.approvalStore ??= new McpApprovalStore(this.stateDir ?? bobbitStateDir());
+    // Approval authority must never fall back into project-reachable runtime
+    // state. Generated docs still use stateDir; decisions default to secrets.
+    return this.approvalStore ??= new McpApprovalStore(serverSecretsDir());
   }
 
   private _definitionForGroup(group: ResolvedMcpConnectionGroup): EffectiveMcpDefinition {
@@ -847,13 +852,18 @@ export class McpManager {
       ? { required: false, state: "trusted" }
       : validationError
         ? { required: true, state: "pending" }
-        : this._getApprovalStore().classify({
-          projectId: origin.projectId,
-          sourceId,
-          serverName: group.serverName,
-          trust,
-          config: group.config,
-        });
+        : (() => {
+          const classified = this._getApprovalStore().classify({
+            projectId: origin.projectId,
+            sourceId,
+            serverName: group.serverName,
+            trust,
+            config: group.config,
+          });
+          return origin.marketplaceAttestationChanged && classified.state === "pending"
+            ? { ...classified, state: "changed" as const }
+            : classified;
+        })();
     return {
       name: group.serverName,
       config: group.config,
