@@ -271,7 +271,13 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		const remote = await startRecordingMcpServer("trusted_local_probe");
 		let local: RunningGateway | undefined;
 		try {
-			local = await bootGateway("", "127.0.0.1", false, { serveStatic: false });
+			// execGh still follows the latest gateway constructed in this process. Reuse
+			// the fork gateway runner so this nested auth fixture cannot retarget later
+			// shared-gateway route tests away from their injected command seam.
+			local = await bootGateway("", "127.0.0.1", false, {
+				serveStatic: false,
+				commandRunner: (gateway.sessionManager as any).commandRunner,
+			});
 			expect(local.gateway.trustedLocal).toBe(true);
 			const projectRoot = path.join(local.root, "trusted-local-project");
 			mkdirSync(projectRoot, { recursive: true });
