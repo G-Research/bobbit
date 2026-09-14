@@ -11,16 +11,15 @@ Changing tool-call policy cannot bypass startup approval. Pending, rejected, cha
 
 ## Review and decide
 
-When the currently relevant project has definitions to review, Bobbit shows a compact banner with the pending count and a **Review servers** action. The count includes **Pending approval** and **Configuration changed — review again** definitions. Rejected definitions remain in the management view but do not keep the banner open.
+When the currently relevant project has definitions to review, Bobbit shows a compact banner with the pending count and a **Review servers** action. The count includes **Pending approval** and **Configuration changed — review again** definitions. Rejected definitions remain in the management view but do not keep the banner open. Periodic reconciliation keeps the last confirmed banner state while a refresh is unresolved; explicit decision or configuration invalidation clears the affected cached count, fences older responses, and refetches current state.
 
 Use **Tools → MCP** to manage definitions:
 
 1. Select the project whose MCP view you want to inspect. A **Review servers** action opened from a session or goal retains that owner's execution scope, so Tools reviews the same worktree definition as the runtime; opening Tools directly reviews the registered project root.
-2. If the browser is not paired, enter the current MCP pairing code from the gateway terminal and choose **Pair browser**.
-3. Expand one server row. Review the introducing project and logical source file, transport, command and arguments or remote URL, working directory, environment/header names, and fingerprint.
-4. Choose **Approve**, **Reject**, or, after a prior decision, **Approve current configuration**. There is intentionally no approve-all action.
+2. Expand one server row. Review the introducing project and logical source file, transport, command and arguments or remote URL, working directory, environment/header names, and fingerprint.
+3. Choose **Approve**, **Reject**, or, after a prior decision, **Approve current configuration**. There is intentionally no approve-all action.
 
-Pairing authorizes the browser; it does not approve a server. Decisions remain deliberate and per-server.
+Decisions use the browser's existing gateway authentication and remain deliberate and per-server.
 
 The row reports startup trust independently from connection health:
 
@@ -30,22 +29,23 @@ The row reports startup trust independently from connection health:
 
 Rejection is reversible. Rejecting a running server disconnects it and removes its routes and external tools; approving the currently displayed definition makes it eligible again without a gateway restart.
 
-## Pairing requires terminal-code possession
+## Who can decide
 
-A normal gateway bearer token or browser session cookie is not enough to approve project MCP startup. Repository-controlled agents can possess those general admission credentials, so approval mutations require a separate, purpose-bound capability. Pairing proves possession of the current terminal code; the resulting bearer credential is not bound to a particular person, browser, or device.
+Approval and rejection use Bobbit's established gateway authentication. Any of these normal control-plane contexts can decide an exact current definition:
 
-At gateway startup, the terminal prints an MCP pairing code. The code:
+- a valid admin bearer or query token;
+- a genuine signed `bobbit_session` cookie; or
+- credential-free trusted-local admission.
 
-- is single-use and expires after ten minutes;
-- is held by the gateway only as an in-memory digest;
-- is replaced when the gateway creates a newer code; and
-- is rate-limited by remote address after repeated failed attempts.
+Direct, non-sandbox agents intentionally receive the admin `BOBBIT_TOKEN` and therefore have the same decision authority. Approval is not a human-only capability.
 
-`POST /api/mcp-operator/pair` exchanges the current code for an opaque operator credential. Pairing a browser replaces the gateway's previous operator credential, so an older paired browser can no longer make decisions. The gateway persists only the credential ID and a one-way verifier—not the code, credential secret, or complete credential.
+Trusted-local authority requires both an admitted all-loopback gateway policy and an actual loopback socket peer. Bobbit recognizes IPv4 `127/8`, IPv6 `::1`, and IPv4-mapped loopback peers. A remote or container client cannot gain credential-free authority by spoofing `Host: localhost`; the same peer-bound rule protects API requests, preview/cookie bootstrap, and WebSocket admission.
 
-The UI stores the complete credential per normalized gateway base URL in browser local storage and keeps an in-memory copy for the current tab. Pair only a trusted browser profile: same-origin script can read local storage, and anyone holding the credential can submit decisions. If local storage is unavailable, the tab remains paired and shows a warning, but it must be paired again after reload. A rejected or obsolete credential is forgotten for that gateway.
+Sandbox agents receive only project-scoped gateway tokens. The MCP approval route is outside the sandbox allowlist, so a sandbox-token request returns 403 before request-body parsing, manager creation, ledger mutation, process spawn, or remote contact. A selected sandbox credential keeps that scope even on a genuine loopback connection.
 
-The browser sends the credential only as `X-Bobbit-Mcp-Operator` on an approval or rejection request. It is not attached to pairing, status, or generic API requests. This narrow use prevents a general Bobbit credential from becoming MCP approval authority. Repository previews are also opaque-origin sandboxed frames: they cannot read the parent document, browser storage, operator credential, or pairing controls. See [Preview architecture](preview-architecture.md#security-boundary).
+Docker Desktop and similar host-gateway proxies can make container traffic appear to arrive from loopback. To keep that ambiguity from granting sandbox code credential-free control, Bobbit refuses sandbox creation, restoration, revival, respawn, and replacement before side effects whenever credential-free trusted-local control is enabled. Restart Bobbit with `--auth` before using sandboxed agents. Authenticated sandboxes continue to receive server-minted scoped tokens, and configured sandbox credentials cannot override `BOBBIT_TOKEN` in any casing.
+
+Repository previews remain opaque-origin sandboxed documents. They cannot read the parent document or application storage, and their preview-only cookie cannot authorize API or MCP decisions. See [Preview architecture](preview-architecture.md#security-boundary).
 
 ## Which sources require approval
 
@@ -137,9 +137,10 @@ The hash keeps gateways with different Headquarters directories in separate stab
 The private root contains:
 
 - `mcp-approvals/mcp-server-approvals.json` — exact approval/rejection decisions;
-- `mcp-approvals/mcp-server-approval.key` — approval fingerprint HMAC key;
-- `mcp-operator-authorization.json` — operator credential ID and verifier; and
+- `mcp-approvals/mcp-server-approval.key` — approval fingerprint HMAC key; and
 - `marketplace-mcp-install-attestations.json` — exact project Marketplace install attestations.
+
+Upgrades best-effort remove the retired browser key `mcp.operator.credentials.v1` without changing `gateway.url` or `gateway.token`. A historical `serverSecretsDir()/mcp-operator-authorization.json` file contains only an obsolete ID/verifier and is no longer read. Bobbit deliberately does not auto-unlink it because automatic filesystem cleanup would add path, race, and symlink risk; an operator may delete it manually.
 
 The decision ledger stores only schema, project/source/server identity, opaque fingerprint, decision, and timestamp. The Marketplace ledger likewise stores identities, fingerprints, and timestamps rather than raw MCP configuration. On POSIX systems new authority files are opened with mode `0600` and private directories request mode `0700`; some permission tightening is best-effort, so operators should also enforce appropriate ownership and parent-directory permissions. On Windows the files remain under the selected user's application-data boundary and inherit its access controls. Writes use exclusive temporary files, flush data, and publish by atomic rename.
 
@@ -180,20 +181,7 @@ If the source changes or disappears during one of those windows, Bobbit disconne
 
 ## Status and approval API
 
-These endpoints still require normal gateway admission unless trusted-local admission applies. `X-Bobbit-Mcp-Operator` is an additional credential required only for approval mutations.
-
-### Pair a browser
-
-```http
-POST /api/mcp-operator/pair
-Content-Type: application/json
-
-{
-  "code": "<current terminal pairing code>"
-}
-```
-
-A successful response contains an opaque `credential`. Pairing responses use `Cache-Control: no-store`. Invalid, expired, consumed, or replaced codes return `MCP_OPERATOR_PAIRING_REQUIRED`; temporary rate limiting returns `MCP_OPERATOR_PAIRING_RATE_LIMITED`; a verifier persistence failure returns `MCP_OPERATOR_PERSIST_FAILED`.
+These endpoints require normal gateway admission and authentication. An admin bearer/query token, genuine signed `bobbit_session`, or peer-bound trusted-local admission can make a decision; a sandbox-scoped credential cannot.
 
 ### Read status
 
@@ -205,14 +193,14 @@ A successful response contains an opaque `credential`. Pairing responses use `Ca
 - `diagnostics`: actionable startup-trust codes independent of connection health; and
 - redacted owner contribution data for grouped Marketplace runtimes.
 
-Reading status does not require or receive the MCP operator credential.
+Reading status uses the same normal gateway admission and authentication as the surrounding API.
 
 ### Submit one decision
 
 ```http
 POST /api/mcp-servers/<server>/approval?projectId=<view-project>[&sessionId=<owner>&cwd=<displayed-cwd>]
+Authorization: Bearer <admin-token>
 Content-Type: application/json
-X-Bobbit-Mcp-Operator: <paired operator credential>
 
 {
   "decision": "approved",
@@ -222,7 +210,7 @@ X-Bobbit-Mcp-Operator: <paired operator credential>
 }
 ```
 
-`decision` may be `approved` or `rejected`. The server freshly validates operator capability, registered project scope, introducing source, configuration validity, and fingerprint before persisting. It then reloads active managers and validates the current winner again. A stale source or fingerprint returns HTTP 409 with `MCP_APPROVAL_STALE` and, when available, current safe server status. A pretrusted source returns HTTP 422 with `MCP_APPROVAL_NOT_REQUIRED`; an invalid definition returns HTTP 422 with `MCP_CONFIG_INVALID`.
+The `Authorization` header is for remote or programmatic requests; signed-cookie and trusted-local callers omit it. `decision` may be `approved` or `rejected`. Global authentication and sandbox denial happen before the handler. The server then freshly validates registered project and owner/CWD scope, introducing source, configuration validity, and fingerprint before persisting. It reloads active managers and validates the current winner again. A stale source or fingerprint returns HTTP 409 with `MCP_APPROVAL_STALE` and, when available, current safe server status. A pretrusted source returns HTTP 422 with `MCP_APPROVAL_NOT_REQUIRED`; an invalid definition returns HTTP 422 with `MCP_CONFIG_INVALID`.
 
 ## Troubleshooting
 
@@ -230,12 +218,9 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 
 | State or symptom | Diagnostic | Safe recovery |
 |---|---|---|
-| Browser is not paired | `MCP_APPROVAL_HUMAN_REQUIRED` (HTTP 403) | Copy the current code from the gateway terminal into **Tools → MCP**. A normal cookie or bearer token cannot authorize the decision. |
-| Pairing code is invalid, expired, already used, or replaced | `MCP_OPERATOR_PAIRING_REQUIRED` (HTTP 403) | Use the latest code printed by the current gateway process. Restart the gateway to print a fresh code if the terminal code expired. |
-| Too many failed pairing attempts | `MCP_OPERATOR_PAIRING_RATE_LIMITED` (HTTP 429) | Wait briefly for the per-address failure window to clear, then use the current code. |
-| Pairing authorization could not be saved by the gateway | `MCP_OPERATOR_PERSIST_FAILED` (HTTP 500) | Check ownership, permissions, and free space for the server secrets directory, then retry pairing. The old credential remains authoritative when replacement publication fails. |
-| Browser says pairing could not be saved | Browser storage warning | The current tab can decide servers. Enable local storage or pair again after reloading; credentials are scoped by gateway base URL. |
-| A formerly paired browser receives `MCP_APPROVAL_HUMAN_REQUIRED` | Approval credential was replaced, malformed, or no longer matches the gateway | Pair again with the current terminal code. Pairing another browser intentionally invalidates the old credential. |
+| Decision request is unauthenticated | HTTP 401 | Authenticate with the normal admin bearer/query token, use the signed same-origin UI cookie, or connect through the peer-bound trusted-local mode. |
+| Sandboxed agent receives HTTP 403 on a decision | The selected sandbox credential is correctly confined by the route allowlist | Review the definition from the authenticated UI or a direct/admin context. Do not widen the sandbox allowlist. |
+| Sandboxed session cannot start or restore in credential-free local mode | `Sandboxed agents require gateway authentication` | Restart Bobbit with `--auth`, then retry. This guard prevents Docker host-gateway proxying from turning sandbox traffic into trusted-local control. |
 | **Pending approval** / **Not started** | `MCP_APPROVAL_PENDING` | Open **Review servers** or **Tools → MCP**, inspect the current definition, then approve or reject that server. |
 | **Rejected** / **Not started** | `MCP_APPROVAL_REJECTED` | Expand the row and choose **Approve current configuration** if it is now trusted. |
 | **Configuration changed — review again** / **Not started** | `MCP_APPROVAL_CHANGED` | Review all currently displayed behavior and decide the new fingerprint. An old decision or Marketplace attestation cannot authorize changed behavior. |
@@ -252,5 +237,5 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 | Bobbit cannot remove decisions that no longer match the key | `MCP_APPROVAL_LEDGER_RESET_FAILED` | Restore write/delete access to the private `mcp-approvals` directory, then make fresh per-server decisions. Unauthenticated old rows do not authorize current fingerprints. |
 | Marketplace attestation ledger is corrupt | `MARKETPLACE_MCP_ATTESTATION_INVALID` in gateway logs | Repair private storage, then reinstall/update the affected project Marketplace pack. Corrupt attestations fail closed and their contents are not logged. |
 | Marketplace attestation could not be published | `MARKETPLACE_MCP_ATTESTATION_PERSIST_FAILED` | Check private storage ownership, permissions, and free space, then retry the install/update. Bobbit does not report the installation as successfully pretrusted. |
-| Old approvals under Headquarters state are ignored after upgrade | No private matching decision exists | This is intentional. Pair the browser and review each project server again; never copy the old repository-reachable key or ledger into private storage. |
+| Old approvals under Headquarters state are ignored after upgrade | No private matching decision exists | This is intentional. Review each project server again in **Tools → MCP**; never copy the old repository-reachable key or ledger into private storage. |
 | Private storage is inside a project after customization | `BOBBIT_SECRETS_DIR` points into a registered root or agent workspace | Move the override to an owner-controlled location outside all projects before making decisions. `BOBBIT_DIR` is not a substitute for the private secrets override. |

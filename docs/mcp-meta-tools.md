@@ -74,8 +74,10 @@ Project-controlled servers publish neither a meta-tool nor discoverable schemas
 until their exact current definition has startup approval. Pending, rejected,
 changed, and invalid servers are not started or contacted, so a model cannot use
 `mcp_describe`, a generated proxy, or an internal call to cross the startup gate.
-Approval is a private operator action, not a model-facing operation; the later
-`Allow` / `Ask` / `Never` policy still governs calls after startup. See
+Approval is a gateway control-plane action, not a model-facing MCP operation;
+direct agents with the admin credential may decide, while sandbox-scoped callers
+remain denied. The later `Allow` / `Ask` / `Never` policy still governs calls
+after startup. See
 [MCP server startup approvals](mcp-server-approvals.md).
 
 ## What stays the same
@@ -254,14 +256,17 @@ startup label (**Pending approval**, **Approved**, **Rejected**, or
 **Configuration changed — review again**) is distinct from connection health
 and from the **Tool calls** policy.
 
-Approve/Reject actions require the dedicated MCP operator credential obtained
-from the one-use code printed in the gateway terminal. A normal gateway cookie,
-bearer token, agent session secret, or model tool cannot make a decision. The
-credential is sent only on that mutation, and opaque-origin repository previews
-cannot read it from the host application's browser storage. Session/goal review
-links also retain their validated worktree owner scope so the row describes the
-same definition that runtime would publish. See [MCP server startup approvals](mcp-server-approvals.md)
-for pairing, review flow, and safe metadata contracts.
+Approve/Reject actions use the active connection's normal gateway authentication:
+an admin bearer/query token, genuine signed `bobbit_session`, or peer-bound
+trusted-local admission. Direct, non-sandbox agents intentionally receive the
+admin `BOBBIT_TOKEN` and can decide. Sandbox-scoped tokens cannot reach the
+approval route, and Bobbit refuses sandbox startup in credential-free trusted-local
+mode because Docker host-gateway proxying can obscure the real container peer.
+Opaque-origin repository previews cannot read or spend application credentials.
+Session/goal review links also retain their validated worktree owner scope so the
+row describes the same definition that runtime would publish. See
+[MCP server startup approvals](mcp-server-approvals.md) for the authority, review,
+and safe-metadata contracts.
 
 Each server row mirrors a built-in tool group:
 
