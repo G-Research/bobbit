@@ -57,6 +57,19 @@ describe("MCP runtime error redaction", () => {
 		}
 	});
 
+	it("redacts the complete private snapshot root independently of a configured subdirectory cwd", () => {
+		const privateRoot = process.platform === "win32"
+			? "C:\\private\\marketplace-snapshots\\snapshot-id"
+			: "/private/marketplace-snapshots/snapshot-id";
+		const cwd = `${privateRoot}${process.platform === "win32" ? "\\" : "/"}work`;
+		const message = `${privateRoot}${process.platform === "win32" ? "\\" : "/"}server.mjs failed from ${cwd}`;
+		const safe = sanitizeMcpRuntimeError(message, { command: "node", cwd }, [privateRoot]);
+
+		expect(safe).toContain("server.mjs failed");
+		expect(safe).not.toContain(privateRoot);
+		expect(safe).not.toContain("snapshot-id");
+	});
+
 	it.each(["connect", "list"] as const)("sanitizes %s failures before logs and status DTOs", async (stage) => {
 		process.env[EXPANDED_ENV_NAME] = EXPANDED_SECRET;
 		const config: McpServerConfig = {
@@ -84,5 +97,44 @@ describe("MCP runtime error redaction", () => {
 		expect(status.error).toContain(`${stage} rejected`);
 		expect(JSON.stringify(status)).not.toContain(EXPANDED_SECRET);
 		expect(JSON.stringify(errorLog.mock.calls)).not.toContain(EXPANDED_SECRET);
+	});
+
+	it("carries private snapshot roots through mixed-separator manager diagnostics without exposing them", async () => {
+		const privateRoot = "C:\\Private\\marketplace-snapshots\\Snapshot-Id";
+		const mixedPrivateRoot = "c:/private\\MARKETPLACE-snapshots/snapshot-id";
+		const config: McpServerConfig = { command: "node", cwd: `${mixedPrivateRoot}\\work` };
+		class StubClient extends McpClient {
+			override async connect(): Promise<void> {
+				throw new Error(`module not found at ${mixedPrivateRoot}\\server.mjs`);
+			}
+			override async disconnect(): Promise<void> {}
+		}
+		class TestManager extends McpManager {
+			protected override _createClient(name: string): McpClient { return new StubClient(name); }
+		}
+		const manager = new TestManager(process.cwd(), undefined, undefined, {
+			marketplaceResolver: () => [{
+				listName: "snapshot",
+				serverName: "snapshot",
+				config,
+				origin: {
+					scope: "project",
+					authority: "marketplace",
+					trust: "pretrusted",
+					sourceId: "snapshot-source",
+					runtimePrivatePackRoot: privateRoot,
+					reviewPackRoot: ".bobbit/config/market-packs/snapshot",
+				},
+			}],
+		});
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+
+		const serialized = JSON.stringify(manager.getServerStatuses());
+		expect(serialized).toContain("module not found");
+		expect(serialized).not.toContain(privateRoot);
+		expect(serialized.toLowerCase()).not.toContain("snapshot-id");
+		expect(JSON.stringify(errorLog.mock.calls).toLowerCase()).not.toContain("snapshot-id");
 	});
 });

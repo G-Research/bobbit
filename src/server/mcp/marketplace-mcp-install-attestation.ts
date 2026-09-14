@@ -82,6 +82,14 @@ export class MarketplaceMcpPackIntegrityError extends Error {
 	}
 }
 
+export class MarketplaceMcpSnapshotPublicationError extends Error {
+	readonly code = "MARKETPLACE_MCP_SNAPSHOT_PUBLISH_FAILED";
+	constructor() {
+		super("Could not publish the Marketplace MCP install snapshot.");
+		this.name = "MarketplaceMcpSnapshotPublicationError";
+	}
+}
+
 function integrityFailure(): never {
 	throw new MarketplaceMcpPackIntegrityError();
 }
@@ -578,6 +586,25 @@ export class MarketplaceMcpInstallAttestationStore {
 
 	/** Publish a complete private snapshot, then atomically replace one logical project's pack rows. */
 	replacePack(
+		projectId: string,
+		sourceId: string,
+		packName: string,
+		packRoot: string,
+		expectedPackIntegrity?: string,
+	): string {
+		try {
+			return this.replacePackSnapshot(projectId, sourceId, packName, packRoot, expectedPackIntegrity);
+		} catch (error) {
+			const code = (error as { code?: unknown })?.code;
+			if (error instanceof MarketplaceMcpPackIntegrityError
+				|| code === "MARKETPLACE_MCP_SNAPSHOT_INVALID"
+				|| code === "MARKETPLACE_MCP_ATTESTATION_KEY_UNAVAILABLE"
+				|| code === "MARKETPLACE_MCP_ATTESTATION_PERSIST_FAILED") throw error;
+			throw new MarketplaceMcpSnapshotPublicationError();
+		}
+	}
+
+	private replacePackSnapshot(
 		projectId: string,
 		sourceId: string,
 		packName: string,

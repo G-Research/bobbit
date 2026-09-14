@@ -17,6 +17,8 @@ fs.mkdirSync(process.env.HOME, { recursive: true });
 
 const { McpManager } = await import("../../../src/server/mcp/mcp-manager.ts");
 const { McpApprovalStore } = await import("../../../src/server/mcp/mcp-approval-store.ts");
+const { measureMarketplaceMcpPackIntegrity } = await import("../../../src/server/mcp/marketplace-mcp-install-attestation.ts");
+const { snapshotBackedMcpConfig } = await import("../../../src/server/mcp/marketplace-mcp-snapshot-config.ts");
 
 const temporaryRoots: string[] = [];
 afterEach(() => {
@@ -30,19 +32,23 @@ class StubMcpClient {
 	disconnectCount = 0;
 	listToolsCount = 0;
 	callCount = 0;
+	lastConfig?: McpServerConfig;
 
 	constructor(
 		readonly name: string,
 		private readonly options: {
 			tools?: McpToolDef[];
 			connectGate?: Promise<void>;
+			connectImpl?: (config: McpServerConfig) => void | Promise<void>;
 			disconnectGate?: Promise<void>;
 			listToolsGate?: Promise<void>;
 		} = {},
 	) {}
 
-	async connect(_config: McpServerConfig): Promise<void> {
+	async connect(config: McpServerConfig): Promise<void> {
 		this.connectCount += 1;
+		this.lastConfig = config;
+		if (this.options.connectImpl) await this.options.connectImpl(config);
 		if (this.options.connectGate) await this.options.connectGate;
 		this.connected = true;
 	}
@@ -77,11 +83,13 @@ class TestMcpManager extends (McpManager as any) {
 			approvalStore?: InstanceType<typeof McpApprovalStore>;
 			marketplaceResolver?: MarketplaceMcpResolver;
 		} = {},
+		private readonly beforeCreate?: () => void,
 	) {
 		super(cwd, undefined, stateDir, opts);
 	}
 
 	protected _createClient(name: string): any {
+		this.beforeCreate?.();
 		this.createCount += 1;
 		const stub = this.stubs.get(name);
 		if (!stub) throw new Error(`Unexpected client creation for ${name}`);
@@ -310,6 +318,59 @@ describe("MCP approval lifecycle gate", () => {
 		assert.equal(stub.connectCount, 1);
 		assert.equal(manager.getServerStatuses()[0].approval.state, "trusted");
 		assert.equal(manager.getServerStatuses()[0].approval.required, false);
+	});
+
+	it("uses snapshot bytes when the live alias changes after final eligibility and before connect", async () => {
+		const { root, cwd, stateDir } = temporaryCase();
+		const livePack = path.join(root, "market-packs", "trusted-pack");
+		const snapshotPack = path.join(root, "private-snapshot");
+		fs.mkdirSync(livePack, { recursive: true });
+		fs.mkdirSync(snapshotPack, { recursive: true });
+		const fixtureScript = path.resolve(process.cwd(), "tests", "fixtures", "mock-mcp-server.mjs");
+		const liveScript = path.join(livePack, "server.mjs");
+		const snapshotScript = path.join(snapshotPack, "server.mjs");
+		const maliciousMarker = path.join(root, "malicious-live-spawned");
+		fs.copyFileSync(fixtureScript, liveScript);
+		fs.copyFileSync(fixtureScript, snapshotScript);
+		const initialIntegrity = measureMarketplaceMcpPackIntegrity(livePack);
+		const aliasedLiveScript = `${path.dirname(livePack)}${path.sep}.${path.sep}${path.basename(livePack)}${path.sep}server.mjs`;
+		const runtimeConfig = snapshotBackedMcpConfig({ command: process.execPath, args: [aliasedLiveScript] }, livePack, snapshotPack);
+		const resolver: MarketplaceMcpResolver = () => {
+			const unchanged = measureMarketplaceMcpPackIntegrity(livePack) === initialIntegrity;
+			return [{
+				listName: "installed",
+				serverName: "installed",
+				config: unchanged ? runtimeConfig : { command: process.execPath, args: [liveScript] },
+				origin: unchanged
+					? { scope: "project", authority: "marketplace", trust: "pretrusted", sourceId: "installed", runtimePrivatePackRoot: snapshotPack }
+					: { scope: "project", authority: "project", trust: "approval-required", sourceId: "installed", projectId: "project-1", marketplaceAttestationChanged: true },
+			}];
+		};
+		let observedRuntimeBytes = "";
+		const stub = new StubMcpClient("installed", {
+			connectImpl: (config) => {
+				observedRuntimeBytes = fs.readFileSync(config.args![0]!, "utf8");
+				if (observedRuntimeBytes.includes("malicious-live-spawned")) fs.writeFileSync(maliciousMarker, "spawned");
+			},
+		});
+		let mutated = false;
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["installed", stub]]), {
+			projectId: "project-1",
+			marketplaceResolver: resolver,
+		}, () => {
+			if (mutated) return;
+			mutated = true;
+			fs.writeFileSync(liveScript, "malicious-live-spawned");
+		}) as any;
+
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+
+		assert.equal(observedRuntimeBytes.includes("malicious-live-spawned"), false);
+		assert.equal(stub.lastConfig?.args?.[0], snapshotScript);
+		assert.equal(fs.existsSync(maliciousMarker), false, "mutable live bytes must never be observed at connect");
+		assert.equal(stub.disconnectCount, 1, "the post-connect freshness check revokes changed live content");
+		assert.equal(stub.listToolsCount, 0);
+		assert.equal(manager.getServerStatuses()[0].approval.state, "changed");
 	});
 
 	it("revalidates after forced disconnect and never creates or connects a stale replacement", async () => {
