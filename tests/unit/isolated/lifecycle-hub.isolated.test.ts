@@ -28,6 +28,7 @@ import type { PackContributionRegistry } from "../../../src/server/extension-hos
 import { ModuleHost } from "../../../src/server/extension-host/module-host-worker.ts";
 import { createServerHostApi } from "../../../src/server/extension-host/server-host-api.ts";
 import { createPackStore } from "../../../src/server/extension-host/pack-store.ts";
+import { SandboxTokenStore } from "../../../src/server/auth/sandbox-token.ts";
 
 function tmpDir(): string {
 	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "lifecycle-hub-")));
@@ -68,26 +69,17 @@ function base(tmp: string, sessionId = "sess-1"): Omit<HookCtx, "budget" | "conf
 }
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
-const TEST_ADMIN_TOKEN = "a".repeat(64);
 
-function seedAdminToken(stateRoot: string): () => void {
+function seedGatewayState(stateRoot: string): () => void {
 	const stateDir = path.join(stateRoot, "state");
-	const secretsDir = path.join(stateRoot, "secrets");
 	fs.mkdirSync(stateDir, { recursive: true });
-	fs.mkdirSync(secretsDir, { recursive: true });
 	fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-	fs.writeFileSync(path.join(stateDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
-	fs.writeFileSync(path.join(secretsDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
 
 	const previousBobbitDir = process.env.BOBBIT_DIR;
-	const previousSecretsDir = process.env.BOBBIT_SECRETS_DIR;
 	process.env.BOBBIT_DIR = stateRoot;
-	process.env.BOBBIT_SECRETS_DIR = secretsDir;
 	return () => {
 		if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 		else process.env.BOBBIT_DIR = previousBobbitDir;
-		if (previousSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
-		else process.env.BOBBIT_SECRETS_DIR = previousSecretsDir;
 	};
 }
 
@@ -345,7 +337,7 @@ describe("LifecycleHub", () => {
 		const providerRoot = path.join(stateRoot, "provider");
 		fs.mkdirSync(hostWorktree, { recursive: true });
 		fs.mkdirSync(providerRoot, { recursive: true });
-		const restoreEnv = seedAdminToken(stateRoot);
+		const restoreEnv = seedGatewayState(stateRoot);
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
 		const marker = ".goal-provisioned-marker.json";
 
@@ -357,7 +349,8 @@ describe("LifecycleHub", () => {
 			};
 			manager.preferencesStore = undefined;
 			manager.projectContextManager = null;
-			manager.sandboxTokenStore = null;
+			const sandboxTokenStore = new SandboxTokenStore();
+			manager.sandboxTokenStore = sandboxTokenStore;
 			manager.sandboxManager = {
 				ensureForProject: async () => {},
 				get: () => ({
@@ -396,6 +389,11 @@ describe("LifecycleHub", () => {
 			});
 			assert.equal(ok, true);
 			assert.equal(bridgeOptions.cwd, CONTAINER_WORKTREE, "agent runtime cwd remains container-internal");
+			const tokenScope = sandboxTokenStore.lookup(bridgeOptions.gatewayToken);
+			assert.ok(tokenScope, "sandbox gateway token must be registered by scoped authority");
+			assert.equal(tokenScope.projectId, "proj-1", "sandbox receives a project-scoped token");
+			assert.deepEqual([...tokenScope.sessionIds], ["sess-fs"]);
+			assert.deepEqual([...tokenScope.goalIds], ["goal-g1"]);
 
 			const markerPath = path.join(hostWorktree, marker);
 			assert.ok(fs.existsSync(markerPath), `marker must be written into the host worktree (${markerPath})`);
