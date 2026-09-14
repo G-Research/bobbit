@@ -1191,7 +1191,11 @@ function resolveMcpContributionFile(dir: string, listName: string): string {
 }
 
 /** Load `mcp/<name>.yaml|json` ONLY for names listed in contents.mcp[]. */
-export function loadMcpContributions(packRoot: string, manifest: PackManifest): McpPackContribution[] {
+export function loadMcpContributions(
+	packRoot: string,
+	manifest: PackManifest,
+	options: { silent?: boolean } = {},
+): McpPackContribution[] {
 	if ((manifest.schema ?? 1) < 2) return [];
 	const listNames = manifest.contents.mcp ?? [];
 	const dir = path.join(packRoot, "mcp");
@@ -1200,7 +1204,7 @@ export function loadMcpContributions(packRoot: string, manifest: PackManifest): 
 	for (const listName of listNames) {
 		if (typeof listName !== "string" || listName.length === 0) continue;
 		if (!isSafeMcpListName(listName)) {
-			console.warn(`[pack-contributions] MCP listName ${JSON.stringify(listName)} is not a safe MCP basename; skipping`);
+			if (!options.silent) console.warn(`[pack-contributions] MCP listName ${JSON.stringify(listName)} is not a safe MCP basename; skipping`);
 			continue;
 		}
 		if (seenListName.has(listName)) {
@@ -1211,7 +1215,7 @@ export function loadMcpContributions(packRoot: string, manifest: PackManifest): 
 		seenListName.add(listName);
 		const sourceFile = resolveMcpContributionFile(dir, listName);
 		if (!isPackPathWithinRoot(dir, sourceFile)) {
-			console.warn(`[pack-contributions] MCP '${listName}' resolves outside mcp/ (${sourceFile}); skipping`);
+			if (!options.silent) console.warn(`[pack-contributions] MCP '${listName}' resolves outside mcp/ (${sourceFile}); skipping`);
 			continue;
 		}
 		let data: unknown;
@@ -1219,7 +1223,7 @@ export function loadMcpContributions(packRoot: string, manifest: PackManifest): 
 			data = readMcpContributionFile(sourceFile);
 			out.push(normalizeMcpContribution(data, { listName, sourceFile, packRoot }));
 		} catch (err) {
-			console.warn(`[pack-contributions] skipping missing/malformed MCP '${listName}' (${sourceFile}): ${String(err)}`);
+			if (!options.silent) console.warn(`[pack-contributions] skipping missing/malformed MCP '${listName}' (${sourceFile}): ${String(err)}`);
 			continue;
 		}
 	}

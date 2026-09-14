@@ -747,6 +747,7 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpManager, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { McpServerConfig } from "./mcp/mcp-types.js";
 import {
 	MarketplaceMcpInstallAttestationStore,
 	measureMarketplaceMcpPackIntegrity,
@@ -3026,7 +3027,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// pack-schema-v1 §5.2: enumerate installed market-pack ENTRIES (low→high,
 	// deduped-on-path) for a project — the registry collapses to the winning pack
 	// per packId before indexing.
-	const marketPackEntriesForProject = (projectId?: string): PackEntry[] => {
+	const marketPackEntriesForProject = (projectId?: string, applyActivation = true): PackEntry[] => {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		const out: PackEntry[] = [];
 		const seen = new Set<string>();
@@ -3053,7 +3054,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const activation = e.manifest
 					? packActivationStore(scope, effectiveProjectId)?.getPackActivation(scope, e.manifest.name)
 					: undefined;
-				if (!isPackEffectivelyEnabled(e.manifest, activation)) continue;
+				if (applyActivation && !isPackEffectivelyEnabled(e.manifest, activation)) continue;
 				const key = path.resolve(e.path);
 				if (seen.has(key)) continue;
 				seen.add(key);
@@ -3062,32 +3063,98 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
+	const snapshotBackedMcpConfig = (
+		config: McpServerConfig,
+		repositoryPackRoot: string,
+		snapshotPackRoot: string,
+	): McpServerConfig => {
+		if (!config.command) return config;
+		const rebasePackPathReferences = (value: string): string => {
+			let rebased = value;
+			const roots = [
+				[repositoryPackRoot, snapshotPackRoot],
+				[repositoryPackRoot.replace(/\\/g, "/"), snapshotPackRoot.replace(/\\/g, "/")],
+			] as const;
+			for (const [liveRoot, privateRoot] of roots) {
+				if (!liveRoot) continue;
+				rebased = process.platform === "win32"
+					? rebased.replace(new RegExp(liveRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), privateRoot)
+					: rebased.split(liveRoot).join(privateRoot);
+			}
+			return rebased;
+		};
+		return {
+			...config,
+			command: rebasePackPathReferences(config.command),
+			...(config.args ? { args: config.args.map(rebasePackPathReferences) } : {}),
+			...(config.env ? { env: Object.fromEntries(Object.entries(config.env)
+				.map(([name, value]) => [name, rebasePackPathReferences(value)])) } : {}),
+			cwd: config.cwd ?? snapshotPackRoot,
+		};
+	};
+
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
-		for (const entry of marketPackEntriesForProject(projectId)) {
-			if (entry.scope === "builtin" || !entry.manifest || (entry.manifest.contents.mcp ?? []).length === 0) continue;
-			const store = packActivationStore(entry.scope, projectId);
-			const activation = store?.getPackActivation(entry.scope as PackOrderScope, entry.manifest.name) ?? {};
-			const disabled = new Set(activation.mcp ?? []);
-			const disabledOperations = activation.mcpOperations ?? {};
-			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
-			const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
-			const installSourceId = safeString(metaDetails.sourceId) ?? entry.meta?.sourceId ?? fallbackSourceId;
-			const projectRecord = entry.scope === "project" && projectId ? projectRegistry.get(projectId) : undefined;
+		// MCP activation is reapplied below after a project installation has been
+		// rebound to its immutable snapshot manifest. Repository-cached manifest
+		// bytes must not select an activation identity for a pretrusted runtime.
+		for (const repositoryEntry of marketPackEntriesForProject(projectId, false)) {
+			if (repositoryEntry.scope === "builtin" || !repositoryEntry.manifest) continue;
+			if (repositoryEntry.scope !== "project" && (repositoryEntry.manifest.contents.mcp ?? []).length === 0) continue;
+
+			let entry = repositoryEntry;
+			let metaDetails: Record<string, unknown>;
+			let loadedMcp: ReturnType<typeof loadPackContributions>["mcp"];
+			let marketplacePackIntegrity: string | undefined;
+			let marketplacePackIntegrityInvalid = false;
+			let projectAttestation: "attested" | "changed" | "missing" | "invalid" = "missing";
+			let attestedSnapshotRoot: string | undefined;
+			let attestedSourceId: string | undefined;
+
 			try {
-				const loadedMcp = loadPackContributions(entry.path, entry.manifest).mcp ?? [];
-				let marketplacePackIntegrity: string | undefined;
-				let marketplacePackIntegrityInvalid = false;
-				if (entry.scope === "project") {
+				if (repositoryEntry.scope === "project" && projectId) {
 					try {
-						marketplacePackIntegrity = measureMarketplaceMcpPackIntegrity(entry.path);
+						marketplacePackIntegrity = measureMarketplaceMcpPackIntegrity(repositoryEntry.path);
 					} catch {
 						marketplacePackIntegrityInvalid = true;
-						console.warn(`[mcp] Marketplace pack integrity validation failed for ${entry.manifest.name}`);
+						console.warn(`[mcp] Marketplace pack integrity validation failed for ${repositoryEntry.manifest.name}`);
 					}
+					const installedPackName = path.basename(repositoryEntry.path);
+					const snapshot = marketplaceMcpInstallAttestations.resolvePack(projectId, installedPackName, marketplacePackIntegrity);
+					projectAttestation = snapshot.status;
+					if (snapshot.status === "attested") {
+						attestedSnapshotRoot = snapshot.packRoot;
+						attestedSourceId = snapshot.sourceId;
+						entry = { ...repositoryEntry, path: snapshot.packRoot, manifest: snapshot.manifest, meta: snapshot.meta };
+						metaDetails = snapshot.metaDetails;
+						loadedMcp = snapshot.mcp;
+					} else {
+						if (snapshot.status === "changed") attestedSourceId = snapshot.sourceId;
+						if (snapshot.status === "invalid") marketplacePackIntegrityInvalid = true;
+						metaDetails = readYamlMapping(path.join(repositoryEntry.path, ".pack-meta.yaml")) ?? {};
+						loadedMcp = loadPackContributions(repositoryEntry.path, repositoryEntry.manifest).mcp ?? [];
+					}
+				} else {
+					metaDetails = readYamlMapping(path.join(repositoryEntry.path, ".pack-meta.yaml")) ?? {};
+					loadedMcp = loadPackContributions(repositoryEntry.path, repositoryEntry.manifest).mcp ?? [];
 				}
+
+				const manifest = entry.manifest!;
+				if (!isPackEffectivelyEnabled(manifest, packActivationStore(entry.scope, projectId)
+					?.getPackActivation(entry.scope as PackOrderScope, manifest.name))) continue;
+				const store = packActivationStore(entry.scope, projectId);
+				const activation = store?.getPackActivation(entry.scope as PackOrderScope, manifest.name) ?? {};
+				const disabled = new Set(activation.mcp ?? []);
+				const disabledOperations = activation.mcpOperations ?? {};
+				const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
+				const installSourceId = attestedSourceId ?? safeString(metaDetails.sourceId) ?? entry.meta?.sourceId ?? fallbackSourceId;
+				const projectRecord = repositoryEntry.scope === "project" && projectId ? projectRegistry.get(projectId) : undefined;
+
 				for (const mcp of loadedMcp) {
+					const runtimeConfig = attestedSnapshotRoot
+						? snapshotBackedMcpConfig(mcp.config, repositoryEntry.path, attestedSnapshotRoot)
+						: mcp.config;
 					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
 					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
 					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
@@ -3096,20 +3163,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const selectedOperations = metaDetails.sourceType === "mcp-gateway" && operationMetadata.length > 0
 						? operationMetadata.map((op) => op.name).filter((name) => !disabledOpsSet.has(name))
 						: (mcp.selectedOperations ? mcp.selectedOperations.filter((name) => !disabledOpsSet.has(name)) : undefined);
-					const projectAttestation = entry.scope === "project" && projectId && installSourceId
-						? marketplaceMcpInstallAttestations.classify({
-							projectId,
-							sourceId: installSourceId,
-							packName: entry.manifest.name,
-							contributionId: mcp.listName,
-							serverName: mcp.serverName,
-							config: mcp.config,
-							packIntegrity: marketplacePackIntegrity,
-						})
-						: "missing";
-					const projectControlled = entry.scope === "project" && projectAttestation !== "attested";
-					const fallbackFile = `.bobbit/config/market-packs/${entry.manifest.name}/mcp/${path.basename(mcp.sourceFile)}`;
-					const relativeFile = projectRecord
+					const projectControlled = repositoryEntry.scope === "project" && projectAttestation !== "attested";
+					const fallbackFile = `.bobbit/config/market-packs/${manifest.name}/mcp/${path.basename(mcp.sourceFile)}`;
+					const relativeFile = projectRecord && !attestedSnapshotRoot
 						? path.relative(projectRecord.rootPath, mcp.sourceFile).replace(/\\/g, "/")
 						: fallbackFile;
 					const sourceFile = relativeFile && relativeFile !== ".." && !relativeFile.startsWith("../")
@@ -3122,27 +3178,31 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
 						...(selectedOperations !== undefined ? { selectedOperations } : {}),
 						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
-						config: mcp.config,
+						config: runtimeConfig,
 						origin: {
-							scope: entry.scope,
+							scope: repositoryEntry.scope,
 							authority: projectControlled ? "project" : "marketplace",
 							trust: projectControlled ? "approval-required" : "pretrusted",
 							...(projectAttestation === "changed" ? { marketplaceAttestationChanged: true } : {}),
 							...(marketplacePackIntegrity ? { marketplacePackIntegrity } : {}),
 							...(marketplacePackIntegrityInvalid ? { marketplacePackIntegrityInvalid: true } : {}),
-							sourceId: `marketplace-pack:${installSourceId ?? "unattested"}:${entry.manifest.name}:${mcp.listName}`,
+							...(attestedSnapshotRoot ? {
+								runtimePrivatePackRoot: attestedSnapshotRoot,
+								reviewPackRoot: `.bobbit/config/market-packs/${manifest.name}`,
+							} : {}),
+							sourceId: `marketplace-pack:${installSourceId ?? "unattested"}:${manifest.name}:${mcp.listName}`,
 							file: sourceFile,
-							...(entry.scope === "project" && projectId ? { projectId } : {}),
+							...(repositoryEntry.scope === "project" && projectId ? { projectId } : {}),
 							...(projectRecord?.name ? { projectName: projectRecord.name } : {}),
-							packName: entry.manifest.name,
-							packId: entry.id,
+							packName: manifest.name,
+							packId: repositoryEntry.id,
 							path: mcp.sourceFile,
 							...(entry.meta?.sourceUrl ? { sourceUrl: entry.meta.sourceUrl } : {}),
 						},
 					});
 				}
-			} catch (err) {
-				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
+			} catch {
+				console.warn(`[mcp] failed to load Marketplace MCP pack ${repositoryEntry.manifest.name}`);
 			}
 		}
 		return contributions;

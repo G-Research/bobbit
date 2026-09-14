@@ -583,17 +583,11 @@ export class MarketplaceInstaller {
 			this.opts.mcpInstallAttestationStore.removePack(ctx.projectId, manifest.name);
 			return;
 		}
-		const definitions = (loadPackContributions(packRoot, manifest).mcp ?? []).map((mcp) => ({
-			contributionId: mcp.listName,
-			serverName: mcp.serverName,
-			config: mcp.config,
-		}));
 		this.opts.mcpInstallAttestationStore.replacePack(
 			ctx.projectId,
 			sourceId,
 			manifest.name,
 			packRoot,
-			definitions,
 			expectedPackIntegrity,
 		);
 	}
