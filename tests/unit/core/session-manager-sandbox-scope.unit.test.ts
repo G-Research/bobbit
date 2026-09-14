@@ -5,6 +5,7 @@ import path from "node:path";
 
 const SESSION_MANAGER = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
 const RPC_BRIDGE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/rpc-bridge.ts"), "utf-8");
+const SERVER = fs.readFileSync(path.join(process.cwd(), "src/server/server.ts"), "utf-8");
 
 function methodBody(name: string, isAsync = true): string {
 	const marker = `private ${isAsync ? "async " : ""}${name}(`;
@@ -56,6 +57,39 @@ describe("session-manager sandbox scope regressions", () => {
 		assert.match(mintBody, /if \(!scopedToken\) throw new Error\("Cannot mint scoped gateway token for sandbox"\);/);
 		assert.match(wiringBody, /bridgeOptions\.gatewayToken = this\.mintScopedGatewayToken\(/);
 		assert.doesNotMatch(wiringBody, /readToken\(|adminToken/, "sandbox wiring must never read or expose the admin token");
+	});
+
+	it("credential-free trusted-local mode is compiled and installed before session restoration", () => {
+		const compileIdx = SERVER.indexOf("requestAdmissionPolicy = compileRequestAdmissionPolicy({");
+		const configureIdx = SERVER.indexOf("sessionManager.setCredentialFreeTrustedLocal(", compileIdx);
+		const restoreIdx = SERVER.indexOf("sessionManager.restoreSessions(", configureIdx);
+		assert.ok(compileIdx >= 0 && configureIdx > compileIdx && restoreIdx > configureIdx);
+		assert.match(SERVER.slice(configureIdx, restoreIdx), /!config\.forceAuth && requestAdmissionPolicy\.allAuthoritiesLoopback/);
+
+		const bootstrapIdx = SERVER.indexOf("const sandboxBootstrap: SandboxBootstrap");
+		const projectLookupIdx = SERVER.indexOf("projectRegistry.get(projectId)", bootstrapIdx);
+		assert.ok(bootstrapIdx >= 0 && projectLookupIdx > bootstrapIdx);
+		assert.match(
+			SERVER.slice(bootstrapIdx, projectLookupIdx),
+			/sessionManager\.assertSandboxStartupAllowed\(\);/,
+			"direct sandbox-manager callers must fail before bootstrap effects",
+		);
+	});
+
+	it("new, restored, revived, and replacement sandboxes share the startup guard", () => {
+		const wiringBody = methodBody("applySandboxWiring");
+		assert.match(SESSION_MANAGER, /const effectiveSandboxed = [^;]+;\s*if \(effectiveSandboxed\) this\.assertSandboxStartupAllowed\(\);/);
+		assert.match(SESSION_MANAGER, /if \(delegateSandboxed\) this\.assertSandboxStartupAllowed\(\);/);
+		assert.match(wiringBody, /this\.assertSandboxStartupAllowed\(\);/);
+
+		for (const method of ["restoreSession", "_forceAbortOwned", "_assignRoleStaged"]) {
+			assert.match(methodBody(method), /this\.applySandboxWiring\(/, `${method} must route sandbox revival through guarded wiring`);
+		}
+		assert.match(
+			methodBody("_respawnAgentInPlaceOwned"),
+			/await this\.restoreSession\(ps\);/,
+			"in-place revival must route through guarded restore wiring",
+		);
 	});
 
 	it("direct agents receive admin gateway credentials from session-manager", () => {

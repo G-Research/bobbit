@@ -19,7 +19,7 @@
  * value. The sandbox path is exercised through `applySandboxWiring` to prove
  * missing or failed scoped-token provisioning never falls back to admin.
  */
-import { describe, it, afterEach } from "vitest";
+import { describe, it, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -87,6 +87,7 @@ function configureDockerSandbox(sm: any): void {
 	sm.projectContextManager = null;
 	sm.projectConfigStore = {
 		get: (key: string) => (key === "sandbox" ? "docker" : undefined),
+		getSandboxTokens: () => [],
 	};
 	const sandbox = {
 		getContainerId: async () => "control-container",
@@ -95,6 +96,9 @@ function configureDockerSandbox(sm: any): void {
 	sm.sandboxManager = {
 		ensureForProject: async () => {},
 		get: () => sandbox,
+		ensureSessionRuntime: async (_projectId: string, sessionId: string) => `runtime-${sessionId}`,
+		isSessionRuntimeIsolated: async () => true,
+		releaseSessionRuntime: async () => {},
 	};
 }
 
@@ -108,6 +112,7 @@ describe("direct-agent admin token", () => {
 	it("scopedGatewayEnvForDirectAgent (createSession / createDelegateSession path) returns the ADMIN token", () => {
 		const h = makeHarness();
 		current = h;
+		h.sm.setCredentialFreeTrustedLocal(true);
 		const admin = readToken();
 		assert.equal(admin, TEST_ADMIN_TOKEN, "readToken() should return the seeded admin token");
 
@@ -153,6 +158,70 @@ describe("direct-agent admin token", () => {
 		const scope = h.sm.sandboxTokenStore.lookup(scoped);
 		assert.ok(scope, "scoped token must resolve to a registered scope");
 		assert.equal(scope.projectId, "proj-1");
+	});
+
+	it("credential-free trusted-local mode rejects sandbox startup before container or session effects", async () => {
+		const h = makeHarness();
+		current = h;
+		configureDockerSandbox(h.sm);
+		const ensureForProject = vi.fn(async () => {});
+		h.sm.sandboxManager.ensureForProject = ensureForProject;
+		h.sm.setCredentialFreeTrustedLocal(true);
+
+		const bridgeOptions: any = { env: {}, cwd: "/host/project" };
+		await assert.rejects(
+			h.sm.applySandboxWiring(bridgeOptions, "sess-local-no-auth", { projectId: "proj-1" }),
+			/require gateway authentication.*--auth/i,
+		);
+		assert.equal(ensureForProject.mock.calls.length, 0, "guard must run before project container initialization");
+		assert.equal(bridgeOptions.gatewayToken, undefined, "guard must run before credential minting");
+		assert.equal(bridgeOptions.containerId, undefined, "guard must run before session runtime creation");
+
+		const ensureMcp = vi.spyOn(h.sm, "ensureMcpManagerForContext");
+		await assert.rejects(
+			h.sm.createSession("/host/project", [], undefined, undefined, {
+				projectId: "proj-1",
+				sandboxed: true,
+			}),
+			/require gateway authentication.*--auth/i,
+		);
+		assert.equal(ensureMcp.mock.calls.length, 0, "new sandbox rejection must precede setup side effects");
+		assert.equal(ensureForProject.mock.calls.length, 0, "new sandbox rejection must not initialize a container");
+
+		const agentSessionFile = path.join(h.stateRoot, "state", "sandbox-restore.jsonl");
+		fs.writeFileSync(agentSessionFile, '{"type":"init"}\n');
+		const persisted: any = {
+			id: "sess-restore-local-no-auth",
+			title: "Blocked restore",
+			cwd: "/workspace",
+			agentSessionFile,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			sandboxed: true,
+			projectId: "proj-1",
+		};
+		h.sm._testStore.put(persisted);
+		await assert.rejects(
+			h.sm.restoreSession(persisted),
+			/require gateway authentication.*--auth/i,
+		);
+		assert.equal(ensureForProject.mock.calls.length, 0, "restore must reject before container revival");
+		await h.sm._testStore.flushAsync();
+	});
+
+	it("authenticated gateway mode preserves scoped sandbox startup", async () => {
+		const h = makeHarness();
+		current = h;
+		configureDockerSandbox(h.sm);
+		h.sm.setCredentialFreeTrustedLocal(false);
+		const bridgeOptions: any = { env: {}, cwd: "/host/project" };
+
+		assert.equal(
+			await h.sm.applySandboxWiring(bridgeOptions, "sess-authenticated", { projectId: "proj-1" }),
+			true,
+		);
+		assert.equal(bridgeOptions.containerId, "runtime-sess-authenticated");
+		assert.equal(h.sm.sandboxTokenStore.lookup(bridgeOptions.gatewayToken)?.projectId, "proj-1");
 	});
 
 	it("sandbox startup fails closed without a SandboxTokenStore even when admin is available", async () => {

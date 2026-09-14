@@ -5351,6 +5351,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
 			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+				// Every direct SandboxManager caller funnels through this closure before
+				// Docker/image/network/worktree setup, including goal and staff preflight.
+				sessionManager.assertSandboxStartupAllowed();
 				const project = projectRegistry.get(projectId);
 				if (!project) {
 					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
@@ -5552,6 +5555,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					viteOriginPairs: config.viteOrigins?.flatMap((origin) =>
 						[...viteGatewayOrigins].map((gatewayOrigin) => ({ origin, gatewayOrigin }))),
 				});
+				// Docker Desktop may proxy container host-gateway traffic back to Node
+				// from a loopback peer. Preserve trusted-local host access, but never
+				// start a sandbox unless this compiled gateway policy requires auth.
+				sessionManager.setCredentialFreeTrustedLocal(
+					!config.forceAuth && requestAdmissionPolicy.allAuthoritiesLoopback,
+				);
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
 			// Resolve any cross-store staff-fork publication interrupted after the
