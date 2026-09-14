@@ -93,16 +93,17 @@ function scheduleToolsRevalidation(scope: McpApprovalReviewScope, route: AppRout
 		const currentRoute = getRouteFromHash();
 		const currentScope = resolveMcpApprovalBannerScope(currentRoute);
 		if (currentRoute.view !== "tools" || !currentScope || scopeKey(currentScope) !== key) return;
-		reviewCountByScope.delete(key);
-		countRequestByScope.delete(key);
-		countRevisionByScope.set(key, (countRevisionByScope.get(key) ?? 0) + 1);
+		// Stale-while-revalidate: keep the last confirmed count visible until
+		// this refresh confirms its replacement. The in-flight guard also keeps
+		// slow periodic reads from overlapping later timer ticks.
+		ensureReviewCount(currentScope, true);
 		renderApp();
 	}, 2_000);
 }
 
-function ensureReviewCount(scope: McpApprovalReviewScope): void {
+function ensureReviewCount(scope: McpApprovalReviewScope, revalidate = false): void {
 	const key = scopeKey(scope);
-	if (reviewCountByScope.has(key) || countRequestByScope.has(key)) return;
+	if (countRequestByScope.has(key) || (!revalidate && reviewCountByScope.has(key))) return;
 	const revision = countRevisionByScope.get(key) ?? 0;
 	let request: Promise<void>;
 	request = fetchMcpServers({ ...scope, ensure: true })
