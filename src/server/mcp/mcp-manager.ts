@@ -96,6 +96,10 @@ export interface McpSourceSummary {
 export type McpReviewConfig = RedactedMcpServerConfig;
 export interface McpStatusDiagnostic { code: string; message: string; }
 
+interface McpDiscoveryDiagnostic extends McpStatusDiagnostic {
+  source: McpSourceSummary;
+}
+
 export interface EffectiveMcpDefinition {
   name: string;
   config: McpServerConfig;
@@ -173,6 +177,8 @@ export interface McpToolRegistrationRefresh {
 /** Status of an MCP server */
 export interface McpServerStatus {
   name: string;
+  /** Invalid configuration rows are diagnostics, not actionable servers. */
+  kind?: "invalid-configuration";
   status: "connected" | "disconnected" | "error" | "reconnecting";
   toolCount: number;
   error?: string;
@@ -529,7 +535,7 @@ export class McpManager {
   /** Maps public Bobbit tool names to their authoritative runtime route. */
   private _toolRouteMap = new Map<string, McpToolRoute>();
   private _routeDiagnostics: McpRouteDiagnostic[] = [];
-  private _discoveryDiagnostics: McpStatusDiagnostic[] = [];
+  private _discoveryDiagnostics: McpDiscoveryDiagnostic[] = [];
   private _routeMapDirty = true;
   /** Maps truncated Bobbit tool names back to original MCP tool names. Kept for legacy tests/introspection. */
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
@@ -834,6 +840,26 @@ export class McpManager {
     return merged;
   }
 
+  private _recordDiscoveryParseFailure(origin: ResolvedMcpOrigin): void {
+    const file = origin.file ?? "the configured source";
+    const sourceId = origin.sourceId ?? "unknown-source";
+    if (this._discoveryDiagnostics.some((diagnostic) =>
+      diagnostic.source.sourceId === sourceId && diagnostic.source.projectId === origin.projectId
+    )) return;
+    this._discoveryDiagnostics.push({
+      code: "MCP_CONFIG_PARSE_FAILED",
+      message: `Could not parse MCP configuration from ${file}.`,
+      source: {
+        sourceId,
+        authority: origin.authority ?? "project",
+        ...(origin.projectId ? { projectId: origin.projectId } : {}),
+        ...(origin.projectName ? { projectName: origin.projectName } : {}),
+        file,
+      },
+    });
+    console.error(`[mcp] MCP_CONFIG_PARSE_FAILED (${file})`);
+  }
+
   /** Read a JSON config file and merge its servers into the target. */
   private _mergeConfigFile(target: Map<string, ResolvedManualServer>, filePath: string, origin: ResolvedMcpOrigin): void {
     try {
@@ -846,8 +872,7 @@ export class McpManager {
         }
       }
     } catch {
-      this._discoveryDiagnostics.push({ code: "MCP_CONFIG_PARSE_FAILED", message: `Could not parse MCP configuration from ${origin.file ?? "the configured source"}.` });
-      console.error(`[mcp] MCP_CONFIG_PARSE_FAILED (${origin.file ?? "unknown source"})`);
+      this._recordDiscoveryParseFailure(origin);
     }
   }
 
@@ -878,13 +903,12 @@ export class McpManager {
         break;
       }
     } catch {
-      this._discoveryDiagnostics.push({ code: "MCP_CONFIG_PARSE_FAILED", message: `Could not parse MCP configuration from ${origin.file ?? "the configured source"}.` });
-      console.error(`[mcp] MCP_CONFIG_PARSE_FAILED (${origin.file ?? "unknown source"})`);
+      this._recordDiscoveryParseFailure(origin);
     }
   }
 
   getDiscoveryDiagnostics(): McpStatusDiagnostic[] {
-    return this._discoveryDiagnostics.map((diagnostic) => ({ ...diagnostic }));
+    return this._discoveryDiagnostics.map(({ code, message }) => ({ code, message }));
   }
 
   // ── Connection lifecycle ───────────────────────────────────────────
@@ -1417,8 +1441,9 @@ export class McpManager {
     return this._routeDiagnostics.map((d) => ({ ...d }));
   }
 
-  getToolRouteSnapshots(): McpToolRouteSnapshot[] {
-    this.reconcileToolPublication();
+  getToolRouteSnapshots(opts?: { reconcileEligibility?: boolean }): McpToolRouteSnapshot[] {
+    if (opts?.reconcileEligibility === false) this._ensureRouteMapFresh();
+    else this.reconcileToolPublication();
     return [...this._toolRouteMap.values()].map((route) => {
       const summary = this._summaryCache.get(route.runtimeServerKey)?.get(route.mcpToolName);
       const paramNames = this._getParamNames(route.tool);
@@ -1833,6 +1858,18 @@ export class McpManager {
         ...(diagnostics.length > 0 ? { diagnostics } : {}),
         ownerContributions: group.ownerContributions.map(redactMcpContribution),
         ...(group.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
+      });
+    }
+
+    for (const diagnostic of this._discoveryDiagnostics) {
+      const scope = diagnostic.source.projectId ?? diagnostic.source.authority;
+      statuses.push({
+        name: `invalid:${scope}:${diagnostic.source.sourceId}`,
+        kind: "invalid-configuration",
+        status: "disconnected",
+        toolCount: 0,
+        source: { ...diagnostic.source },
+        diagnostics: [{ code: diagnostic.code, message: diagnostic.message }],
       });
     }
 

@@ -3221,6 +3221,8 @@ export interface McpServerDiagnostic {
 
 export interface McpServerInfo {
 	name: string;
+	/** Present for safe, non-actionable discovery diagnostics. */
+	kind?: "invalid-configuration";
 	status: "connected" | "connecting" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
