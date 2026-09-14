@@ -1,13 +1,19 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { parse as parseYaml } from "yaml";
 
 import { serverSecretsDir } from "../bobbit-dir.js";
+import { loadMcpContributions, type McpPackContribution } from "../agent/pack-contributions.js";
+import { parseManifest, validateMeta } from "../agent/pack-manifest.js";
+import type { PackManifest, PackMeta } from "../agent/pack-types.js";
 import { McpApprovalStore } from "./mcp-approval-store.js";
 import type { McpServerConfig } from "./mcp-types.js";
 
 const ATTESTATION_FILE = "marketplace-mcp-install-attestations.json";
-const SCHEMA = 2;
+const SNAPSHOT_DIRECTORY = "marketplace-mcp-pack-snapshots";
+const SNAPSHOT_ID_RE = /^[a-f0-9]{64}$/;
+const SCHEMA = 3;
 const READ_CHUNK_BYTES = 64 * 1024;
 export const MARKETPLACE_MCP_PACK_MAX_ENTRIES = 10_000;
 export const MARKETPLACE_MCP_PACK_MAX_BYTES = 256 * 1024 * 1024;
@@ -37,13 +43,28 @@ interface PersistedMarketplaceMcpInstallAttestation {
 	contributionId: string;
 	serverName: string;
 	fingerprint: string;
+	snapshotId: string;
 	attestedAt: string;
 }
 
 interface PersistedMarketplaceMcpInstallLedger {
-	schema: 2;
+	schema: 3;
 	attestations: PersistedMarketplaceMcpInstallAttestation[];
 }
+
+export type MarketplaceMcpPackSnapshotResolution =
+	| { status: "missing" | "invalid" }
+	| { status: "changed"; sourceId: string }
+	| {
+		status: "attested";
+		packRoot: string;
+		packIntegrity: string;
+		sourceId: string;
+		manifest: PackManifest;
+		meta: PackMeta;
+		metaDetails: Record<string, unknown>;
+		mcp: McpPackContribution[];
+	};
 
 type EntryType = "directory" | "file" | "symlink";
 interface MeasuredEntry {
@@ -79,8 +100,9 @@ function isAttestation(value: unknown): value is PersistedMarketplaceMcpInstallA
 		row.contributionId,
 		row.serverName,
 		row.fingerprint,
+		row.snapshotId,
 		row.attestedAt,
-	].every(nonEmptyString);
+	].every(nonEmptyString) && SNAPSHOT_ID_RE.test(String(row.snapshotId));
 }
 
 function normalizedRelative(root: string, candidate: string): string {
@@ -193,7 +215,9 @@ export function measureMarketplaceMcpPackIntegrity(
 		updateString(hash, entry.relativePath);
 		updateString(hash, entry.type);
 		// Execute/search bits alter how installed files and directories may be used.
-		updateString(hash, (entry.stat.mode & 0o111).toString(8));
+		// Snapshot sealing removes group/other permissions. Only the owner's
+		// executable bit is behaviorally relevant to the server-private copy.
+		updateString(hash, (entry.stat.mode & 0o100) === 0 ? "0" : "1");
 
 		if (entry.type === "directory") continue;
 		if (entry.type === "symlink") {
@@ -294,30 +318,149 @@ function sameInstall(
 	return row.projectId === projectId && row.packName === packName;
 }
 
+function isPlainMapping(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function snapshotFailure(): never {
+	throw Object.assign(new Error("Installed Marketplace MCP snapshot could not be verified."), {
+		code: "MARKETPLACE_MCP_SNAPSHOT_INVALID",
+	});
+}
+
+interface ValidatedSnapshot {
+	packRoot: string;
+	packIntegrity: string;
+	sourceId: string;
+	manifest: PackManifest;
+	meta: PackMeta;
+	metaDetails: Record<string, unknown>;
+	mcp: McpPackContribution[];
+}
+
 /** Server-private proof that an install flow published one exact complete pack. */
 export class MarketplaceMcpInstallAttestationStore {
 	private attestations: PersistedMarketplaceMcpInstallAttestation[] = [];
+	private ledgerInvalid = false;
 	private readonly fingerprints: McpApprovalStore;
 	readonly ledgerPath: string;
+	readonly snapshotsRoot: string;
 
 	constructor(private readonly secretsDir = serverSecretsDir()) {
 		this.ledgerPath = path.join(secretsDir, ATTESTATION_FILE);
+		this.snapshotsRoot = path.join(secretsDir, SNAPSHOT_DIRECTORY);
 		this.fingerprints = new McpApprovalStore(secretsDir);
 		this.load();
+		if (!this.ledgerInvalid) this.cleanupUnreferencedSnapshots();
 	}
 
 	private load(): void {
 		try {
 			const parsed = JSON.parse(fs.readFileSync(this.ledgerPath, "utf8")) as Partial<PersistedMarketplaceMcpInstallLedger>;
-			this.attestations = parsed.schema === SCHEMA && Array.isArray(parsed.attestations)
-				? parsed.attestations.filter(isAttestation)
-				: [];
+			if (parsed.schema !== SCHEMA || !Array.isArray(parsed.attestations) || !parsed.attestations.every(isAttestation)) {
+				throw new Error("invalid Marketplace MCP attestation ledger");
+			}
+			this.attestations = parsed.attestations;
+			this.ledgerInvalid = false;
 		} catch (error) {
 			this.attestations = [];
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				console.error("[mcp] MARKETPLACE_MCP_ATTESTATION_INVALID");
-			}
+			this.ledgerInvalid = (error as NodeJS.ErrnoException).code !== "ENOENT";
+			if (this.ledgerInvalid) console.error("[mcp] MARKETPLACE_MCP_ATTESTATION_INVALID");
 		}
+	}
+
+	private ensureSnapshotsRoot(): void {
+		fs.mkdirSync(this.snapshotsRoot, { recursive: true, mode: 0o700 });
+		const stat = fs.lstatSync(this.snapshotsRoot);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) snapshotFailure();
+		if (process.platform !== "win32") fs.chmodSync(this.snapshotsRoot, 0o700);
+	}
+
+	private snapshotPath(snapshotId: string): string {
+		if (!SNAPSHOT_ID_RE.test(snapshotId)) return snapshotFailure();
+		const candidate = path.join(this.snapshotsRoot, snapshotId);
+		const relative = path.relative(this.snapshotsRoot, candidate);
+		if (!relative || relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)) return snapshotFailure();
+		return candidate;
+	}
+
+	private readSnapshotPack(packRoot: string, packName: string, sourceId: string): Omit<ValidatedSnapshot, "packIntegrity"> {
+		let manifest: PackManifest | null;
+		let metaDetails: unknown;
+		try {
+			manifest = parseManifest(fs.readFileSync(path.join(packRoot, "pack.yaml"), "utf8"));
+			metaDetails = parseYaml(fs.readFileSync(path.join(packRoot, ".pack-meta.yaml"), "utf8"));
+		} catch {
+			return snapshotFailure();
+		}
+		const meta = validateMeta(metaDetails);
+		if (!manifest || !meta || !isPlainMapping(metaDetails)
+			|| manifest.name !== packName || meta.packName !== packName
+			|| meta.scope !== "project" || meta.sourceId !== sourceId
+			|| meta.version !== manifest.version) return snapshotFailure();
+		let mcp: McpPackContribution[];
+		try {
+			mcp = loadMcpContributions(packRoot, manifest, { silent: true });
+		} catch {
+			return snapshotFailure();
+		}
+		// Authored packs have always tolerated malformed contributions by dropping
+		// them. The snapshot attests only the successfully normalized declarations;
+		// a later repair changes the repository digest and cannot inherit pretrust.
+		return { packRoot, sourceId, manifest, meta, metaDetails, mcp };
+	}
+
+	private validateSnapshotRows(rows: PersistedMarketplaceMcpInstallAttestation[]): ValidatedSnapshot {
+		if (rows.length === 0) return snapshotFailure();
+		const first = rows[0]!;
+		if (rows.some((row) => row.projectId !== first.projectId
+			|| row.sourceId !== first.sourceId
+			|| row.packName !== first.packName
+			|| row.snapshotId !== first.snapshotId)) return snapshotFailure();
+		const packRoot = this.snapshotPath(first.snapshotId);
+		let packIntegrity: string;
+		try {
+			const snapshotsStat = fs.lstatSync(this.snapshotsRoot);
+			if (!snapshotsStat.isDirectory() || snapshotsStat.isSymbolicLink()) return snapshotFailure();
+			const rootStat = fs.lstatSync(packRoot);
+			if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return snapshotFailure();
+			const rootReal = fs.realpathSync(this.snapshotsRoot);
+			const packReal = fs.realpathSync(packRoot);
+			const relative = path.relative(rootReal, packReal);
+			if (!relative || relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)) return snapshotFailure();
+			packIntegrity = measureMarketplaceMcpPackIntegrity(packRoot);
+		} catch {
+			return snapshotFailure();
+		}
+		const snapshot = this.readSnapshotPack(packRoot, first.packName, first.sourceId);
+		const rowsByContribution = new Map<string, PersistedMarketplaceMcpInstallAttestation>();
+		for (const row of rows) {
+			const key = `${row.contributionId}\0${row.serverName}`;
+			if (rowsByContribution.has(key)) return snapshotFailure();
+			rowsByContribution.set(key, row);
+		}
+		if (rowsByContribution.size !== snapshot.mcp.length) return snapshotFailure();
+		for (const contribution of snapshot.mcp) {
+			const row = rowsByContribution.get(`${contribution.listName}\0${contribution.serverName}`);
+			const fingerprint = this.fingerprints.marketplaceInstallFingerprint(contribution.config, packIntegrity);
+			if (!row || !fingerprint || row.fingerprint !== fingerprint) return snapshotFailure();
+		}
+		return { ...snapshot, packIntegrity };
+	}
+
+	resolvePack(projectId: string, packName: string, repositoryPackIntegrity?: string): MarketplaceMcpPackSnapshotResolution {
+		const rows = this.attestations.filter((row) => sameInstall(row, projectId, packName));
+		if (rows.length === 0) return { status: this.ledgerInvalid ? "invalid" : "missing" };
+		let snapshot: ValidatedSnapshot;
+		try {
+			snapshot = this.validateSnapshotRows(rows);
+		} catch {
+			return { status: "invalid" };
+		}
+		if (!repositoryPackIntegrity || repositoryPackIntegrity !== snapshot.packIntegrity) {
+			return { status: "changed", sourceId: snapshot.sourceId };
+		}
+		return { status: "attested", ...snapshot };
 	}
 
 	classify(identity: MarketplaceMcpInstallIdentity): "attested" | "changed" | "missing" {
@@ -328,56 +471,189 @@ export class MarketplaceMcpInstallAttestationStore {
 			&& row.serverName === identity.serverName);
 		if (tuple.length === 0) return "missing";
 		if (!identity.packIntegrity) return "changed";
-		const fingerprint = this.fingerprints.marketplaceInstallFingerprint(identity.config, identity.packIntegrity);
-		return fingerprint && tuple.some((row) => row.fingerprint === fingerprint) ? "attested" : "changed";
+		const packRows = this.attestations.filter((row) => sameInstall(row, identity.projectId, identity.packName));
+		try {
+			const snapshot = this.validateSnapshotRows(packRows);
+			if (snapshot.packIntegrity !== identity.packIntegrity) return "changed";
+			const fingerprint = this.fingerprints.marketplaceInstallFingerprint(identity.config, identity.packIntegrity);
+			return fingerprint && tuple.some((row) => row.fingerprint === fingerprint) ? "attested" : "changed";
+		} catch {
+			return "changed";
+		}
 	}
 
 	isAttested(identity: MarketplaceMcpInstallIdentity): boolean {
 		return this.classify(identity) === "attested";
 	}
 
-	/** Atomically replace all attestations owned by one logical project pack. */
+	private sealSnapshot(packRoot: string): void {
+		const directories: string[] = [];
+		const pending = [packRoot];
+		while (pending.length > 0) {
+			const directory = pending.pop()!;
+			directories.push(directory);
+			for (const name of fs.readdirSync(directory)) {
+				const candidate = path.join(directory, name);
+				const stat = fs.lstatSync(candidate);
+				if (stat.isDirectory() && !stat.isSymbolicLink()) pending.push(candidate);
+				else if (stat.isFile() && !stat.isSymbolicLink()) fs.chmodSync(candidate, (stat.mode & 0o100) === 0 ? 0o400 : 0o500);
+			}
+		}
+		for (const directory of directories.reverse()) fs.chmodSync(directory, 0o500);
+	}
+
+	private fsyncSnapshot(packRoot: string): void {
+		const pending = [packRoot];
+		const directories: string[] = [];
+		while (pending.length > 0) {
+			const directory = pending.pop()!;
+			directories.push(directory);
+			for (const name of fs.readdirSync(directory)) {
+				const candidate = path.join(directory, name);
+				const stat = fs.lstatSync(candidate);
+				if (stat.isDirectory() && !stat.isSymbolicLink()) pending.push(candidate);
+				else if (stat.isFile() && !stat.isSymbolicLink()) {
+					// Windows requires a writable handle for fsync. This is still an
+					// unpublished private staging tree and is sealed immediately after.
+					fs.chmodSync(candidate, (stat.mode & 0o100) === 0 ? 0o600 : 0o700);
+					const fd = fs.openSync(candidate, "r+");
+					try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+				}
+			}
+		}
+		for (const directory of directories.reverse()) {
+			try {
+				const fd = fs.openSync(directory, "r");
+				try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+			} catch { /* directory fsync is unavailable on some platforms */ }
+		}
+	}
+
+	private makeSnapshotWritable(packRoot: string): void {
+		const pending = [packRoot];
+		while (pending.length > 0) {
+			const directory = pending.pop()!;
+			try { fs.chmodSync(directory, 0o700); } catch { continue; }
+			let names: string[];
+			try { names = fs.readdirSync(directory); } catch { continue; }
+			for (const name of names) {
+				const candidate = path.join(directory, name);
+				try {
+					const stat = fs.lstatSync(candidate);
+					if (stat.isDirectory() && !stat.isSymbolicLink()) pending.push(candidate);
+					else if (stat.isFile() && !stat.isSymbolicLink()) fs.chmodSync(candidate, 0o600);
+				} catch { /* cleanup remains best-effort */ }
+			}
+		}
+	}
+
+	private removeSnapshotBestEffort(packRoot: string): void {
+		try {
+			const stat = fs.lstatSync(packRoot);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) {
+				fs.rmSync(packRoot, { force: true });
+				return;
+			}
+		} catch {
+			return;
+		}
+		try { this.makeSnapshotWritable(packRoot); } catch { /* cleanup remains best-effort */ }
+		try { fs.rmSync(packRoot, { recursive: true, force: true }); } catch { /* an orphan is inert without a ledger reference */ }
+	}
+
+	private cleanupUnreferencedSnapshots(): void {
+		let names: string[];
+		try {
+			const stat = fs.lstatSync(this.snapshotsRoot);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+			names = fs.readdirSync(this.snapshotsRoot);
+		} catch { return; }
+		const referenced = new Set(this.attestations.map((row) => row.snapshotId));
+		for (const name of names) {
+			if ((SNAPSHOT_ID_RE.test(name) && !referenced.has(name)) || name.startsWith(".tmp-")) {
+				this.removeSnapshotBestEffort(path.join(this.snapshotsRoot, name));
+			}
+		}
+	}
+
+	/** Publish a complete private snapshot, then atomically replace one logical project's pack rows. */
 	replacePack(
 		projectId: string,
 		sourceId: string,
 		packName: string,
 		packRoot: string,
-		definitions: Array<{ contributionId: string; serverName: string; config: McpServerConfig }>,
 		expectedPackIntegrity?: string,
 	): string {
-		const packIntegrity = measureMarketplaceMcpPackIntegrity(packRoot);
-		if (expectedPackIntegrity !== undefined && packIntegrity !== expectedPackIntegrity) integrityFailure();
-		const attestedAt = new Date().toISOString();
-		const next = this.attestations.filter((row) => !sameInstall(row, projectId, packName));
-		for (const definition of definitions) {
-			const fingerprint = this.fingerprints.marketplaceInstallFingerprint(definition.config, packIntegrity);
-			if (!fingerprint) throw Object.assign(new Error("Could not create Marketplace MCP install attestation."), {
-				code: "MARKETPLACE_MCP_ATTESTATION_KEY_UNAVAILABLE",
-			});
-			next.push({
-				projectId,
-				sourceId,
-				packName,
-				contributionId: definition.contributionId,
-				serverName: definition.serverName,
-				fingerprint,
-				attestedAt,
-			});
+		this.ensureSnapshotsRoot();
+		const beforeCopy = measureMarketplaceMcpPackIntegrity(packRoot);
+		if (expectedPackIntegrity !== undefined && beforeCopy !== expectedPackIntegrity) integrityFailure();
+		const snapshotId = crypto.randomBytes(32).toString("hex");
+		const staging = path.join(this.snapshotsRoot, `.tmp-${snapshotId}-${crypto.randomBytes(8).toString("hex")}`);
+		const published = this.snapshotPath(snapshotId);
+		let publishedSnapshot = false;
+		try {
+			fs.cpSync(packRoot, staging, { recursive: true, dereference: false, errorOnExist: true, force: false, verbatimSymlinks: true });
+			const afterCopy = measureMarketplaceMcpPackIntegrity(packRoot);
+			const copied = measureMarketplaceMcpPackIntegrity(staging);
+			if (beforeCopy !== afterCopy || copied !== afterCopy) integrityFailure();
+			this.fsyncSnapshot(staging);
+			this.sealSnapshot(staging);
+			if (measureMarketplaceMcpPackIntegrity(staging) !== copied) integrityFailure();
+			fs.renameSync(staging, published);
+			publishedSnapshot = true;
+			try {
+				const rootFd = fs.openSync(this.snapshotsRoot, "r");
+				try { fs.fsyncSync(rootFd); } finally { fs.closeSync(rootFd); }
+			} catch { /* the complete snapshot still precedes its ledger reference */ }
+
+			const snapshot = this.readSnapshotPack(published, packName, sourceId);
+			const attestedAt = new Date().toISOString();
+			const rows: PersistedMarketplaceMcpInstallAttestation[] = [];
+			for (const contribution of snapshot.mcp) {
+				const fingerprint = this.fingerprints.marketplaceInstallFingerprint(contribution.config, copied);
+				if (!fingerprint) throw Object.assign(new Error("Could not create Marketplace MCP install attestation."), {
+					code: "MARKETPLACE_MCP_ATTESTATION_KEY_UNAVAILABLE",
+				});
+				rows.push({
+					projectId,
+					sourceId,
+					packName,
+					contributionId: contribution.listName,
+					serverName: contribution.serverName,
+					fingerprint,
+					snapshotId,
+					attestedAt,
+				});
+			}
+			const next = [
+				...this.attestations.filter((row) => !sameInstall(row, projectId, packName)),
+				...rows,
+			];
+			this.persist(next);
+			this.attestations = next;
+			this.ledgerInvalid = false;
+			this.cleanupUnreferencedSnapshots();
+			return copied;
+		} catch (error) {
+			this.removeSnapshotBestEffort(publishedSnapshot ? published : staging);
+			throw error;
 		}
-		this.persist(next);
-		this.attestations = next;
-		return packIntegrity;
 	}
 
 	removePack(projectId: string, packName: string): void {
 		const next = this.attestations.filter((row) => !sameInstall(row, projectId, packName));
-		if (next.length === this.attestations.length) return;
+		if (next.length === this.attestations.length && !this.ledgerInvalid) return;
 		this.persist(next);
 		this.attestations = next;
+		this.ledgerInvalid = false;
+		this.cleanupUnreferencedSnapshots();
 	}
 
 	private persist(attestations: PersistedMarketplaceMcpInstallAttestation[]): void {
-		fs.mkdirSync(this.secretsDir, { recursive: true });
+		fs.mkdirSync(this.secretsDir, { recursive: true, mode: 0o700 });
+		if (process.platform !== "win32") {
+			try { fs.chmodSync(this.secretsDir, 0o700); } catch { /* parent may be managed externally */ }
+		}
 		const temporary = `${this.ledgerPath}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
 		let fd: number | undefined;
 		try {

@@ -24,6 +24,23 @@ function write(file: string, content: string): void {
 	fs.writeFileSync(file, content, "utf-8");
 }
 
+function makeTestTreeWritable(root: string): void {
+	if (process.platform === "win32" || !fs.existsSync(root)) return;
+	const pending = [root];
+	while (pending.length > 0) {
+		const candidate = pending.pop()!;
+		try {
+			const stat = fs.lstatSync(candidate);
+			if (stat.isDirectory() && !stat.isSymbolicLink()) {
+				fs.chmodSync(candidate, 0o700);
+				for (const name of fs.readdirSync(candidate)) pending.push(path.join(candidate, name));
+			} else if (stat.isFile() && !stat.isSymbolicLink()) {
+				fs.chmodSync(candidate, 0o600);
+			}
+		} catch { /* best-effort test cleanup */ }
+	}
+}
+
 function writeMinimalPack(root: string): void {
 	write(
 		path.join(root, "decision-pack", "pack.yaml"),
@@ -79,7 +96,10 @@ function installer(root: string, sourceStore: MarketplaceSourceStore, seams: {
 }
 
 afterEach(() => {
-	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+	for (const root of roots.splice(0)) {
+		makeTestTreeWritable(root);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });
 
 describe("MarketplaceInstaller injected-runner decisions", () => {
@@ -223,6 +243,7 @@ describe("MarketplaceInstaller injected-runner decisions", () => {
 			packIntegrity: measureMarketplaceMcpPackIntegrity(packRoot),
 		};
 		assert.equal(attestationStore.classify(oldIdentity), "attested");
+		assert.equal(fs.readdirSync(attestationStore.snapshotsRoot).filter((name) => /^[a-f0-9]{64}$/.test(name)).length, 1);
 
 		writeProjectPack(sourceRoot, { mcp: false, version: "2.0.0" });
 		const replace = vi.spyOn(attestationStore, "replacePack").mockImplementation(() => {
@@ -241,6 +262,7 @@ describe("MarketplaceInstaller injected-runner decisions", () => {
 		assert.equal(replace.mock.calls.length, 0);
 		assert.deepEqual(remove.mock.calls, [["project-1", "decision-pack"]]);
 		assert.equal(attestationStore.classify(oldIdentity), "missing");
+		assert.deepEqual(fs.readdirSync(attestationStore.snapshotsRoot).filter((name) => /^[a-f0-9]{64}$/.test(name)), []);
 	});
 
 	it("rolls a project gateway update back when final-tree attestation cannot commit", async () => {
@@ -280,7 +302,7 @@ describe("MarketplaceInstaller injected-runner decisions", () => {
 		const before = measureMarketplaceMcpPackIntegrity(packRoot);
 		generation = "two";
 		const replace = vi.spyOn(attestationStore, "replacePack").mockImplementation((...args) => {
-			assert.equal(measureMarketplaceMcpPackIntegrity(args[3]), args[5], "published tree must match the staged digest");
+			assert.equal(measureMarketplaceMcpPackIntegrity(args[3]), args[4], "published tree must match the staged digest");
 			throw new Error("simulated attestation persistence failure");
 		});
 

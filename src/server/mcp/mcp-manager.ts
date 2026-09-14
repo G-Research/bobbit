@@ -51,6 +51,9 @@ export interface ResolvedMcpOrigin {
   marketplacePackIntegrity?: string;
   /** Internal fail-closed signal for an unreadable/unsafe/incomplete pack measurement. */
   marketplacePackIntegrityInvalid?: boolean;
+  /** Internal roots for replacing server-private snapshot coordinates in review/status output. */
+  runtimePrivatePackRoot?: string;
+  reviewPackRoot?: string;
 }
 
 export interface ResolvedMcpContribution {
@@ -425,14 +428,37 @@ function safeOrigin(origin: ResolvedMcpOrigin): ResolvedMcpOrigin {
     marketplaceAttestationChanged: _attestationChanged,
     marketplacePackIntegrity: _packIntegrity,
     marketplacePackIntegrityInvalid: _packIntegrityInvalid,
+    runtimePrivatePackRoot: _runtimePrivatePackRoot,
+    reviewPackRoot: _reviewPackRoot,
     ...safe
   } = origin;
   if (safe.sourceUrl) safe.sourceUrl = redactUrl(safe.sourceUrl);
   return safe;
 }
 
+function redactMcpServerConfigForOrigin(config: McpServerConfig, origin: ResolvedMcpOrigin): RedactedMcpServerConfig {
+  const redacted = redactMcpServerConfig(config);
+  if (!origin.runtimePrivatePackRoot || !origin.reviewPackRoot) return redacted;
+  const roots = [
+    [origin.runtimePrivatePackRoot, origin.reviewPackRoot],
+    [origin.runtimePrivatePackRoot.replace(/\\/g, "/"), origin.reviewPackRoot.replace(/\\/g, "/")],
+  ] as const;
+  const replacePrivateRoot = (value: string): string => {
+    for (const [privateRoot, replacement] of roots) {
+      value = process.platform === "win32"
+        ? value.replace(new RegExp(privateRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), replacement)
+        : value.split(privateRoot).join(replacement);
+    }
+    return value;
+  };
+  if (redacted.command) redacted.command = replacePrivateRoot(redacted.command);
+  if (redacted.args) redacted.args = redacted.args.map(replacePrivateRoot);
+  if (redacted.cwd) redacted.cwd = replacePrivateRoot(redacted.cwd);
+  return redacted;
+}
+
 function redactMcpContribution(contribution: ResolvedMcpContribution): RedactedResolvedMcpContribution {
-  return { ...contribution, origin: safeOrigin(contribution.origin), config: redactMcpServerConfig(contribution.config) };
+  return { ...contribution, origin: safeOrigin(contribution.origin), config: redactMcpServerConfigForOrigin(contribution.config, contribution.origin) };
 }
 
 function flatManualContribution(
@@ -1761,7 +1787,7 @@ export class McpManager {
         status: error ? "error" : client?.connected && eligible ? "connected" : "disconnected",
         toolCount: tools?.length ?? 0,
         ...(error ? { error } : {}),
-        config: redactMcpServerConfig(config),
+        config: redactMcpServerConfigForOrigin(config, definition.origin),
         origin,
         approval: definition.approval,
         source: {
@@ -1771,7 +1797,7 @@ export class McpManager {
           ...(definition.origin.projectName ? { projectName: definition.origin.projectName } : {}),
           file: definition.origin.file ?? "Unknown source",
         },
-        ...(definition.approval.required ? { reviewConfig: redactMcpServerConfig(config) } : {}),
+        ...(definition.approval.required ? { reviewConfig: redactMcpServerConfigForOrigin(config, definition.origin) } : {}),
         ...(diagnostics.length > 0 ? { diagnostics } : {}),
         ownerContributions: group.ownerContributions.map(redactMcpContribution),
         ...(group.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),

@@ -57,6 +57,20 @@ function decodeUrlComponent(value: string): string {
   }
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function redactConfiguredCwd(message: string, cwd: string): string {
+  for (const value of new Set([cwd, cwd.replace(/\\/g, '/'), cwd.replace(/\//g, '\\')])) {
+    if (!value) continue;
+    message = process.platform === 'win32'
+      ? message.replace(new RegExp(escapeRegExp(value), 'gi'), REDACTED)
+      : message.split(value).join(REDACTED);
+  }
+  return message;
+}
+
 function redactedDiagnosticUrl(raw: string): string {
   try {
     const url = new URL(raw);
@@ -77,6 +91,13 @@ function configuredRuntimeSecrets(config: McpServerConfig | null | undefined): s
     ...stringRecordValues(config.headers),
   ];
   const values = [...rawValues, ...rawValues.map(expandEnvVars)];
+
+  // Snapshot-backed Marketplace processes intentionally run from a private
+  // server directory. Runtime-controlled diagnostics must not disclose that
+  // physical path (or its alternate separator spelling) through health APIs.
+  if (typeof config.cwd === 'string' && config.cwd) {
+    values.push(config.cwd, config.cwd.replace(/\\/g, '/'), config.cwd.replace(/\//g, '\\'));
+  }
 
   if (typeof config.url === 'string' && config.url) {
     for (const rawUrl of new Set([config.url, expandEnvVars(config.url)])) {
@@ -115,6 +136,10 @@ export function sanitizeMcpRuntimeError(
 ): string {
   let message = error instanceof Error ? error.message : String(error);
   if (!message) message = 'Unknown MCP runtime error';
+
+  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.cwd === 'string' && config.cwd) {
+    message = redactConfiguredCwd(message, config.cwd);
+  }
 
   if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.url === 'string' && config.url) {
     const urls = [...new Set([config.url, expandEnvVars(config.url)])]
