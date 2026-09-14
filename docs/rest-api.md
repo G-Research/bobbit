@@ -8,8 +8,13 @@ authentication sources. Most programmatic API calls use
 `Authorization: Bearer <admin-token>`; routes that support it also accept
 `?token=`. Browser API requests and initial preview resources may instead
 authenticate with a valid `bobbit_session` cookie; matching opaque preview
-follow-ons may use the narrower `bobbit_preview` capability. Scoped sandbox and
-session credentials remain limited to their existing route allow-lists.
+follow-ons may use the narrower `bobbit_preview` capability. Credential-free
+trusted-local authority requires both an admitted all-loopback policy and an
+actual loopback socket peer (IPv4 `127/8`, IPv6 `::1`, or IPv4-mapped loopback);
+caller-controlled Host/Origin values cannot substitute. This peer-bound rule is
+used consistently for API, preview/cookie bootstrap, and WebSocket admission.
+Scoped sandbox and session credentials remain limited to their existing route
+allow-lists.
 
 `bobbit_session` is a stateless signed value:
 `v1.<iat>.<exp>.<nonce>.<signature>`. The canonical issuance and expiry Unix
@@ -1980,7 +1985,6 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/mcp-operator/pair` | Exchange `{ code }` from the gateway terminal for an MCP operator credential |
 | `GET` | `/api/mcp-servers?projectId=<id>` | Read safe status for one visible project scope |
 | `POST` | `/api/mcp-servers/:name/approval?projectId=<id>` | Approve or reject one current project-controlled definition |
 | `POST` | `/api/mcp-servers/:name/restart?projectId=<id>` | Rediscover the scoped configuration through the startup trust gate and return the named server |
@@ -1996,13 +2000,24 @@ manager and returns `[]` when none exists. Responses include safe rows for
 pending, rejected, changed, and invalid definitions even though those servers
 have no runtime connection or registered tools.
 
-Approval mutations additionally require the terminal-paired credential in
-`X-Bobbit-Mcp-Operator`. The body is `{ decision: "approved" | "rejected",
-fingerprint, sourceProjectId, sourceId }`. A stale source or fingerprint returns
-`409 MCP_APPROVAL_STALE`, while a pretrusted or invalid definition returns the
-corresponding `422` outcome. Restart performs fresh discovery; it never bypasses
-startup approval. See [MCP server startup approvals](mcp-server-approvals.md#status-and-approval-api)
-for pairing, safe status fields, worktree ownership, and decision semantics.
+Approval mutations use normal gateway authentication: an admin bearer/query
+token, genuine signed `bobbit_session`, or peer-bound trusted-local admission.
+Direct, non-sandbox agents intentionally receive the admin `BOBBIT_TOKEN` and
+may decide. A selected sandbox-scoped token is denied by the route allowlist with
+403 before body parsing or MCP state/runtime effects. Because Docker host-gateway
+proxying can make container traffic appear loopback, sandbox creation,
+restoration, revival, respawn, and replacement are refused before side effects
+while credential-free trusted-local control is enabled; restart with `--auth`
+before using sandboxes.
+
+The decision body is `{ decision: "approved" | "rejected", fingerprint,
+sourceProjectId, sourceId }`. The handler revalidates the visible project and
+owner/CWD scope plus the current source and fingerprint. A stale source,
+worktree owner, or fingerprint returns `409 MCP_APPROVAL_STALE` (or the applicable
+scope error), while a pretrusted or invalid definition returns the corresponding
+`422` outcome. Restart performs fresh discovery; it never bypasses startup
+approval. See [MCP server startup approvals](mcp-server-approvals.md#status-and-approval-api)
+for safe status fields, authentication, worktree ownership, and decision semantics.
 
 **`POST /api/internal/mcp-call`** is the internal proxy endpoint used by generated agent extensions. Returns the raw MCP `{ content, isError }` response. Enforces Layer B per-op `never`-policy denial via `resolveGrantPolicy` before dispatching. On error, the response body includes structured `{ error, server, operation }` fields when the tool name is parseable.
 
