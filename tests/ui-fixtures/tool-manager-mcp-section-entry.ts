@@ -12,16 +12,14 @@ type FetchLogEntry = {
 	body: any;
 	credentials: RequestCredentials | null;
 	authorization: string | null;
-	mcpOperator: string | null;
 };
 
-const MCP_OPERATOR_CREDENTIAL = `v1.${"A".repeat(22)}.${"A".repeat(43)}`;
 let mcpServers: any[] = [];
 let tools: any[] = [{ name: "bash", description: "Run a shell command.", group: "Shell" }];
 let policies: Record<string, string> = {};
 let fetchLog: FetchLogEntry[] = [];
 let nextApprovalError: { status: number; code: string; error: string; servers?: any[] } | null = null;
-let nextPairingError: { status: number; code: string; error: string } | null = null;
+let heldApproval: { promise: Promise<void>; release: () => void } | null = null;
 
 commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
 
@@ -62,17 +60,8 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		body,
 		credentials: init?.credentials ?? request?.credentials ?? null,
 		authorization: headers.get("Authorization"),
-		mcpOperator: headers.get("X-Bobbit-Mcp-Operator"),
 	});
 
-	if (route === "/api/mcp-operator/pair" && method === "POST") {
-		if (nextPairingError) {
-			const failure = nextPairingError;
-			nextPairingError = null;
-			return response({ code: failure.code, error: failure.error }, failure.status);
-		}
-		return response({ credential: MCP_OPERATOR_CREDENTIAL });
-	}
 	if (route.startsWith("/api/tools")) return response({ tools });
 	if (route.startsWith("/api/roles")) return response([]);
 	const approvalMatch = route.match(/^\/api\/mcp-servers\/([^/?]+)\/approval(?:\?|$)/);
@@ -82,6 +71,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 			nextApprovalError = null;
 			if (failure.servers) mcpServers = failure.servers;
 			return response({ code: failure.code, error: failure.error }, failure.status);
+		}
+		if (heldApproval) {
+			const gate = heldApproval;
+			await gate.promise;
+			if (heldApproval === gate) heldApproval = null;
 		}
 		const server = mcpServers.find((entry) => entry.name === decodeURIComponent(approvalMatch[1]));
 		if (!server) return response({ code: "MCP_APPROVAL_STALE", error: "Server changed" }, 409);
@@ -120,7 +114,8 @@ setRenderApp(doRender);
 	state.projects = structuredClone(opts.projects || []);
 	fetchLog = [];
 	nextApprovalError = null;
-	nextPairingError = null;
+	heldApproval?.release();
+	heldApproval = null;
 	clearToolPageState();
 	doRender();
 };
@@ -129,9 +124,13 @@ setRenderApp(doRender);
 	nextApprovalError = structuredClone(failure);
 };
 
-(window as any).__failNextMcpPairing = (failure: { status: number; code: string; error: string }) => {
-	nextPairingError = structuredClone(failure);
+(window as any).__holdNextMcpApproval = () => {
+	let release = () => {};
+	const promise = new Promise<void>((resolve) => { release = resolve; });
+	heldApproval = { promise, release };
 };
+
+(window as any).__releaseMcpApproval = () => heldApproval?.release();
 
 (window as any).__loadToolManager = async () => {
 	await loadToolPageData();
