@@ -747,11 +747,11 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpManager, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
-import type { McpServerConfig } from "./mcp/mcp-types.js";
 import {
 	MarketplaceMcpInstallAttestationStore,
 	measureMarketplaceMcpPackIntegrity,
 } from "./mcp/marketplace-mcp-install-attestation.js";
+import { snapshotBackedMcpConfig } from "./mcp/marketplace-mcp-snapshot-config.js";
 import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -3063,36 +3063,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
-	const snapshotBackedMcpConfig = (
-		config: McpServerConfig,
-		repositoryPackRoot: string,
-		snapshotPackRoot: string,
-	): McpServerConfig => {
-		if (!config.command) return config;
-		const rebasePackPathReferences = (value: string): string => {
-			let rebased = value;
-			const roots = [
-				[repositoryPackRoot, snapshotPackRoot],
-				[repositoryPackRoot.replace(/\\/g, "/"), snapshotPackRoot.replace(/\\/g, "/")],
-			] as const;
-			for (const [liveRoot, privateRoot] of roots) {
-				if (!liveRoot) continue;
-				rebased = process.platform === "win32"
-					? rebased.replace(new RegExp(liveRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), privateRoot)
-					: rebased.split(liveRoot).join(privateRoot);
-			}
-			return rebased;
-		};
-		return {
-			...config,
-			command: rebasePackPathReferences(config.command),
-			...(config.args ? { args: config.args.map(rebasePackPathReferences) } : {}),
-			...(config.env ? { env: Object.fromEntries(Object.entries(config.env)
-				.map(([name, value]) => [name, rebasePackPathReferences(value)])) } : {}),
-			cwd: config.cwd ?? snapshotPackRoot,
-		};
-	};
-
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
@@ -12148,6 +12118,20 @@ async function handleApiRoute(
 		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
 			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
 			if (err instanceof Error && err.name === "McpGatewayError") { json({ error: err.message }, /fetch failed|HTTP|timed out/i.test(err.message) ? 502 : 422); return; }
+			const mcpInstallError = err instanceof Error ? err as Error & { code?: string } : undefined;
+			const mcpInstallCode = mcpInstallError?.code;
+			if (mcpInstallError && mcpInstallCode && new Set([
+				"MARKETPLACE_MCP_PACK_INTEGRITY_INVALID",
+				"MARKETPLACE_MCP_SNAPSHOT_INVALID",
+				"MARKETPLACE_MCP_SNAPSHOT_CONFIG_INVALID",
+				"MARKETPLACE_MCP_SNAPSHOT_PUBLISH_FAILED",
+				"MARKETPLACE_MCP_ATTESTATION_KEY_UNAVAILABLE",
+				"MARKETPLACE_MCP_ATTESTATION_PERSIST_FAILED",
+			]).has(mcpInstallCode)) {
+				console.error(`[marketplace] ${mcpInstallCode}`);
+				json({ error: mcpInstallError.message }, mcpInstallCode.endsWith("_INVALID") ? 422 : 500);
+				return;
+			}
 			jsonError(500, err);
 		};
 

@@ -5,6 +5,7 @@ import path from "node:path";
 import {
 	MarketplaceMcpInstallAttestationStore,
 	MarketplaceMcpPackIntegrityError,
+	MarketplaceMcpSnapshotPublicationError,
 	measureMarketplaceMcpPackIntegrity,
 	type MarketplaceMcpInstallIdentity,
 } from "../../../src/server/mcp/marketplace-mcp-install-attestation.ts";
@@ -277,13 +278,18 @@ describe("Marketplace MCP install attestations", () => {
 		fs.writeFileSync(path.join(packRoot, "server.mjs"), "export const generation = 'two';\n");
 
 		const originalRename = fs.renameSync.bind(fs);
+		const rawFailure = `simulated failure for ${store.snapshotsRoot} private-secret-name`;
 		vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
 			if (path.dirname(String(to)) === store.snapshotsRoot && /^[a-f0-9]{64}$/.test(path.basename(String(to)))) {
-				throw new Error("simulated snapshot publication failure");
+				throw new Error(rawFailure);
 			}
 			return originalRename(from, to);
 		}) as typeof fs.renameSync);
-		expect(() => attest(store, packRoot)).toThrow("simulated snapshot publication failure");
+		let thrown: unknown;
+		try { attest(store, packRoot); } catch (error) { thrown = error; }
+		expect(thrown).toBeInstanceOf(MarketplaceMcpSnapshotPublicationError);
+		expect((thrown as Error).message).not.toContain(store.snapshotsRoot);
+		expect((thrown as Error).message).not.toContain("private-secret-name");
 		expect(fs.readFileSync(store.ledgerPath, "utf8")).toBe(beforeLedger);
 		expect(snapshotIds(store)).toEqual(beforeSnapshots);
 		expect(fs.readdirSync(store.snapshotsRoot).some((name) => name.startsWith(".tmp-"))).toBe(false);

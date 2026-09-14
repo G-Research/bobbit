@@ -574,6 +574,59 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(approvedServer.requests.some(request => request.method === "tools/list")).toBe(true);
 			expect(JSON.stringify(trustedStatus)).not.toContain("installed-header-secret");
 
+			// Deterministically reproduce the original load-then-measure race: expose
+			// a malicious live contribution, let the surrounding Marketplace loader
+			// observe it, then restore the attested bytes at the first integrity
+			// traversal. Runtime discovery must still use only the private snapshot.
+			const installedPack = path.join(project.rootPath, ".bobbit", "config", "market-packs", installedPackName);
+			const liveContribution = path.join(installedPack, "mcp", "remote.json");
+			const transientStdioContribution = path.join(installedPack, "mcp", "transient-stdio.json");
+			const transientStdioMarker = path.join(project.rootPath, "transient-stdio-marker");
+			const attestedContribution = fs.readFileSync(liveContribution, "utf8");
+			fs.writeFileSync(liveContribution, JSON.stringify({
+				server: "attested_runtime",
+				transport: { type: "http", url: changedServer.url, headers: { Authorization: "Bearer transient-malicious-secret" } },
+			}, null, 2));
+			fs.writeFileSync(transientStdioContribution, JSON.stringify({
+				server: "transient_stdio",
+				transport: {
+					type: "stdio",
+					command: process.execPath,
+					args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(transientStdioMarker)}, 'spawned')`],
+				},
+			}, null, 2));
+			const originalReadFile = fs.readFileSync.bind(fs);
+			const originalLstat = fs.lstatSync.bind(fs);
+			let transientLiveDefinitionRead = false;
+			let restoredBeforeMeasurement = false;
+			(fs as any).readFileSync = ((file: fs.PathOrFileDescriptor, ...args: any[]) => {
+				const resolvedFile = typeof file === "number" ? "" : path.resolve(String(file));
+				if (!restoredBeforeMeasurement && (resolvedFile === path.resolve(liveContribution)
+					|| resolvedFile === path.resolve(transientStdioContribution))) {
+					transientLiveDefinitionRead = true;
+				}
+				return (originalReadFile as any)(file, ...args);
+			});
+			(fs as any).lstatSync = ((file: fs.PathLike, ...args: any[]) => {
+				if (!restoredBeforeMeasurement && path.resolve(String(file)) === path.resolve(installedPack)) {
+					restoredBeforeMeasurement = true;
+					fs.writeFileSync(liveContribution, attestedContribution, "utf8");
+					fs.rmSync(transientStdioContribution, { force: true });
+				}
+				return (originalLstat as any)(file, ...args);
+			});
+			try {
+				const raceRefresh = await refreshProjectPackOrder(project.id, [installedPackName]);
+				expect(raceRefresh.status).toBe(200);
+			} finally {
+				(fs as any).readFileSync = originalReadFile;
+				(fs as any).lstatSync = originalLstat;
+			}
+			expect(restoredBeforeMeasurement).toBe(true);
+			expect(transientLiveDefinitionRead).toBe(true);
+			expect(changedServer.requests).toHaveLength(0);
+			expect(fs.existsSync(transientStdioMarker)).toBe(false);
+
 			const attestationPath = path.join(secretsDir(), "marketplace-mcp-install-attestations.json");
 			let privateLedger = fs.readFileSync(attestationPath, "utf8");
 			expect(privateLedger).toContain(installedPackName);
@@ -599,7 +652,6 @@ test.describe("Marketplace MCP API integration", () => {
 			expect(copiedStatus).toMatchObject({ status: "disconnected", toolCount: 0, approval: { required: true, state: "pending" } });
 			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
 
-			const installedPack = path.join(project.rootPath, ".bobbit", "config", "market-packs", installedPackName);
 			const approvedRequestCountBeforeMutation = approvedServer.requests.length;
 			// The transport declaration is unchanged; only dynamically loadable pack
 			// content changes. Complete-pack integrity must still revoke pretrust.
@@ -638,6 +690,51 @@ test.describe("Marketplace MCP API integration", () => {
 			await cleanup(sourceId, project.id, [forgedPackName, installedPackName]);
 			await Promise.all([forgedServer.close(), approvedServer.close(), changedServer.close()]);
 			fs.rmSync(fixtureRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("snapshot publication failures expose only stable API and log diagnostics", async () => {
+		const project = await defaultProject();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "marketplace-mcp-snapshot-error-"));
+		const packName = "snapshot-error-pack";
+		writeRemoteMcpPack(path.join(root, packName), packName, "snapshot_error", "http://127.0.0.1:9/mcp", "secret-header-value");
+		let sourceId: string | undefined;
+		const originalRename = fs.renameSync.bind(fs);
+		const originalConsoleError = console.error;
+		const logs: string[] = [];
+		try {
+			const add = await apiFetch("/api/marketplace/sources", {
+				method: "POST",
+				body: JSON.stringify({ url: root }),
+			});
+			expect(add.status).toBe(201);
+			sourceId = (await add.json()).source.id;
+			const snapshotRoot = path.join(secretsDir(), "marketplace-mcp-pack-snapshots");
+			(fs as any).renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+				if (path.dirname(String(to)) === snapshotRoot && /^[a-f0-9]{64}$/.test(path.basename(String(to)))) {
+					throw new Error(`raw snapshot failure ${to} ${project.rootPath} secret-bearing-filename`);
+				}
+				return originalRename(from, to);
+			});
+			console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+
+			const install = await apiFetch("/api/marketplace/install", {
+				method: "POST",
+				body: JSON.stringify({ sourceId, dirName: packName, scope: "project", projectId: project.id }),
+			});
+			const body = await install.text();
+			expect(install.status).toBe(500);
+			expect(body).toContain("Could not publish the Marketplace MCP install snapshot.");
+			for (const forbidden of [snapshotRoot, project.rootPath, "secret-bearing-filename", "secret-header-value"]) {
+				expect(body).not.toContain(forbidden);
+				expect(logs.join("\n")).not.toContain(forbidden);
+			}
+			expect(logs.join("\n")).toContain("MARKETPLACE_MCP_SNAPSHOT_PUBLISH_FAILED");
+		} finally {
+			(fs as any).renameSync = originalRename;
+			console.error = originalConsoleError;
+			await cleanup(sourceId, project.id, [packName]);
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

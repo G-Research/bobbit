@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { McpClient, expandEnvRecord, sanitizeMcpRuntimeError } from "./mcp-client.js";
+import { McpClient, expandEnvRecord, replaceMcpDiagnosticPath, sanitizeMcpRuntimeError } from "./mcp-client.js";
 import {
   McpApprovalStore,
   validateMcpServerConfig,
@@ -156,6 +156,12 @@ export interface McpReloadOptions {
   timeoutMs?: number;
   /** Queue one fresh reload after the active reload. Used when activation mutates while discovery is in flight. */
   queueIfInFlight?: boolean;
+}
+
+function runtimePrivatePaths(group: ResolvedMcpConnectionGroup | undefined): string[] {
+  return [...new Set(group?.ownerContributions
+    .map((owner) => owner.origin.runtimePrivatePackRoot)
+    .filter((value): value is string => Boolean(value)) ?? [])];
 }
 
 export interface McpToolRegistrationRefresh {
@@ -439,18 +445,11 @@ function safeOrigin(origin: ResolvedMcpOrigin): ResolvedMcpOrigin {
 function redactMcpServerConfigForOrigin(config: McpServerConfig, origin: ResolvedMcpOrigin): RedactedMcpServerConfig {
   const redacted = redactMcpServerConfig(config);
   if (!origin.runtimePrivatePackRoot || !origin.reviewPackRoot) return redacted;
-  const roots = [
-    [origin.runtimePrivatePackRoot, origin.reviewPackRoot],
-    [origin.runtimePrivatePackRoot.replace(/\\/g, "/"), origin.reviewPackRoot.replace(/\\/g, "/")],
-  ] as const;
-  const replacePrivateRoot = (value: string): string => {
-    for (const [privateRoot, replacement] of roots) {
-      value = process.platform === "win32"
-        ? value.replace(new RegExp(privateRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), replacement)
-        : value.split(privateRoot).join(replacement);
-    }
-    return value;
-  };
+  const replacePrivateRoot = (value: string): string => replaceMcpDiagnosticPath(
+    value,
+    origin.runtimePrivatePackRoot!,
+    origin.reviewPackRoot!,
+  );
   if (redacted.command) redacted.command = replacePrivateRoot(redacted.command);
   if (redacted.args) redacted.args = redacted.args.map(replacePrivateRoot);
   if (redacted.cwd) redacted.cwd = replacePrivateRoot(redacted.cwd);
@@ -1062,7 +1061,7 @@ export class McpManager {
     try {
       // Guard for test-injected stubs that may pre-set connected=true.
       if (!client.connected) {
-        await client.connect(config);
+        await client.connect(config, { privatePaths: runtimePrivatePaths(currentGroup) });
       }
       this.clients.set(name, client);
       // A concurrent rejection/configuration change during initialize must not
@@ -1086,7 +1085,7 @@ export class McpManager {
           await this.disconnectServer(name, { runtimeOnly: true });
           return;
         }
-        const reason = sanitizeMcpRuntimeError(err, currentGroup.config);
+        const reason = sanitizeMcpRuntimeError(err, currentGroup.config, runtimePrivatePaths(currentGroup));
         console.error(`[mcp] tools/list failed for "${name}": ${reason}`);
         this.errors.set(name, reason);
         // Server stays in errored state with empty toolDefs — sibling servers
@@ -1128,7 +1127,7 @@ export class McpManager {
             : ""),
       );
     } catch (err) {
-      const msg = sanitizeMcpRuntimeError(err, currentGroup.config);
+      const msg = sanitizeMcpRuntimeError(err, currentGroup.config, runtimePrivatePaths(currentGroup));
       this.errors.set(name, msg);
       console.error(`[mcp] Failed to connect to server "${name}":`, msg);
 
@@ -1317,7 +1316,7 @@ export class McpManager {
       } catch (err) {
         console.error(
           `[mcp] Error disconnecting server "${name}":`,
-          sanitizeMcpRuntimeError(err, this.configs.get(name)),
+          sanitizeMcpRuntimeError(err, this.configs.get(name), runtimePrivatePaths(this.connectionGroups.get(name))),
         );
       }
       this.clients.delete(name);
@@ -1768,7 +1767,7 @@ export class McpManager {
       const storedError = eligible ? this.errors.get(name) : undefined;
       // Status is a public API/UI boundary. Re-project even though writers use
       // the same sanitizer, so legacy/injected state cannot bypass redaction.
-      const error = storedError ? sanitizeMcpRuntimeError(storedError, config) : undefined;
+      const error = storedError ? sanitizeMcpRuntimeError(storedError, config, runtimePrivatePaths(group)) : undefined;
       const tools = eligible ? this.toolDefs.get(name) : undefined;
       const origin = safeOrigin(definition.origin);
       const diagnostics: McpStatusDiagnostic[] = [];

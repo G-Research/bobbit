@@ -2,6 +2,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import path from 'node:path';
 import type { IncomingHttpHeaders } from 'node:http';
 import type {
   McpServerConfig,
@@ -61,14 +62,17 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function redactConfiguredCwd(message: string, cwd: string): string {
-  for (const value of new Set([cwd, cwd.replace(/\\/g, '/'), cwd.replace(/\//g, '\\')])) {
-    if (!value) continue;
-    message = process.platform === 'win32'
-      ? message.replace(new RegExp(escapeRegExp(value), 'gi'), REDACTED)
-      : message.split(value).join(REDACTED);
+export function replaceMcpDiagnosticPath(message: string, configuredPath: string, replacement = REDACTED): string {
+  if (!configuredPath) return message;
+  const windowsStyle = path.win32.isAbsolute(configuredPath);
+  if (windowsStyle || process.platform === 'win32') {
+    let pattern = '';
+    for (const character of configuredPath) {
+      pattern += character === '/' || character === '\\' ? '[\\\\/]' : escapeRegExp(character);
+    }
+    return message.replace(new RegExp(pattern, 'gi'), replacement);
   }
-  return message;
+  return message.split(configuredPath).join(replacement);
 }
 
 function redactedDiagnosticUrl(raw: string): string {
@@ -133,12 +137,14 @@ function configuredRuntimeSecrets(config: McpServerConfig | null | undefined): s
 export function sanitizeMcpRuntimeError(
   error: unknown,
   config: McpServerConfig | null | undefined,
+  privatePaths: readonly string[] = [],
 ): string {
   let message = error instanceof Error ? error.message : String(error);
   if (!message) message = 'Unknown MCP runtime error';
 
+  for (const privatePath of privatePaths) message = replaceMcpDiagnosticPath(message, privatePath);
   if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.cwd === 'string' && config.cwd) {
-    message = redactConfiguredCwd(message, config.cwd);
+    message = replaceMcpDiagnosticPath(message, config.cwd);
   }
 
   if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.url === 'string' && config.url) {
@@ -197,9 +203,15 @@ type PendingRequest = {
 /**
  * MCP JSON-RPC 2.0 client supporting stdio and HTTP transports.
  */
+export interface McpRuntimeDiagnosticContext {
+  /** Server-private filesystem roots to redact from transport diagnostics. */
+  privatePaths?: readonly string[];
+}
+
 export class McpClient {
   private _connected = false;
   private _config: McpServerConfig | null = null;
+  private _privateDiagnosticPaths: readonly string[] = [];
   private _nextId = 1;
 
   // Stdio transport state
@@ -216,8 +228,9 @@ export class McpClient {
   }
 
   /** Connect to MCP server. Spawns process (stdio) or validates URL (HTTP). Sends initialize handshake. */
-  async connect(config: McpServerConfig): Promise<void> {
+  async connect(config: McpServerConfig, diagnosticContext: McpRuntimeDiagnosticContext = {}): Promise<void> {
     this._config = config;
+    this._privateDiagnosticPaths = [...new Set(diagnosticContext.privatePaths?.filter(Boolean) ?? [])];
     this._httpSessionId = null;
 
     if (config.command) {
@@ -674,6 +687,6 @@ export class McpClient {
   }
 
   private _log(message: string): void {
-    console.error(`[mcp:${this.serverName}] ${sanitizeMcpRuntimeError(message, this._config)}`);
+    console.error(`[mcp:${this.serverName}] ${sanitizeMcpRuntimeError(message, this._config, this._privateDiagnosticPaths)}`);
   }
 }
