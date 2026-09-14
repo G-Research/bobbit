@@ -7,6 +7,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
 import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "./project-registry.js";
+import { isSandboxExemptProject } from "./sandbox-manager.js";
 import type { Component } from "./project-config-store.js";
 import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, shouldSkipRemoteGitForTests, type RemoteGitPolicy } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
@@ -426,6 +427,9 @@ export class StaffManager {
 		const projectId = opts?.projectId;
 		if (!projectId) {
 			throw new Error("Cannot create staff: projectId is required");
+		}
+		if (opts?.sandboxed && !isSandboxExemptProject(projectId)) {
+			sessionManager.assertSandboxStartupAllowed();
 		}
 
 		// Auto-assign UUIDs to triggers missing IDs, then validate the exact
@@ -989,6 +993,9 @@ export class StaffManager {
 		if (!found) throw new Error("Staff agent not found");
 		const { staff } = found;
 		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot ensure session`);
+		if (staff.sandboxed && !isSandboxExemptProject(found.projectId)) {
+			sessionManager.assertSandboxStartupAllowed();
+		}
 
 		// Branch 1: legacy migration — no permanent session yet, create one
 		if (!staff.currentSessionId) {

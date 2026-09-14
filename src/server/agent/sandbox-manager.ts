@@ -62,6 +62,8 @@ export interface SandboxManagerOptions {
 	 * just coordinates lifecycle.
 	 */
 	bootstrap?: SandboxBootstrap;
+	/** Synchronous admission fence installed by SessionManager. */
+	assertStartupAllowed?: () => void;
 	commandRunner?: CommandRunner;
 	clock?: Clock;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -85,10 +87,12 @@ export class SandboxManager {
 	 */
 	private _ensureInFlight = new Map<string, Promise<void>>();
 	private _bootstrap: SandboxBootstrap | null;
+	private _assertStartupAllowed: (() => void) | null;
 	private readonly deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } };
 
 	constructor(opts: SandboxManagerOptions = {}) {
 		this._bootstrap = opts.bootstrap ?? null;
+		this._assertStartupAllowed = opts.assertStartupAllowed ?? null;
 		this.deps = { commandRunner: opts.commandRunner, clock: opts.clock, worktreeSetupRuntime: opts.worktreeSetupRuntime };
 	}
 
@@ -103,6 +107,11 @@ export class SandboxManager {
 	/** Set or replace the bootstrap function post-construction. */
 	setBootstrap(bootstrap: SandboxBootstrap | null): void {
 		this._bootstrap = bootstrap;
+	}
+
+	/** Install the SessionManager-owned gateway-mode admission fence. */
+	setStartupGuard(assertStartupAllowed: (() => void) | null): void {
+		this._assertStartupAllowed = assertStartupAllowed;
 	}
 
 	/** Subscribe to container recovery events across all projects. Returns unsubscribe function. */
@@ -131,6 +140,10 @@ export class SandboxManager {
 		// directory, never cloning the server-run-dir git checkout or creating a
 		// one-off `<hqDir>/.bobbit/{state,config}` layout.
 		if (isSandboxExemptProject(projectId)) return;
+
+		// Fence every project entry before bootstrap, Docker, or reuse can let a
+		// caller proceed with sandbox work in credential-free trusted-local mode.
+		this._assertStartupAllowed?.();
 
 		// Already fully initialized — fast path.
 		const existing = this.sandboxes.get(projectId);
@@ -178,6 +191,7 @@ export class SandboxManager {
 		if (isSandboxExemptProject(projectId)) {
 			throw new Error(`[sandbox-manager] refusing to create a sandbox for exempt project ${projectId} (Headquarters/system are never sandboxed)`);
 		}
+		this._assertStartupAllowed?.();
 
 		// If already tracked, just return — init was already done
 		if (this.sandboxes.has(projectId)) {

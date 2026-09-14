@@ -5333,7 +5333,9 @@ export class SessionManager {
 	}
 
 	setSandboxManager(manager: SandboxManager | null): void {
+		this.sandboxManager?.setStartupGuard(null);
 		this.sandboxManager = manager;
+		manager?.setStartupGuard(() => this.assertSandboxStartupAllowed());
 	}
 
 	/** Configure the gateway-wide auth mode before restoring or creating sessions. */
@@ -6314,6 +6316,7 @@ export class SessionManager {
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts, projectId),
 
+			assertSandboxStartupAllowed: () => this.assertSandboxStartupAllowed(),
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),

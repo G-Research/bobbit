@@ -29,6 +29,10 @@ import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.j
 guardProcessEnv();
 
 import { SessionManager } from "../../../src/server/agent/session-manager.js";
+import { StaffManager } from "../../../src/server/agent/staff-manager.js";
+import { SandboxManager } from "../../../src/server/agent/sandbox-manager.js";
+import { executePlan, executeWorktreeAsync } from "../../../src/server/agent/session-setup.js";
+import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "../../../src/server/agent/project-registry.js";
 import { SandboxTokenStore } from "../../../src/server/auth/sandbox-token.js";
 import { readToken } from "../../../src/server/auth/token.js";
 
@@ -207,6 +211,59 @@ describe("direct-agent admin token", () => {
 		);
 		assert.equal(ensureForProject.mock.calls.length, 0, "restore must reject before container revival");
 		await h.sm._testStore.flushAsync();
+	});
+
+	it("the real SandboxManager funnel rejects every project bootstrap but preserves authenticated and exempt scopes", async () => {
+		const h = makeHarness();
+		current = h;
+		const bootstrap = vi.fn(async () => null);
+		const manager = new SandboxManager({ bootstrap });
+		h.sm.setSandboxManager(manager);
+		h.sm.setCredentialFreeTrustedLocal(true);
+
+		await assert.rejects(
+			manager.ensureForProject("project-blocked"),
+			/require gateway authentication.*--auth/i,
+		);
+		assert.equal(bootstrap.mock.calls.length, 0, "admission must precede the bootstrap callback");
+		await assert.doesNotReject(() => manager.ensureForProject(HEADQUARTERS_PROJECT_ID));
+		await assert.doesNotReject(() => manager.ensureForProject(SYSTEM_PROJECT_ID));
+		assert.equal(bootstrap.mock.calls.length, 0, "HQ/system exemptions must remain bootstrap-free");
+
+		h.sm.setCredentialFreeTrustedLocal(false);
+		await assert.doesNotReject(() => manager.ensureForProject("project-authenticated"));
+		assert.deepEqual(bootstrap.mock.calls, [["project-authenticated"]]);
+	});
+
+	it("session setup funnels reject before configuration, worktree, hook, MCP, or agent effects", async () => {
+		const h = makeHarness();
+		current = h;
+		h.sm.setCredentialFreeTrustedLocal(true);
+		const assertStartup = () => h.sm.assertSandboxStartupAllowed();
+		const plan = { id: "blocked-plan", sandboxed: true } as any;
+		const ctx = { assertSandboxStartupAllowed: assertStartup } as any;
+
+		await assert.rejects(() => executePlan(plan, ctx), /require gateway authentication.*--auth/i);
+		await assert.rejects(
+			() => executeWorktreeAsync(plan, { id: "blocked-plan" } as any, ctx),
+			/require gateway authentication.*--auth/i,
+		);
+	});
+
+	it("staff creation rejects before project worktree or persistence setup", async () => {
+		const h = makeHarness();
+		current = h;
+		h.sm.setCredentialFreeTrustedLocal(true);
+		const staffManager = new StaffManager({ all: () => [] } as any);
+
+		await assert.rejects(
+			() => staffManager.createStaff("blocked", "", "prompt", "/host/project", h.sm, {
+				projectId: "project-blocked",
+				sandboxed: true,
+				worktree: true,
+			}),
+			/require gateway authentication.*--auth/i,
+		);
 	});
 
 	it("authenticated gateway mode preserves scoped sandbox startup", async () => {
