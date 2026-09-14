@@ -4,12 +4,8 @@ import path from "node:path";
 import { McpApprovalStore } from "../../../src/server/mcp/mcp-approval-store.js";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
 import {
-	authenticatedMcpOperatorHeaders,
 	authenticatedOperatorCookie,
 	apiFetch,
-	createMcpOperatorPairingCode,
-	pairMcpOperatorBrowser,
-	rawApiFetch,
 	createSession,
 	deleteSession,
 	createGoal,
@@ -17,6 +13,7 @@ import {
 } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
 import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
+import { bootGateway, type RunningGateway } from "../../support/helpers/integration/gateway/base-path-gateway-fixture.js";
 import {
 	appendCount,
 	startRecordingMcpServer,
@@ -131,7 +128,6 @@ async function decide(
 	const params = mcpReviewParams(viewProjectId, cwd, owner);
 	return apiFetch(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?${params.toString()}`, {
 		method: "POST",
-		headers: await authenticatedMcpOperatorHeaders(),
 		body: JSON.stringify({
 			decision,
 			fingerprint: overrides.fingerprint ?? status.approval.fingerprint,
@@ -241,8 +237,22 @@ async function setToolPolicy(projectId: string, serverName: string, policy: "nev
 }
 
 test.describe("project MCP startup approval gateway boundary", () => {
-	test("operator approval header is exposed only to an admitted browser origin", async ({ gateway }) => {
-		const allowed = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
+	test("obsolete MCP operator headers are not admitted by CORS", async ({ gateway }) => {
+		const standard = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: "http://127.0.0.1:5173",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "Authorization, Content-Type",
+			},
+		});
+		expect(standard.status).toBe(204);
+		expect(standard.headers.get("access-control-allow-headers")?.toLowerCase()).toContain("authorization");
+		expect(standard.headers.get("access-control-allow-credentials")).toBeNull();
+
+		const obsolete = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
 			method: "OPTIONS",
 			headers: {
 				Origin: "http://127.0.0.1:5173",
@@ -252,25 +262,102 @@ test.describe("project MCP startup approval gateway boundary", () => {
 				"Access-Control-Request-Headers": "X-Bobbit-Mcp-Operator, Content-Type",
 			},
 		});
-		expect(allowed.status).toBe(204);
-		expect(allowed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain("x-bobbit-mcp-operator");
-		expect(allowed.headers.get("access-control-allow-credentials")).toBeNull();
-
-		const rejected = await fetch(`${gateway.baseURL}/api/mcp-servers/example/approval?projectId=headquarters`, {
-			method: "OPTIONS",
-			headers: {
-				Origin: "https://repository-controlled.invalid",
-				"Sec-Fetch-Site": "cross-site",
-				"Sec-Fetch-Mode": "cors",
-				"Access-Control-Request-Method": "POST",
-				"Access-Control-Request-Headers": "X-Bobbit-Mcp-Operator, Content-Type",
-			},
-		});
-		expect(rejected.status).toBe(403);
-		expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
+		expect(obsolete.status).toBe(403);
+		expect(obsolete.headers.get("access-control-allow-origin")).toBeNull();
+		expect(obsolete.headers.get("access-control-allow-headers")).toBeNull();
 	});
 
-	test("stdio stays unspawned until exact approval and decisions survive manager/store reconstruction", async ({ gateway }) => {
+	test("trusted-local gateway authentication can approve an exact project MCP definition", async () => {
+		const remote = await startRecordingMcpServer("trusted_local_probe");
+		let local: RunningGateway | undefined;
+		try {
+			local = await bootGateway("", "127.0.0.1", false, { serveStatic: false });
+			expect(local.gateway.trustedLocal).toBe(true);
+			const projectRoot = path.join(local.root, "trusted-local-project");
+			mkdirSync(projectRoot, { recursive: true });
+			const created = await fetch(`${local.baseUrl}/api/projects`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: "trusted-local-project", rootPath: projectRoot, acceptCanonical: true }),
+			});
+			expect(created.status).toBe(201);
+			const project = await created.json() as { id: string };
+			const serverName = `trusted-local-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpConfig(projectRoot, serverName, { url: remote.url });
+
+			const listed = await fetch(`${local.baseUrl}/api/mcp-servers?projectId=${encodeURIComponent(project.id)}&ensure=true`);
+			expect(listed.status).toBe(200);
+			const pending = named(await listed.json() as ServerStatus[], serverName);
+			expect(pending).toMatchObject({ status: "disconnected", approval: { state: "pending" } });
+			expect(remote.requests).toHaveLength(0);
+
+			const decision = await fetch(`${local.baseUrl}/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					decision: "approved",
+					fingerprint: pending.approval.fingerprint,
+					sourceProjectId: pending.source.projectId,
+					sourceId: pending.source.sourceId,
+				}),
+			});
+			expect(decision.status).toBe(200);
+			expect((await decision.json()).server).toMatchObject({
+				status: "connected",
+				toolCount: 1,
+				approval: { state: "approved" },
+			});
+			expect(rpcCount(remote, "initialize")).toBe(1);
+		} finally {
+			await local?.shutdown();
+			await remote.close();
+		}
+	});
+
+	test("a sandbox-scoped token is denied before body parsing, manager creation, ledger mutation, spawn, or network activity", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "sandbox-pre-handler");
+		const remote = await startRecordingMcpServer("sandbox_probe");
+		let sandboxProjectId: string | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-sandbox-denial-${randomUUID().slice(0, 8)}`);
+			sandboxProjectId = project.id;
+			const marker = path.join(isolated.root, "sandbox-spawns.txt");
+			const stdioName = `sandbox-stdio-${randomUUID().slice(0, 8)}`;
+			const remoteName = `sandbox-remote-${randomUUID().slice(0, 8)}`;
+			writeProjectMcpServers(project.root, {
+				[stdioName]: { command: "must-not-spawn", args: [marker] },
+				[remoteName]: { url: remote.url },
+			});
+
+			const sessionManager = gateway.sessionManager as any;
+			expect(sessionManager.getMcpManager({ projectId: project.id })).toBeNull();
+			expect(existsSync(path.join(isolated.approvalDir, "mcp-server-approvals.json"))).toBe(false);
+			const sandboxToken = sessionManager.sandboxTokenStore.register(project.id);
+
+			const response = await fetch(`${gateway.baseURL}/api/mcp-servers/${encodeURIComponent(stdioName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${sandboxToken}`,
+					"Content-Type": "application/json",
+				},
+				// If route dispatch or JSON parsing occurs this is a 400, not the
+				// pre-handler sandbox denial asserted below.
+				body: "{not-json",
+			});
+			expect(response.status).toBe(403);
+			expect(await response.json()).toMatchObject({ error: "Forbidden: sandbox token cannot access this endpoint" });
+			expect(sessionManager.getMcpManager({ projectId: project.id })).toBeNull();
+			expect(existsSync(path.join(isolated.approvalDir, "mcp-server-approvals.json"))).toBe(false);
+			expect(appendCount(marker)).toBe(0);
+			expect(remote.requests).toHaveLength(0);
+		} finally {
+			if (sandboxProjectId) (gateway.sessionManager as any).sandboxTokenStore.remove(sandboxProjectId);
+			await remote.close();
+			await isolated.cleanup();
+		}
+	});
+
+	test("stdio stays unspawned until exact gateway-authenticated approval and decisions survive manager/store reconstruction", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "stdio");
 		try {
 			const project = await createProject(gateway, isolated, `mcp-stdio-${randomUUID().slice(0, 8)}`);
@@ -291,63 +378,33 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect(JSON.stringify(current)).not.toContain("must-not-cross-the-api");
 			expect(current.reviewConfig?.env).toEqual({ FIXTURE_SECRET: "[redacted]", GENERATION: "[redacted]" });
 
-			// The global admin bearer is available to direct agents and must not let
-			// repository instructions authorize their own MCP process. Authorization
-			// is checked before the body is parsed or any ledger/runtime mutation.
 			const approvalPath = `/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`;
-			const approvalBody = JSON.stringify({
-				decision: "approved",
+			const approvalRequest = (decision: "approved" | "rejected") => JSON.stringify({
+				decision,
 				fingerprint: current.approval.fingerprint,
 				sourceProjectId: current.source.projectId,
 				sourceId: current.source.sourceId,
 			});
-			const bearerOnly = await rawApiFetch(approvalPath, {
-				method: "POST",
-				body: approvalBody,
-			});
-			expect(bearerOnly.status).toBe(403);
-			expect(await bearerOnly.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
 
-			const genericCookie = await rawApiFetch(approvalPath, {
+			const unauthenticated = await fetch(`${gateway.baseURL}${approvalPath}`, {
 				method: "POST",
-				headers: { Cookie: await authenticatedOperatorCookie() },
-				body: approvalBody,
+				headers: { "Content-Type": "application/json" },
+				body: approvalRequest("approved"),
 			});
-			expect(genericCookie.status).toBe(403);
-			expect(await genericCookie.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
+			expect(unauthenticated.status).toBe(401);
+
+			const obsoleteHeaderOnly = await fetch(`${gateway.baseURL}${approvalPath}`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Bobbit-Mcp-Operator": "obsolete-credential-must-not-authenticate",
+				},
+				body: approvalRequest("approved"),
+			});
+			expect(obsoleteHeaderOnly.status).toBe(401);
 			expect(existsSync(path.join(isolated.approvalDir, "mcp-server-approvals.json"))).toBe(false);
 			current = named(await statuses(project.id), serverName);
 			expect(current.approval.state).toBe("pending");
-			expect(appendCount(marker)).toBe(0);
-
-			const pairing = createMcpOperatorPairingCode();
-			const wrongPairing = await rawApiFetch("/api/mcp-operator/pair", {
-				method: "POST",
-				body: JSON.stringify({ code: Buffer.alloc(32, 0x5a).toString("base64url") }),
-			});
-			expect(wrongPairing.status).toBe(403);
-			expect(wrongPairing.headers.get("cache-control")).toBe("no-store");
-			expect(await wrongPairing.json()).toMatchObject({ code: "MCP_OPERATOR_PAIRING_REQUIRED" });
-
-			const firstCredential = await pairMcpOperatorBrowser(pairing.code);
-			expect(firstCredential).toMatch(/^v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
-			const replay = await rawApiFetch("/api/mcp-operator/pair", {
-				method: "POST",
-				body: JSON.stringify({ code: pairing.code }),
-			});
-			expect(replay.status).toBe(403);
-			expect(replay.headers.get("cache-control")).toBe("no-store");
-			expect(await replay.json()).toMatchObject({ code: "MCP_OPERATOR_PAIRING_REQUIRED" });
-
-			const rotatedCredential = await pairMcpOperatorBrowser(createMcpOperatorPairingCode().code);
-			expect(rotatedCredential).not.toBe(firstCredential);
-			const revokedCredential = await rawApiFetch(approvalPath, {
-				method: "POST",
-				headers: { "X-Bobbit-Mcp-Operator": firstCredential },
-				body: approvalBody,
-			});
-			expect(revokedCredential.status).toBe(403);
-			expect(await revokedCredential.json()).toMatchObject({ code: "MCP_APPROVAL_HUMAN_REQUIRED" });
 			expect(appendCount(marker)).toBe(0);
 
 			const restart = await apiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/restart?projectId=${encodeURIComponent(project.id)}`, { method: "POST" });
@@ -355,19 +412,31 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect((await restart.json()).approval.state).toBe("pending");
 			expect(appendCount(marker)).toBe(0);
 
+			const cookieApproval = await fetch(`${gateway.baseURL}${approvalPath}`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Cookie: await authenticatedOperatorCookie(),
+				},
+				body: approvalRequest("approved"),
+			});
+			expect(cookieApproval.status).toBe(200);
+			current = (await cookieApproval.json()).server;
+			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
+			expect(appendCount(marker)).toBe(1);
+
 			let response = await decide(project.id, current, "rejected");
 			expect(response.status).toBe(200);
 			current = (await response.json()).server;
-			expect(current.approval.state).toBe("rejected");
-			expect(current.toolCount).toBe(0);
-			expect(appendCount(marker)).toBe(0);
+			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "rejected" } });
+			expect(appendCount(marker)).toBe(1);
 
 			await setToolPolicy(project.id, serverName, "never");
 			response = await decide(project.id, current, "approved");
 			expect(response.status).toBe(200);
 			current = (await response.json()).server;
 			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
-			expect(appendCount(marker)).toBe(1);
+			expect(appendCount(marker)).toBe(2);
 
 			const sessionManager = gateway.sessionManager as any;
 			const firstManager = sessionManager.getMcpManager({ projectId: project.id });
@@ -379,7 +448,7 @@ test.describe("project MCP startup approval gateway boundary", () => {
 
 			current = named(await statuses(project.id), serverName);
 			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
-			expect(appendCount(marker)).toBe(2);
+			expect(appendCount(marker)).toBe(3);
 			expect(firstClient.connected).toBe(false);
 
 			const reconstructedManager = sessionManager.getMcpManager({ projectId: project.id });
@@ -389,19 +458,19 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			current = named(await statuses(project.id), serverName);
 			expect(current).toMatchObject({ status: "disconnected", toolCount: 0, approval: { state: "changed" } });
 			expect(reconstructedClient.connected).toBe(false);
-			expect(appendCount(marker)).toBe(2);
+			expect(appendCount(marker)).toBe(3);
 
 			response = await decide(project.id, staleIdentity, "approved");
 			expect(response.status).toBe(409);
 			const stale = await response.json();
 			expect(stale).toMatchObject({ code: "MCP_APPROVAL_STALE", server: { approval: { state: "changed" } } });
-			expect(appendCount(marker)).toBe(2);
+			expect(appendCount(marker)).toBe(3);
 
 			response = await decide(project.id, current, "approved");
 			expect(response.status).toBe(200);
 			current = (await response.json()).server;
 			expect(current.approval.state).toBe("approved");
-			expect(appendCount(marker)).toBe(3);
+			expect(appendCount(marker)).toBe(4);
 
 			const approvedManager = sessionManager.getMcpManager({ projectId: project.id });
 			const approvedClient = approvedManager.clients.get(serverName);
@@ -515,7 +584,6 @@ test.describe("project MCP startup approval gateway boundary", () => {
 				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=missing-owner&ensure=true`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
 				{ query: `projectId=${encodedProject}&cwd=${encodedCwd}&sessionId=${foreign.id}&ensure=true`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
 			];
-			const operatorHeaders = await authenticatedMcpOperatorHeaders();
 			for (const rejected of rejectedCases) {
 				for (const request of [
 					{ path: `/api/mcp-servers?${rejected.query}`, init: undefined },
@@ -523,7 +591,6 @@ test.describe("project MCP startup approval gateway boundary", () => {
 						path: `/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${rejected.query}`,
 						init: {
 							method: "POST",
-							headers: operatorHeaders,
 							body: JSON.stringify({
 								decision: "approved",
 								fingerprint: "unreachable",
