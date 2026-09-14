@@ -374,16 +374,18 @@ describe("project-scoped persistent group grants", () => {
 		projectA.toolGroupPolicyStore.setGroupPolicy(mcpGroup, "ask");
 
 		const scopeKey = manager.mcpScopeKey({ projectId: PROJECT_A, cwd: hostWorktree });
+		const toolInfos = [{
+			name: canonicalName,
+			group: mcpGroup,
+			serverName: "review-server",
+			mcpToolName: "inspect",
+			description: "Inspect a review.",
+		}];
 		const boundManager = {
 			getScopeKey: () => scopeKey,
 			getServerStatuses: () => [],
-			getToolInfos: () => [{
-				name: canonicalName,
-				group: mcpGroup,
-				serverName: "review-server",
-				mcpToolName: "inspect",
-				description: "Inspect a review.",
-			}],
+			getToolInfos: () => toolInfos,
+			getToolRegistrationRefresh: () => ({ removePrefixes: ["mcp__"], toolInfos }),
 		};
 		manager.scopedMcpManagers.set(scopeKey, boundManager);
 		manager.mcpSessionScopes.set(session.id, { projectId: PROJECT_A, cwd: hostWorktree, scopeKey });

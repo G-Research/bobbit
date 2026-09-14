@@ -1310,17 +1310,13 @@ export class McpManager {
   /** Disconnect a specific server and remove its cached state. */
   async disconnectServer(name: string, opts?: { forget?: boolean; runtimeOnly?: boolean }): Promise<void> {
     const client = this.clients.get(name);
-    if (client) {
-      try {
-        await client.disconnect();
-      } catch (err) {
-        console.error(
-          `[mcp] Error disconnecting server "${name}":`,
-          sanitizeMcpRuntimeError(err, this.configs.get(name), runtimePrivatePaths(this.connectionGroups.get(name))),
-        );
-      }
-      this.clients.delete(name);
-    }
+    const config = this.configs.get(name);
+    const group = this.connectionGroups.get(name);
+
+    // Detach routes and runtime state before awaiting transport shutdown. Tool
+    // publication is synchronous, so no reader may observe a revoked server
+    // while its attacker-influenceable disconnect is still settling.
+    this.clients.delete(name);
     this.toolDefs.delete(name);
     this.errors.delete(name);
     this._markRouteMapDirty();
@@ -1333,6 +1329,17 @@ export class McpManager {
         if (this._toolNameMap.get(key)?.serverName === name) this._toolNameMap.delete(key);
       }
       this._summaryCache.delete(name);
+    }
+
+    if (client) {
+      try {
+        await client.disconnect();
+      } catch (err) {
+        console.error(
+          `[mcp] Error disconnecting server "${name}":`,
+          sanitizeMcpRuntimeError(err, config, runtimePrivatePaths(group)),
+        );
+      }
     }
   }
 
@@ -1350,11 +1357,37 @@ export class McpManager {
   // ── Tool queries ───────────────────────────────────────────────────
 
   /**
+   * Reconcile cached runtime routes against fresh, local-only discovery before
+   * publishing them. This deliberately does not connect a replacement or call
+   * tools/list: newly pending/rejected/changed definitions remain inert until
+   * the normal approval/reload lifecycle starts them.
+   */
+  reconcileToolPublication(): void {
+    this.discoverConnectionGroups();
+    for (const [name, active] of [...this.connectionGroups]) {
+      const programmatic = active.ownerContributions[0]?.origin.sourceId === "programmatic-manual";
+      const current = programmatic ? active : this.discoveredConnectionGroups.get(active.serverName);
+      if (
+        current
+        && this._fingerprintGroup(current) === this._fingerprintGroup(active)
+        && this._isEligible(current)
+      ) {
+        continue;
+      }
+
+      // disconnectServer detaches the route synchronously before its first await.
+      // Start transport shutdown without delaying this synchronous publication API.
+      void this.disconnectServer(name, { runtimeOnly: true });
+    }
+    this._ensureRouteMapFresh();
+  }
+
+  /**
    * Get all MCP tools as Bobbit-compatible tool info objects.
    * Tool names use double-underscore separator: mcp__<public-server>__<tool>
    */
   getToolInfos(): McpToolInfo[] {
-    this._ensureRouteMapFresh();
+    this.reconcileToolPublication();
     const infos: McpToolInfo[] = [];
 
     for (const route of this._toolRouteMap.values()) {
@@ -1380,12 +1413,12 @@ export class McpManager {
   }
 
   getRouteDiagnostics(): McpRouteDiagnostic[] {
-    this._ensureRouteMapFresh();
+    this.reconcileToolPublication();
     return this._routeDiagnostics.map((d) => ({ ...d }));
   }
 
   getToolRouteSnapshots(): McpToolRouteSnapshot[] {
-    this._ensureRouteMapFresh();
+    this.reconcileToolPublication();
     return [...this._toolRouteMap.values()].map((route) => {
       const summary = this._summaryCache.get(route.runtimeServerKey)?.get(route.mcpToolName);
       const paramNames = this._getParamNames(route.tool);
