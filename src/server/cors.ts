@@ -11,7 +11,6 @@ export const API_CORS_ALLOWED_HEADERS = [
 	"Content-Type",
 	"If-Match",
 	"X-Bobbit-Session-Id",
-	"X-Bobbit-Mcp-Operator",
 	"X-Bobbit-Spawning-Session",
 	"X-Bobbit-Session-Secret",
 ] as const;
