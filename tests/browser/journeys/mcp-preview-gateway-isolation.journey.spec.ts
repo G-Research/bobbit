@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Page } from "@playwright/test";
+import type { Page, Response } from "@playwright/test";
 import {
 	apiFetch,
 	createSession,
@@ -57,40 +57,73 @@ function named(statuses: McpStatus[], name: string): McpStatus {
 }
 
 function attackScript(endpoint: string, body: Record<string, unknown>): string {
-	return `(() => {
+	return `(async () => {
 		const report = document.getElementById("isolation-result");
 		let storageReadable = false;
-		let credential = "";
+		let bearer = "";
 		for (const readStorage of [
 			() => localStorage,
-			() => parent.localStorage,
+			() => sessionStorage,
+			() => parent === window ? null : parent.localStorage,
+			() => parent === window ? null : parent.sessionStorage,
 			() => opener ? opener.localStorage : null,
+			() => opener ? opener.sessionStorage : null,
 		]) {
 			try {
 				const storage = readStorage();
 				if (!storage) continue;
-				const raw = storage.getItem("mcp.operator.credentials.v1");
 				storageReadable = true;
-				if (!raw) continue;
-				const parsed = JSON.parse(raw);
-				credential = Object.values(parsed).find(value => typeof value === "string") || "";
-				if (credential) break;
+				bearer ||= storage.getItem("gateway.token") || "";
 			} catch {}
 		}
-		const headers = credential
-			? { "Content-Type": "application/json", "X-Bobbit-Mcp-Operator": credential }
+		let parentDomReadable = false;
+		for (const readPrivilegedDocument of [
+			() => parent === window ? null : parent.document.documentElement,
+			() => opener ? opener.document.documentElement : null,
+		]) {
+			try {
+				if (readPrivilegedDocument()) parentDomReadable = true;
+			} catch {}
+		}
+		let cookieReadable = false;
+		try { cookieReadable = document.cookie.length > 0; } catch {}
+		const indexedDbReadable = await new Promise(resolve => {
+			let settled = false;
+			const finish = value => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+			};
+			try {
+				const databaseName = "preview-isolation-" + Date.now();
+				const request = indexedDB.open(databaseName);
+				request.onsuccess = () => {
+					request.result.close();
+					indexedDB.deleteDatabase(databaseName);
+					finish(true);
+				};
+				request.onerror = () => finish(false);
+				setTimeout(() => finish(false), 2000);
+			} catch {
+				finish(false);
+			}
+		});
+		const headers = bearer
+			? { "Content-Type": "application/json", "Authorization": "Bearer " + bearer }
 			: { "Content-Type": "text/plain" };
-		fetch(${JSON.stringify(endpoint)}, {
+		const status = await fetch(${JSON.stringify(endpoint)}, {
 			method: "POST",
 			credentials: "include",
 			headers,
 			body: ${JSON.stringify(JSON.stringify(body))},
-		}).then(response => String(response.status), () => "network-error").then(status => {
-			report.setAttribute("data-storage-readable", String(storageReadable));
-			report.setAttribute("data-credential-stolen", credential ? "yes" : "no");
-			report.setAttribute("data-decision-status", status);
-			report.textContent = "attack-finished";
-		});
+		}).then(response => String(response.status), () => "network-error");
+		report.setAttribute("data-storage-readable", String(storageReadable));
+		report.setAttribute("data-bearer-stolen", bearer ? "yes" : "no");
+		report.setAttribute("data-cookie-readable", String(cookieReadable));
+		report.setAttribute("data-indexeddb-readable", String(indexedDbReadable));
+		report.setAttribute("data-parent-dom-readable", String(parentDomReadable));
+		report.setAttribute("data-decision-status", status);
+		report.textContent = "attack-finished";
 	})();`;
 }
 
@@ -106,7 +139,40 @@ async function expectIsolated(frameOrPage: ReturnType<Page["frameLocator"]> | Pa
 	const report = frameOrPage.locator("#isolation-result");
 	await expect(report).toHaveText("attack-finished", { timeout: 15_000 });
 	await expect(report).toHaveAttribute("data-storage-readable", "false");
-	await expect(report).toHaveAttribute("data-credential-stolen", "no");
+	await expect(report).toHaveAttribute("data-bearer-stolen", "no");
+	await expect(report).toHaveAttribute("data-cookie-readable", "false");
+	await expect(report).toHaveAttribute("data-indexeddb-readable", "false");
+	await expect(report).toHaveAttribute("data-parent-dom-readable", "false");
+	await expect(report).not.toHaveAttribute("data-decision-status", "200");
+}
+
+function expectOpaquePreviewResponse(response: Response): void {
+	expect(response.status()).toBe(200);
+	const csp = response.headers()["content-security-policy"] ?? "";
+	expect(csp, "successful preview responses must be response-sandboxed").toContain("sandbox allow-scripts");
+	expect(csp, "preview response CSP must not restore same-origin authority").not.toContain("allow-same-origin");
+}
+
+async function installSignedGatewayCookie(page: Page, gatewayBaseUrl: string): Promise<void> {
+	const bootstrap = await apiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	expect(bootstrap.status).toBe(200);
+	const setCookies = (bootstrap.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.()
+		?? (bootstrap.headers.get("set-cookie") ? [bootstrap.headers.get("set-cookie")!] : []);
+	const serialized = setCookies.find(cookie => cookie.startsWith("bobbit_session="));
+	expect(serialized, "browser-signaled gateway auth must mint a signed session cookie").toBeDefined();
+	const value = serialized!.slice("bobbit_session=".length).split(";", 1)[0];
+	// The browser harness uses HTTP loopback. Install the genuine signed value as
+	// a non-Secure test cookie so Chromium can send it on the attack/control POSTs.
+	await page.context().addCookies([{
+		name: "bobbit_session",
+		value,
+		url: gatewayBaseUrl,
+		httpOnly: true,
+		secure: false,
+		sameSite: "Lax",
+	}]);
 }
 
 function seedInlineAttack(gateway: any, sessionId: string, html: string): void {
@@ -133,10 +199,10 @@ function seedInlineAttack(gateway: any, sessionId: string, html: string): void {
 	];
 }
 
-test.use({ enableMcp: true, gatewayStateGroup: "mcp-preview-operator-isolation" });
+test.use({ enableMcp: true, gatewayStateGroup: "mcp-preview-gateway-isolation" });
 test.describe.configure({ mode: "serial" });
 
-test("repository inline, mounted, popout, and SVG previews cannot spend browser-held MCP decision authority", async ({ page, gateway }) => {
+test("MCP preview isolation keeps repository documents from spending gateway authority", async ({ page, gateway }) => {
 	test.setTimeout(120_000);
 	const fixture = createMcpProjectApprovalFixture();
 	const localSpawnMarker = join(fixture.primaryRoot, "local-mcp-spawned.txt");
@@ -147,12 +213,14 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 		response.end("pending MCP server must never reach this listener");
 	});
 	const remotePort = await listen(remoteServer);
-	const pairingCode = gateway.createMcpOperatorPairingCode().code;
-	const approvalPosts: string[] = [];
+	const approvalPosts: Array<{ url: string; authorization: string | null }> = [];
 	page.context().on("request", request => {
 		const url = new URL(request.url());
 		if (request.method() === "POST" && url.pathname.includes("/api/mcp-servers/") && url.pathname.endsWith("/approval")) {
-			approvalPosts.push(request.url());
+			approvalPosts.push({
+				url: request.url(),
+				authorization: request.headers()["authorization"] ?? null,
+			});
 		}
 	});
 
@@ -202,19 +270,16 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 		seedInlineAttack(gateway, sessionId, htmlAttack(approvalEndpoint, approvalBody, "inline"));
 
 		await openApp(page);
+		expect(await page.evaluate(() => Boolean(localStorage.getItem("gateway.token"))), "trusted UI must hold ordinary gateway bearer authority").toBe(true);
+		await installSignedGatewayCookie(page, gateway.baseURL);
+		expect((await page.context().cookies(gateway.baseURL)).some(cookie => cookie.name === "bobbit_session" && cookie.httpOnly), "trusted UI must hold the signed gateway cookie attacked with credentials: include").toBe(true);
 		await navigateToHash(page, `#/session/${sessionId}`);
 		const banner = page.locator('[data-testid="mcp-approval-banner"]');
 		await expect(banner).toBeVisible({ timeout: 20_000 });
-		await banner.locator('[data-testid="mcp-review-servers"]').click();
-		const pairing = page.locator('[data-testid="mcp-pairing-callout"]');
-		await pairing.locator('[data-testid="mcp-pairing-code"]').fill(pairingCode);
-		await pairing.locator('[data-testid="mcp-pair-browser"]').click();
-		await expect(pairing.locator('[data-testid="mcp-pairing-notice"]')).toContainText("no decision was made");
-		await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem("mcp.operator.credentials.v1")))).toBe(true);
-
-		await navigateToHash(page, `#/session/${sessionId}`);
 		await page.reload();
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		const inlineFrameElement = page.locator('iframe[title="repository-inline-attack.html"]');
+		await expect(inlineFrameElement, "inline repository HTML must have no same-origin sandbox capability").toHaveAttribute("sandbox", "allow-scripts");
 		const inlineFrame = page.frameLocator('iframe[title="repository-inline-attack.html"]');
 		await expectIsolated(inlineFrame);
 
@@ -227,13 +292,27 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 			const state: any = (window as any).bobbitState ?? (window as any).__bobbitState;
 			state.previewPanelActiveTab = "preview";
 		});
+		const mountedDocumentResponse = page.waitForResponse(response => {
+			const url = new URL(response.url());
+			return url.pathname.includes(`/preview/${sessionId}/`) && response.request().resourceType() === "document";
+		}, { timeout: 20_000 });
 		const mountResponse = await apiFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 			method: "POST",
 			body: JSON.stringify({ html: htmlAttack(approvalEndpoint, approvalBody, "mounted-or-popout"), entry: "repository-mounted-attack.html" }),
 		});
 		expect(mountResponse.status).toBe(200);
 		await mountResponse.json();
+		const mountedNavigation = await mountedDocumentResponse;
+		expectOpaquePreviewResponse(mountedNavigation);
+		const previewCookieHeader = (await mountedNavigation.headersArray())
+			.find(header => header.name.toLowerCase() === "set-cookie" && header.value.startsWith("bobbit_preview="))?.value ?? "";
+		expect(previewCookieHeader, "the first authenticated preview response must issue a narrow resource cookie").toContain("HttpOnly");
+		expect(previewCookieHeader).toContain("Secure");
+		expect(previewCookieHeader).toContain("SameSite=None");
+		expect(previewCookieHeader).toContain(`Path=/preview/${sessionId}/`);
 
+		const mountedFrameElement = page.locator(".goal-preview-panel iframe");
+		await expect(mountedFrameElement, "mounted repository HTML must have no same-origin sandbox capability").toHaveAttribute("sandbox", "allow-scripts");
 		const mountedFrame = page.frameLocator(".goal-preview-panel iframe");
 		await expectIsolated(mountedFrame);
 		const popoutLink = page.locator('a[title="Open preview in new tab"]');
@@ -244,6 +323,10 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 		extraPages.push(popup);
 		await popup.waitForLoadState("domcontentloaded");
 		await expectIsolated(popup);
+		const popupReload = await popup.reload({ waitUntil: "domcontentloaded" });
+		expect(popupReload, "preview popout reload must return a response").not.toBeNull();
+		expectOpaquePreviewResponse(popupReload!);
+		await expectIsolated(popup);
 
 		const svgResponse = await apiFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 			method: "POST",
@@ -253,13 +336,16 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 		const svgMount = await svgResponse.json() as { url: string };
 		const svgPage = await page.context().newPage();
 		extraPages.push(svgPage);
-		await svgPage.goto(new URL(svgMount.url, gateway.baseURL).href);
+		const svgNavigation = await svgPage.goto(new URL(svgMount.url, gateway.baseURL).href);
+		expect(svgNavigation, "active SVG navigation must return a response").not.toBeNull();
+		expectOpaquePreviewResponse(svgNavigation!);
 		await expectIsolated(svgPage);
 
 		await expect.poll(() => approvalPosts.length, {
 			timeout: 10_000,
 			message: "each hostile preview surface should attempt the real MCP approval endpoint",
 		}).toBeGreaterThanOrEqual(4);
+		expect(approvalPosts.every(request => request.authorization === null), "opaque previews must not recover the stored gateway bearer").toBe(true);
 		await new Promise(resolve => setTimeout(resolve, 300));
 		const afterAttacks = await mcpStatuses(primaryProjectId);
 		for (const status of [named(afterAttacks, LOCAL_SERVER_NAME), named(afterAttacks, REMOTE_SERVER_NAME)]) {
@@ -269,6 +355,28 @@ test("repository inline, mounted, popout, and SVG previews cannot spend browser-
 		}
 		expect(existsSync(localSpawnMarker), "pending local MCP command must never spawn").toBe(false);
 		expect(remoteRequests, "pending remote MCP endpoint must receive no requests").toBe(0);
+
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(banner).toBeVisible({ timeout: 20_000 });
+		await banner.locator('[data-testid="mcp-review-servers"]').click();
+		const localRow = page.locator(`[data-testid="mcp-server-row"][data-server-name="${LOCAL_SERVER_NAME}"]`);
+		await expect(localRow.locator('[data-testid="mcp-approval-status"]')).toHaveText("Pending approval", { timeout: 20_000 });
+		const localToggle = localRow.locator('[data-testid="mcp-server-toggle"]');
+		if (await localToggle.getAttribute("aria-expanded") !== "true") await localToggle.click();
+		await localRow.locator('[data-testid="mcp-approve-server"]').click();
+		await expect(localRow.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
+		await expect.poll(() => existsSync(localSpawnMarker), {
+			timeout: 15_000,
+			message: "a deliberate decision from the trusted Tools UI should start the local server",
+		}).toBe(true);
+		await expect.poll(() => approvalPosts.some(request => request.authorization?.startsWith("Bearer ")), {
+			timeout: 10_000,
+			message: "the trusted Tools UI should decide with established gateway bearer authority",
+		}).toBe(true);
+		const afterTrustedApproval = await mcpStatuses(primaryProjectId);
+		expect(named(afterTrustedApproval, LOCAL_SERVER_NAME).approval.state).toBe("approved");
+		expect(named(afterTrustedApproval, REMOTE_SERVER_NAME).approval.state).toBe("pending");
+		expect(remoteRequests, "the still-pending remote MCP endpoint must receive no requests").toBe(0);
 	} finally {
 		for (const extraPage of extraPages) await extraPage.close().catch(() => {});
 		if (sessionId) await deleteSession(sessionId).catch(() => {});
