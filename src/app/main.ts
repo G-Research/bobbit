@@ -37,6 +37,7 @@ import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
 import { authenticateGateway, backToSessions, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
+import { safeRemoveItem } from "./safe-storage.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
 import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable, hasActiveSidePanel, getSidePanelSizeMode, setSidePanelSizeMode } from "./render.js";
 import { getSidePanelWorkspace, hydrateSidePanelWorkspace, setActiveSidePanelTab } from "./side-panel-workspace.js";
@@ -634,6 +635,10 @@ async function initApp() {
 	bootMark("initApp-start");
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
+
+	// The retired operator-pairing credential is no longer read. Remove only its
+	// legacy key; the gateway URL and token remain owned by gateway-fetch.
+	safeRemoveItem("mcp.operator.credentials.v1");
 
 	// Palette is loaded from server preferences after gateway auth (see below)
 

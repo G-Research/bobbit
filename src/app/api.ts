@@ -17,7 +17,6 @@ import {
 // dependency-free) so utility modules like `fetch-tool-content.ts` can
 // import it without pulling the entire app-shell graph.
 import { activeGatewayConnection, appUrl, gatewayFetch, gatewayWsUrl } from "./gateway-fetch.js";
-import { forgetMcpOperatorCredential, mcpOperatorApprovalHeaders } from "./mcp-operator-auth.js";
 import { gatewayRoute } from "../shared/base-path.js";
 import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 export { gatewayFetch };
@@ -3287,20 +3286,12 @@ export async function decideMcpServerApproval(
 	const projectId = typeof scope === "string" ? scope : scope?.projectId;
 	const params = new URLSearchParams({ projectId: configApiProjectId(projectId) });
 	if (typeof scope !== "string") appendMcpServerRequestScope(params, scope);
-	const approvalGatewayBaseUrl = activeGatewayConnection().baseUrl;
 	const res = await gatewayFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?${params.toString()}`, {
 		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			...mcpOperatorApprovalHeaders(),
-		},
+		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(request),
 	});
-	if (!res.ok) {
-		const error = await errorFromResponse(res, `Could not update MCP server approval (${res.status})`);
-		if (errorDetails(error).code === "MCP_APPROVAL_HUMAN_REQUIRED") forgetMcpOperatorCredential(approvalGatewayBaseUrl);
-		throw error;
-	}
+	if (!res.ok) throw await errorFromResponse(res, `Could not update MCP server approval (${res.status})`);
 	const data = await res.json();
 	// Keep rolling-upgrade response-shape handling here, away from the page UI.
 	const server = data && typeof data === "object" && "server" in data ? (data as { server: unknown }).server : data;
