@@ -7172,6 +7172,9 @@ export class SessionManager {
 		const manager = await this.ensureMcpManagerForContext(projectId, canonicalCwd);
 		if (!manager) return null;
 		this.mcpSessionScopes.set(sessionId, { projectId, cwd: canonicalCwd, scopeKey: manager.getScopeKey() });
+		// Initial session setup calls this binding directly, before tool policy and
+		// proxy generation. Remove stale process-wide MCP rows at that same boundary.
+		this.refreshExternalMcpToolRegistrations();
 		return manager;
 	}
 
@@ -7182,9 +7185,19 @@ export class SessionManager {
 
 	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
 		const bound = this.mcpSessionScopes.get(sessionId);
-		if (bound) return this.getMcpManager({ scopeKey: bound.scopeKey }) ?? this.bindMcpManagerToSession(sessionId, bound.projectId, bound.cwd);
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
-		return this.bindMcpManagerToSession(sessionId, projectId, cwd);
+		let manager: McpManager | null;
+		if (bound) {
+			manager = this.getMcpManager({ scopeKey: bound.scopeKey })
+				?? await this.bindMcpManagerToSession(sessionId, bound.projectId, bound.cwd);
+		} else {
+			const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+			manager = await this.bindMcpManagerToSession(sessionId, projectId, cwd);
+		}
+		// New/respawned sessions consume both the bound manager and ToolManager's
+		// process-wide external rows. Rebuild those rows from fresh manager-owned
+		// publication snapshots before any activation/policy projection can read them.
+		if (manager) this.refreshExternalMcpToolRegistrations();
+		return manager;
 	}
 
 	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {

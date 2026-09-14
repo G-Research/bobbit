@@ -345,6 +345,79 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		}
 	});
 
+	test("a new session and tools API cannot publish cached routes after an on-disk change", async ({ gateway }) => {
+		const isolated = await isolateMcpRuntime(gateway, "pre-publication-freshness");
+		const approvedServer = await startRecordingMcpServer("published_probe");
+		const changedServer = await startRecordingMcpServer("replacement_probe");
+		let sessionId: string | undefined;
+		try {
+			const project = await createProject(gateway, isolated, `mcp-pre-publish-${randomUUID().slice(0, 8)}`);
+			const serverName = `pre-publish-${randomUUID().slice(0, 8)}`;
+			const toolName = `mcp__${serverName}__published_probe`;
+			writeProjectMcpConfig(project.root, serverName, { url: approvedServer.url });
+
+			let current = named(await statuses(project.id), serverName);
+			const response = await decide(project.id, current, "approved");
+			expect(response.status).toBe(200);
+			current = (await response.json()).server;
+			expect(current).toMatchObject({ status: "connected", toolCount: 1, approval: { state: "approved" } });
+
+			const sessionManager = gateway.sessionManager as any;
+			const manager = sessionManager.getMcpManager({ projectId: project.id });
+			const firstApprovedClient = manager.clients.get(serverName);
+			sessionManager.refreshExternalMcpToolRegistrations();
+			expect(sessionManager.toolManager.getAvailableTools().some((tool: any) => tool.name === toolName)).toBe(true);
+			let approvedRequestCount = approvedServer.requests.length;
+
+			// The catalogue route must initiate reconciliation itself; no call, timer,
+			// status read, or explicit manager reload occurs after this edit.
+			writeProjectMcpConfig(project.root, serverName, { url: changedServer.url });
+			const tools = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(tools.tools.some((tool: any) => tool.name === toolName)).toBe(false);
+			expect(firstApprovedClient.connected).toBe(false);
+			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
+			expect(changedServer.requests).toHaveLength(0);
+
+			// Reintroducing the exact approved definition reconnects through the normal
+			// lifecycle, then a new session must independently close the same window.
+			writeProjectMcpConfig(project.root, serverName, { url: approvedServer.url });
+			await manager.reloadDiscoveredServers({ timeoutMs: 0 });
+			const secondApprovedClient = manager.clients.get(serverName);
+			expect(secondApprovedClient?.connected).toBe(true);
+			expect(manager.getToolInfos().some((tool: any) => tool.name === toolName)).toBe(true);
+			approvedRequestCount = approvedServer.requests.length;
+
+			writeProjectMcpConfig(project.root, serverName, { url: changedServer.url });
+			sessionId = `new-session-${randomUUID().slice(0, 8)}`;
+			sessionManager.sessions.set(sessionId, { id: sessionId, projectId: project.id, cwd: project.root });
+			const bound = await sessionManager.ensureMcpManagerForSession(sessionId);
+			expect(bound).toBe(manager);
+			expect(manager.getToolInfos()).toEqual([]);
+			expect(sessionManager.toolManager.getAvailableTools().some((tool: any) => tool.name === toolName)).toBe(false);
+
+			const activation = sessionManager.buildToolActivationArgs(
+				sessionId,
+				undefined,
+				undefined,
+				project.root,
+				project.id,
+			);
+			expect(activation.args.some((arg: string) => arg.includes("mcp-extensions"))).toBe(false);
+			expect(secondApprovedClient.connected).toBe(false);
+			expect(approvedServer.requests).toHaveLength(approvedRequestCount);
+			expect(rpcCount(approvedServer, "tools/call")).toBe(0);
+			expect(changedServer.requests).toHaveLength(0);
+		} finally {
+			if (sessionId) {
+				const sessionManager = gateway.sessionManager as any;
+				sessionManager.sessions.delete(sessionId);
+				sessionManager.mcpSessionScopes.delete(sessionId);
+			}
+			await Promise.allSettled([approvedServer.close(), changedServer.close()]);
+			await isolated.cleanup();
+		}
+	});
+
 	test("a forced reload changed during disconnect sends no initialize request to the stale replacement", async ({ gateway }) => {
 		const isolated = await isolateMcpRuntime(gateway, "pre-connect-disconnect-window");
 		const approvedServer = await startRecordingMcpServer("approved_probe");

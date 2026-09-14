@@ -10627,6 +10627,9 @@ async function handleApiRoute(
 		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 		const effectiveConfigProjectId = projectScope.effectiveProjectId;
+		// External MCP rows are a process-wide projection. Rebuild them from each
+		// manager's fresh publication snapshot before exposing the catalogue.
+		sessionManager.refreshExternalMcpToolRegistrations();
 		const scopedToolManager = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
 		const scopedContext = piExtensionToolScopeContext({ projectId: effectiveConfigProjectId });
 		const scopedCatalogue = scopedToolManager.getResolvedToolCatalogue(scopedContext);
@@ -10670,6 +10673,7 @@ async function handleApiRoute(
 			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 			const effectiveConfigProjectId = projectScope.effectiveProjectId;
+			sessionManager.refreshExternalMcpToolRegistrations();
 			const scopedToolManager = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
 			const scopedContext = piExtensionToolScopeContext({ projectId: effectiveConfigProjectId });
 			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));

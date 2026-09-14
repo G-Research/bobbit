@@ -179,6 +179,53 @@ describe("MCP approval lifecycle gate", () => {
 		assert.equal(manager.getServerStatuses()[0].approval.state, "approved");
 	});
 
+	it("removes stale routes before publication without connecting or listing the replacement", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });
+		let releaseDisconnect!: () => void;
+		const disconnectGate = new Promise<void>((resolve) => { releaseDisconnect = resolve; });
+		const stub = new StubMcpClient("repository", { disconnectGate });
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+		assert.deepEqual(manager.getToolInfos().map((tool: any) => tool.name), ["mcp__repository__inspect"]);
+
+		writeProjectConfig(cwd, { repository: { command: "node", args: ["changed.js"] } });
+		const refresh = manager.getToolRegistrationRefresh();
+
+		assert.deepEqual(refresh, { removePrefixes: ["mcp__"], toolInfos: [] });
+		assert.deepEqual(manager.getToolRouteSnapshots(), []);
+		assert.equal(stub.disconnectCount, 1, "transport shutdown starts without delaying publication cleanup");
+		assert.equal(manager.createCount, 1, "publication must not construct the replacement client");
+		assert.equal(stub.connectCount, 1, "publication must not connect the replacement definition");
+		assert.equal(stub.listToolsCount, 1, "publication must not discover replacement tools");
+		const status = manager.getServerStatuses()[0];
+		assert.equal(status.approval.state, "changed");
+		assert.equal(status.status, "disconnected");
+		releaseDisconnect();
+	});
+
+	it("removes routes for a deleted definition before publication", async () => {
+		const { cwd, stateDir } = temporaryCase();
+		writeProjectConfig(cwd, { repository: { command: "node" } });
+		const stub = new StubMcpClient("repository");
+		const manager = new TestMcpManager(cwd, stateDir, new Map([["repository", stub]]), {
+			projectId: "project-1",
+			approvalStore: new McpApprovalStore(stateDir),
+		}) as any;
+		await decideCurrent(manager, "repository", "approved");
+		await manager.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+
+		fs.rmSync(path.join(cwd, ".mcp.json"));
+		assert.deepEqual(manager.getToolInfos(), []);
+		assert.deepEqual(manager.getToolRouteSnapshots(), []);
+		assert.equal(stub.disconnectCount, 1);
+		assert.deepEqual(manager.getServerStatuses(), []);
+	});
+
 	it("revalidates the effective definition before a cached tool route can send data", async () => {
 		const { cwd, stateDir } = temporaryCase();
 		writeProjectConfig(cwd, { repository: { command: "node", args: ["approved.js"] } });

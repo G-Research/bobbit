@@ -259,10 +259,12 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 			activeSubNamespaces: new Set(["jira"]),
 		};
 	};
+	const groups: any[] = [];
 	for (const { runtimeServerKey, contributionId, url } of GATEWAY_RUNTIME_SERVERS) {
 		const client = new FakeMcpClient(runtimeServerKey);
 		client.connected = true;
 		const group = makeGroup(runtimeServerKey, contributionId, url);
+		groups.push(group);
 		(mgr as any).clients.set(runtimeServerKey, client);
 		(mgr as any).toolDefs.set(runtimeServerKey, [{
 			name: "jira__search",
@@ -273,6 +275,12 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 		(mgr as any).discoveredConnectionGroups.set(runtimeServerKey, group);
 		(mgr as any).connectionGroups.set(runtimeServerKey, group);
 	}
+	// Publication now re-runs manager-owned discovery. Keep this synthetic
+	// Marketplace fixture discoverable instead of relying on injected cache maps.
+	mgr.discoverConnectionGroups = () => {
+		(mgr as any).discoveredConnectionGroups = new Map(groups.map(group => [group.serverName, group]));
+		return groups;
+	};
 	if (scopeKey) {
 		(gw.sessionManager as any).scopedMcpManagers.set(scopeKey, mgr);
 	} else {
