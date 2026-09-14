@@ -12533,8 +12533,12 @@ async function handleApiRoute(
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
 				const mcpManager = scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+				// Preserve already-discovered operation metadata for the activation
+				// catalogue, then enforce fresh eligibility before reporting runtime
+				// status. The snapshot cannot publish or invoke a route.
+				const runtimeRoutes = mcpManager?.getToolRouteSnapshots({ reconcileEligibility: false }) ?? [];
+				mcpManager?.reconcileToolPublication();
 				const statuses = mcpManager?.getServerStatuses() ?? [];
-				const runtimeRoutes = mcpManager?.getToolRouteSnapshots?.() ?? [];
 				for (const mcp of contributions.mcp ?? []) {
 					const transport = mcp.config.url ? "http" : "stdio";
 					const contributionId = activationMcpRef(entry, mcp, metaDetails);
@@ -20838,6 +20842,9 @@ async function handleApiRoute(
 	}
 
 	const serializeMcpServerStatus = (mcpManager: McpManager, status: ReturnType<McpManager["getServerStatuses"]>[number]) => {
+		if (status.kind === "invalid-configuration") {
+			return { ...status, tools: [] };
+		}
 		const routeSnapshots = mcpManager.getToolRouteSnapshots();
 		const ownedRoutes = routeSnapshots.filter(tool => tool.runtimeServerKey === status.name);
 		const publicServerNames = new Set<string>([
@@ -20940,6 +20947,9 @@ async function handleApiRoute(
 			json([]);
 			return;
 		}
+		// Status and diagnostic rows must describe the same fresh discovery used
+		// to publish routes, including newly malformed or changed definitions.
+		mcpManager.reconcileToolPublication();
 		json(mcpManager.getServerStatuses().map(status => serializeMcpServerStatus(mcpManager, status)));
 		return;
 	}

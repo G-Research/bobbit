@@ -799,6 +799,7 @@ const MCP_APPROVAL_LABELS = {
 } as const;
 
 function mcpHealthLabel(server: McpServerInfo): string {
+	if (server.kind === "invalid-configuration") return "Not started";
 	if (server.approval?.required && (server.approval.state === "pending" || server.approval.state === "rejected" || server.approval.state === "changed")) {
 		return "Not started";
 	}
@@ -896,9 +897,12 @@ function renderMcpReviewPanel(server: McpServerInfo): TemplateResult | typeof no
 	const approval = server.approval;
 	if (!config && !source && !server.diagnostics?.length) return nothing;
 	const fingerprint = approval?.fingerprint ? approval.fingerprint.slice(0, 12) : undefined;
+	const invalidConfiguration = server.kind === "invalid-configuration";
 	return html`
 		<div class="mcp-review-panel" data-testid="mcp-review-panel">
-			<div class="mcp-review-copy">Startup approval controls whether Bobbit may start or connect to this server. <strong>Tool calls</strong> controls whether agents may invoke its operations.</div>
+			<div class="mcp-review-copy">${invalidConfiguration
+				? "Bobbit could not read this MCP configuration. It was not started or connected; fix the source file and reload."
+				: html`Startup approval controls whether Bobbit may start or connect to this server. <strong>Tool calls</strong> controls whether agents may invoke its operations.`}</div>
 			<dl class="mcp-review-grid">
 				${renderMcpReviewValue("Project", source?.projectName || source?.projectId)}
 				${renderMcpReviewValue("Source", source?.file)}
@@ -993,22 +997,30 @@ function renderMcpSection(): TemplateResult {
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 	const toolByName = new Map<string, ToolInfo>();
 	for (const tool of tools) toolByName.set(tool.name, tool);
+	const invalidCount = mcpServers.filter((server) => server.kind === "invalid-configuration").length;
+	const serverCount = mcpServers.length - invalidCount;
 	const reviewCount = mcpServers.filter((server) => server.approval?.state === "pending" || server.approval?.state === "changed").length;
+	const countParts = [
+		...(serverCount ? [`${serverCount} server${serverCount !== 1 ? "s" : ""}`] : []),
+		...(invalidCount ? [`${invalidCount} invalid configuration${invalidCount !== 1 ? "s" : ""}`] : []),
+		...(reviewCount ? [`${reviewCount} need review`] : []),
+	];
 	return html`
 		<div class="tool-group" data-testid="mcp-section">
 			<div class="tool-group-header mcp-section-header">
 				<span class="tool-group-name">MCP</span>
-				<span class="tool-group-count">${mcpServers.length} server${mcpServers.length !== 1 ? "s" : ""}${reviewCount ? ` · ${reviewCount} need review` : ""}</span>
+				<span class="tool-group-count">${countParts.join(" · ")}</span>
 				<span class="mcp-section-help">Startup approval is separate from <strong>Tool calls</strong> policy.</span>
 			</div>
 			<div class="tool-group-items">
 				${mcpServers.map((server) => {
 					const expanded = expandedMcpServers.has(server.name);
+					const invalidConfiguration = server.kind === "invalid-configuration";
 					const healthLabel = mcpHealthLabel(server);
 					const healthText = healthLabel === "Not started" ? healthLabel : healthLabel.toLocaleLowerCase();
 					const statusClass = healthLabel === "Connected" ? "text-emerald-600" : healthLabel === "Error" ? "text-red-600" : "text-muted-foreground";
 					const approvalState = server.approval?.state;
-					const approvalLabel = approvalState ? MCP_APPROVAL_LABELS[approvalState] : undefined;
+					const approvalLabel = invalidConfiguration ? "Invalid configuration" : approvalState ? MCP_APPROVAL_LABELS[approvalState] : undefined;
 					const serverPolicyKey = mcpServerPolicyKey(server);
 					const serverPolicy = groupPolicies[serverPolicyKey] || "";
 					const serverEmptyPolicyLabel = inheritedMcpPolicyLabel(["mcp__"]);
@@ -1029,16 +1041,18 @@ function renderMcpSection(): TemplateResult {
 							<div class="mcp-server-summary">
 								<button class="mcp-server-disclosure" data-testid="mcp-server-toggle" aria-expanded=${expanded ? "true" : "false"} aria-controls=${panelId} @click=${() => toggleMcpServer(server.name)}>
 									<span class="mcp-server-chevron ${expanded ? "mcp-server-chevron--expanded" : ""}">${chevronSvg}</span>
-									<span class="tool-group-name">${server.name}</span>
-									${approvalLabel ? html`<span class="mcp-approval-status mcp-approval-status--${approvalState}" data-testid="mcp-approval-status">${approvalLabel}</span>` : nothing}
+									<span class="tool-group-name">${invalidConfiguration ? "Invalid MCP configuration" : server.name}</span>
+									${approvalLabel ? html`<span class="mcp-approval-status mcp-approval-status--${invalidConfiguration ? "invalid" : approvalState}" data-testid="mcp-approval-status">${approvalLabel}</span>` : nothing}
 									<span class="mcp-health-status text-xs ${statusClass}" data-testid="mcp-server-status" aria-label=${healthLabel}>${healthText}</span>
-									<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
+									${invalidConfiguration ? nothing : html`<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>`}
 								</button>
-								<div class="mcp-tool-call-policy">
-									<span class="tool-group-policy-label">Tool calls:</span>
-									${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
-								</div>
-								${renderMcpApprovalActions(server)}
+								${invalidConfiguration ? nothing : html`
+									<div class="mcp-tool-call-policy">
+										<span class="tool-group-policy-label">Tool calls:</span>
+										${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
+									</div>
+									${renderMcpApprovalActions(server)}
+								`}
 							</div>
 							<div class="mcp-approval-live" role="status" aria-live="polite" aria-atomic="true">${mcpApprovalAnnouncements.get(server.name) || nothing}</div>
 							${mcpApprovalErrors.has(server.name) ? html`<div class="mcp-approval-error" data-testid="mcp-approval-error" role="alert">${mcpApprovalErrors.get(server.name)}</div>` : nothing}
@@ -1046,7 +1060,7 @@ function renderMcpSection(): TemplateResult {
 							${expanded ? html`
 								<div class="mcp-server-details" id=${panelId}>
 									${renderMcpReviewPanel(server)}
-									<div class="tool-group-items mcp-operation-groups">
+									${invalidConfiguration ? nothing : html`<div class="tool-group-items mcp-operation-groups">
 										${subKeys.length === 0 ? html`<div class="tools-note mcp-no-operations">No operations available.</div>` : subKeys.map((sub) => {
 											const ops = bySub.get(sub)!;
 											const hasSub = sub.length > 0;
@@ -1079,7 +1093,7 @@ function renderMcpSection(): TemplateResult {
 												</div>
 											`;
 										})}
-									</div>
+									</div>`}
 								</div>
 							` : nothing}
 						</div>

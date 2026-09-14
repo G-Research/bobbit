@@ -296,7 +296,8 @@
 	color: var(--positive);
 }
 
-.mcp-approval-status--rejected {
+.mcp-approval-status--rejected,
+.mcp-approval-status--invalid {
 	color: var(--negative);
 }
 
