@@ -206,6 +206,13 @@ test("MCP preview isolation keeps repository documents from spending gateway aut
 	test.setTimeout(120_000);
 	const fixture = createMcpProjectApprovalFixture();
 	const localSpawnMarker = join(fixture.primaryRoot, "local-mcp-spawned.txt");
+	const localMarkerProcess = join(fixture.primaryRoot, "local-mcp-marker.cjs");
+	const mockMcpServerUrl = new URL("../../fixtures/mock-mcp-server.mjs", import.meta.url).href;
+	writeFileSync(localMarkerProcess, [
+		'const { writeFileSync } = require("node:fs");',
+		'writeFileSync(process.argv[2], "spawned");',
+		`import(${JSON.stringify(mockMcpServerUrl)}).catch(error => { console.error(error); process.exit(1); });`,
+	].join("\n"));
 	let remoteRequests = 0;
 	const remoteServer = createServer((_request, response) => {
 		remoteRequests += 1;
@@ -228,7 +235,7 @@ test("MCP preview isolation keeps repository documents from spending gateway aut
 		mcpServers: {
 			[LOCAL_SERVER_NAME]: {
 				command: process.execPath,
-				args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(localSpawnMarker)}, "spawned"); setInterval(() => {}, 1000)`],
+				args: [localMarkerProcess, localSpawnMarker],
 				cwd: ".",
 			},
 		},
