@@ -36,6 +36,7 @@ const { sessionFileCopy, sessionFsContextForAgentFile } = await import("../../..
 const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../../src/server/agent/session-manager.ts");
 const { executePlan } = await import("../../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../../src/server/agent/system-prompt.ts");
+const { SandboxTokenStore } = await import("../../../src/server/auth/sandbox-token.ts");
 const { loadOrCreateToken } = await import("../../../src/server/auth/token.ts");
 const {
 	applyRuntimeSessionModelSelection,
@@ -164,6 +165,7 @@ function containerTranscript(sessionId: string): { containerFile: string; hostFi
 interface ExactSandboxFixture {
 	projectConfigStore: any;
 	sandboxManager: any;
+	sandboxTokenStore: InstanceType<typeof SandboxTokenStore>;
 	sandbox: SandboxSessionFilesystem;
 	runtimeId: (sessionId: string) => string;
 	register: (sessionId: string) => Promise<string>;
@@ -248,12 +250,14 @@ function realSandboxFixture(label: string): ExactSandboxFixture {
 		releaseSessionRuntime,
 		runSessionTranscriptOperation,
 	};
+	const sandboxTokenStore = new SandboxTokenStore();
 	const fixture: ExactSandboxFixture = {
 		projectConfigStore: {
 			get: vi.fn((key: string) => key === "sandbox" ? "docker" : undefined),
 			getSandboxTokens: vi.fn(() => []),
 		},
 		sandboxManager,
+		sandboxTokenStore,
 		sandbox,
 		runtimeId: sessionId => `fixture-runtime:${sessionId}`,
 		register: sessionId => ensureSessionRuntime(projectId, sessionId),
@@ -2990,6 +2994,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		const manager: any = new SessionManager({ projectConfigStore: sandboxFx.projectConfigStore });
 		manager.sandboxManager = sandboxFx.sandboxManager;
+		manager.sandboxTokenStore = sandboxFx.sandboxTokenStore;
 		const ps = persisted(sessionId, containerFile, {
 			sandboxed: true,
 			cwd: "/workspace",
@@ -3026,11 +3031,19 @@ describe("executable SessionManager rehydration boundaries", () => {
 			ps.id,
 			sandboxFx.runtimeId(ps.id),
 		);
+		const scopedToken = sandboxFx.sandboxTokenStore.getTokenForProject("project-boundary");
+		expect(scopedToken).toBeTypeOf("string");
 		expect(replacementOptions).toMatchObject({
 			containerId: sandboxFx.runtimeId(ps.id),
 			sandboxed: true,
 			cwd: "/workspace",
 			gatewayUrl: "http://127.0.0.1:7890",
+			gatewayToken: scopedToken,
+		});
+		expect(sandboxFx.sandboxTokenStore.lookup(scopedToken!)).toEqual({
+			projectId: "project-boundary",
+			goalIds: new Set(),
+			sessionIds: new Set([ps.id]),
 		});
 		expect(switches).toEqual([containerFile]);
 		expect(sendCommand).toHaveBeenCalledWith(
