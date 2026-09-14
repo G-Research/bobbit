@@ -3638,6 +3638,12 @@ export class SessionManager {
 	private removedWorktreePoolProjectIds?: Set<string>;
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
+	/**
+	 * True when the gateway permits credential-free trusted-local control. Docker
+	 * Desktop may re-originate container traffic from a loopback peer, so this
+	 * mode cannot safely coexist with sandbox process startup.
+	 */
+	private credentialFreeTrustedLocal = false;
 	lifecycleHub?: LifecycleHub;
 	private hostInterceptors?: SessionHostInterceptorPort;
 	private hostNotificationPublisher?: HostSessionNotificationPublisher;
@@ -5330,6 +5336,17 @@ export class SessionManager {
 		this.sandboxManager = manager;
 	}
 
+	/** Configure the gateway-wide auth mode before restoring or creating sessions. */
+	setCredentialFreeTrustedLocal(enabled: boolean): void {
+		this.credentialFreeTrustedLocal = enabled;
+	}
+
+	assertSandboxStartupAllowed(): void {
+		if (this.credentialFreeTrustedLocal) {
+			throw new Error("Sandboxed agents require gateway authentication. Restart Bobbit with --auth before starting or restoring a sandboxed agent.");
+		}
+	}
+
 	/**
 	 * OrchestrationCore wiring (docs/design/orchestration-core.md). Injected by
 	 * server.ts after construction (the core is built near teamManager and needs
@@ -6520,6 +6537,11 @@ export class SessionManager {
 		if (!projectConfigStore) return false;
 		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
 		if (sandboxConfig !== "docker") return false;
+
+		// This must precede every container, worktree, hook, credential, and agent
+		// effect. Docker Desktop can proxy host-gateway traffic from a sandbox back
+		// to Node as an indistinguishable loopback peer.
+		this.assertSandboxStartupAllowed();
 
 		// Get the ProjectSandbox for this project
 		if (!this.sandboxManager) {
@@ -14752,6 +14774,7 @@ export class SessionManager {
 		const sandboxExemptScope = projectId ? isSandboxExemptProject(projectId) : false;
 		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
+		if (effectiveSandboxed) this.assertSandboxStartupAllowed();
 		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
 		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
 		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
@@ -15239,6 +15262,7 @@ export class SessionManager {
 			opts.cwd = parentMeta.cwd;
 			delegateSandboxed = true;
 		}
+		if (delegateSandboxed) this.assertSandboxStartupAllowed();
 
 		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
 		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
