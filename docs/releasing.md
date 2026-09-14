@@ -25,6 +25,17 @@ For a release commit, `verify` then enforces the whole contract, in [`scripts/re
 
 Only then does the run build and type-check the commit, and pack the resulting files into an immutable workflow artifact. The serialized publishing job publishes that exact tarball with provenance, the tag job then creates `v<version>`, and the GitHub release follows. Pre-release versions (`0.16.0-rc.1`) go to the `next` dist-tag and are marked as prereleases; stable versions go to `latest`.
 
+### Static analysis of the release control plane
+
+The modules under [`scripts/release/`](../scripts/release/) are publication control-plane code, not ordinary development scripts. They decide whether a commit may publish, validate its release contract and npm provenance, prevent a dist-tag from moving backwards, make reruns safe, and select the reviewed changelog text that becomes the public release. A defect in this code can therefore weaken an authorization or integrity boundary even though the files use `.mjs` and live outside `src/`.
+
+They receive two complementary forms of static analysis:
+
+- CodeQL includes `scripts/release/**/*.mjs` in JavaScript/TypeScript analysis. Tests, fixtures, and unrelated development scripts remain excluded because broadening analysis to those paths would add noise without protecting the publication boundary.
+- The dedicated strict JavaScript TypeScript project checks `dist-tag-guard.mjs`, `release-contract.mjs`, `validate-release-commit.mjs`, and `changelog-section.mjs`, including their module graph, with `allowJs`, `checkJs`, and `noEmit`. `npm run check` owns this check, so the required PR build gate and the post-merge verification of the exact release commit both execute it.
+
+These checks provide defense in depth; they do not replace or relax the runtime release contract. Validation still runs before dependency installation, publish/tag/release jobs retain separate least-privilege permissions, npm provenance remains the authority for an already-published version, dist-tags must advance from the value verified before publication, and recovery still requires a full rerun so those facts are checked again.
+
 The post-merge build is deliberate because it produces the exact tarball that ships. The test suites are not repeated after publication approval: the release PR's required GitHub checks already ran the full unit, browser, and E2E matrices against the mergeable tree. The local release pre-flight installs dependencies, builds, and type-checks so basic failures are caught before the PR opens without duplicating the hosted suites.
 
 **The same contract also runs before the merge.** `build-unit-gate.yml` runs `validate-release-commit.mjs --mode pre-merge` on every pull request. It decides whether a PR is a release the same way `detect` does — by comparing `package.json` against the base — and exits immediately when the version is unchanged. Every content rule then runs against that base, including the append-only changelog check and the version-increase check, so a wrong branch name, title, lockfile, changelog entry, backwards version or unpublished binary pin fails while it still costs one push — rather than after the merge, when the version is on `main` and the number is spent. The post-merge run is the authority; the pre-merge run is there so the authority rarely has to say no.

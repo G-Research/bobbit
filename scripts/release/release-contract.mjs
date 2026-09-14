@@ -9,21 +9,47 @@ const MIN_RELEASE_NOTES_CHARS = 80;
 
 export const CHANGELOG_PATH = "CHANGELOG.md";
 
+/** @typedef {{ version: string, body: string, raw: string }} ChangelogSection */
+/** @typedef {{ version: string, optionalDependencies?: Record<string, string> }} PackageManifest */
+/** @typedef {{ version?: unknown, packages?: { ""?: { version?: unknown } } }} LockfileManifest */
+/**
+ * @typedef {{
+ *   number?: unknown,
+ *   merged_at?: unknown,
+ *   merge_commit_sha?: unknown,
+ *   base?: { ref?: unknown },
+ *   head?: { ref?: unknown, repo?: { full_name?: unknown } },
+ *   title?: unknown
+ * }} PullRequest
+ */
+/** @typedef {{ sha: string | null, repository: string | null, path: string | null }} ProvenanceSource */
+/** @typedef {{ status: number | null, stdout: string, stderr: string }} GitResult */
+
 export class ReleaseContractError extends Error {
+	/** @param {string} message */
 	constructor(message) {
 		super(message);
 		this.name = "ReleaseContractError";
 	}
 }
 
+/**
+ * @param {string} message
+ * @returns {never}
+ */
 function fail(message) {
 	throw new ReleaseContractError(message);
 }
 
+/** @param {string} version */
 export function releaseTagFor(version) {
 	return `v${version}`;
 }
 
+/**
+ * @param {unknown} changelog
+ * @returns {{ preamble: string, sections: ChangelogSection[] }}
+ */
 function parseChangelog(changelog) {
 	const text = String(changelog ?? "");
 	const headings = [...text.matchAll(/^## v(\S+)[^\S\n]*$/gm)];
@@ -42,14 +68,20 @@ function parseChangelog(changelog) {
 	};
 }
 
+/** @param {unknown} changelog */
 export function changelogSections(changelog) {
 	return parseChangelog(changelog).sections.map(({ version, body }) => ({ version, body }));
 }
 
+/**
+ * @param {unknown} changelog
+ * @param {string} version
+ */
 export function changelogSectionFor(changelog, version) {
 	return changelogSections(changelog).find(section => section.version === version)?.body ?? null;
 }
 
+/** @param {ChangelogSection[]} sections */
 function assertUniqueChangelogVersions(sections) {
 	const seen = new Set();
 	for (const { version } of sections) {
@@ -60,6 +92,10 @@ function assertUniqueChangelogVersions(sections) {
 	}
 }
 
+/**
+ * @param {unknown} changelog
+ * @param {string} version
+ */
 export function assertChangelogSection(changelog, version) {
 	const { sections } = parseChangelog(changelog);
 	assertUniqueChangelogVersions(sections);
@@ -86,6 +122,10 @@ export function assertChangelogSection(changelog, version) {
 	return section.body;
 }
 
+/**
+ * @param {unknown} previousChangelog
+ * @param {unknown} currentChangelog
+ */
 export function assertChangelogAppendOnly(previousChangelog, currentChangelog) {
 	const previous = parseChangelog(previousChangelog);
 	const current = parseChangelog(currentChangelog);
@@ -109,6 +149,11 @@ export function assertChangelogAppendOnly(previousChangelog, currentChangelog) {
 	}
 }
 
+/**
+ * @param {string} rev
+ * @param {string} path
+ * @param {(args: string[]) => GitResult} run
+ */
 export function fileAtCommit(rev, path, run) {
 	const resolved = run(["rev-parse", "--verify", `${rev}^{commit}`]);
 	if (resolved.status !== 0) {
@@ -121,18 +166,22 @@ export function fileAtCommit(rev, path, run) {
 	return shown.status === 0 ? shown.stdout : null;
 }
 
+/** @param {string} version */
 export function releaseBranchFor(version) {
 	return `release/v${version}`;
 }
 
+/** @param {string} version */
 export function releaseTitleFor(version) {
 	return `chore(release): v${version}`;
 }
 
+/** @param {string} version */
 export function distTagFor(version) {
 	return version.includes("-") ? "next" : "latest";
 }
 
+/** @param {unknown} version */
 export function assertReleaseVersion(version) {
 	if (!isExactVersion(version) || version.includes("+")) {
 		fail(`package.json version is not a release version: ${version}`);
@@ -140,6 +189,10 @@ export function assertReleaseVersion(version) {
 	return version;
 }
 
+/**
+ * @param {PackageManifest} pkg
+ * @param {LockfileManifest} lock
+ */
 export function assertLockfileAgreement(pkg, lock) {
 	const root = lock?.packages?.[""]?.version;
 	if (lock?.version !== pkg?.version || root !== pkg?.version) {
@@ -150,6 +203,7 @@ export function assertLockfileAgreement(pkg, lock) {
 	}
 }
 
+/** @param {PackageManifest} pkg */
 export function assertExactOptionalDependencyPins(pkg) {
 	for (const [name, version] of Object.entries(pkg?.optionalDependencies ?? {})) {
 		if (!isExactVersion(version)) {
@@ -161,6 +215,11 @@ export function assertExactOptionalDependencyPins(pkg) {
 	}
 }
 
+/**
+ * @param {string} parentVersion
+ * @param {string} version
+ * @param {string} sha
+ */
 export function assertVersionBump(parentVersion, version, sha) {
 	const order = compareReleaseVersions(version, parentVersion);
 	if (order === 0) {
@@ -177,6 +236,10 @@ export function assertVersionBump(parentVersion, version, sha) {
 	}
 }
 
+/**
+ * @param {PullRequest | null | undefined} pr
+ * @param {{ version: string, repository: string, sha: string }} release
+ */
 export function assertPullRequestContract(pr, { version, repository, sha }) {
 	if (!pr) {
 		fail(
@@ -208,14 +271,26 @@ export function assertPullRequestContract(pr, { version, repository, sha }) {
 
 export const RELEASE_WORKFLOW_PATH = ".github/workflows/release-publish.yml";
 
+/**
+ * @param {unknown} response
+ * @returns {ProvenanceSource | null}
+ */
 export function extractProvenanceSource(response) {
-	const attestations = Array.isArray(response?.attestations) ? response.attestations : [];
+	const data = /** @type {{ attestations?: Array<{
+	 * predicateType?: unknown,
+	 * bundle?: { dsseEnvelope?: { payload?: unknown } }
+	 * } | null | undefined> }} */ (response);
+	const attestations = Array.isArray(data?.attestations) ? data.attestations : [];
 	const provenance = attestations.find(entry =>
 		String(entry?.predicateType ?? "").startsWith("https://slsa.dev/provenance/"),
 	);
 	const payload = provenance?.bundle?.dsseEnvelope?.payload;
 	if (typeof payload !== "string") return null;
 
+	/** @type {{ predicate?: { buildDefinition?: {
+	 * resolvedDependencies?: Array<{ digest?: { gitCommit?: unknown }, uri?: unknown } | null | undefined>,
+	 * externalParameters?: { workflow?: { repository?: unknown, path?: unknown } }
+	 * } } }} */
 	let statement;
 	try {
 		statement = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
@@ -225,7 +300,7 @@ export function extractProvenanceSource(response) {
 
 	const build = statement?.predicate?.buildDefinition ?? {};
 	const dependencies = Array.isArray(build.resolvedDependencies) ? build.resolvedDependencies : [];
-	const workflow = build?.externalParameters?.workflow ?? {};
+	const workflow = build.externalParameters?.workflow ?? {};
 	const repository = typeof workflow.repository === "string" ? workflow.repository : null;
 	const source = repository
 		? dependencies.find(
@@ -237,12 +312,16 @@ export function extractProvenanceSource(response) {
 		: null;
 
 	return {
-		sha: source?.digest?.gitCommit ?? null,
+		sha: typeof source?.digest?.gitCommit === "string" ? source.digest.gitCommit : null,
 		repository,
 		path: typeof workflow.path === "string" ? workflow.path : null,
 	};
 }
 
+/**
+ * @param {ProvenanceSource | null} source
+ * @param {{ spec: string, repository: string, sha: string }} expected
+ */
 export function assertPublishedArtifactMatches(source, { spec, repository, sha }) {
 	const recover =
 		`${spec} is already on the registry and npm versions are immutable. ` +
@@ -268,11 +347,21 @@ export function assertPublishedArtifactMatches(source, { spec, repository, sha }
 	return true;
 }
 
+/**
+ * @param {string} name
+ * @param {string} version
+ */
 export function npmAttestationUrl(name, version) {
 	return `${PUBLIC_NPM_REGISTRY}/-/npm/v1/attestations/${encodeURIComponent(name)}@${encodeURIComponent(version)}`;
 }
 
+/**
+ * @param {string} url
+ * @param {{ headers?: Record<string, string>, fetchImpl?: typeof fetch, attempts?: number }} [options]
+ * @returns {Promise<{ status: number, body: unknown }>}
+ */
 export async function fetchJson(url, { headers = {}, fetchImpl = fetch, attempts = 3 } = {}) {
+	/** @type {unknown} */
 	let lastError;
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
 		try {
@@ -291,6 +380,7 @@ export async function fetchJson(url, { headers = {}, fetchImpl = fetch, attempts
 	throw new Error(`request failed after ${attempts} attempts: ${url}`, { cause: lastError });
 }
 
+/** @param {string | undefined} token */
 export function githubHeaders(token) {
 	return {
 		accept: "application/vnd.github+json",
@@ -299,6 +389,10 @@ export function githubHeaders(token) {
 	};
 }
 
+/**
+ * @param {string} name
+ * @param {string} version
+ */
 export function npmPackageUrl(name, version) {
 	return `${PUBLIC_NPM_REGISTRY}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
 }
