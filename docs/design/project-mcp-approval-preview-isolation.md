@@ -23,7 +23,7 @@ The revised decision was validated against the current implementation rather tha
 - `RpcBridge.spawnDockerExec()` currently appends `sandboxCredentials` after its server-supplied `BOBBIT_TOKEN`; a case-insensitive credential named `BOBBIT_TOKEN` can therefore override the scoped token. The key must be reserved and filtered.
 - `src/server/agent/docker-args.ts` correctly omits gateway URL/token from the sandbox container's PID 1. The scoped token is injected only into the session process with `docker exec -e`; this stays unchanged.
 - The current approval handler verifies `X-Bobbit-Mcp-Operator`, and current server/CLI/browser/Tools code owns pairing state. Those branches are removed. The exact decision validation begins immediately afterward and remains intact.
-- `src/app/mcp-approval-banner.ts` already has scope-keyed counts, one in-flight request per scope, periodic Tools reconciliation, and revision fencing. The remaining UX contract is stale-while-revalidate across invalidation as well: never erase a confirmed count merely because a refresh started.
+- `src/app/mcp-approval-banner.ts` already has scope-keyed counts, one owned current request per scope during periodic reconciliation, a periodic Tools timer, and revision fencing. The remaining UX contract is stale-while-revalidate for periodic reconciliation: a timer refresh must not erase a confirmed count merely because it started. Explicit decision/configuration invalidation keeps its existing lifecycle: increment the revision, clear cached count and request ownership, render promptly, and let a current fetch repopulate the count.
 
 ### Consolidated finding matrix
 
@@ -39,7 +39,7 @@ The revised decision was validated against the current implementation rather tha
 | Explicit principal/capability layer is viable | Alternate exploration supplied a pure classification module and positive capability check. | It makes authority named but adds a type/module/router parameter and changes mixed-credential semantics not required by the amended model. | Reject it for this change. The already-authenticated request is authority; sandbox safety is enforced by credential provenance plus the existing pre-handler guard. |
 | Mixed normal and sandbox credentials | Alternate exploration proposed contaminating otherwise valid admin/cookie/local authentication. | That would downgrade a valid normal gateway credential solely because a sandbox token is also presented. | Reject the downgrade. Any winning valid normal gateway credential is authority under the amendment. Keep `hasSandboxCredential` for its current cookie bootstrap/renewal defense. |
 | Pairing-era preview containment remains necessary | Preview-isolation comparison and current iframe/content-route code | Normal gateway authentication is broader than the retired pairing token. Same-origin repository code could spend stored Bearer or ambient cookie authority. | Preserve opaque iframe/CSP isolation, narrow preview resources, and exact-source cosmetic messaging. |
-| Periodic pending banner can flicker | Banner task and existing count/revision seams | Clearing a confirmed count while reconciliation is unresolved hides a real pending state and remounts the banner. | Use stale-while-revalidate for periodic and event-driven reconciliation, with single flight and revision fencing. |
+| Periodic pending banner can flicker | Banner task and existing count/revision seams | Clearing a confirmed count on every timer refresh hides a real pending state and remounts the banner every two seconds. | Use stale-while-revalidate and single flight for periodic reconciliation. Preserve explicit invalidation's revision bump, cached-state/request-ownership reset, prompt render, and current refetch. |
 
 ## Scope ledger
 
@@ -56,7 +56,7 @@ The revised decision was validated against the current implementation rather tha
 - Opaque-origin execution for repository-authored inline HTML, mounted preview HTML, popouts/direct preview navigation, and active non-HTML documents such as SVG.
 - Authenticated sibling preview resources without granting opaque preview code application/API authority.
 - Message-based theme, resize, and swipe compatibility, with all messages cosmetic, source-checked, and bounded.
-- Stale-while-revalidate banner behavior that preserves confirmed state until a current response replaces it.
+- Periodic stale-while-revalidate banner behavior that preserves confirmed state during timer refreshes, while explicit invalidation clears cached state and promptly refetches under a new revision.
 - Documentation plus focused unit, DOM, integration, browser, multi-project, worktree, and cross-browser coverage.
 
 ### Allowed bounded improvements
@@ -143,7 +143,7 @@ The selected composition has fewer independent concepts and is protected by focu
 9. Sandbox startup cannot fall back to the admin token, and sandbox-configured credentials cannot replace the server-minted scoped `BOBBIT_TOKEN`.
 10. Preview bridge messages carry cosmetic state only. Hosts identify the exact sending frame by `event.source`, validate a strict DTO, and clamp numeric values; `event.origin === "null"` is never identity.
 11. Generic gateway API CORS remains `allowCredentials:false`. Any credentialed `Origin: null` projection is route-local to authenticated preview GET/HEAD resources and is never available to API, WebSocket, UI static, preflight escalation, or unsafe methods.
-12. Pending-banner refresh never substitutes “unknown” for a last confirmed count. Only a current authoritative response changes visible count.
+12. Periodic pending-banner refresh never substitutes “unknown” for a last confirmed count. Explicit decision/configuration invalidation instead increments the revision, clears cached count and request ownership, renders promptly, and discards older responses before a current fetch repopulates state.
 
 ## Preserved MCP approval architecture
 
@@ -298,15 +298,15 @@ Responsive behavior remains inline: at 768px summaries and controls wrap; at 480
 Reconciliation follows these rules:
 
 1. A missing scope has no banner. A scope with no confirmed result renders no speculative banner.
-2. Once a count is confirmed, keep it while periodic or event-driven revalidation is unresolved. Never delete it merely to mark loading.
-3. Allow both confirmed zero → pending and pending → zero transitions. Only a successful current response changes the confirmed count.
-4. Keep at most one request in flight per exact scope. Timer ticks do not overlap a slow request.
-5. Capture the scope revision at request start. Any authoritative invalidation increments the revision; a response from an older revision is discarded even if it resolves last.
-6. Invalidation schedules/refires an immediate authoritative fetch for the current scope without trusting event-provided counts. It does not clear the prior confirmed count.
+2. Once a count is confirmed, keep it while periodic revalidation is unresolved. A timer refresh never deletes it merely to mark loading.
+3. Allow both confirmed zero → pending and pending → zero transitions during periodic reconciliation. Only a successful current response changes the confirmed count in that lifecycle.
+4. Keep periodic reconciliation single-flight per exact scope. Timer ticks do not overlap a slow periodic request.
+5. Capture the scope revision at request start. Explicit decision/configuration invalidation increments the revision, so a response from the prior revision is discarded even if it resolves last.
+6. Explicit invalidation clears the affected scope's cached count and in-flight request ownership, then renders promptly. The render starts a current authoritative fetch without trusting event-provided counts; that fetch repopulates the cache under the new revision.
 7. Scope changes never project the old scope's count into the new one. Each scope key retains its own fenced state.
-8. Rejected-only rows do not count. The banner disappears only after a current response confirms no pending/changed rows.
+8. Rejected-only rows do not count. A current periodic response can remove a confirmed banner; explicit invalidation removes the cached presentation immediately until the current fetch resolves.
 
-This is stale-while-revalidate, not optimistic state. It prevents banner flashes and preserves urgency while still discovering filesystem changes on a continuously mounted Tools route that has no active session socket.
+This is stale-while-revalidate for periodic Tools reconciliation, not optimistic state and not a change to explicit invalidation semantics. It prevents the every-two-second banner flash while still discovering filesystem changes on a continuously mounted Tools route that has no active session socket. Explicit decision/configuration events deliberately clear affected cached state and trigger prompt authoritative repopulation.
 
 ## Migration and compatibility
 
@@ -441,7 +441,7 @@ Replace `HtmlRenderer` `contentDocument` resize with child `ResizeObserver` mess
 1. **Delete the obsolete authority subsystem.** Remove server authorizer construction/route/hook, CLI pairing lifecycle, browser credential owner/header, Tools pairing UI/CSS, and pairing errors/tests/helpers. Remove the special CORS header. Add bounded browser-storage cleanup; leave the inert server verifier unread.
 2. **Harden sandbox credential delivery.** Remove `applySandboxWiring()`'s admin fallback and reserve `BOBBIT_TOKEN` case-insensitively in `spawnDockerExec()` sandbox credential projection. Pin direct admin continuity and sandbox startup failure.
 3. **Compose approval with global auth.** Leave the approval handler behind existing auth and sandbox guard; retain all current scope/body/fingerprint/persistence/reload behavior. Add normal-admin, cookie, trusted-local, unauthenticated, obsolete-header, and real sandbox cases.
-4. **Amend banner reconciliation.** Preserve last confirmed per-scope count across refresh/invalidation; single-flight requests, revision fencing, immediate invalidation refresh, periodic zero discovery, and both zero transitions.
+4. **Amend banner reconciliation.** Preserve the last confirmed per-scope count across periodic refreshes, keep periodic requests single-flight, and retain periodic zero discovery plus both zero transitions. Preserve explicit invalidation's revision bump, stale-response fence, cached count/request-ownership reset, prompt render, and current refetch.
 5. **Preserve and verify MCP trust core.** Run provenance, fingerprint, redaction, store, runtime, remote no-request, worktree, Marketplace, shared-owner, and reload suites unchanged except auth helpers.
 6. **Preserve preview isolation.** Keep iframe/CSP opacity, preview resource cookie/admission, bounded bridge, raw popout/SVG protection, and adapt the hostile journey to attempt normal gateway-auth approval rather than the removed operator header.
 7. **Update journeys and support.** The canonical browser flow goes from banner directly to inline review, decides without pairing, survives reload, handles changed reapproval, and cleans up.
@@ -461,7 +461,7 @@ Replace `HtmlRenderer` `contentDocument` resize with child `ResizeObserver` mess
 | `src/app/tool-manager-page.ts` | pairing helpers/state/callout; decision rows | Delete pairing-only code; preserve direct per-row decision lifecycle. | Safe review, confirmation, stale refresh, focus/live regions, policy separation. |
 | `src/app/tool-manager.css` | `.mcp-pairing-*` | Delete pairing-only rules/selectors. | Existing MCP row/responsive/accessibility styling. |
 | `src/app/main.ts`, `src/app/safe-storage.ts` | app boot; `safeRemoveItem()` | Best-effort remove only `mcp.operator.credentials.v1`. | `gateway.url`, `gateway.token`, boot/auth flow. |
-| `src/app/mcp-approval-banner.ts` | confirmed count/request/revision maps; periodic timer/invalidation | Preserve confirmed count while revalidating; immediate invalidation fetch, no overlap, revision discard, zero transitions. | Scope resolution, Review servers navigation/focus, rejected exclusion. |
+| `src/app/mcp-approval-banner.ts` | confirmed count/request/revision maps; periodic timer/invalidation | Preserve confirmed count and single flight during periodic refresh; on explicit invalidation bump revision, clear cached count/request ownership, render promptly, and refetch current state. Preserve stale-response discard and zero transitions. | Scope resolution, Review servers navigation/focus, rejected exclusion. |
 | `src/server/preview/content-route.ts` | `handlePreviewRequest()`, `isAuthorized()` | Preserve scoped cookie follow-ons, common sandbox CSP, post-auth null-origin CORS. | Entry/artifact/path/read-lease/base/no-store behavior. |
 | `src/server/auth/cookie.ts` | `CookieStore` and preview helpers | Preserve domain-separated SID-bound preview format/path. | Generic `bobbit_session` format and browser auth. |
 | `src/server/request-admission.ts` | preview context classification and CORS projection | Preserve exact opaque GET/HEAD exception. | API/UI/WS/preflight policy and generic non-credentialed CORS. |
@@ -509,9 +509,9 @@ These tests protect reused seams; revised coverage supplements rather than repla
 1. A confirmed pending banner stays the same mounted element throughout a deferred periodic refresh.
 2. Slow periodic requests never overlap later timer ticks.
 3. Confirmed zero becomes pending after a current response; confirmed pending becomes zero only after a current response.
-4. Invalidation prompts an immediate fetch but preserves the last confirmed count while unresolved.
-5. A response from an older revision cannot replace a newer result, including after scope changes.
-6. Authoritative decision/configuration events update promptly without trusting payload counts.
+4. Explicit invalidation increments the revision, clears cached count and request ownership, renders promptly, and starts a current fetch that repopulates state without trusting event-provided counts.
+5. A response from an older revision cannot replace the current result, including after invalidation or scope changes.
+6. Scope changes remain isolated; no scope projects its cached count or request ownership into another.
 
 ### MCP trust/runtime
 
@@ -548,7 +548,7 @@ npm run test:unit
 npm run test:browser
 ```
 
-Acceptance is not merely green status: inspect that sandbox denial precedes body/ledger/runtime, obsolete credentials never authenticate, banner state changes only from current confirmed responses, normal gateway contexts all decide successfully, and hostile previews leave both local and remote MCP activity at zero.
+Acceptance is not merely green status: inspect that sandbox denial precedes body/ledger/runtime, obsolete credentials never authenticate, periodic banner state changes only from current confirmed responses, explicit invalidation clears affected cached state and fences older responses before refetch, normal gateway contexts all decide successfully, and hostile previews leave both local and remote MCP activity at zero.
 
 ## Explicitly rejected alternatives
 
@@ -602,7 +602,7 @@ Credible but larger. It preserves the pairing-free Tools approval journey and is
 - [ ] Obsolete browser storage is removed without touching gateway connection state; obsolete server verifier is ignored and never auto-migrated.
 - [ ] Every approval still validates project, cwd, source project, source ID, server name, and current fingerprint before atomic persistence/reload.
 - [ ] Pending/rejected/changed definitions remain inert; trusted/approved definitions preserve discovery precedence and runtime behavior.
-- [ ] Banner keeps last confirmed state while refreshing, single-flights, handles both zero transitions, and discards stale revisions.
+- [ ] Banner keeps last confirmed state and single-flight ownership during periodic refreshes, handles both zero transitions, and preserves explicit invalidation's revision bump, cache/request reset, prompt render/refetch, and stale-response discard.
 - [ ] No repository HTML iframe contains `allow-same-origin`.
 - [ ] Every successful preview content response, including SVG and HEAD, contains CSP sandbox without `allow-same-origin`.
 - [ ] Preview cookie is HttpOnly, Secure, SameSite=None, exact-path, purpose-separated, session-bound, and unusable for gateway API/MCP approval.
@@ -619,4 +619,4 @@ The smallest robust design is subtraction plus two concrete sandbox fixes. Delet
 
 Opaque preview isolation remains security-critical because a normal gateway cookie or stored admin bearer now authorizes decisions. Repository-authored content must not share the application origin that holds or spends those credentials. The selected iframe/CSP boundary, SID-scoped read cookie, narrow admission, and cosmetic message bridge remove that path without changing MCP identity, persistence, runtime, Tools UX, or deployment topology.
 
-Finally, banner stale-while-revalidate makes the management surface truthful during uncertainty: confirmed pending state stays visible until a current response replaces it, while revision fencing and single-flight requests prevent stale or overlapping refreshes. Together these choices preserve the original MCP trust architecture, align authority with the product decision, and minimize new defect surface.
+Finally, periodic banner stale-while-revalidate prevents the two-second reconciliation timer from flashing away confirmed pending state while keeping periodic reads single-flight. Explicit decision/configuration invalidation retains its distinct lifecycle: it increments the revision, clears cached count and request ownership, renders promptly, and lets a current fetch repopulate state while older responses are discarded. Together these choices preserve the original MCP trust architecture, align authority with the product decision, and minimize new defect surface.
