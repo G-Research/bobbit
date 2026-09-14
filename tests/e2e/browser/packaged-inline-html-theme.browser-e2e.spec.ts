@@ -29,6 +29,11 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const PACKAGE_NAME = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { name: string }).name;
 const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");
+const REPOSITORY_LOCK = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8")) as {
+	packages?: Record<string, { version?: string }>;
+};
+const LOCKED_NODE_TYPES_VERSION = REPOSITORY_LOCK.packages?.["node_modules/@types/node"]?.version;
+if (!LOCKED_NODE_TYPES_VERSION) throw new Error("repository package-lock.json must lock @types/node");
 const CANONICAL_BRIDGE_SIGNATURE = "data-bobbit-inline-theme-bridge";
 const SOURCE_BRIDGE_PATH = "src/shared/preview-bridge-scripts.ts";
 const THEME_TOKENS = ["--background", "--foreground", "--card", "--positive", "--chart-1"] as const;
@@ -422,6 +427,10 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				name: "bobbit-inline-theme-clean-consumer",
 				version: "1.0.0",
 				private: true,
+				// protobufjs accepts every @types/node release. Offline npm otherwise
+				// selects the newest cached packument entry even when its tarball is
+				// absent. Anchor that broad edge to npm ci's repository-cached artifact.
+				overrides: { "@types/node": LOCKED_NODE_TYPES_VERSION },
 			}, null, 2)}\n`);
 			await writePackedAgent(agentPath);
 
@@ -510,10 +519,19 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				expect(installedManifest.dependencies?.[name], `${name} must not ship as a production dependency`).toBeUndefined();
 			}
 			const installedLock = JSON.parse(await readFile(join(consumerDir, "package-lock.json"), "utf8")) as {
-				packages?: Record<string, { dependencies?: Record<string, string> }>;
+				packages?: Record<string, { dependencies?: Record<string, string>; version?: string }>;
 			};
-			const installedPackagePaths = Object.keys(installedLock.packages ?? {})
+			const installedPackages = installedLock.packages ?? {};
+			const installedPackagePaths = Object.keys(installedPackages)
 				.filter(path => path !== "" && /(?:^|\/)node_modules\//.test(path));
+			const nodeTypesVersions = Object.entries(installedPackages)
+				.filter(([path]) => /(?:^|\/)node_modules\/@types\/node$/.test(path))
+				.map(([, entry]) => entry.version);
+			expect(nodeTypesVersions.length, "clean consumer must install @types/node").toBeGreaterThan(0);
+			expect(
+				[...new Set(nodeTypesVersions)],
+				"every @types/node edge must use the repository-cached offline artifact",
+			).toEqual([LOCKED_NODE_TYPES_VERSION]);
 			report.packageMetrics!.installedPackageCount = installedPackagePaths.length;
 			for (const name of DEV_ONLY_BUNDLED_PACKAGES) {
 				const suffix = `/node_modules/${name}`;
