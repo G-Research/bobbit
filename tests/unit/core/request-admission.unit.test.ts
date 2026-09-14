@@ -4,6 +4,8 @@ import { describe, it } from "vitest";
 import {
 	admitRequest,
 	compileRequestAdmissionPolicy,
+	isLoopbackPeerAddress,
+	isTrustedLocalRequest,
 	RequestAdmissionConfigError,
 	type RequestAdmissionMetadata,
 	type RequestAdmissionPolicyInput,
@@ -40,6 +42,46 @@ function assertDenied(reason: string, overrides: Partial<RequestAdmissionMetadat
 	assert.equal(decision.allowed, false);
 	assert.equal(decision.reason, reason);
 }
+
+describe("trusted-local transport authority", () => {
+	it("recognizes IPv4, IPv6, and IPv4-mapped loopback peers", () => {
+		for (const address of [
+			"127.0.0.1",
+			"127.255.18.9",
+			"::1",
+			"0:0:0:0:0:0:0:1",
+			"::ffff:127.0.0.1",
+			"::ffff:127.42.5.9",
+			"::ffff:7f00:1",
+		]) {
+			assert.equal(isLoopbackPeerAddress(address), true, address);
+		}
+	});
+
+	it("rejects non-loopback, malformed, named, and absent peers", () => {
+		for (const address of [
+			"10.0.0.1",
+			"172.17.0.1",
+			"192.168.1.20",
+			"::2",
+			"::ffff:10.0.0.1",
+			"::ffff:c0a8:114",
+			"localhost",
+			"127.0.0.1:4242",
+			"",
+			undefined,
+		]) {
+			assert.equal(isLoopbackPeerAddress(address), false, String(address));
+		}
+	});
+
+	it("requires both admitted loopback policy and an actual loopback peer", () => {
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "127.0.0.1"), true);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "::ffff:127.0.0.1"), true);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "172.17.0.1"), false);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: false }, "127.0.0.1"), false);
+	});
+});
 
 describe("request admission policy compilation", () => {
 	it("builds a finite normalized authority set without trusting wildcard listeners", () => {

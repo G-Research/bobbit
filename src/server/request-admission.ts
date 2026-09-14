@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 import {
 	API_CORS_ALLOWED_HEADERS,
 	API_CORS_ALLOWED_METHODS,
@@ -845,6 +847,38 @@ function isWildcardListener(hostname: string): boolean {
 
 function isLoopbackHostname(hostname: string): boolean {
 	return (LOOPBACK_HOSTS as readonly string[]).includes(hostname);
+}
+
+/**
+ * Return whether the transport peer itself is a loopback address. Host and
+ * Origin are deliberately irrelevant: they are caller-controlled authority
+ * claims and cannot establish credential-free local access.
+ */
+export function isLoopbackPeerAddress(remoteAddress: string | undefined): boolean {
+	const addressFamily = remoteAddress ? isIP(remoteAddress) : 0;
+	if (addressFamily === 4) return remoteAddress!.split(".", 1)[0] === "127";
+	if (addressFamily !== 6) return false;
+
+	let normalized: string;
+	try {
+		normalized = new URL(`http://[${remoteAddress}]`).hostname.slice(1, -1).toLowerCase();
+	} catch {
+		return false;
+	}
+	if (normalized === "::1") return true;
+
+	// Node commonly reports dual-stack IPv4 peers as ::ffff:127.x.y.z. URL
+	// canonicalization renders that mapped suffix as two hexadecimal hextets.
+	const mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+	return mapped !== null && (Number.parseInt(mapped[1]!, 16) >>> 8) === 127;
+}
+
+/** Require both admitted loopback-only policy and a proven loopback peer. */
+export function isTrustedLocalRequest(
+	admission: Pick<RequestAdmissionAllowed, "trustedLocal">,
+	remoteAddress: string | undefined,
+): boolean {
+	return admission.trustedLocal && isLoopbackPeerAddress(remoteAddress);
 }
 
 function isCleanScalar(raw: string): boolean {

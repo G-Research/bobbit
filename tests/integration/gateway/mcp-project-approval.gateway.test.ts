@@ -297,6 +297,30 @@ test.describe("project MCP startup approval gateway boundary", () => {
 			expect(pending).toMatchObject({ status: "disconnected", approval: { state: "pending" } });
 			expect(remote.requests).toHaveLength(0);
 
+			// A sandbox credential remains scoped even when the actual peer is trusted
+			// loopback. It must reach the global default-deny guard rather than inherit
+			// the credential-free local authority and enter the approval handler.
+			const sandboxTokenStore = (local.gateway.sessionManager as any).sandboxTokenStore as {
+				register(projectId: string): string;
+				remove(projectId: string): void;
+			};
+			const sandboxToken = sandboxTokenStore.register(project.id);
+			try {
+				const sandboxDecision = await fetch(`${local.baseUrl}/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${sandboxToken}`,
+						"Content-Type": "application/json",
+					},
+					body: "{not-json",
+				});
+				expect(sandboxDecision.status).toBe(403);
+				expect(await sandboxDecision.json()).toMatchObject({ error: "Forbidden: sandbox token cannot access this endpoint" });
+				expect(remote.requests).toHaveLength(0);
+			} finally {
+				sandboxTokenStore.remove(project.id);
+			}
+
 			const decision = await fetch(`${local.baseUrl}/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(project.id)}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },

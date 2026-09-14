@@ -41,7 +41,7 @@ import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
 import { applyApprovedCorsHeaders } from "./cors.js";
-import { admitRequest, compileRequestAdmissionPolicy } from "./request-admission.js";
+import { admitRequest, compileRequestAdmissionPolicy, isTrustedLocalRequest } from "./request-admission.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
@@ -4182,10 +4182,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.end("Gateway starting");
 			return;
 		}
-		// Local credential bypass is a property of the complete admitted authority
-		// policy, not of the physical bind address. A loopback backend that publishes
-		// any non-loopback authority must retain the normal auth boundary everywhere.
-		const isLocalhostMode = !config.forceAuth && admission.trustedLocal;
+		// Credential-free local authority requires both an all-loopback admitted
+		// policy and the actual socket peer to be loopback. Host is caller-controlled:
+		// a Docker/remote peer that sends `Host: localhost` must authenticate normally.
+		const trustedLocalRequest = !config.forceAuth
+			&& isTrustedLocalRequest(admission, req.socket.remoteAddress);
 
 		// Content-origin preview route — served before API auth so iframe loads
 		// can authenticate via the bobbit_session cookie instead of the bearer
@@ -4193,7 +4194,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (url.pathname.startsWith("/preview/")) {
 			await handlePreviewRequest(req, res, url.pathname, {
 				cookieStore,
-				isLocalhost: isLocalhostMode,
+				isLocalhost: trustedLocalRequest,
 				adminBearerToken: config.authToken,
 				basePath,
 			});
@@ -4277,52 +4278,45 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const presentedTokens = [...presentedBearerTokens, ...url.searchParams.getAll("token")];
 			const hasSandboxCredential = presentedTokens.some((token) => sandboxTokenStore.lookup(token) !== undefined);
 
-			// Auth check — skipped in localhost mode (only local processes can connect).
 			// Signed-cookie auth retains precedence over any simultaneously presented
-			// credential, matching the previous short-circuit behavior.
+			// credential. Otherwise, a selected sandbox credential always retains its
+			// scope, including on a genuine loopback peer, so the default-deny route
+			// guard cannot be bypassed merely because local authority is also available.
 			let sandboxScope: SandboxScope | undefined;
-			if (!isLocalhostMode && !isPublicEndpoint && !hasValidCookie) {
+			if (!isPublicEndpoint && !hasValidCookie) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
 					: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
 				const ip = req.socket.remoteAddress || "unknown";
+				const presentedSandboxScope = token ? sandboxTokenStore.lookup(token) : undefined;
 
-				if (rateLimiter.isRateLimited(ip)) {
+				if (!trustedLocalRequest && rateLimiter.isRateLimited(ip)) {
 					res.writeHead(429);
 					res.end();
 					return;
 				}
 
-				if (!token) {
-					res.writeHead(401, { "Content-Type": "application/json" });
-					res.end(JSON.stringify({ error: "Unauthorized" }));
-					return;
-				}
-
-				// Admin token first, then sandbox token.
-				if (!validateToken(token, config.authToken)) {
-					const scope = sandboxTokenStore.lookup(token);
-					if (!scope) {
-						rateLimiter.recordFailure(ip);
-						res.writeHead(401, { "Content-Type": "application/json" });
-						res.end(JSON.stringify({ error: "Unauthorized" }));
-						return;
-					}
+				if (token && validateToken(token, config.authToken)) {
+					authentication = { source: "admin-bearer" };
+				} else if (presentedSandboxScope) {
 					// Route dispatch performs generic awaited probes before this endpoint
 					// reads its body. Snapshot its mutable scope at request admission so
 					// verifier teardown cannot rewrite the already-made scope decision.
 					sandboxScope = verificationResultUpload
 						? {
-							projectId: scope.projectId,
-							goalIds: new Set(scope.goalIds),
-							sessionIds: new Set(scope.sessionIds),
+							projectId: presentedSandboxScope.projectId,
+							goalIds: new Set(presentedSandboxScope.goalIds),
+							sessionIds: new Set(presentedSandboxScope.sessionIds),
 						}
-						: scope;
+						: presentedSandboxScope;
+				} else if (trustedLocalRequest) {
+					authentication = { source: "localhost-trusted" };
 				} else {
-					authentication = { source: "admin-bearer" };
+					if (token) rateLimiter.recordFailure(ip);
+					res.writeHead(401, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({ error: "Unauthorized" }));
+					return;
 				}
-			} else if (!isPublicEndpoint && isLocalhostMode && !hasValidCookie) {
-				authentication = { source: "localhost-trusted" };
 			}
 
 			if (!isPublicEndpoint) {
@@ -4342,7 +4336,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					const isLoopbackHttpOrigin = isLocalhostMode
+					const isLoopbackHttpOrigin = trustedLocalRequest
 						&& (admission.gatewayOrigin
 							? admission.gatewayOrigin.startsWith("http://")
 							: !isTls);
@@ -4368,7 +4362,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, isLocalhostMode);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter, trustedLocalRequest);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -5243,8 +5237,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 		const ip = req.socket.remoteAddress || "unknown";
-		const isLocalhostRequest = !config.forceAuth && admission.trustedLocal;
-		if (!isLocalhostRequest && rateLimiter.isRateLimited(ip)) {
+		const trustedLocalRequest = !config.forceAuth
+			&& isTrustedLocalRequest(admission, req.socket.remoteAddress);
+		if (!trustedLocalRequest && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
@@ -5256,7 +5251,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostRequest, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, trustedLocalRequest, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
