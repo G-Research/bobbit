@@ -475,6 +475,8 @@ export interface PipelineContext {
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
+	/** SessionManager-owned gateway-mode fence; production contexts always provide it. */
+	assertSandboxStartupAllowed?: () => void;
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
 	finalizeSpawnOptions?: (
@@ -1360,6 +1362,9 @@ async function withSessionToolGeneration(
  * Used by normal and delegate session creation.
  */
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	// Direct executor callers must hit the same fence as SessionManager entrypoints,
+	// before MCP/config resolution or any sandbox bootstrap can have effects.
+	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
 	resolveBridgeOptions(plan, ctx);
@@ -1460,6 +1465,10 @@ export async function executeWorktreeAsync(
 	ctx: PipelineContext,
 	preBuiltWorktreePath?: string,
 ): Promise<void> {
+	// Worktree creation, setup hooks, and worktree-scoped MCP discovery all occur
+	// below, so reject an unsafe sandbox before crossing any of those boundaries.
+	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
+
 	// Test-only knob: deterministically extend the "preparing" window so the
 	// preparing-UX banner is observable to the client. Status is already set to
 	// "preparing" by SessionManager.createSession before this fn is invoked, so
