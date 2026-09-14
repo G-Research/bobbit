@@ -16,13 +16,6 @@ test.describe.configure({ mode: "serial" });
 test("project MCP startup approval is deliberate, safe, scoped, durable, and invalidated by configuration changes", async ({ page, gateway }) => {
 	test.setTimeout(120_000);
 	const fixture = createMcpProjectApprovalFixture();
-	const pairingCode = gateway.createMcpOperatorPairingCode().code;
-	const approvalRequests: string[] = [];
-	page.on("request", (request) => {
-		if (new URL(request.url()).pathname.includes("/api/mcp-servers/") && new URL(request.url()).pathname.endsWith("/approval")) {
-			approvalRequests.push(request.url());
-		}
-	});
 	const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 	const primaryName = `Approval Project ${stamp}`;
 	const secondaryName = `Introduced Service ${stamp}`;
@@ -62,30 +55,7 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		await expect(focusedReviewToggle).toHaveCount(1);
 		await expect(focusedReviewToggle).toHaveAttribute("aria-expanded", "true");
 
-		const pairingCallout = section.locator('[data-testid="mcp-pairing-callout"]');
-		let pairingInput = pairingCallout.locator('[data-testid="mcp-pairing-code"]');
-		await expect(pairingCallout).toContainText("Pair this browser to approve or reject project MCP servers.");
-		await expect(pairingInput).toHaveAttribute("type", "password");
-		await expect(pairingInput).toHaveAttribute("autocomplete", "off");
-		await expect(pairingInput).toHaveAttribute("spellcheck", "false");
-
-		await pairingInput.fill("used-or-wrong-code");
-		await pairingCallout.locator('[data-testid="mcp-pair-browser"]').click();
-		await expect(pairingCallout.locator('[data-testid="mcp-pairing-error"]')).toContainText("invalid, expired, or already used");
-		await expect(pairingInput).toBeFocused();
-		expect(approvalRequests).toHaveLength(0);
-
-		pairingInput = pairingCallout.locator('[data-testid="mcp-pairing-code"]');
-		const pairedResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/api/mcp-operator/pair") && response.request().method() === "POST");
-		await pairingInput.fill(pairingCode);
-		await pairingCallout.locator('[data-testid="mcp-pair-browser"]').click();
-		expect((await pairedResponse).status()).toBe(200);
-		await expect(pairingCallout.locator('[data-testid="mcp-pairing-notice"]')).toContainText("no decision was made");
-		await expect(pairingCallout.locator('[data-testid="mcp-pairing-code"]')).toHaveCount(0);
-		expect(approvalRequests).toHaveLength(0);
-		expect(page.url()).not.toContain(pairingCode);
-		expect(await page.locator("body").innerText()).not.toContain(pairingCode);
-		expect(await page.content()).not.toContain(pairingCode);
+		await expect(section.locator('[data-testid="mcp-pairing-callout"]')).toHaveCount(0);
 
 		let localRow = section.locator(`[data-testid="mcp-server-row"][data-server-name="${LOCAL_SERVER_NAME}"]`);
 		await expect(localRow).toBeVisible();
@@ -158,19 +128,22 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 		await expect(localRow.locator('[data-testid="mcp-server-policy"]')).toHaveValue("ask");
 		await expect(banner).toHaveCount(0, { timeout: 15_000 });
 
-		// The paired capability, decision, and independent invocation policy survive a hard reload.
+		// Boot migration removes only the obsolete operator credential. The normal
+		// gateway connection, durable decision, and invocation policy survive.
+		await page.evaluate(({ gatewayUrl }) => {
+			localStorage.setItem("mcp.operator.credentials.v1", JSON.stringify({
+				[window.location.origin]: "obsolete-operator-credential",
+			}));
+			localStorage.setItem("gateway.url", gatewayUrl);
+			localStorage.setItem("gateway.token", "localhost");
+		}, { gatewayUrl: gateway.baseURL });
 		await page.reload();
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
-		await expect.poll(() => page.evaluate(() => {
-			const raw = localStorage.getItem("mcp.operator.credentials.v1");
-			if (!raw) return false;
-			try {
-				const stored = JSON.parse(raw) as Record<string, unknown>;
-				return typeof stored[window.location.origin] === "string";
-			} catch {
-				return false;
-			}
-		})).toBe(true);
+		expect(await page.evaluate(() => ({
+			operator: localStorage.getItem("mcp.operator.credentials.v1"),
+			url: localStorage.getItem("gateway.url"),
+			token: localStorage.getItem("gateway.token"),
+		}))).toEqual({ operator: null, url: gateway.baseURL, token: "localhost" });
 		await page.getByRole("button", { name: primaryName, exact: true }).click();
 		await expect(page.locator('[data-testid="mcp-pairing-callout"]')).toHaveCount(0);
 		localRow = page.locator(`[data-testid="mcp-server-row"][data-server-name="${LOCAL_SERVER_NAME}"]`);
@@ -229,7 +202,6 @@ test("project MCP startup approval is deliberate, safe, scoped, durable, and inv
 test("worktree MCP review scope survives navigation, decisions, reload, and request races", async ({ page, gateway }) => {
 	test.setTimeout(120_000);
 	const fixture = createMcpWorktreeApprovalFixture();
-	const pairingCode = gateway.createMcpOperatorPairingCode().code;
 	const projectName = `Worktree Approval ${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 	let projectId = "";
 	let sessionId = "";
@@ -286,10 +258,7 @@ test("worktree MCP review scope survives navigation, decisions, reload, and requ
 		}
 		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("--variant worktree-v1");
 
-		const pairing = page.locator('[data-testid="mcp-pairing-callout"]');
-		await pairing.locator('[data-testid="mcp-pairing-code"]').fill(pairingCode);
-		await pairing.locator('[data-testid="mcp-pair-browser"]').click();
-		await expect(pairing.locator('[data-testid="mcp-pairing-notice"]')).toBeVisible();
+		await expect(page.locator('[data-testid="mcp-pairing-callout"]')).toHaveCount(0);
 		await row.locator('[data-testid="mcp-approve-server"]').click();
 		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Approved", { timeout: 20_000 });
 		expect(approvalRequests).toHaveLength(1);
