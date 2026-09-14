@@ -5,6 +5,24 @@ import type { McpServerConfig } from "../../../src/server/mcp/mcp-types.ts";
 
 const EXPANDED_ENV_NAME = "BOBBIT_TEST_MCP_RUNTIME_SECRET";
 const EXPANDED_SECRET = "expanded-runtime-secret-sentinel";
+const PRIVATE_SNAPSHOT_ROOT = "C:\\Private\\marketplace-snapshots\\Snapshot-Call-Id";
+const MIXED_PRIVATE_SNAPSHOT_ROOT = "c:/private/MARKETPLACE-snapshots/snapshot-call-id";
+
+function configureConnectedClient(config: McpServerConfig): McpClient {
+	const client = new McpClient("snapshot-call");
+	Object.assign(client as any, {
+		_connected: true,
+		_config: config,
+		_privateDiagnosticPaths: [PRIVATE_SNAPSHOT_ROOT],
+	});
+	return client;
+}
+
+function expectNoPrivateSnapshotPath(value: unknown): void {
+	const serialized = JSON.stringify(value).toLowerCase();
+	expect(serialized).not.toContain(PRIVATE_SNAPSHOT_ROOT.toLowerCase());
+	expect(serialized).not.toContain("snapshot-call-id");
+}
 
 afterEach(() => {
 	delete process.env[EXPANDED_ENV_NAME];
@@ -97,6 +115,82 @@ describe("MCP runtime error redaction", () => {
 		expect(status.error).toContain(`${stage} rejected`);
 		expect(JSON.stringify(status)).not.toContain(EXPANDED_SECRET);
 		expect(JSON.stringify(errorLog.mock.calls)).not.toContain(EXPANDED_SECRET);
+	});
+
+	it("sanitizes private roots throughout successful tool results without truncating content", async () => {
+		const longText = `prefix-${"x".repeat(1_100)}-${MIXED_PRIVATE_SNAPSHOT_ROOT}/server.mjs`;
+		const client = configureConnectedClient({
+			command: "node",
+			cwd: `${MIXED_PRIVATE_SNAPSHOT_ROOT}/work`,
+		});
+		(client as any)._sendRequest = async () => ({
+			jsonrpc: "2.0",
+			id: 1,
+			result: {
+				content: [{ type: "text", text: longText }],
+				_meta: {
+					diagnostic: `${MIXED_PRIVATE_SNAPSHOT_ROOT}/trace.log`,
+					[`${MIXED_PRIVATE_SNAPSHOT_ROOT}/key`]: "nested diagnostic",
+				},
+			},
+		});
+
+		const result = await client.callTool("inspect", {});
+
+		expect(result.content[0]?.text?.length).toBeGreaterThan(1_000);
+		expect(result.content[0]?.text).toContain("server.mjs");
+		expectNoPrivateSnapshotPath(result);
+	});
+
+	it("sanitizes private roots in tool error results", async () => {
+		const client = configureConnectedClient({
+			command: "node",
+			cwd: `${MIXED_PRIVATE_SNAPSHOT_ROOT}/work`,
+		});
+		(client as any)._sendRequest = async () => ({
+			jsonrpc: "2.0",
+			id: 1,
+			error: { code: -1, message: `failed at ${MIXED_PRIVATE_SNAPSHOT_ROOT}/server.mjs` },
+		});
+
+		const result = await client.callTool("inspect", {});
+
+		expect(result).toMatchObject({ isError: true });
+		expect(result.content[0]?.text).toContain("server.mjs");
+		expectNoPrivateSnapshotPath(result);
+	});
+
+	it("sanitizes private roots when a tool call throws", async () => {
+		const client = configureConnectedClient({
+			command: "node",
+			cwd: `${MIXED_PRIVATE_SNAPSHOT_ROOT}/work`,
+		});
+		(client as any)._sendRequest = async () => {
+			throw new Error(`transport failed at ${MIXED_PRIVATE_SNAPSHOT_ROOT}/server.mjs`);
+		};
+
+		const failure = await client.callTool("inspect", {}).catch((error: unknown) => error);
+
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("server.mjs");
+		expectNoPrivateSnapshotPath(failure instanceof Error ? failure.message : failure);
+	});
+
+	it("sanitizes private roots in HTTP transport failures", async () => {
+		const client = configureConnectedClient({
+			url: "https://mcp.example.test/rpc",
+			cwd: `${MIXED_PRIVATE_SNAPSHOT_ROOT}/work`,
+		});
+		(client as any)._postHttpJson = async () => {
+			throw new Error(`socket failed at ${MIXED_PRIVATE_SNAPSHOT_ROOT}/server.mjs`);
+		};
+
+		const failure = await client.callTool("inspect", {}).catch((error: unknown) => error);
+
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("HTTP request failed");
+		expect((failure as Error).message).toContain("server.mjs");
+		expectNoPrivateSnapshotPath(failure instanceof Error ? failure.message : failure);
 	});
 
 	it("carries private snapshot roots through mixed-separator manager diagnostics without exposing them", async () => {

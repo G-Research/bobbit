@@ -130,16 +130,16 @@ function configuredRuntimeSecrets(config: McpServerConfig | null | undefined): s
 }
 
 /**
- * Project an MCP transport/runtime failure to bounded health text. Configured
- * environment/header values are expanded exactly as the transport expands env
- * values, and URL credentials are removed in both whole-URL and component form.
+ * Project MCP-controlled text to a safe form. Configured environment/header
+ * values are expanded exactly as the transport expands env values, and URL
+ * credentials are removed in both whole-URL and component form.
  */
-export function sanitizeMcpRuntimeError(
-  error: unknown,
+function sanitizeMcpRuntimeText(
+  value: unknown,
   config: McpServerConfig | null | undefined,
   privatePaths: readonly string[] = [],
 ): string {
-  let message = error instanceof Error ? error.message : String(error);
+  let message = value instanceof Error ? value.message : String(value);
   if (!message) message = 'Unknown MCP runtime error';
 
   for (const privatePath of privatePaths) message = replaceMcpDiagnosticPath(message, privatePath);
@@ -167,7 +167,15 @@ export function sanitizeMcpRuntimeError(
   for (const secret of configuredRuntimeSecrets(config)) {
     message = message.split(secret).join(REDACTED);
   }
-  return message.slice(0, MAX_RUNTIME_ERROR_LENGTH);
+  return message;
+}
+
+export function sanitizeMcpRuntimeError(
+  error: unknown,
+  config: McpServerConfig | null | undefined,
+  privatePaths: readonly string[] = [],
+): string {
+  return sanitizeMcpRuntimeText(error, config, privatePaths).slice(0, MAX_RUNTIME_ERROR_LENGTH);
 }
 
 function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
@@ -247,7 +255,7 @@ export class McpClient {
     this._assertConnected();
     const response = await this._sendRequest('tools/list', {});
     if (response.error) {
-      const reason = sanitizeMcpRuntimeError(jsonRpcErrorMessage(response.error), this._config);
+      const reason = this._sanitizeRuntimeText(jsonRpcErrorMessage(response.error));
       throw new Error(`[mcp:${this.serverName}] tools/list failed: ${reason}`);
     }
     const result = response.result as { tools?: McpToolDef[] } | undefined;
@@ -257,25 +265,32 @@ export class McpClient {
   /** Call tools/call with the given tool name and arguments */
   async callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     this._assertConnected();
-    const response = await this._sendRequest('tools/call', { name, arguments: args });
+    let response: JsonRpcResponse;
+    try {
+      response = await this._sendRequest('tools/call', { name, arguments: args });
+    } catch (error) {
+      const safeMessage = this._sanitizeRuntimeText(error);
+      if (error instanceof Error && error.message === safeMessage) throw error;
+      throw new Error(safeMessage);
+    }
 
     if (response.error) {
       const rawMessage = typeof response.error === 'object'
         ? (response.error.message || JSON.stringify(response.error))
         : String(response.error);
-      const errMsg = sanitizeMcpRuntimeError(rawMessage, this._config);
       return {
-        content: [{ type: 'text', text: errMsg }],
+        content: [{ type: 'text', text: this._sanitizeRuntimeText(rawMessage) }],
         isError: true,
       };
     }
 
     const result = response.result as McpToolResult | undefined;
     if (result && !Array.isArray(result.content)) {
-      this._log(`Warning: tools/call "${name}" returned result with non-array content: ${JSON.stringify(result).slice(0, 500)}`);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: false };
+      const serialized = this._sanitizeRuntimeText(JSON.stringify(result), false);
+      this._log(`Warning: tools/call "${name}" returned result with non-array content: ${serialized.slice(0, 500)}`);
+      return { content: [{ type: 'text', text: serialized }], isError: false };
     }
-    return result ?? { content: [], isError: false };
+    return result ? this._sanitizeToolResult(result) : { content: [], isError: false };
   }
 
   /** Graceful shutdown */
@@ -610,7 +625,7 @@ export class McpClient {
       if (err instanceof HttpRequestTimeoutError) {
         throw err;
       }
-      const reason = sanitizeMcpRuntimeError(err, this._config);
+      const reason = this._sanitizeRuntimeText(err);
       throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${reason}`);
     }
   }
@@ -672,7 +687,7 @@ export class McpClient {
     });
 
     if (response.error) {
-      const reason = sanitizeMcpRuntimeError(jsonRpcErrorMessage(response.error), this._config);
+      const reason = this._sanitizeRuntimeText(jsonRpcErrorMessage(response.error));
       throw new Error(`[mcp:${this.serverName}] Initialize failed: ${reason}`);
     }
 
@@ -686,7 +701,32 @@ export class McpClient {
     }
   }
 
+  /** Apply every client-owned redaction input at one boundary. */
+  private _sanitizeRuntimeText(value: unknown, bounded = true): string {
+    const sanitized = sanitizeMcpRuntimeText(value, this._config, this._privateDiagnosticPaths);
+    return bounded ? sanitized.slice(0, MAX_RUNTIME_ERROR_LENGTH) : sanitized;
+  }
+
+  private _sanitizeToolResult(result: McpToolResult): McpToolResult {
+    const sanitizeString = (value: string): string => {
+      let sanitized = value;
+      for (const privatePath of this._privateDiagnosticPaths) {
+        sanitized = replaceMcpDiagnosticPath(sanitized, privatePath);
+      }
+      return sanitized;
+    };
+    const sanitizeValue = (value: unknown): unknown => {
+      if (typeof value === 'string') return sanitizeString(value);
+      if (Array.isArray(value)) return value.map(sanitizeValue);
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [sanitizeString(key), sanitizeValue(item)]));
+      }
+      return value;
+    };
+    return sanitizeValue(result) as McpToolResult;
+  }
+
   private _log(message: string): void {
-    console.error(`[mcp:${this.serverName}] ${sanitizeMcpRuntimeError(message, this._config, this._privateDiagnosticPaths)}`);
+    console.error(`[mcp:${this.serverName}] ${this._sanitizeRuntimeText(message)}`);
   }
 }
