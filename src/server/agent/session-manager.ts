@@ -6430,9 +6430,11 @@ export class SessionManager {
 		}
 	}
 
-	private mintScopedGatewayToken(projectId: string | undefined, sessionId: string, goalId?: string): string | undefined {
-		if (!projectId || !this.sandboxTokenStore) return undefined;
+	private mintScopedGatewayToken(projectId: string | undefined, sessionId: string, goalId?: string): string {
+		if (!projectId) throw new Error("Cannot mint scoped gateway token for sandbox: projectId is missing");
+		if (!this.sandboxTokenStore) throw new Error("Cannot mint scoped gateway token for sandbox: SandboxTokenStore is not initialized");
 		const scopedToken = this.sandboxTokenStore.register(projectId);
+		if (!scopedToken) throw new Error("Cannot mint scoped gateway token for sandbox");
 		this.sandboxTokenStore.addSession(projectId, sessionId);
 		if (goalId) this.sandboxTokenStore.addGoal(projectId, goalId);
 		return scopedToken;
@@ -6548,18 +6550,11 @@ export class SessionManager {
 		const gwUrl = this.readGatewayUrlForAgent();
 		if (!gwUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url not found");
 		bridgeOptions.gatewayUrl = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
-		if (scopedToken) {
-			bridgeOptions.gatewayToken = scopedToken;
-		} else {
-			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
-			// unchanged there. Direct agents never use this admin fallback.
-			const adminToken = readToken();
-			if (adminToken === null) {
-				throw new Error("Cannot read gateway credentials for sandbox");
-			}
-			bridgeOptions.gatewayToken = adminToken;
-		}
+		bridgeOptions.gatewayToken = this.mintScopedGatewayToken(
+			projectId,
+			sessionId,
+			opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID,
+		);
 
 		// Re-check after credential wiring as well: a health transition during an
 		// await must reject before a candidate bridge can start.
