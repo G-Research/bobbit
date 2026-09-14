@@ -1106,7 +1106,12 @@ export class RpcBridge {
 		// reach the container process.
 		const sandboxCredentials = sanitizeAgentProcessEnv(this.options.sandboxCredentials ?? {});
 		for (const [key, value] of Object.entries(sandboxCredentials)) {
-			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key === TOOL_EXTENSION_TARGETS_ENV || value === undefined) continue;
+			if (
+				!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+				|| key.toLocaleUpperCase("en-US") === "BOBBIT_TOKEN"
+				|| key === TOOL_EXTENSION_TARGETS_ENV
+				|| value === undefined
+			) continue;
 			execArgs.push("-e", `${key}=${value}`);
 		}
 

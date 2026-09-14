@@ -100,6 +100,7 @@ describe("RpcBridge private server environment boundary", () => {
 			expect(capturedEnv!.NODE_EXTRA_CA_CERTS).toBe(publicAgentCaCertPath());
 			expect(capturedEnv!.NODE_EXTRA_CA_CERTS).not.toBe(privateCa);
 			expect(fs.readFileSync(publicAgentCaCertPath(), "utf8")).toBe("PUBLIC CA ONLY\n");
+			expect(fs.readFileSync(verifier, "utf8")).toBe("operator-verifier-must-stay-private\n");
 			expect(capturedEnv!.BOBBIT_TOKEN).toBe("scoped-agent-token");
 			expect(capturedEnv!.BOBBIT_GATEWAY_URL).toBe("https://127.0.0.1:7443");
 			expect(capturedEnv!.BOBBIT_SESSION_ID).toBe("session-direct");
@@ -134,10 +135,14 @@ describe("RpcBridge private server environment boundary", () => {
 					BOBBIT_SESSION_SECRET: "sandbox-session-capability",
 					BOBBIT_SECRETS_DIR: verifier,
 					NODE_EXTRA_CA_CERTS: privateCa,
+					BOBBIT_TOKEN: "untrusted-option-token",
+					bobbit_token: "untrusted-option-token-lowercase",
 				},
 				sandboxCredentials: {
 					BOBBIT_SECRETS_DIR: privateRoot,
 					NODE_EXTRA_CA_CERTS: privateCa,
+					BOBBIT_TOKEN: "untrusted-credential-token",
+					bObBiT_ToKeN: "untrusted-credential-token-mixed-case",
 					SAFE_PROVIDER_API_KEY: "provider-key",
 				},
 				clock: immediateClock,
@@ -154,7 +159,10 @@ describe("RpcBridge private server environment boundary", () => {
 			expect(containsPath(capturedArgs, verifier)).toBe(false);
 			expect(containsPath(capturedEnv, privateRoot)).toBe(false);
 			expect(Object.keys(capturedEnv!).some((key) => key.toLocaleUpperCase("en-US") === "BOBBIT_SECRETS_DIR")).toBe(false);
-			expect(capturedArgs).toContain("BOBBIT_TOKEN=scoped-sandbox-token");
+			const gatewayTokens = capturedArgs.filter((arg) => arg.split("=", 1)[0]?.toLocaleUpperCase("en-US") === "BOBBIT_TOKEN");
+			expect(gatewayTokens).toEqual(["BOBBIT_TOKEN=scoped-sandbox-token"]);
+			expect(capturedArgs.join("\n")).not.toContain("untrusted-option-token");
+			expect(capturedArgs.join("\n")).not.toContain("untrusted-credential-token");
 			expect(capturedArgs).toContain("BOBBIT_GATEWAY_URL=https://host.docker.internal:7443");
 			expect(capturedArgs).toContain("BOBBIT_SESSION_ID=session-docker");
 			expect(capturedArgs).toContain("BOBBIT_SESSION_SECRET=sandbox-session-capability");
