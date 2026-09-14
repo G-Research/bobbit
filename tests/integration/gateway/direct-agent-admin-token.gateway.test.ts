@@ -16,8 +16,8 @@
  * worktrees + agent spawn, so per the design doc we assert the observable
  * behaviour of those methods directly via a typed cast, seeding a real
  * SandboxTokenStore + a temp admin-token file so readToken() returns a known
- * value. The sandbox path is covered by exercising `mintScopedGatewayToken`
- * (what applySandboxWiring uses) and asserting the token differs from admin.
+ * value. The sandbox path is exercised through `applySandboxWiring` to prove
+ * missing or failed scoped-token provisioning never falls back to admin.
  */
 import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
@@ -83,6 +83,21 @@ function makeHarness(opts?: { seedToken?: boolean }): Harness {
 	return { sm, stateRoot, restore };
 }
 
+function configureDockerSandbox(sm: any): void {
+	sm.projectContextManager = null;
+	sm.projectConfigStore = {
+		get: (key: string) => (key === "sandbox" ? "docker" : undefined),
+	};
+	const sandbox = {
+		getContainerId: async () => "control-container",
+		getStatus: () => ({ status: "ready", containerId: "control-container" }),
+	};
+	sm.sandboxManager = {
+		ensureForProject: async () => {},
+		get: () => sandbox,
+	};
+}
+
 describe("direct-agent admin token", () => {
 	let current: Harness | undefined;
 	afterEach(() => {
@@ -129,8 +144,6 @@ describe("direct-agent admin token", () => {
 		current = h;
 		const admin = readToken();
 
-		// applySandboxWiring uses mintScopedGatewayToken — the boundary the guard
-		// enforces. It must produce a per-project scoped token, NOT the admin one.
 		const scoped = h.sm.mintScopedGatewayToken("proj-1", "sess-3", "goal-1");
 		assert.ok(scoped, "sandbox path must mint a scoped token");
 		assert.equal(scoped.length, 64, "scoped token is a 64-char hex string");
@@ -140,6 +153,38 @@ describe("direct-agent admin token", () => {
 		const scope = h.sm.sandboxTokenStore.lookup(scoped);
 		assert.ok(scope, "scoped token must resolve to a registered scope");
 		assert.equal(scope.projectId, "proj-1");
+	});
+
+	it("sandbox startup fails closed without a SandboxTokenStore even when admin is available", async () => {
+		const h = makeHarness();
+		current = h;
+		assert.equal(readToken(), TEST_ADMIN_TOKEN, "precondition: an admin fallback would be available");
+		configureDockerSandbox(h.sm);
+		h.sm.sandboxTokenStore = null;
+		const bridgeOptions: any = { env: {} };
+
+		await assert.rejects(
+			h.sm.applySandboxWiring(bridgeOptions, "sess-no-store", { projectId: "proj-1" }),
+			/SandboxTokenStore is not initialized/,
+		);
+		assert.equal(bridgeOptions.gatewayToken, undefined, "sandbox must never receive the admin token");
+	});
+
+	it("sandbox startup propagates scoped-token mint failure without exposing admin", async () => {
+		const h = makeHarness();
+		current = h;
+		assert.equal(readToken(), TEST_ADMIN_TOKEN, "precondition: an admin fallback would be available");
+		configureDockerSandbox(h.sm);
+		h.sm.sandboxTokenStore = {
+			register: () => { throw new Error("scoped mint failed"); },
+		};
+		const bridgeOptions: any = { env: {} };
+
+		await assert.rejects(
+			h.sm.applySandboxWiring(bridgeOptions, "sess-mint-failure", { projectId: "proj-1" }),
+			/scoped mint failed/,
+		);
+		assert.equal(bridgeOptions.gatewayToken, undefined, "sandbox must never receive the admin token");
 	});
 
 	it("fails loudly when no admin token is available (no silent fallback)", () => {
