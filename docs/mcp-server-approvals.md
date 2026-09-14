@@ -7,7 +7,7 @@ Startup approval is separate from **Tool calls** policy:
 - Startup approval controls whether a server process or connection may exist and whether Bobbit may initialize it or discover operations.
 - **Tool calls** (`Allow`, `Ask`, or `Never`) controls whether an agent may invoke operations after an eligible server has connected.
 
-Changing tool-call policy cannot bypass startup approval. Pending, rejected, changed, and invalid definitions are not spawned or contacted, do not receive initialization or `tools/list` requests, and publish no operations.
+Changing tool-call policy cannot bypass startup approval. Pending, rejected, changed, and invalid definitions are not spawned or contacted, do not receive initialization or `tools/list` requests, and publish no operations. A malformed project MCP file is omitted from discovery and reported separately as an inert configuration diagnostic.
 
 ## Review and decide
 
@@ -26,8 +26,9 @@ The row reports startup trust independently from connection health:
 - **Trusted** means the source was authorized through an existing user, administrator, or Marketplace flow and needs no startup decision.
 - **Pending approval**, **Rejected**, and **Configuration changed — review again** show **Not started**, not a connection error.
 - **Approved** permits startup, after which the separate health state can be connected, disconnected, reconnecting, or error.
+- **Invalid MCP configuration** is a safe diagnostic row for a malformed source file. It shows the introducing project, logical file, and `MCP_CONFIG_PARSE_FAILED`, but no file contents, server operations, fingerprint, approval actions, or **Tool calls** policy. Fix the source and reload; the row itself is not actionable.
 
-Rejection is reversible. Rejecting a running server disconnects it and removes its routes and external tools; approving the currently displayed definition makes it eligible again without a gateway restart.
+Malformed rows do not count as pending approvals or keep the review banner open. Rejection is reversible. Rejecting a running server disconnects it and removes its routes and external tools; approving the currently displayed definition makes it eligible again without a gateway restart.
 
 ## Who can decide
 
@@ -59,25 +60,23 @@ Bobbit classifies the source that supplied the effective definition rather than 
 | `~/.claude.json` (including matching project entries), `~/.claude/.mcp.json`, and `~/.bobbit/.mcp.json` | Pretrusted | The user explicitly manages these files outside a repository. |
 | Headquarters `config/mcp.json` and custom MCP directories declared by Headquarters | Pretrusted | They use the existing administrator-controlled configuration flow. |
 | Server- or global-user-scoped Marketplace contributions | Pretrusted | Installation and activation are already explicit trust decisions. |
-| Project-scoped Marketplace contributions with an exact private install attestation | Pretrusted | Bobbit's Marketplace install/update flow attested the exact installed behavior. |
-| Unattested or modified project-scoped Marketplace content | Approval required | Repository files cannot claim Marketplace authority merely by containing pack metadata. |
+| Project-scoped Marketplace contributions with an exact private install attestation and verified snapshot | Pretrusted | Bobbit's Marketplace install/update flow captured and attested the exact installed behavior. |
+| Unattested or repository-modified project-scoped Marketplace content | Approval required | Repository files cannot claim Marketplace authority merely by containing pack metadata. |
+| Project-scoped Marketplace content whose referenced private snapshot cannot be verified | Inert until repaired | Bobbit cannot safely use either the claimed snapshot or mutable repository bytes as pretrusted runtime content. |
 
 Existing project definitions are not grandfathered during upgrade. A definition without either an exact private Marketplace attestation or a matching approval decision starts pending.
 
 ### Marketplace install attestations
 
-Project-scoped Marketplace installation is a special case because its files live under the project but installation is an explicit Bobbit action. For a project pack that declares MCP contributions, Bobbit measures the complete pack: every directory, regular file, and internal relative symlink contributes its relative path, entry type, executable/search bits, bytes or link target. Traversal and opened files are rechecked so a partial or concurrent replacement cannot inherit install trust. Unsafe entry types or links, cycles, changed snapshots, and enforced entry, byte, or path bounds fail closed. Packs without MCP contributions skip this pass because they cannot introduce an MCP runtime through this path.
+Project-scoped Marketplace installation is a special case because its files live under the project but installation is an explicit Bobbit action. For a project pack that declares MCP contributions, Bobbit measures the complete pack: every directory, regular file, and internal relative symlink contributes its relative path, entry type, executable/search bits, bytes or link target. Traversal and opened files are rechecked so a partial or concurrent replacement cannot inherit install trust. Unsafe entry types or links, cycles, concurrent changes, and enforced entry, byte, or path bounds fail closed. Packs without MCP contributions skip this pass because they cannot introduce an MCP runtime through this path.
 
-The install flow requires the staged and published pack measurements to match before it atomically records a private attestation binding:
+After staged and published measurements match, the install flow copies the complete pack into server-private storage, verifies and seals that snapshot, then atomically publishes an attestation that references it. The attestation binds the project and Marketplace source, pack and contribution, server name, snapshot, and a keyed fingerprint of the exact configuration and complete-pack measurement. A ledger write cannot make a partial snapshot authoritative.
 
-- project and Marketplace source identity;
-- pack and contribution identity;
-- server name; and
-- a keyed fingerprint of the exact configuration and complete-pack measurement.
+At discovery time, repository bytes are measured only to establish freshness. When they still match, contribution definitions and pack-local runtime content come from the verified private snapshot, not the mutable repository copy. Pack-local stdio paths are rebound to the snapshot and its directory becomes the default working directory; external paths remain external. UI and API provenance stays logical—the introducing project and project-relative Marketplace source—without exposing the private snapshot path.
 
-The raw pack measurement is not persisted or exposed. Discovery treats a project contribution as Marketplace-pretrusted only when that complete tuple and fingerprint match. The current attestation ledger is schema 2; legacy configuration-only ledgers are not accepted after this upgrade. Copied pack metadata, an old/missing/corrupt attestation ledger, or any on-disk pack change falls back to project-controlled approval. A changed attested contribution appears as **Configuration changed — review again** when it has no matching decision. Its manual approval fingerprint also includes the complete-pack measurement, so another pack edit invalidates that decision even if the MCP JSON is unchanged. Uninstall removes the pack's attestations.
+The current attestation ledger is schema 3. A missing or legacy attestation makes the live contribution ordinary project-controlled content. A repository change appears as **Configuration changed — review again** when it has no matching decision; manual approval includes the current complete-pack measurement, so another edit invalidates that decision even if the MCP JSON is unchanged. A missing, corrupt, changed, or unverifiable referenced snapshot—or a corrupt ledger—makes the contribution invalid and inert until Marketplace reinstall/update repairs it. Live repository content never substitutes for a snapshot while retaining Marketplace pretrust. Uninstall removes the pack's attestations and unreferenced snapshots.
 
-Reinstalling or updating through Marketplace records the newly installed definitions. Alternatively, an operator can review and decide the currently effective project-controlled definition in **Tools → MCP**. MCP Gateway materializations follow the same project-scope attestation rule.
+Reinstalling or updating through Marketplace publishes a fresh snapshot and attestation. Alternatively, an operator can review and decide the currently effective project-controlled definition in **Tools → MCP**. MCP Gateway materializations follow the same project-scope rule.
 
 ## Decision identity and fingerprints
 
@@ -137,12 +136,13 @@ The hash keeps gateways with different Headquarters directories in separate stab
 The private root contains:
 
 - `mcp-approvals/mcp-server-approvals.json` — exact approval/rejection decisions;
-- `mcp-approvals/mcp-server-approval.key` — approval fingerprint HMAC key; and
-- `marketplace-mcp-install-attestations.json` — exact project Marketplace install attestations.
+- `mcp-approvals/mcp-server-approval.key` — approval fingerprint HMAC key;
+- `marketplace-mcp-install-attestations.json` — project Marketplace attestations and private snapshot references; and
+- `marketplace-mcp-pack-snapshots/` — complete immutable pack snapshots used by attested project MCP runtimes.
 
 Upgrades best-effort remove the retired browser key `mcp.operator.credentials.v1` without changing `gateway.url` or `gateway.token`. A historical `serverSecretsDir()/mcp-operator-authorization.json` file contains only an obsolete ID/verifier and is no longer read. Bobbit deliberately does not auto-unlink it because automatic filesystem cleanup would add path, race, and symlink risk; an operator may delete it manually.
 
-The decision ledger stores only schema, project/source/server identity, opaque fingerprint, decision, and timestamp. The Marketplace ledger likewise stores identities, fingerprints, and timestamps rather than raw MCP configuration. On POSIX systems new authority files are opened with mode `0600` and private directories request mode `0700`; some permission tightening is best-effort, so operators should also enforce appropriate ownership and parent-directory permissions. On Windows the files remain under the selected user's application-data boundary and inherit its access controls. Writes use exclusive temporary files, flush data, and publish by atomic rename.
+The decision ledger stores only schema, project/source/server identity, opaque fingerprint, decision, and timestamp. The Marketplace ledger stores identities, fingerprints, snapshot IDs, and timestamps rather than raw MCP configuration; the exact pack bytes used as the attested runtime authority live in the referenced private snapshot. On POSIX systems new authority files are opened with mode `0600` and private directories request mode `0700`; snapshots are sealed read-only after publication. Some permission tightening is best-effort, so operators should also enforce appropriate ownership and parent-directory permissions. On Windows the files remain under the selected user's application-data boundary and inherit its access controls. Writes use exclusive temporary files, flush data, and publish by atomic rename.
 
 Historical approval files under `<headquarters-dir>/state` are deliberately ignored and are not migrated. That location can be inside a registered project's reachable tree in a same-root setup, so trusting a preseeded key or ledger there would let repository content mint its own approval. `BOBBIT_DIR` still relocates Headquarters, but only `BOBBIT_SECRETS_DIR` overrides live secret storage.
 
@@ -173,11 +173,12 @@ After a successful decision Bobbit reloads every active manager, because a serve
 Runtime checks close configuration-change races at every data-bearing boundary:
 
 - discovery and approval eligibility run before connecting;
-- the effective definition is rediscovered after initialization and before `tools/list` or route publication;
+- the effective definition is rediscovered after initialization and before `tools/list`;
+- every tool, route, and status publication performs fresh local discovery and revalidates the active fingerprint and eligibility before exposing it;
 - queued reloads run again when a mutation arrives during an in-flight reload; and
 - the effective definition is rediscovered immediately before every tool call.
 
-If the source changes or disappears during one of those windows, Bobbit disconnects the stale client and sends no tool-call data. Periodic reconciliation catches edits made outside Bobbit, while status reads reconcile the requested project scope. Configuration removal, rejection, or invalidation removes active connections and external tool registrations without requiring a gateway restart.
+Publication reconciliation never connects a replacement or requests its operations. If the source changed, disappeared, became invalid, or lost eligibility, Bobbit removes the stale route synchronously before transport shutdown continues. Periodic reconciliation catches edits made outside Bobbit, while status reads reconcile the requested project scope. Configuration removal, rejection, or invalidation therefore removes active connections and external tool registrations without requiring a gateway restart.
 
 ## Status and approval API
 
@@ -185,15 +186,15 @@ These endpoints require normal gateway admission and authentication. An admin be
 
 ### Read status
 
-`GET /api/mcp-servers?projectId=<view-project>&ensure=true` returns effective definitions even when they expose zero operations because they are pending, rejected, changed, or invalid. A session/goal review carries exactly one `sessionId` or `goalId` query parameter, plus its displayed `cwd` when present, through both status and decision requests; a direct Tools view omits owner scope and remains at the registered root. Each server can include:
+`GET /api/mcp-servers?projectId=<view-project>&ensure=true` returns effective definitions even when they expose zero operations because they are pending, rejected, changed, or invalid. It also returns one synthetic `kind: "invalid-configuration"` row per malformed source, with disconnected status, an empty `tools` array, safe logical `source`, and `MCP_CONFIG_PARSE_FAILED`; that row has no approval or review configuration. A session/goal review carries exactly one `sessionId` or `goalId` query parameter, plus its displayed `cwd` when present, through both status and decision requests; a direct Tools view omits owner scope and remains at the registered root. Each server can include:
 
 - `approval`: whether approval is required, its state, current opaque fingerprint, and optional decision time;
 - `source`: safe source ID, authority, introducing project ID/name, and logical file;
 - `reviewConfig`: redacted live transport configuration for project-controlled review;
-- `diagnostics`: actionable startup-trust codes independent of connection health; and
+- `diagnostics`: startup-trust and safe configuration codes independent of connection health; and
 - redacted owner contribution data for grouped Marketplace runtimes.
 
-Reading status uses the same normal gateway admission and authentication as the surrounding API.
+Status performs fresh publication reconciliation before serializing these rows. Reading it uses the same normal gateway admission and authentication as the surrounding API.
 
 ### Submit one decision
 
@@ -225,9 +226,10 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 | **Rejected** / **Not started** | `MCP_APPROVAL_REJECTED` | Expand the row and choose **Approve current configuration** if it is now trusted. |
 | **Configuration changed — review again** / **Not started** | `MCP_APPROVAL_CHANGED` | Review all currently displayed behavior and decide the new fingerprint. An old decision or Marketplace attestation cannot authorize changed behavior. |
 | A shared runtime remains pending after one approval | Another project-controlled owner is still blocked | Refresh or expand the same row and review the newly surfaced owner. Every owner needs its own trust decision. |
-| A project Marketplace server unexpectedly needs approval | Its private install attestation is missing or does not match current files | Reinstall/update through Marketplace to attest the installed definition, or deliberately decide the current project-controlled definition. Investigate unexpected on-disk changes first. |
+| A project Marketplace server unexpectedly needs approval | Its private attestation is missing or the repository no longer matches its verified snapshot | Investigate unexpected changes first. Reinstall/update through Marketplace to publish a fresh snapshot, or deliberately decide the current project-controlled definition. |
+| Marketplace contribution reports invalid pack integrity | `MCP_CONFIG_INVALID` with an installed-pack integrity message | The live measurement, private ledger, or referenced snapshot could not be verified. Repair private storage if needed, then reinstall/update the pack. The invalid contribution cannot be manually approved. |
 | Invalid server definition | `MCP_CONFIG_INVALID` | Configure exactly one non-empty command or HTTP(S) URL and valid string arguments, working directory, environment, and headers. Remove case-insensitive duplicate header names. Invalid definitions cannot be approved. |
-| A configuration source is omitted after JSON parsing fails | `MCP_CONFIG_PARSE_FAILED` | Correct the attributed logical file and reload the MCP view. Other valid sources continue to be discovered; logs do not include file contents. |
+| **Invalid MCP configuration** row | `MCP_CONFIG_PARSE_FAILED` | Correct the attributed logical file and reload the MCP view. The malformed source is inert and has no approval or policy controls; other valid sources continue to be discovered. Logs and status do not include file contents. |
 | Definition changed, disappeared, or changed owner during submission | `MCP_APPROVAL_STALE` (HTTP 409) | Review the safe current status returned by the server and submit a decision for its current source and fingerprint. If the source project was removed, no decision is needed. |
 | Worktree review is rejected as invalid scope or outside the project | `MCP_REVIEW_SCOPE_INVALID` or `CWD_OUTSIDE_PROJECT` | Return to the owning session or goal and use its **Review servers** action. Do not retry with a hand-written `cwd`; the owner binding is the authority for an external sibling worktree. |
 | An agent cannot see a server that looks approved at the project root | No operation in that session's MCP scope | Review connection/approval state from that session's worktree scope, then check **Tool calls** policy. Root and worktree managers can discover different content. |
@@ -236,6 +238,6 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 | Approval key is unavailable, lost, or corrupt | `MCP_APPROVAL_KEY_UNAVAILABLE` when no replacement can be created; otherwise definitions return to pending | Restore private storage access and review each pending definition again. Do not reconstruct fingerprints or ledger rows manually. |
 | Bobbit cannot remove decisions that no longer match the key | `MCP_APPROVAL_LEDGER_RESET_FAILED` | Restore write/delete access to the private `mcp-approvals` directory, then make fresh per-server decisions. Unauthenticated old rows do not authorize current fingerprints. |
 | Marketplace attestation ledger is corrupt | `MARKETPLACE_MCP_ATTESTATION_INVALID` in gateway logs | Repair private storage, then reinstall/update the affected project Marketplace pack. Corrupt attestations fail closed and their contents are not logged. |
-| Marketplace attestation could not be published | `MARKETPLACE_MCP_ATTESTATION_PERSIST_FAILED` | Check private storage ownership, permissions, and free space, then retry the install/update. Bobbit does not report the installation as successfully pretrusted. |
+| Marketplace snapshot or attestation could not be published | `MARKETPLACE_MCP_SNAPSHOT_PUBLISH_FAILED` or `MARKETPLACE_MCP_ATTESTATION_PERSIST_FAILED` | Check private storage ownership, permissions, and free space, then retry the install/update. Bobbit does not report the installation as successfully pretrusted. |
 | Old approvals under Headquarters state are ignored after upgrade | No private matching decision exists | This is intentional. Review each project server again in **Tools → MCP**; never copy the old repository-reachable key or ledger into private storage. |
 | Private storage is inside a project after customization | `BOBBIT_SECRETS_DIR` points into a registered root or agent workspace | Move the override to an owner-controlled location outside all projects before making decisions. `BOBBIT_DIR` is not a substitute for the private secrets override. |
