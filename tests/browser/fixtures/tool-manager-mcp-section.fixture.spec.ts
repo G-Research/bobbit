@@ -438,16 +438,32 @@ test.describe("Tools page → MCP section fixture", () => {
 		expect(buttonBox?.height).toBeGreaterThanOrEqual(44);
 	});
 
-	test("does not offer decisions for invalid definitions", async ({ page }) => {
-		const invalid = structuredClone(APPROVAL_SERVERS[0]);
-		invalid.name = "invalid-project";
-		invalid.diagnostics = [{ code: "MCP_CONFIG_INVALID", message: "A supported command or HTTP URL is required." }];
+	test("renders malformed project diagnostics without server actions or unsafe config", async ({ page }) => {
+		const invalid = {
+			name: "invalid:project-a:project-file:.mcp.json",
+			kind: "invalid-configuration",
+			status: "disconnected",
+			toolCount: 0,
+			tools: [],
+			source: { sourceId: "project-file:.mcp.json", authority: "project", projectId: "project-a", projectName: "Acme Portal", file: ".mcp.json" },
+			diagnostics: [{ code: "MCP_CONFIG_PARSE_FAILED", message: "Could not parse MCP configuration from .mcp.json." }],
+		};
 		await setupMcp(page, [invalid]);
-		const row = page.locator('[data-server-name="invalid-project"]');
-		await expect(row.locator('[data-testid="mcp-approve-server"]')).toHaveCount(0);
-		await expect(row.locator('[data-testid="mcp-reject-server"]')).toHaveCount(0);
+		const section = page.locator('[data-testid="mcp-section"]');
+		const row = section.locator(`[data-server-name="${invalid.name}"]`);
+		await expect(section.locator(".mcp-section-header .tool-group-count")).toHaveText("1 invalid configuration");
+		await expect(row.getByText("Invalid MCP configuration", { exact: true })).toBeVisible();
+		await expect(row.locator('[data-testid="mcp-approval-status"]')).toHaveText("Invalid configuration");
+		await expect(row.locator('[data-testid="mcp-server-status"]')).toHaveAttribute("aria-label", "Not started");
+		await expect(row.locator('[data-testid="mcp-approve-server"], [data-testid="mcp-reject-server"], [data-testid="mcp-server-policy"]')).toHaveCount(0);
 		await row.locator('[data-testid="mcp-server-toggle"]').click();
-		await expect(row.locator('[data-testid="mcp-review-panel"]')).toContainText("MCP_CONFIG_INVALID");
+		const review = row.locator('[data-testid="mcp-review-panel"]');
+		await expect(review).toContainText("It was not started or connected; fix the source file and reload.");
+		await expect(review).toContainText("Acme Portal");
+		await expect(review).toContainText(".mcp.json");
+		await expect(review).toContainText("MCP_CONFIG_PARSE_FAILED");
+		await expect(review).not.toContainText("Fingerprint");
+		await expect(section).not.toContainText(invalid.name);
 	});
 
 	test("reloads every scoped Tools resource when the project scope changes", async ({ page }) => {
