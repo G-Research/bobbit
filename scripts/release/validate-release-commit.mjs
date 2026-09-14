@@ -30,7 +30,27 @@ import {
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+/** @typedef {Record<string, string | undefined> & { mode?: string }} ReleaseArgs */
+/** @typedef {{ name: string, version: string, optionalDependencies?: Record<string, string> }} PackageManifest */
+/** @typedef {{ status: number | null, stdout: string, stderr: string }} GitResult */
+/**
+ * @typedef {{
+ *   number?: unknown,
+ *   merged_at?: unknown,
+ *   merge_commit_sha?: unknown,
+ *   base?: { ref?: unknown },
+ *   head?: { ref?: unknown, repo?: { full_name?: unknown } },
+ *   title?: unknown
+ * }} PullRequest
+ */
+/** @typedef {{ root?: string, fetchImpl?: typeof fetch, runGit?: (args: string[]) => GitResult }} ValidatorOptions */
+
+/**
+ * @param {string[]} argv
+ * @returns {ReleaseArgs}
+ */
 function parseArgs(argv) {
+	/** @type {ReleaseArgs} */
 	const args = { mode: "merged" };
 	for (let i = 0; i < argv.length; i += 1) {
 		const flag = argv[i];
@@ -42,25 +62,40 @@ function parseArgs(argv) {
 	return args;
 }
 
+/**
+ * @param {{
+ *   repository: string,
+ *   sha: string,
+ *   number?: string,
+ *   token?: string,
+ *   fetchImpl: typeof fetch
+ * }} options
+ * @returns {Promise<PullRequest | null>}
+ */
 async function resolvePullRequest({ repository, sha, number, token, fetchImpl }) {
 	if (number) {
 		const { body } = await fetchJson(`${GITHUB_API}/repos/${repository}/pulls/${number}`, {
 			headers: githubHeaders(token),
 			fetchImpl,
 		});
-		return body;
+		return /** @type {PullRequest | null} */ (body);
 	}
 	const { body } = await fetchJson(`${GITHUB_API}/repos/${repository}/commits/${sha}/pulls`, {
 		headers: githubHeaders(token),
 		fetchImpl,
 	});
-	const candidates = Array.isArray(body) ? body : [];
+	const candidates = Array.isArray(body) ? /** @type {PullRequest[]} */ (body) : [];
 	return (
 		candidates.find(pr => pr.merged_at && pr.base?.ref === "main" && pr.merge_commit_sha === sha) ??
 		null
 	);
 }
 
+/**
+ * @param {string} name
+ * @param {string} version
+ * @param {typeof fetch} fetchImpl
+ */
 async function isPublished(name, version, fetchImpl) {
 	const { status } = await fetchJson(npmPackageUrl(name, version), { fetchImpl });
 	if (status === 404) return false;
@@ -68,6 +103,10 @@ async function isPublished(name, version, fetchImpl) {
 	throw new Error(`registry lookup for ${name}@${version} returned ${status}`);
 }
 
+/**
+ * @param {PackageManifest} pkg
+ * @param {typeof fetch} fetchImpl
+ */
 async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
 	const pins = Object.entries(pkg.optionalDependencies ?? {});
 	const missing = [];
@@ -82,6 +121,9 @@ async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
 	}
 }
 
+/**
+ * @param {{ repository: string, tag: string, token?: string, fetchImpl: typeof fetch }} options
+ */
 async function releaseExists({ repository, tag, token, fetchImpl }) {
 	const { status } = await fetchJson(`${GITHUB_API}/repos/${repository}/releases/tags/${tag}`, {
 		headers: githubHeaders(token),
@@ -92,11 +134,18 @@ async function releaseExists({ repository, tag, token, fetchImpl }) {
 	throw new Error(`release lookup for ${tag} returned ${status}`);
 }
 
+/**
+ * @param {ReleaseArgs} args
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {ValidatorOptions} [options]
+ */
 export async function validateReleaseCommit(args, env = process.env, options = {}) {
 	const root = options.root ?? REPO_ROOT;
 	const fetchImpl = options.fetchImpl ?? fetch;
+	/** @type {(args: string[]) => GitResult} */
 	const runGit =
 		options.runGit ?? (gitArgs => spawnSync("git", gitArgs, { cwd: root, encoding: "utf8" }));
+	/** @param {string[]} gitArgs */
 	const git = (...gitArgs) => {
 		const result = runGit(gitArgs);
 		if (result.status !== 0) {
@@ -104,6 +153,10 @@ export async function validateReleaseCommit(args, env = process.env, options = {
 		}
 		return result.stdout;
 	};
+	/**
+	 * @param {string} relativePath
+	 * @returns {unknown}
+	 */
 	const readJson = relativePath => JSON.parse(readFileSync(join(root, relativePath), "utf8"));
 
 	const mode = args.mode ?? "merged";
@@ -117,19 +170,26 @@ export async function validateReleaseCommit(args, env = process.env, options = {
 	if (!repository) throw new Error("--repository or GITHUB_REPOSITORY is required");
 	if (!sha) throw new Error("--sha or GITHUB_SHA is required");
 
-	const pkg = readJson("package.json");
+	const pkg = /** @type {PackageManifest} */ (readJson("package.json"));
 	const version = assertReleaseVersion(pkg.version);
 	const tag = releaseTagFor(version);
 
 	const baseRev = mode === "pre-merge" ? "HEAD^1" : `${sha}^`;
-	const baseVersion = JSON.parse(git("show", `${baseRev}:package.json`)).version;
+	const { version: baseVersion } = /** @type {{ version: string }} */ (
+		JSON.parse(git("show", `${baseRev}:package.json`))
+	);
 
 	if (mode === "pre-merge" && baseVersion === version) {
 		console.log(`package.json is unchanged at ${version}; not a release pull request`);
 		return null;
 	}
 
-	assertLockfileAgreement(pkg, readJson("package-lock.json"));
+	assertLockfileAgreement(
+		pkg,
+		/** @type {{ version?: unknown, packages?: { ""?: { version?: unknown } } }} */ (
+			readJson("package-lock.json")
+		),
+	);
 	assertExactOptionalDependencyPins(pkg);
 
 	let changelog = "";

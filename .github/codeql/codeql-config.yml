@@ -27,10 +27,22 @@ name: "CodeQL config"
 queries:
   - uses: security-extended
 
-# Non-production code is not attack surface. Alerts here are pure noise.
+# Ordinary development and test tooling is not attack surface. Release-control
+# scripts are different: they authorize npm publication and are publication
+# control-plane code, so scripts/release/**/*.mjs must remain analyzed.
+#
+# CodeQL exclusions override inclusions, and `!` is not a supported path-filter
+# operator. Exclude direct files and dev-only subdirectories separately instead
+# of excluding `scripts`, which would also prune the release-control subtree.
 paths-ignore:
   - tests
-  - scripts
+  - "scripts/*.*" # direct development scripts only; `*` does not cross `/`
+  - scripts/benchmarks
+  - scripts/lib
+  - scripts/metrics
+  - scripts/qa-seed
+  - scripts/testing
+  - scripts/testing-v2
   - tools          # dev-only tooling (e.g. tools/dummy-aigw test double)
   - "**/*.test.ts"
   - "**/*.spec.ts"
