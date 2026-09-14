@@ -2964,7 +2964,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 - **Lossless snapshots (≤ 250 UTF-8 bytes)** - current v3 writers use `/preview/<sid>/` with canonical `entry`, `contentHash`, and `artifactId`; they omit duplicate `path` and never write identity aliases. The entry remains reversible through a bounded envelope or the trusted same-call fallback, and is encoded exactly once when the reader rebuilds the strict route. Historical `path`, `e`, and artifact-id aliases are reader compatibility only. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. See [the current write contract](preview-architecture.md#current-write-contract).
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
-- **Cookie auth for the content origin** - the stateless HMAC-signed `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens. A stable 32-byte key is loaded once from `<serverSecretsDir>/cookie-signing-key`; request verification is bounded and entirely in memory. Cookie bootstrap and seven-day renewal happen only on centrally classified browser-signaled API requests, never on preview content or SSE.
+- **Layered preview cookie auth** - the stateless HMAC-signed `bobbit_session` cookie supplies normal primary browser authorization for an initial preview request. After primary authorization, a successful response may issue or renew the signed `bobbit_preview` read capability, bound to that session and `<gateway-mount>/preview/<sid>/`. Opaque-origin `GET`/`HEAD` follow-on resources use that capability; it cannot authorize APIs, WebSockets, another preview session, or MCP decisions. `bobbit_session` bootstrap and seven-day renewal remain limited to centrally classified browser-signaled API requests. Both formats use the stable signing key loaded once from `<serverSecretsDir>/cookie-signing-key`, while retaining distinct claims and issuance rules; request verification is bounded and entirely in memory. See [Preview resource capability](preview-architecture.md#preview-resource-capability).
 - **SSE replaces 1 s polling for hot reload** - `subscribePreviewChanged` pushes `preview-changed` events; the panel bumps `#mtime=<n>` on the iframe `src` to force reload, typically within 100 ms of the agent writing.
 - **Truncation layer recognises all three markers** - `truncateSnapshotBlock()` matches against `PREVIEW_SNAPSHOT_MARKERS`. v3 blocks are always ≤250 UTF-8 bytes, but the lazy-load branch remains necessary for legacy archived v1 raw-HTML and v2 path blocks that may exceed the 32 KB threshold.
 
@@ -2976,7 +2976,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 | `src/server/preview/artifacts.ts` | Immutable preview artifact store — `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash` (dedupe), `removeArtifacts`, `sweepOrphanArtifacts` |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
 | `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel (payload now includes `contentHash` + `artifactId`) |
-| `src/server/auth/cookie.ts` | Stateless `bobbit_session` v1 signer and constant-memory verifier; no filesystem capability |
+| `src/server/auth/cookie.ts` | Stateless `bobbit_session` primary cookie and session-bound, path-scoped `bobbit_preview` read capability; in-memory signing and constant-time verification |
 | `src/server/auth/cookie-signing-key.ts` | Startup-only safe load/create of the stable 32-byte key under `serverSecretsDir()` |
 | `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
@@ -3666,18 +3666,27 @@ replaces its cookie, without touching the file.
 |---|---|---|
 | `cookie-signing-key` | `src/server/auth/cookie-signing-key.ts` | Stable, exact 32-byte HMAC-SHA-256 key, loaded or safely created once at startup (`0o600`; parent directory `0o700` where supported). Request-time signing and verification use the in-memory key and perform no filesystem I/O. |
 
-The cookie wire format is
+The `bobbit_session` wire format is
 `v1.<iat>.<exp>.<nonce>.<signature>` with a 30-day signed lifetime. Bootstrap
 requires admin Bearer or localhost-trusted authentication plus the browser
 Fetch Metadata and Origin rules; renewal is limited to signed-cookie API
 requests in the inclusive seven-day window. Bearer-only requests lacking that
 metadata, sandbox or session-bound traffic, internal callbacks, preview
-content, and preview SSE do not receive `Set-Cookie`. These browser headers are
-routing metadata, not a human identity proof: a shared-admin-token holder can
-deliberately make an eligible browser-shaped request and obtain the weak
-operator cookie. There is no independent per-cookie revocation; rotating the
-stable key invalidates all cookies. See [Preview cookie auth](preview-architecture.md#cookie-auth)
-for the exact issuance matrix.
+content, and preview SSE do not receive a `bobbit_session` `Set-Cookie`. These
+browser headers are routing metadata, not a human identity proof: a
+shared-admin-token holder can deliberately make an eligible browser-shaped
+request and obtain the weak operator cookie.
+
+A successful primary-authorized preview content response may separately issue
+or renew `bobbit_preview`. It is an `HttpOnly; Secure; SameSite=None` read
+capability scoped to the exact `<gateway-mount>/preview/<sid>/` path and session.
+It cannot authorize APIs, WebSockets, another preview session, or MCP decisions.
+The two formats share the in-memory signing store but have distinct claims and
+issuance rules; neither causes request-time filesystem I/O. There is no
+independent per-cookie revocation, so rotating the stable key invalidates both.
+See [Preview cookie auth](preview-architecture.md#cookie-auth) for the primary
+issuance matrix and [Preview resource capability](preview-architecture.md#preview-resource-capability)
+for the opaque-origin follow-on boundary.
 
 ### Active agent directory
 

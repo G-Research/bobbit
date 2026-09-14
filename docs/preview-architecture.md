@@ -22,7 +22,7 @@ Five pieces, one mount, one URL shape:
    `bobbit_session` cookie. A successful primary-authenticated preview response
    then issues a narrower signed `bobbit_preview` capability bound to that
    session and URL path. Opaque iframe subresources use only that read-only
-   capability; no operator credential or token-in-URL workaround crosses into
+   capability; no gateway credential or token-in-URL workaround crosses into
    repository content.
 4. **SSE hot reload** — `GET /api/sessions/:sid/preview-events` streams a
    `preview-changed` event whenever the gateway repopulates the mount. The panel
@@ -346,8 +346,8 @@ Repository-authored preview documents run in iframes with
 `sandbox="allow-scripts"`. Omitting `allow-same-origin` deliberately gives the
 document an opaque/null origin even though its URL is served by the gateway.
 The document can run its own JavaScript, but it cannot read the parent DOM,
-Bobbit application state, parent storage, the normal session cookie, or the MCP
-operator credential. It also has no authenticated same-origin API or WebSocket
+Bobbit application state, parent storage, the normal session cookie, or a
+gateway credential. It also has no authenticated same-origin API or WebSocket
 authority. Adding both `allow-scripts` and `allow-same-origin` would let
 same-origin authored code escape this boundary, so `allow-same-origin` must
 not be added to make a preview or test pass.
@@ -1020,7 +1020,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 - Iframe link clicks navigate inside the preview origin; assets resolve via
   `<base href="/preview/<sid>/">`.
 - "Open in new tab" works through primary browser authorization; successful content responses can then mint the narrower preview capability for follow-on resources below that exact session mount.
-- Repository previews use opaque-origin `allow-scripts` frames without `allow-same-origin`; neither inline nor side-panel authored HTML can read parent DOM/storage or operator credentials.
+- Repository previews use opaque-origin `allow-scripts` frames without `allow-same-origin`; neither inline nor side-panel authored HTML can read parent DOM/storage or gateway credentials.
 - Null-origin credentialed CORS is emitted only for a successfully authenticated request to the matching preview session path, and hostile cross-site iframe navigation is rejected.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
