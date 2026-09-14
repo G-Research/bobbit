@@ -15,7 +15,7 @@ import {
 test.use({ enableMcp: true, gatewayStateGroup: "mcp-runtime-error-redaction" });
 test.describe.configure({ mode: "serial" });
 
-test("MCP transport failures stay actionable without rendering configured secrets", async ({ page, gateway }) => {
+test("MCP transport failures stay actionable without rendering configured secrets", async ({ page }) => {
 	test.setTimeout(90_000);
 	const runRoot = process.env.BOBBIT_E2E_TMP_ROOT;
 	if (!runRoot) throw new Error("BOBBIT_E2E_TMP_ROOT must identify the browser run root");
@@ -75,7 +75,6 @@ test("MCP transport failures stay actionable without rendering configured secret
 			seedWorkflows: false,
 		})).id;
 		sessionId = await createSession({ projectId, cwd: root });
-		const pairingCode = gateway.createMcpOperatorPairingCode().code;
 
 		await openApp(page);
 		await navigateToHash(page, `#/session/${sessionId}`);
@@ -83,10 +82,7 @@ test("MCP transport failures stay actionable without rendering configured secret
 		await expect(banner).toBeVisible({ timeout: 20_000 });
 		await banner.locator('[data-testid="mcp-review-servers"]').click();
 
-		const pairing = page.locator('[data-testid="mcp-pairing-callout"]');
-		await pairing.locator('[data-testid="mcp-pairing-code"]').fill(pairingCode);
-		await pairing.locator('[data-testid="mcp-pair-browser"]').click();
-		await expect(pairing.locator('[data-testid="mcp-pairing-notice"]')).toBeVisible();
+		await expect(page.locator('[data-testid="mcp-pairing-callout"]')).toHaveCount(0);
 
 		for (const [mode, name] of Object.entries(names) as Array<[keyof typeof names, string]>) {
 			const row = page.locator(`[data-testid="mcp-server-row"][data-server-name="${name}"]`);
