@@ -267,7 +267,7 @@ test.describe("project MCP startup approval gateway boundary", () => {
 		expect(obsolete.headers.get("access-control-allow-headers")).toBeNull();
 	});
 
-	test("trusted-local gateway authentication can approve an exact project MCP definition", async () => {
+	test("trusted-local gateway authentication can approve an exact project MCP definition", async ({ gateway }) => {
 		const remote = await startRecordingMcpServer("trusted_local_probe");
 		let local: RunningGateway | undefined;
 		try {
