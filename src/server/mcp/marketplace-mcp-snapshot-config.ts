@@ -92,6 +92,16 @@ function rebaseAbsolutePath(value: string, repositoryPackRoot: string, snapshotP
 	return rebased;
 }
 
+function rebaseCwd(value: string, repositoryPackRoot: string, snapshotPackRoot: string): string {
+	const windows = isWindowsPath(repositoryPackRoot);
+	const pathApi = windows ? path.win32 : path.posix;
+	// Authored Marketplace cwd values are normalized to absolute pack paths by
+	// normalizeMcpContribution(). A relative or different-dialect value cannot
+	// be classified safely here, so never let it inherit the gateway cwd.
+	if (isWindowsPath(value) !== windows || !pathApi.isAbsolute(value)) configFailure();
+	return rebaseAbsolutePath(value, repositoryPackRoot, snapshotPackRoot);
+}
+
 function rebaseValue(value: string, repositoryPackRoot: string, snapshotPackRoot: string): string {
 	if (!value) return value;
 
@@ -129,6 +139,8 @@ export function snapshotBackedMcpConfig(
 		...(config.args ? { args: config.args.map((value) => rebaseValue(value, repositoryPackRoot, snapshotPackRoot)) } : {}),
 		...(config.env ? { env: Object.fromEntries(Object.entries(config.env)
 			.map(([name, value]) => [name, rebaseValue(value, repositoryPackRoot, snapshotPackRoot)])) } : {}),
-		cwd: config.cwd ?? snapshotPackRoot,
+		cwd: config.cwd === undefined
+			? snapshotPackRoot
+			: rebaseCwd(config.cwd, repositoryPackRoot, snapshotPackRoot),
 	};
 }

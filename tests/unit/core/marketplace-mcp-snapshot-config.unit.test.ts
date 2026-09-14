@@ -20,7 +20,7 @@ function temporaryRoot(): string {
 }
 
 describe("Marketplace MCP snapshot runtime config", () => {
-	it("rebases normalized pack-local command, argument, and environment paths while preserving cwd semantics", () => {
+	it("rebases normalized pack-local command, argument, environment, and cwd paths", () => {
 		const root = temporaryRoot();
 		const live = path.join(root, "market-packs", "trusted-pack");
 		const snapshot = path.join(root, "private", "snapshot");
@@ -29,7 +29,7 @@ describe("Marketplace MCP snapshot runtime config", () => {
 			command: aliased,
 			args: [`--loader=${aliased}`, "relative-resource.mjs", "/external/tool"],
 			env: { SCRIPT: aliased, SEARCH: `${aliased}${path.delimiter}/external/bin` },
-			cwd: path.join(snapshot, "work"),
+			cwd: path.join(live, "work"),
 		}, live, snapshot);
 
 		expect(config).toEqual({
@@ -59,10 +59,11 @@ describe("Marketplace MCP snapshot runtime config", () => {
 		expect(snapshotBackedMcpConfig({
 			command: path.join(alias, "server.mjs"),
 			args: [path.join(alias, "created-after-check", "late.mjs")],
+			cwd: path.join(alias, "work"),
 		}, live, snapshot)).toMatchObject({
 			command: path.join(snapshot, "server.mjs"),
 			args: [path.join(snapshot, "created-after-check", "late.mjs")],
-			cwd: snapshot,
+			cwd: path.join(snapshot, "work"),
 		});
 	});
 
@@ -73,15 +74,65 @@ describe("Marketplace MCP snapshot runtime config", () => {
 			command: "c:/REPO/.bobbit/config/market-packs/./trusted/bin/server.exe",
 			args: ["C:\\repo\\.bobbit\\config\\market-packs\\Trusted-other\\server.exe"],
 			env: { PATHS: "C:\\repo\\.bobbit\\config\\market-packs\\Trusted\\bin;C:\\external\\bin" },
+			cwd: "c:/REPO/.bobbit/config/market-packs/trusted/work",
 		}, live, snapshot);
 
 		expect(config.command).toBe("D:\\private\\snapshot\\bin\\server.exe");
 		expect(config.args).toEqual(["C:\\repo\\.bobbit\\config\\market-packs\\Trusted-other\\server.exe"]);
 		expect(config.env?.PATHS).toBe("D:\\private\\snapshot\\bin;C:\\external\\bin");
-		expect(config.cwd).toBe(snapshot);
+		expect(config.cwd).toBe("D:\\private\\snapshot\\work");
 	});
 
-	it("fails closed when a live-pack-prefixed path escapes through dot segments", () => {
+	it("preserves truly external cwd paths", () => {
+		expect(snapshotBackedMcpConfig({
+			command: "node",
+			cwd: "/external/work",
+		}, "/repo/packs/trusted", "/private/snapshot").cwd).toBe("/external/work");
+		expect(snapshotBackedMcpConfig({
+			command: "node.exe",
+			cwd: "E:\\external\\work",
+		}, "C:\\repo\\packs\\trusted", "D:\\private\\snapshot").cwd).toBe("E:\\external\\work");
+	});
+
+	it("fails closed for cwd traversal after entering the live pack", () => {
+		expect(() => snapshotBackedMcpConfig({
+			command: "node",
+			cwd: "/repo/packs/./trusted/../mutable",
+		}, "/repo/packs/trusted", "/private/snapshot")).toThrow(MarketplaceMcpSnapshotConfigError);
+	});
+
+	it("fails closed for cwd traversal through a live-pack alias", () => {
+		const root = temporaryRoot();
+		const live = path.join(root, "trusted-pack");
+		const snapshot = path.join(root, "private-snapshot");
+		const external = path.join(root, "mutable");
+		fs.mkdirSync(live, { recursive: true });
+		fs.mkdirSync(external, { recursive: true });
+		const alias = path.join(root, "pack-alias");
+		try {
+			fs.symlinkSync(live, alias, process.platform === "win32" ? "junction" : "dir");
+		} catch {
+			return;
+		}
+
+		expect(() => snapshotBackedMcpConfig({
+			command: "node",
+			cwd: `${alias}${path.sep}..${path.sep}${path.basename(external)}`,
+		}, live, snapshot)).toThrow(MarketplaceMcpSnapshotConfigError);
+	});
+
+	it("fails closed for cwd values that bypass contribution normalization", () => {
+		for (const cwd of ["work", "C:\\external\\work", "\\\\server\\share\\work"]) {
+			expect(() => snapshotBackedMcpConfig({ command: "node", cwd }, "/repo/packs/trusted", "/private/snapshot"))
+				.toThrow(MarketplaceMcpSnapshotConfigError);
+		}
+		for (const cwd of ["work", "/external/work"]) {
+			expect(() => snapshotBackedMcpConfig({ command: "node.exe", cwd }, "C:\\repo\\packs\\trusted", "D:\\private\\snapshot"))
+				.toThrow(MarketplaceMcpSnapshotConfigError);
+		}
+	});
+
+	it("fails closed when a live-pack-prefixed command path escapes through dot segments", () => {
 		expect(() => snapshotBackedMcpConfig({
 			command: "/repo/packs/./trusted/../mutable/server.mjs",
 		}, "/repo/packs/trusted", "/private/snapshot")).toThrow(MarketplaceMcpSnapshotConfigError);
