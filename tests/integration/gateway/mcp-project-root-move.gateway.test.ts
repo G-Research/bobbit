@@ -3,7 +3,6 @@ import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.js";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
-import { authenticatedMcpOperatorHeaders } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	startRecordingMcpServer,
 	writeProjectMcpConfig,
@@ -33,7 +32,6 @@ function named(all: ServerStatus[], serverName: string): ServerStatus {
 async function decide(gateway: any, projectId: string, status: ServerStatus): Promise<Response> {
 	return gateway.api(`/api/mcp-servers/${encodeURIComponent(status.name)}/approval?projectId=${encodeURIComponent(projectId)}`, {
 		method: "POST",
-		headers: await authenticatedMcpOperatorHeaders(),
 		body: JSON.stringify({
 			decision: "approved",
 			fingerprint: status.approval.fingerprint,

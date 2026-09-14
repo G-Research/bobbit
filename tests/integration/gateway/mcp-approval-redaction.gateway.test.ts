@@ -4,10 +4,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { vi } from "vitest";
 import { test, expect } from "../../support/harnesses/integration/gateway/in-process-harness.js";
-import {
-	authenticatedMcpOperatorHeaders,
-	apiFetch,
-} from "../../support/harnesses/integration/gateway/e2e-setup.js";
+import { apiFetch } from "../../support/harnesses/integration/gateway/e2e-setup.js";
 
 const SENTINELS = [
 	"gateway-command-auth-sentinel",
@@ -202,7 +199,6 @@ test.describe("MCP approval API CLI redaction", () => {
 
 				const approvalResponse = await apiFetch(`/api/mcp-servers/${encodeURIComponent(serverName)}/approval?projectId=${encodeURIComponent(projectId)}`, {
 					method: "POST",
-					headers: await authenticatedMcpOperatorHeaders(),
 					body: JSON.stringify({
 						decision: "approved",
 						fingerprint: pending!.approval.fingerprint,
@@ -255,7 +251,6 @@ test.describe("MCP approval API CLI redaction", () => {
 			writeConfig(root, "two");
 			const staleResponse = await apiFetch(`/api/mcp-servers/${encodeURIComponent(SERVER_NAME)}/approval?projectId=${encodeURIComponent(projectId)}`, {
 				method: "POST",
-				headers: await authenticatedMcpOperatorHeaders(),
 				body: JSON.stringify({
 					decision: "approved",
 					fingerprint: pending.approval.fingerprint,
