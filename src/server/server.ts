@@ -677,7 +677,7 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, getAigwApiKey, aigwAuthHeaders, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
@@ -13160,12 +13160,15 @@ async function handleApiRoute(
 		if (!aigwUrl) {
 			json({ configured: false });
 		} else {
-			// Discover fresh models instead of reading from preferences cache
+			// Discover fresh models instead of reading from preferences cache.
+			// The persisted gateway key authenticates discovery; only its presence
+			// is reported back — never the value.
+			const hasApiKey = !!getAigwApiKey(preferencesStore);
 			try {
-				const models = await discoverAigwModels(aigwUrl);
-				json({ configured: true, url: aigwUrl, models });
+				const models = await discoverAigwModels(aigwUrl, getAigwApiKey(preferencesStore));
+				json({ configured: true, url: aigwUrl, hasApiKey, models });
 			} catch {
-				json({ configured: true, url: aigwUrl, models: [] });
+				json({ configured: true, url: aigwUrl, hasApiKey, models: [] });
 			}
 		}
 		return;
@@ -13178,8 +13181,11 @@ async function handleApiRoute(
 			json({ error: "Missing 'url' field" }, 400);
 			return;
 		}
+		// Optional bearer token for gateways that require one. Omitted ⇒ keep the
+		// persisted key; empty string ⇒ clear it.
+		const apiKey = typeof body.apiKey === "string" ? body.apiKey : undefined;
 		try {
-			const models = await configureAigw(body.url, preferencesStore);
+			const models = await configureAigw(body.url, preferencesStore, apiKey);
 			const remount = await finalizeAigwPublication();
 			json({ ok: true, models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
@@ -13203,8 +13209,22 @@ async function handleApiRoute(
 			json({ error: "Missing 'url' field" }, 400);
 			return;
 		}
+		// An explicitly submitted key is used for this probe only (never saved).
+		// When none is submitted, the persisted key is reused only for the already
+		// configured origin — stored credentials never cross origins, mirroring the
+		// well-known remote_config rule.
+		let effectiveKey = typeof body.apiKey === "string" ? body.apiKey : undefined;
+		if (effectiveKey === undefined) {
+			const storedKey = getAigwApiKey(preferencesStore);
+			const configuredUrl = getAigwUrl(preferencesStore);
+			if (storedKey && configuredUrl) {
+				try {
+					if (new URL(body.url).origin === new URL(configuredUrl).origin) effectiveKey = storedKey;
+				} catch { /* malformed URL — discovery below reports the failure */ }
+			}
+		}
 		try {
-			const models = await discoverAigwModels(body.url);
+			const models = await discoverAigwModels(body.url, effectiveKey);
 			json({ ok: true, models });
 		} catch (err: any) {
 			jsonError(502, err);
@@ -13281,6 +13301,7 @@ async function handleApiRoute(
 			try {
 				let resp: Response;
 				let modelResolved = modelId;
+				const probeAuthHeaders = aigwAuthHeaders(getAigwApiKey(preferencesStore));
 				if (resolved.api === "openai-responses") {
 					// Well-known AIGW entries may expose multiple OpenAI-compatible
 					// providers for the same model family (e.g. /openai/v1 and
@@ -13289,7 +13310,7 @@ async function handleApiRoute(
 					// root; otherwise models like openai.gpt-5.5 falsely fail the flask.
 					resp = await fetchImpl(`${modelBaseUrl}/responses`, {
 						method: "POST",
-						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						headers: { "Content-Type": "application/json", ...probeAuthHeaders, ...aigwUserAgentHeaders() },
 						body: JSON.stringify({
 							model: modelId,
 							max_output_tokens: 16,
@@ -13300,7 +13321,7 @@ async function handleApiRoute(
 				} else {
 					resp = await fetchImpl(`${modelBaseUrl}/chat/completions`, {
 						method: "POST",
-						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						headers: { "Content-Type": "application/json", ...probeAuthHeaders, ...aigwUserAgentHeaders() },
 						body: JSON.stringify({
 							model: modelId,
 							max_tokens: 16,
@@ -13335,7 +13356,7 @@ async function handleApiRoute(
 		const aigwUrl = getAigwUrl(preferencesStore)!;
 		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
 		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
-		proxyRequest(targetUrl, req, res);
+		proxyRequest(targetUrl, req, res, aigwAuthHeaders(getAigwApiKey(preferencesStore)));
 		return;
 	}
 

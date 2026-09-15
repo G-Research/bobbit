@@ -1587,6 +1587,8 @@ function renderPaletteTab() {
 // ── Models tab ──
 
 let aigwUrl = "";
+let aigwApiKey = "";         // typed value; blank means "keep stored key" when one exists
+let aigwApiKeyConfigured = false; // server reports a stored key exists (value never returned)
 let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
 let aigwError = "";
 let aigwConfigured = false;
@@ -1675,6 +1677,7 @@ function loadModelsState(): void {
 			if (statusRes.ok) {
 				const data = await statusRes.json();
 				aigwConfigured = data.configured;
+				aigwApiKeyConfigured = !!data.hasApiKey;
 				if (data.configured) {
 					aigwConfiguredUrl = data.url;
 					aigwUrl = data.url;
@@ -1780,7 +1783,12 @@ async function testAigwConnection(): Promise<void> {
 	try {
 		const res = await gatewayFetch("/api/aigw/test", {
 			method: "POST",
-			body: JSON.stringify({ url: aigwUrl.trim() }),
+			body: JSON.stringify({
+				url: aigwUrl.trim(),
+				// Send the typed key for this probe only; when blank the server
+				// reuses the stored key for the already-configured origin.
+				...(aigwApiKey.trim() ? { apiKey: aigwApiKey.trim() } : {}),
+			}),
 		});
 		const data = await res.json();
 		if (!res.ok) {
@@ -1804,7 +1812,11 @@ async function saveAigwConfig(): Promise<void> {
 	try {
 		const res = await gatewayFetch("/api/aigw/configure", {
 			method: "POST",
-			body: JSON.stringify({ url: aigwUrl.trim() }),
+			body: JSON.stringify({
+				url: aigwUrl.trim(),
+				// A typed key replaces the stored one; blank keeps it unchanged.
+				...(aigwApiKey.trim() ? { apiKey: aigwApiKey.trim() } : {}),
+			}),
 		});
 		const data = await res.json();
 		if (!res.ok) {
@@ -1814,6 +1826,10 @@ async function saveAigwConfig(): Promise<void> {
 			aigwConfiguredUrl = aigwUrl.trim();
 			aigwModels = data.models || [];
 			aigwError = "";
+			if (aigwApiKey.trim()) {
+				aigwApiKeyConfigured = true;
+				aigwApiKey = "";
+			}
 		}
 	} catch (err: any) {
 		aigwError = err.message || "Save failed";
@@ -1871,6 +1887,8 @@ async function removeAigwConfig(): Promise<void> {
 		aigwConfigured = false;
 		aigwConfiguredUrl = "";
 		aigwUrl = "";
+		aigwApiKey = "";
+		aigwApiKeyConfigured = false;
 		aigwModels = [];
 		aigwError = "";
 	} catch (err: any) {
@@ -2130,6 +2148,7 @@ function renderImageModelRow(
 export function __testResetModelsTab(opts: {
 	aigwConfigured?: boolean;
 	aigwUrl?: string;
+	aigwApiKeyConfigured?: boolean;
 	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean; upstreamProvider?: string }>;
 	allModels?: Array<{ id: string; provider: string; reasoning: boolean; upstreamProvider?: string }>;
 	allImageModels?: ImageGenerationModel[];
@@ -2143,6 +2162,8 @@ export function __testResetModelsTab(opts: {
 	aigwConfigured = opts.aigwConfigured ?? false;
 	aigwConfiguredUrl = opts.aigwUrl ?? "";
 	aigwUrl = opts.aigwUrl ?? "";
+	aigwApiKey = "";
+	aigwApiKeyConfigured = opts.aigwApiKeyConfigured ?? false;
 	aigwModels = opts.aigwModels ?? [];
 	allModels = opts.allModels ?? [];
 	allImageModels = opts.allImageModels ?? [];
@@ -2201,6 +2222,32 @@ export function renderModelsTab() {
 							@click=${testAigwConnection}
 						>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
 					</div>
+				</div>
+
+				<!-- API key input (optional) -->
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-medium text-foreground">
+						API Key <span class="text-muted-foreground font-normal">(optional)</span>
+					</label>
+					<input
+						type="password"
+						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						data-testid="aigw-api-key-input"
+						name="bobbit-aigw-api-key"
+						autocomplete="off"
+						autocapitalize="off"
+						spellcheck="false"
+						placeholder=${aigwApiKeyConfigured ? "Key stored — type a new value to replace it" : "Bearer token for gateways that require auth"}
+						.value=${aigwApiKey}
+						?disabled=${busy}
+						@input=${(e: Event) => { aigwApiKey = (e.target as HTMLInputElement).value; }}
+					/>
+					<p class="text-xs text-muted-foreground">
+						Attached as <code>Authorization: Bearer …</code> on Test, Enable/Update, and all
+						gateway traffic (model discovery, completions, agent sessions). Stored locally
+						only; leave blank to keep the stored key${aigwApiKeyConfigured ? "" : " (none stored yet)"}.
+					</p>
 				</div>
 
 				<!-- Error -->
