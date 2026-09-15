@@ -42,35 +42,9 @@ import type { ProviderContribution } from "../../../src/server/agent/pack-contri
 import type { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.js";
 import { makeTmpDir } from "../../../tests/helpers/tmp.js";
 import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
+import { SandboxTokenStore } from "../../../src/server/auth/sandbox-token.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
-
-// A valid admin token must be >= 64 chars (see src/server/auth/token.ts
-// readToken()). The previous fixture wrote a short "admin-token" that
-// readToken() rejects for length, so on a box with no real admin token file
-// applySandboxWiring's mintScopedGatewayToken -> readToken() returned null and
-// threw "Cannot read gateway credentials for sandbox".
-const TEST_ADMIN_TOKEN = "a".repeat(64);
-
-/**
- * Seed a valid admin token where readToken() looks for it: the primary
- * serverSecretsDir() (pinned via BOBBIT_SECRETS_DIR to a temp dir) plus the
- * legacy bobbitStateDir() fallback. Snapshots/restores BOBBIT_SECRETS_DIR so
- * the ambient environment is untouched. Returns the restore fn (callers already
- * snapshot/restore BOBBIT_DIR themselves).
- */
-function seedAdminToken(stateRoot: string, stateDir: string): () => void {
-	const secretsDir = path.join(stateRoot, "secrets");
-	fs.mkdirSync(secretsDir, { recursive: true });
-	fs.writeFileSync(path.join(secretsDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
-	fs.writeFileSync(path.join(stateDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
-	const prevSecrets = process.env.BOBBIT_SECRETS_DIR;
-	process.env.BOBBIT_SECRETS_DIR = secretsDir;
-	return () => {
-		if (prevSecrets === undefined) delete process.env.BOBBIT_SECRETS_DIR;
-		else process.env.BOBBIT_SECRETS_DIR = prevSecrets;
-	};
-}
 
 describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates", () => {
 	function setup(_opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof vi.fn>; createSpy: ReturnType<typeof vi.fn> } {
@@ -80,7 +54,6 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		const stateDir = path.join(stateRoot, "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		const restoreSecrets = seedAdminToken(stateRoot, stateDir);
 
 		const sm: any = new SessionManager();
 		// Sandbox config = docker so applySandboxWiring proceeds.
@@ -90,7 +63,7 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		};
 		sm.preferencesStore = undefined;
 		sm.projectContextManager = null;
-		sm.sandboxTokenStore = null;
+		sm.sandboxTokenStore = new SandboxTokenStore();
 
 		const createSpy = vi.fn(async () => CONTAINER_WORKTREE);
 		const sandbox = {
@@ -113,7 +86,6 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		sm.dispatchGoalProvisionedForWorktree = dispatchSpy;
 
 		const restoreEnv = () => {
-			restoreSecrets();
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
 		};
@@ -135,6 +107,11 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 				sandboxCwdOffset: "packages/app",
 			});
 			assert.equal(ok, true, "wiring should succeed for a docker sandbox");
+			const tokenScope = sm.sandboxTokenStore.lookup(bridgeOptions.gatewayToken);
+			assert.ok(tokenScope, "sandbox gateway token must be registered by scoped authority");
+			assert.equal(tokenScope.projectId, "proj-1", "sandbox receives a project-scoped token");
+			assert.deepEqual([...tokenScope.sessionIds], ["sess-lead"]);
+			assert.deepEqual([...tokenScope.goalIds], ["goal-g1"]);
 
 			assert.equal(dispatchSpy.mock.calls.length, 1, "goalProvisioned must be dispatched exactly once");
 			const arg = dispatchSpy.mock.calls[0][0];
@@ -148,6 +125,24 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 			assert.ok(!String(arg.cwd).startsWith("/workspace-wt/"), "must NOT pass the container worktree path");
 			// The AGENT still boots in the container worktree (offset applied).
 			assert.equal(bridgeOptions.cwd, `${CONTAINER_WORKTREE}/packages/app`, "agent runtime cwd stays container-internal");
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("fails closed when scoped-token authority is unavailable", async () => {
+		const { sm, restoreEnv, dispatchSpy, createSpy } = setup();
+		try {
+			sm.sandboxTokenStore = null;
+			const bridgeOptions: any = { env: {}, cwd: "/some/host/path" };
+			await assert.rejects(() => sm.applySandboxWiring(bridgeOptions, "sess-denied", {
+				projectId: "proj-1",
+				goalId: "goal-g1",
+				sandboxBranch: "goal/g1/coder-x",
+			}), /SandboxTokenStore is not initialized/);
+			assert.equal(bridgeOptions.gatewayToken, undefined, "no admin credential fallback may be installed");
+			assert.equal(createSpy.mock.calls.length, 0, "worktree creation must not proceed without scoped authority");
+			assert.equal(dispatchSpy.mock.calls.length, 0, "lifecycle hooks must not run without scoped authority");
 		} finally {
 			restoreEnv();
 		}
@@ -200,7 +195,6 @@ describe("SessionManager isolated execution runtime wiring", () => {
 		const stateDir = path.join(stateRoot, "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		const restoreSecrets = seedAdminToken(stateRoot, stateDir);
 		const manager: any = new SessionManager();
 		manager.projectContextManager = null;
 		manager.projectConfigStore = {
@@ -208,7 +202,7 @@ describe("SessionManager isolated execution runtime wiring", () => {
 			getSandboxTokens: () => [],
 		};
 		manager.preferencesStore = undefined;
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		const ensureCalls: Array<[string, string, string | undefined]> = [];
 		const releases: string[] = [];
 		const runtimes = new Map<string, string>();
@@ -237,7 +231,6 @@ describe("SessionManager isolated execution runtime wiring", () => {
 			releases,
 			ensureCalls,
 			restoreEnv: () => {
-				restoreSecrets();
 				if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 				else process.env.BOBBIT_DIR = prevBobbitDir;
 			},
@@ -392,11 +385,7 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 			};
 			sm.preferencesStore = undefined;
 			sm.projectContextManager = null;
-			sm.sandboxTokenStore = {
-				register: () => "scoped-token",
-				addSession: () => {},
-				addGoal: () => {},
-			};
+			sm.sandboxTokenStore = new SandboxTokenStore();
 			sm.readGatewayUrlForAgent = () => "https://127.0.0.1:3001";
 			sm.sandboxManager = {
 				ensureForProject: async () => {},

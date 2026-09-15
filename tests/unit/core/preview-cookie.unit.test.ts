@@ -13,10 +13,16 @@ import {
 	COOKIE_NAME,
 	COOKIE_NONCE_BYTES,
 	COOKIE_RENEWAL_WINDOW_SECONDS,
+	PREVIEW_COOKIE_MAX_AGE_SECONDS,
+	PREVIEW_COOKIE_NAME,
+	PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS,
 	CookieStore,
 	issueIfMissing,
+	issuePreviewCookie,
+	issuePreviewCookieIfMissing,
 	parseCookies,
 	tryAuth,
+	tryPreviewAuth,
 } from "../../../src/server/auth/cookie.ts";
 import {
 	COOKIE_SIGNING_KEY_FILE,
@@ -499,6 +505,95 @@ describe("cookie response attributes and renewal", () => {
 		assert.ok(Array.isArray(header));
 		assert.equal(header[0], "other=value; Path=/");
 		assert.ok(new CookieStore(KEY, { clock }).verify(cookieValueFromHeader(header)));
+	});
+});
+
+describe("session-bound preview resource cookies", () => {
+	const SID = "11111111-2222-3333-4444-555555555555";
+	const OTHER_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+	it("uses a domain-separated canonical format bound to the exact session", () => {
+		const { clock } = mutableClock();
+		const store = new CookieStore(KEY, { clock, randomBytes: size => Buffer.alloc(size, 0x45) });
+		const preview = store.mintPreviewResource(SID);
+		assert.match(preview, /^pv1\.11111111-2222-3333-4444-555555555555\./);
+		assert.deepEqual(store.verifyPreviewResource(preview, SID.toUpperCase()), {
+			issuedAt: BASE_NOW,
+			expiresAt: BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS,
+			needsRenewal: false,
+		});
+		assert.equal(store.verifyPreviewResource(preview, OTHER_SID), undefined);
+		assert.equal(store.verify(preview), undefined);
+		assert.equal(store.verifyPreviewResource(store.mint(), SID), undefined);
+	});
+
+	it("rejects malformed sessions, tampering, changed keys, and expiry", () => {
+		const time = mutableClock();
+		const store = new CookieStore(KEY, { clock: time.clock });
+		assert.throws(() => store.mintPreviewResource("not-a-session"), /Invalid preview session ID/);
+		const value = store.mintPreviewResource(SID);
+		const parts = value.split(".");
+		const tampered = [...parts.slice(0, 2), String(BASE_NOW + 1), ...parts.slice(3)].join(".");
+		assert.equal(store.verifyPreviewResource(tampered, SID), undefined);
+		assert.equal(new CookieStore(OTHER_KEY, { clock: time.clock }).verifyPreviewResource(value, SID), undefined);
+
+		time.setSeconds(BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS);
+		assert.equal(store.verifyPreviewResource(value, SID), undefined);
+	});
+
+	it("applies the preview renewal window independently", () => {
+		const time = mutableClock();
+		const store = new CookieStore(KEY, { clock: time.clock });
+		const value = store.mintPreviewResource(SID);
+		time.setSeconds(BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS - PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS - 1);
+		assert.equal(store.verifyPreviewResource(value, SID)?.needsRenewal, false);
+		time.setSeconds(BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS - PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS);
+		assert.equal(store.verifyPreviewResource(value, SID)?.needsRenewal, true);
+	});
+
+	it("serializes an exact mount path with mandatory browser isolation attributes", () => {
+		const { clock } = mutableClock();
+		const store = new CookieStore(KEY, { clock });
+		for (const basePath of ["", "/bobbit"] as const) {
+			const response = fakeRes();
+			const value = issuePreviewCookie(response as any, store, SID, { basePath });
+			assert.equal(response.getHeader("Set-Cookie"), [
+				`${PREVIEW_COOKIE_NAME}=${value}`,
+				"HttpOnly",
+				"Secure",
+				"SameSite=None",
+				`Path=${basePath}/preview/${SID}/`,
+				`Max-Age=${PREVIEW_COOKIE_MAX_AGE_SECONDS}`,
+			].join("; "));
+		}
+		assert.throws(() => issuePreviewCookie(fakeRes() as any, store, SID, { basePath: "/bad; Secure" }), /Invalid preview cookie base path/);
+	});
+
+	it("authenticates only the named cookie and exact session and renews without replacing other cookies", () => {
+		const time = mutableClock();
+		const store = new CookieStore(KEY, { clock: time.clock });
+		const value = store.mintPreviewResource(SID);
+		assert.equal(tryPreviewAuth(fakeReq(), store, SID), false);
+		assert.equal(tryPreviewAuth(fakeReq(`${COOKIE_NAME}=${store.mint()}`), store, SID), false);
+		assert.equal(tryPreviewAuth(fakeReq(`${PREVIEW_COOKIE_NAME}=${value}`), store, SID), true);
+		assert.equal(tryPreviewAuth(fakeReq(`${PREVIEW_COOKIE_NAME}=${value}`), store, OTHER_SID), false);
+
+		const absentResponse = fakeRes();
+		const issuedForAbsence = issuePreviewCookieIfMissing(fakeReq(), absentResponse as any, store, SID);
+		assert.ok(issuedForAbsence);
+		assert.ok(store.verifyPreviewResource(issuedForAbsence, SID));
+
+		time.setSeconds(BASE_NOW + PREVIEW_COOKIE_MAX_AGE_SECONDS - PREVIEW_COOKIE_RENEWAL_WINDOW_SECONDS);
+		const response = fakeRes("other=value; Path=/");
+		const replacement = issuePreviewCookieIfMissing(
+			fakeReq(`${PREVIEW_COOKIE_NAME}=${value}`), response as any, store, SID, { basePath: "/nested" },
+		);
+		assert.ok(replacement);
+		const headers = response.getHeader("Set-Cookie");
+		assert.ok(Array.isArray(headers));
+		assert.equal(headers[0], "other=value; Path=/");
+		assert.match(headers[1]!, /^bobbit_preview=/);
+		assert.match(headers[1]!, new RegExp(`Path=/nested/preview/${SID}/`));
 	});
 });
 

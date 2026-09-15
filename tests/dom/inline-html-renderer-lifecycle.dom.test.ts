@@ -5,7 +5,11 @@ __syncBeforeAll(() => __syncCE());
 import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
-import { PREVIEW_SWIPE_SCRIPT, PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.js";
+import {
+	INLINE_PREVIEW_THEME_ATTRIBUTE,
+	PREVIEW_SWIPE_SCRIPT,
+	PREVIEW_THEME_BRIDGE,
+} from "../../src/shared/preview-bridge-scripts.js";
 import {
 	__resetGatewayConnectionForTests,
 	commitGatewayConnection,
@@ -19,6 +23,7 @@ import {
 	resetInlineHtmlPreparationCacheForTests,
 } from "../../src/ui/tools/renderers/prepare-inline-html.js";
 import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
+import { resetPreviewFrameHostForTests } from "../../src/ui/preview-frame-host.js";
 
 const okResult = {
 	isError: false,
@@ -83,41 +88,17 @@ function originalSource(container: HTMLElement): string {
 	return codeBlock.code;
 }
 
-function declaration(...names: string[]): Record<string | number, unknown> {
-	const style: Record<string | number, unknown> = { length: names.length };
-	for (let index = 0; index < names.length; index++) style[index] = names[index];
-	return style;
-}
-
 function executePreparedScripts(doc: Document): Record<string, unknown> {
-	const hostRoot = {
-		classList: { contains: (name: string) => name === "dark" },
-		getAttribute: (name: string) => name === "data-palette" ? "violet" : null,
-	};
-	const values: Record<string, string> = {
-		"--background": "surface-value",
-		"--foreground": "foreground-value",
-		"--card": "card-value",
-		"--positive": "positive-value",
-		"--chart-1": "chart-value",
-	};
-	const hostDocument = {
-		documentElement: hostRoot,
-		styleSheets: [{ cssRules: [{ style: declaration(...Object.keys(values)) }] }],
-	};
-	class MutationObserverStub {
+	class ResizeObserverStub {
 		observe(): void {}
+		disconnect(): void {}
 	}
+	const parent = { postMessage: () => {} };
 	const sandbox: Record<string, any> = {
 		document: doc,
-		parent: {
-			document: hostDocument,
-			getComputedStyle: () => ({
-				fontFamily: "Inter, ui-sans-serif, system-ui",
-				getPropertyValue: (name: string) => values[name] ?? "",
-			}),
-		},
-		MutationObserver: MutationObserverStub,
+		parent,
+		ResizeObserver: ResizeObserverStub,
+		addEventListener: () => {},
 		getComputedStyle: (element: HTMLElement) => ({
 			getPropertyValue: (name: string) => element.style.getPropertyValue(name),
 		}),
@@ -132,9 +113,10 @@ function executePreparedScripts(doc: Document): Record<string, unknown> {
 }
 
 function expectPreparedInlineFrame(iframe: HTMLIFrameElement): Document {
-	expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin");
+	expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
 	const doc = parsedSrcdoc(iframe);
 	expect(bridgeScripts(doc)).toHaveLength(1);
+	expect(doc.querySelectorAll(`script[${INLINE_PREVIEW_THEME_ATTRIBUTE}]`)).toHaveLength(1);
 	expect(iframe.srcdoc).not.toContain("preview-swipe-start");
 	expect(iframe.srcdoc).not.toContain(PREVIEW_SWIPE_SCRIPT);
 	return doc;
@@ -142,13 +124,28 @@ function expectPreparedInlineFrame(iframe: HTMLIFrameElement): Document {
 
 beforeEach(() => {
 	resetInlineHtmlPreparationCacheForTests();
+	const root = document.documentElement;
+	root.classList.add("dark");
+	root.setAttribute("data-palette", "violet");
+	root.style.fontFamily = "Inter, ui-sans-serif, system-ui";
+	for (const [name, value] of Object.entries({
+		"--background": "surface-value",
+		"--foreground": "foreground-value",
+		"--card": "card-value",
+		"--positive": "positive-value",
+		"--chart-1": "chart-value",
+	})) root.style.setProperty(name, value);
 });
 
 afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
+	resetPreviewFrameHostForTests();
 	document.body.innerHTML = "";
+	document.documentElement.classList.remove("dark");
+	document.documentElement.removeAttribute("data-palette");
+	document.documentElement.removeAttribute("style");
 	localStorage.clear();
 	__resetGatewayConnectionForTests();
 	window.location.hash = "";
@@ -269,8 +266,9 @@ describe("inline HtmlRenderer preparation", () => {
 		expect(iframe.srcdoc.match(/<!--leading-document-comment-->/g)).toHaveLength(1);
 
 		const scripts = Array.from(doc.querySelectorAll("script"));
-		expect(scripts[0].textContent?.trim()).toBe(canonicalBridgeBody());
-		expect(scripts.slice(1).map(script => script.id)).toEqual(["authored-init", "authored-tail"]);
+		expect(scripts[0].hasAttribute(INLINE_PREVIEW_THEME_ATTRIBUTE)).toBe(true);
+		expect(scripts[1].textContent?.trim()).toBe(canonicalBridgeBody());
+		expect(scripts.slice(2).map(script => script.id)).toEqual(["authored-init", "authored-tail"]);
 		expect(doc.querySelector<HTMLScriptElement>("#authored-init")?.textContent).toContain('"</body>"');
 		expect(doc.querySelector<HTMLStyleElement>("#hostile-style")?.textContent).toContain('"</body>"');
 		const textarea = doc.querySelector<HTMLTextAreaElement>("#hostile-textarea");
@@ -344,7 +342,7 @@ describe("inline HtmlRenderer preparation", () => {
 		);
 		expect(markedScripts).toHaveLength(2);
 		expect(bridgeScripts(preparedDocument)).toHaveLength(1);
-		expect(preparedDocument.querySelector("head > script")?.textContent?.trim()).toBe(canonicalBridgeBody());
+		expect(preparedDocument.querySelector(`head > script[${INLINE_PREVIEW_THEME_ATTRIBUTE}]`)).toBeTruthy();
 		expect(Array.from(markedScripts).some(script => script.textContent === "")).toBe(true);
 		expect(preparedDocument.querySelector("#authored-after-marker")?.textContent).toContain("__authoredAfterMarker");
 
@@ -360,6 +358,11 @@ describe("inline HtmlRenderer preparation", () => {
 		const { container, iframe } = mountHtml(renderer, AUTHORED_HTML);
 		const prepared = iframe.srcdoc;
 
+		// Live theme is delivered by the exact-frame message host. It must not
+		// alter srcdoc identity and rerun authored initialization on a repaint.
+		document.documentElement.classList.remove("dark");
+		document.documentElement.setAttribute("data-palette", "forest");
+		document.documentElement.style.setProperty("--background", "changed-live-value");
 		render(renderer.render({ path: "theme-card.html", content: AUTHORED_HTML }, okResult, false).content, container);
 
 		const rerendered = container.querySelector("iframe")!;
@@ -371,42 +374,43 @@ describe("inline HtmlRenderer preparation", () => {
 });
 
 describe("inline HtmlRenderer streaming lifecycle", () => {
-	it("writes prepared content on load, preserves debounce and resize, then completes declaratively", () => {
+	it("writes prepared srcdoc on load, preserves debounce and bounded resize, then completes declaratively", () => {
 		vi.useFakeTimers();
-		vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-			callback(0);
-			return 1;
-		});
 		const renderer = new HtmlRenderer();
 		const firstContent = '<!doctype html><html><body><div id="first">first</div></body></html>';
 		const secondContent = '<!doctype html><html><body><div id="second">second</div></body></html>';
 		const { container, iframe } = mountHtml(renderer, firstContent, null, true);
-		const written: string[] = [];
-		const fakeDocument = {
-			open: vi.fn(),
-			write: vi.fn((payload: string) => written.push(payload)),
-			close: vi.fn(),
-			body: { scrollHeight: 420 },
-		};
-		Object.defineProperty(iframe, "contentDocument", { configurable: true, value: fakeDocument });
 
 		iframe.dispatchEvent(new Event("load"));
-		expect(fakeDocument.open).toHaveBeenCalledTimes(1);
-		expect(fakeDocument.close).toHaveBeenCalledTimes(1);
-		expect(written).toHaveLength(1);
-		expect(bridgeScripts(new DOMParser().parseFromString(written[0], "text/html"))).toHaveLength(1);
-		expect(written[0]).not.toContain("preview-swipe-start");
-		expect(iframe.style.height).toBe("436px");
-		expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin");
+		const firstPrepared = iframe.srcdoc;
+		expect(bridgeScripts(new DOMParser().parseFromString(firstPrepared, "text/html"))).toHaveLength(1);
+		expect(firstPrepared).not.toContain("preview-swipe-start");
+		expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
 		expect(originalSource(container)).toBe(firstContent);
 
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "bobbit-preview-resize", version: 1, height: 436 },
+			source: iframe.contentWindow,
+		}));
+		expect(iframe.style.height).toBe("436px");
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "bobbit-preview-resize", version: 1, height: 900 },
+			source: iframe.contentWindow,
+		}));
+		expect(iframe.style.height).toBe("600px");
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "bobbit-preview-resize", version: 1, height: 100 },
+			source: window,
+		}));
+		expect(iframe.style.height).toBe("600px");
+
 		render(renderer.render({ path: "theme-card.html", content: secondContent }, undefined, true).content, container);
-		expect(written).toHaveLength(1);
+		expect(iframe.srcdoc).toBe(firstPrepared);
 		vi.advanceTimersByTime(1499);
-		expect(written).toHaveLength(1);
+		expect(iframe.srcdoc).toBe(firstPrepared);
 		vi.advanceTimersByTime(1);
-		expect(written).toHaveLength(2);
-		const streamed = new DOMParser().parseFromString(written[1], "text/html");
+		expect(iframe.srcdoc).not.toBe(firstPrepared);
+		const streamed = new DOMParser().parseFromString(iframe.srcdoc, "text/html");
 		expect(bridgeScripts(streamed)).toHaveLength(1);
 		expect(streamed.querySelector("#second")?.textContent).toBe("second");
 
@@ -422,11 +426,7 @@ describe("inline HtmlRenderer streaming lifecycle", () => {
 		const renderer = new HtmlRenderer();
 		const streaming = mountHtml(renderer, '<div id="partial">partial</div>', null, true);
 		const staleIframe = streaming.iframe;
-		const staleWrite = vi.fn();
-		Object.defineProperty(staleIframe, "contentDocument", {
-			configurable: true,
-			value: { open: vi.fn(), write: staleWrite, close: vi.fn(), body: { scrollHeight: 100 } },
-		});
+		const initialSrcdoc = staleIframe.srcdoc;
 		const overlay = streaming.container.querySelector("iframe + div") as HTMLElement;
 		expect(overlay).toBeTruthy();
 		const chromeStyles = [
@@ -444,7 +444,7 @@ describe("inline HtmlRenderer streaming lifecycle", () => {
 
 		render(renderer.render({ path: "theme-card.html", content: AUTHORED_HTML }, okResult, false).content, streaming.container);
 		staleIframe.dispatchEvent(new Event("load"));
-		expect(staleWrite).not.toHaveBeenCalled();
+		expect(staleIframe.srcdoc).toBe(initialSrcdoc);
 		expectPreparedInlineFrame(streaming.container.querySelector("iframe")!);
 	});
 });

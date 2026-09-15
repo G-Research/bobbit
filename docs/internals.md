@@ -2489,6 +2489,8 @@ See also: [docs/rest-api.md - Image generation](rest-api.md#image-generation) fo
 
 ## MCP servers
 
+Project-defined MCP servers cross a startup trust boundary before connection or tool discovery; approval is deliberately separate from invocation policy. See [MCP server startup approvals](mcp-server-approvals.md) for source trust classes, fingerprints, persistence, multi-project decisions, and recovery.
+
 MCP discovery has two layers. Marketplace MCP contributions are resolved first, then the manual/Claude-compatible cascade overlays them for compatibility. Sources (later manual config entries override earlier manual entries):
 
 0. Active Marketplace MCP contributions from installed schema-2 packs and MCP Gateway materializations (lowest; `DisabledRefs.mcp` contributions and `DisabledRefs.mcpOperations` operations are omitted before exposure)
@@ -2499,7 +2501,8 @@ MCP discovery has two layers. Marketplace MCP contributions are resolved first, 
 5. `~/.bobbit/.mcp.json`
 6. `<project>/.mcp.json`
 7. `<project>/.claude/.mcp.json`
-8. `<project>/.bobbit/config/mcp.json` (highest priority)
+8. Headquarters `config/mcp.json`
+9. `<project>/.bobbit/config/mcp.json` (highest priority)
 
 Marketplace gateway installs separate **public** MCP identity from **runtime** identity. Public names (`gr`, `gr-write`, sub-namespaces, and policy keys such as `mcp__gr__jira__jira_search`) stay readable, while runtime client keys include source/install/fingerprint identity so multiple gateway sources can coexist. `McpManager` exposes the union of selected operations through a route map. Distinct public operation names all register; identical public names keep the first route in deterministic contribution order and record a conflict diagnostic. Manual JSON MCP routes are considered before Marketplace routes for collision handling.
 
@@ -2517,7 +2520,7 @@ Config format matches Claude Code `.mcp.json`:
 
 **Tool surface:** the model sees one **meta-tool per server or gateway sub-namespace** named `mcp_<server>(operation, args)` or `mcp_<server>__<sub>(operation, args)` plus a shared `mcp_describe(server, operation?)` discovery tool. The legacy per-op identifier `mcp__<server>__<tool>` / `mcp__<server>__<sub>__<tool>` remains the internal routing and policy key but is no longer exposed to the model. Tool policies can target the MCP wildcard (`mcp__`), server (`mcp__gr`), package/sub-namespace (`mcp__gr__jira`), or operation (`mcp__gr__jira__jira_search`). Failed servers degrade to a stub meta-tool that reports the failure reason rather than aborting the agent turn. See [docs/mcp-meta-tools.md](mcp-meta-tools.md) for the user-facing overview and [docs/design/mcp-meta-tool-aggregation.md](design/mcp-meta-tool-aggregation.md) for the architecture.
 
-Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`. Marketplace MCP validates the same transport shapes before they reach the runtime and redacts env/header values, args, URL credentials, URL query, and fragments in status payloads.
+Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`. Marketplace MCP validates the same transport shapes before they reach the runtime. Status metadata preserves ordinary command, argument, and working-directory text for review, but selectively redacts environment/header values, configured-secret substrings wherever they recur in commands or arguments, credential-shaped CLI/header forms, and URL credentials, query, and fragment. See [Safe review metadata](mcp-server-approvals.md#safe-review-metadata) for the canonical contract.
 
 ### MCP tool documentation
 
@@ -2534,7 +2537,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 
 **Prompt layout** - `getToolDocsForPrompt()` in `tool-manager.ts` produces a single compact `# Tools` section sent on every assistant turn. Each group is one `## <Group> — see <relpath>` header followed by a one-line bullet per tool: `- name(params) — summary`. The `params` list comes from the YAML `params: [name, name?]` field (trailing `?` marks optional); tools without `params` render as `- name — summary`. Per-tool prose (`docs`, `detail_docs`) is **not** inlined into the prompt — it is folded into the per-group reference markdown the pointer resolves to. Built-in groups point at `<stateDir>/tool-docs/<groupDir>.md` (written by `generateDetailDocs()` from each tool's `docs` paragraph followed by `detail_docs`); MCP groups point at `<stateDir>/mcp-tool-docs/<serverName>.md` (auto-generated from `tools/list`). MCP groups render one bullet per op with no inlined parameter prose — agents call `mcp_describe` for full schemas. This compact format replaced an earlier sentence-form `### name` layout to drop ~78% of the per-turn `# Tools` byte count.
 
-**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. `GET /api/mcp-servers` is contextual status only (`projectId`/`cwd` select a scoped manager; `ensure=true` may create one for authenticated UI flows). Marketplace toggles come from `GET/PUT /api/marketplace/pack-activation`, not runtime status. See also [docs/mcp-meta-tools.md](mcp-meta-tools.md) and [docs/marketplace.md#marketplace-mcp](marketplace.md#marketplace-mcp).
+**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/approval`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. `GET /api/mcp-servers` is contextual status only (`projectId`/`cwd` select a scoped manager; `ensure=true` may create one for authenticated UI flows), including safe metadata for project definitions excluded from runtime. Approval mutations require an authenticated operator and validate the view scope, introducing source, and current fingerprint. Marketplace toggles come from `GET/PUT /api/marketplace/pack-activation`, not runtime status. See also [MCP server startup approvals](mcp-server-approvals.md), [docs/mcp-meta-tools.md](mcp-meta-tools.md), and [docs/marketplace.md#marketplace-mcp](marketplace.md#marketplace-mcp).
 
 ---
 
@@ -2961,7 +2964,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 - **Lossless snapshots (≤ 250 UTF-8 bytes)** - current v3 writers use `/preview/<sid>/` with canonical `entry`, `contentHash`, and `artifactId`; they omit duplicate `path` and never write identity aliases. The entry remains reversible through a bounded envelope or the trusted same-call fallback, and is encoded exactly once when the reader rebuilds the strict route. Historical `path`, `e`, and artifact-id aliases are reader compatibility only. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. See [the current write contract](preview-architecture.md#current-write-contract).
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
-- **Cookie auth for the content origin** - the stateless HMAC-signed `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens. A stable 32-byte key is loaded once from `<serverSecretsDir>/cookie-signing-key`; request verification is bounded and entirely in memory. Cookie bootstrap and seven-day renewal happen only on centrally classified browser-signaled API requests, never on preview content or SSE.
+- **Layered preview cookie auth** - the stateless HMAC-signed `bobbit_session` cookie supplies normal primary browser authorization for an initial preview request. After primary authorization, a successful response may issue or renew the signed `bobbit_preview` read capability, bound to that session and `<gateway-mount>/preview/<sid>/`. Opaque-origin `GET`/`HEAD` follow-on resources use that capability; it cannot authorize APIs, WebSockets, another preview session, or MCP decisions. `bobbit_session` bootstrap and seven-day renewal remain limited to centrally classified browser-signaled API requests. Both formats use the stable signing key loaded once from `<serverSecretsDir>/cookie-signing-key`, while retaining distinct claims and issuance rules; request verification is bounded and entirely in memory. See [Preview resource capability](preview-architecture.md#preview-resource-capability).
 - **SSE replaces 1 s polling for hot reload** - `subscribePreviewChanged` pushes `preview-changed` events; the panel bumps `#mtime=<n>` on the iframe `src` to force reload, typically within 100 ms of the agent writing.
 - **Truncation layer recognises all three markers** - `truncateSnapshotBlock()` matches against `PREVIEW_SNAPSHOT_MARKERS`. v3 blocks are always ≤250 UTF-8 bytes, but the lazy-load branch remains necessary for legacy archived v1 raw-HTML and v2 path blocks that may exceed the 32 KB threshold.
 
@@ -2973,7 +2976,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 | `src/server/preview/artifacts.ts` | Immutable preview artifact store — `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash` (dedupe), `removeArtifacts`, `sweepOrphanArtifacts` |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
 | `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel (payload now includes `contentHash` + `artifactId`) |
-| `src/server/auth/cookie.ts` | Stateless `bobbit_session` v1 signer and constant-memory verifier; no filesystem capability |
+| `src/server/auth/cookie.ts` | Stateless `bobbit_session` primary cookie and session-bound, path-scoped `bobbit_preview` read capability; in-memory signing and constant-time verification |
 | `src/server/auth/cookie-signing-key.ts` | Startup-only safe load/create of the stable 32-byte key under `serverSecretsDir()` |
 | `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
@@ -3663,18 +3666,27 @@ replaces its cookie, without touching the file.
 |---|---|---|
 | `cookie-signing-key` | `src/server/auth/cookie-signing-key.ts` | Stable, exact 32-byte HMAC-SHA-256 key, loaded or safely created once at startup (`0o600`; parent directory `0o700` where supported). Request-time signing and verification use the in-memory key and perform no filesystem I/O. |
 
-The cookie wire format is
+The `bobbit_session` wire format is
 `v1.<iat>.<exp>.<nonce>.<signature>` with a 30-day signed lifetime. Bootstrap
 requires admin Bearer or localhost-trusted authentication plus the browser
 Fetch Metadata and Origin rules; renewal is limited to signed-cookie API
 requests in the inclusive seven-day window. Bearer-only requests lacking that
 metadata, sandbox or session-bound traffic, internal callbacks, preview
-content, and preview SSE do not receive `Set-Cookie`. These browser headers are
-routing metadata, not a human identity proof: a shared-admin-token holder can
-deliberately make an eligible browser-shaped request and obtain the weak
-operator cookie. There is no independent per-cookie revocation; rotating the
-stable key invalidates all cookies. See [Preview cookie auth](preview-architecture.md#cookie-auth)
-for the exact issuance matrix.
+content, and preview SSE do not receive a `bobbit_session` `Set-Cookie`. These
+browser headers are routing metadata, not a human identity proof: a
+shared-admin-token holder can deliberately make an eligible browser-shaped
+request and obtain the weak operator cookie.
+
+A successful primary-authorized preview content response may separately issue
+or renew `bobbit_preview`. It is an `HttpOnly; Secure; SameSite=None` read
+capability scoped to the exact `<gateway-mount>/preview/<sid>/` path and session.
+It cannot authorize APIs, WebSockets, another preview session, or MCP decisions.
+The two formats share the in-memory signing store but have distinct claims and
+issuance rules; neither causes request-time filesystem I/O. There is no
+independent per-cookie revocation, so rotating the stable key invalidates both.
+See [Preview cookie auth](preview-architecture.md#cookie-auth) for the primary
+issuance matrix and [Preview resource capability](preview-architecture.md#preview-resource-capability)
+for the opaque-origin follow-on boundary.
 
 ### Active agent directory
 

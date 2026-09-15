@@ -44,11 +44,11 @@ function collectStaticImportGraph(entry: string): Set<string> {
 }
 
 describe("inline HtmlRenderer theme bridge reproducer", () => {
-	it("injects the canonical bridge into completed srcdoc and streaming document.write payloads", () => {
+	it("injects the canonical bridge into completed and streaming srcdoc payloads", () => {
 		const source = fs.readFileSync(RENDERER_PATH, "utf8");
 		const graph = collectStaticImportGraph(RENDERER_PATH);
 		const completedBinding = source.match(/\.srcdoc\s*=\s*\$\{\s*([^}\n]+?)\s*\}/)?.[1].trim();
-		const streamingWrite = source.match(/\bdoc\.write\(\s*([^);\n]+(?:\([^);\n]*\))?)\s*\)/)?.[1].trim();
+		const streamingBinding = source.match(/\biframe\.srcdoc\s*=\s*([^;\n]+)/)?.[1].trim();
 		const missing: string[] = [];
 
 		if (!graph.has(path.normalize(THEME_BRIDGE_PATH))) {
@@ -57,8 +57,8 @@ describe("inline HtmlRenderer theme bridge reproducer", () => {
 		if (!completedBinding || completedBinding === "htmlContent") {
 			missing.push("completed .srcdoc still receives raw htmlContent");
 		}
-		if (!streamingWrite || streamingWrite === "content") {
-			missing.push("streaming document.write still receives raw content");
+		if (streamingBinding !== "prepareInlineHtml(content)") {
+			missing.push("streaming .srcdoc does not receive prepared content");
 		}
 
 		assert.deepEqual(

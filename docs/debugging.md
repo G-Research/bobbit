@@ -1416,9 +1416,13 @@ Diagnose: grep the gateway log for `[verification][reviewer-lifecycle]` (attempt
 
 Key files: `src/server/agent/verification-harness.ts` (`runLlmReviewViaSession`, bounded retry loop in `verifyGateSignal`), `src/server/agent/session-manager.ts` (`createSession` clobber guard). Tests: `tests2/core/verification-harness-review-reliability.test.ts`, `tests2/core/session-id-clobber-guard.test.ts`. Full detail: [docs/llm-review-recovery.md — Reviewer session lifecycle](llm-review-recovery.md#session-lifecycle-and-transcript-preservation).
 
+## MCP server is "Not started" or needs review
+
+**Pending approval**, **Rejected**, and **Configuration changed — review again** are startup trust states, not connection failures. Do not troubleshoot **Tool calls** policy or restart the server to bypass them; review the introducing project and redacted configuration in **Tools → MCP**. Invalid definitions, stale decisions, persistence failures, parse failures, and approval-key recovery are mapped by diagnostic code in [MCP server startup approvals — Troubleshooting](mcp-server-approvals.md#troubleshooting).
+
 ## MCP server unavailable / partial outage
 
-Failed MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.
+Failed eligible MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.
 
 ## MCP per-op `never` policy not enforced
 
@@ -1436,7 +1440,7 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 ## Tools page "MCP" section missing or empty
 
-`GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
+Inspect the same scoped request as the UI: `GET /api/mcp-servers?projectId=<id>&ensure=true`. `projectId` is required; `cwd` is optional but validated, and an external worktree review must also carry exactly one current owning `sessionId` or `goalId`. `ensure=true` creates the scoped manager when needed and reconciles current discovery before returning. An empty list without `ensure=true` may only mean that no manager exists yet; after ensured reconciliation, check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`. Pending, rejected, changed, and invalid definitions should still appear as safe status rows. See [MCP server startup approvals — Status and approval API](mcp-server-approvals.md#status-and-approval-api).
 
 ## MCP group changed from `never`, but refreshed agent still cannot use it
 

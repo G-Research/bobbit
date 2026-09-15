@@ -76,18 +76,17 @@ async function hostTheme(page: Page): Promise<ThemeState> {
 }
 
 async function inlineFrameState(page: Page): Promise<InlineFrameState> {
-	return page.locator('iframe[title="theme-card.html"]').evaluate((element) => {
-		const iframe = element as HTMLIFrameElement;
-		const frameWindow = iframe.contentWindow as (Window & {
+	const iframeSelector = 'iframe[title="theme-card.html"]';
+	const srcdoc = await page.locator(iframeSelector).getAttribute("srcdoc") ?? "";
+	const state = await page.frameLocator(iframeSelector).locator("html").evaluate(root => {
+		const frameWindow = window as Window & {
 			__sourceViteThemeCapture?: ThemeState;
 			__sourceViteFrameIdentity?: string;
-		}) | null;
-		const frameDocument = iframe.contentDocument!;
-		const root = frameDocument.documentElement;
-		const scripts = [...frameDocument.scripts];
-		const style = iframe.contentWindow!.getComputedStyle(root);
+		};
+		const scripts = [...document.scripts];
+		const style = getComputedStyle(root);
 		return {
-			capture: frameWindow?.__sourceViteThemeCapture ?? null,
+			capture: frameWindow.__sourceViteThemeCapture ?? null,
 			current: {
 				background: style.getPropertyValue("--background").trim(),
 				foreground: style.getPropertyValue("--foreground").trim(),
@@ -101,11 +100,11 @@ async function inlineFrameState(page: Page): Promise<InlineFrameState> {
 			authoredScriptRan: root.getAttribute("data-source-vite-authored-script") === "true",
 			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
 			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
-			snapshotStyleCount: frameDocument.querySelectorAll('style[data-bobbit-preview-theme="snapshot"]').length,
-			identity: frameWindow?.__sourceViteFrameIdentity ?? null,
-			srcdoc: iframe.srcdoc,
+			snapshotStyleCount: document.querySelectorAll('style[data-bobbit-preview-theme="snapshot"]').length,
+			identity: frameWindow.__sourceViteFrameIdentity ?? null,
 		};
 	});
+	return { ...state, srcdoc };
 }
 
 function expectThemeMatches(actual: ThemeState, expected: ThemeState, label: string): void {
@@ -279,11 +278,9 @@ test.describe("source Vite inline HTML theme runtime", () => {
 			expect(initialFrame.srcdoc).not.toContain("data-bobbit-preview-theme=\"snapshot\"");
 			expect(initialFrame.srcdoc).not.toContain("preview-swipe-start");
 
-			await iframe.evaluate(element => {
-				const frameWindow = (element as HTMLIFrameElement).contentWindow as (Window & {
-					__sourceViteFrameIdentity?: string;
-				}) | null;
-				if (frameWindow) frameWindow.__sourceViteFrameIdentity = "same-source-vite-iframe";
+			await page.frameLocator('iframe[title="theme-card.html"]').locator("html").evaluate(() => {
+				(window as Window & { __sourceViteFrameIdentity?: string }).__sourceViteFrameIdentity =
+					"same-source-vite-iframe";
 			});
 			await page.evaluate(() => {
 				const root = document.documentElement;

@@ -2,6 +2,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import path from 'node:path';
 import type { IncomingHttpHeaders } from 'node:http';
 import type {
   McpServerConfig,
@@ -17,12 +18,14 @@ const REQUEST_TIMEOUT_MS = 60_000;
 
 const CLIENT_INFO = { name: 'bobbit', version: '0.1.6' };
 const PROTOCOL_VERSION = '2024-11-05';
+const REDACTED = '[redacted]';
+const MAX_RUNTIME_ERROR_LENGTH = 1_000;
 
 /**
  * Expand `${VAR}` patterns in a string using process.env.
  * Unresolved variables are replaced with empty string.
  */
-function expandEnvVars(value: string): string {
+export function expandEnvVars(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_match, varName: string) => {
     return process.env[varName] ?? '';
   });
@@ -31,12 +34,148 @@ function expandEnvVars(value: string): string {
 /**
  * Expand env vars in all values of a config env record.
  */
-function expandEnvRecord(env: Record<string, string>): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    result[key] = expandEnvVars(value);
+export function expandEnvRecord(env: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, expandEnvVars(value)]));
+}
+
+export function buildMcpProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+  return Object.fromEntries([
+    ...Object.entries(process.env),
+    ...Object.entries(env ? expandEnvRecord(env) : {}),
+  ]);
+}
+
+function stringRecordValues(record: Record<string, string> | undefined): string[] {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return [];
+  return Object.values(record).filter((value): value is string => typeof value === 'string');
+}
+
+function decodeUrlComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
-  return result;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function replaceMcpDiagnosticPath(message: string, configuredPath: string, replacement = REDACTED): string {
+  if (!configuredPath) return message;
+  const windowsStyle = path.win32.isAbsolute(configuredPath);
+  if (windowsStyle || process.platform === 'win32') {
+    let pattern = '';
+    for (const character of configuredPath) {
+      pattern += character === '/' || character === '\\' ? '[\\\\/]' : escapeRegExp(character);
+    }
+    return message.replace(new RegExp(pattern, 'gi'), replacement);
+  }
+  return message.split(configuredPath).join(replacement);
+}
+
+function redactedDiagnosticUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return REDACTED;
+  }
+}
+
+function configuredRuntimeSecrets(config: McpServerConfig | null | undefined): string[] {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return [];
+  const rawValues = [
+    ...stringRecordValues(config.env),
+    ...stringRecordValues(config.headers),
+  ];
+  const values = [...rawValues, ...rawValues.map(expandEnvVars)];
+
+  // Snapshot-backed Marketplace processes intentionally run from a private
+  // server directory. Runtime-controlled diagnostics must not disclose that
+  // physical path (or its alternate separator spelling) through health APIs.
+  if (typeof config.cwd === 'string' && config.cwd) {
+    values.push(config.cwd, config.cwd.replace(/\\/g, '/'), config.cwd.replace(/\//g, '\\'));
+  }
+
+  if (typeof config.url === 'string' && config.url) {
+    for (const rawUrl of new Set([config.url, expandEnvVars(config.url)])) {
+      try {
+        const url = new URL(rawUrl);
+        values.push(url.username, decodeUrlComponent(url.username));
+        values.push(url.password, decodeUrlComponent(url.password));
+        for (const value of url.searchParams.values()) {
+          values.push(value, decodeUrlComponent(value));
+        }
+        for (const part of url.search.slice(1).split('&')) {
+          const equals = part.indexOf('=');
+          if (equals >= 0) values.push(part.slice(equals + 1));
+        }
+        const fragment = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+        values.push(fragment, decodeUrlComponent(fragment));
+      } catch {
+        // The complete malformed URL is still projected below. It has no safe
+        // structure from which to extract individual credential components.
+      }
+    }
+  }
+
+  return [...new Set(values.filter((value) => value && value !== REDACTED))]
+    .sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Project MCP-controlled text to a safe form. Configured environment/header
+ * values are expanded exactly as the transport expands env values, and URL
+ * credentials are removed in both whole-URL and component form.
+ */
+function sanitizeMcpRuntimeText(
+  value: unknown,
+  config: McpServerConfig | null | undefined,
+  privatePaths: readonly string[] = [],
+): string {
+  let message = value instanceof Error ? value.message : String(value);
+  if (!message) message = 'Unknown MCP runtime error';
+
+  for (const privatePath of privatePaths) message = replaceMcpDiagnosticPath(message, privatePath);
+  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.cwd === 'string' && config.cwd) {
+    message = replaceMcpDiagnosticPath(message, config.cwd);
+  }
+
+  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.url === 'string' && config.url) {
+    const urls = [...new Set([config.url, expandEnvVars(config.url)])]
+      .flatMap((raw) => {
+        try {
+          const parsed = new URL(raw);
+          return [raw, parsed.href, decodeUrlComponent(raw), decodeUrlComponent(parsed.href)];
+        } catch {
+          return [raw];
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    for (const rawUrl of urls) {
+      message = message.split(rawUrl).join(redactedDiagnosticUrl(rawUrl));
+    }
+  }
+
+  for (const secret of configuredRuntimeSecrets(config)) {
+    message = message.split(secret).join(REDACTED);
+  }
+  return message;
+}
+
+export function sanitizeMcpRuntimeError(
+  error: unknown,
+  config: McpServerConfig | null | undefined,
+  privatePaths: readonly string[] = [],
+): string {
+  return sanitizeMcpRuntimeText(error, config, privatePaths).slice(0, MAX_RUNTIME_ERROR_LENGTH);
 }
 
 function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
@@ -72,9 +211,15 @@ type PendingRequest = {
 /**
  * MCP JSON-RPC 2.0 client supporting stdio and HTTP transports.
  */
+export interface McpRuntimeDiagnosticContext {
+  /** Server-private filesystem roots to redact from transport diagnostics. */
+  privatePaths?: readonly string[];
+}
+
 export class McpClient {
   private _connected = false;
   private _config: McpServerConfig | null = null;
+  private _privateDiagnosticPaths: readonly string[] = [];
   private _nextId = 1;
 
   // Stdio transport state
@@ -91,8 +236,9 @@ export class McpClient {
   }
 
   /** Connect to MCP server. Spawns process (stdio) or validates URL (HTTP). Sends initialize handshake. */
-  async connect(config: McpServerConfig): Promise<void> {
+  async connect(config: McpServerConfig, diagnosticContext: McpRuntimeDiagnosticContext = {}): Promise<void> {
     this._config = config;
+    this._privateDiagnosticPaths = [...new Set(diagnosticContext.privatePaths?.filter(Boolean) ?? [])];
     this._httpSessionId = null;
 
     if (config.command) {
@@ -109,7 +255,8 @@ export class McpClient {
     this._assertConnected();
     const response = await this._sendRequest('tools/list', {});
     if (response.error) {
-      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${jsonRpcErrorMessage(response.error)}`);
+      const reason = this._sanitizeRuntimeText(jsonRpcErrorMessage(response.error));
+      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${reason}`);
     }
     const result = response.result as { tools?: McpToolDef[] } | undefined;
     return result?.tools ?? [];
@@ -118,24 +265,32 @@ export class McpClient {
   /** Call tools/call with the given tool name and arguments */
   async callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     this._assertConnected();
-    const response = await this._sendRequest('tools/call', { name, arguments: args });
+    let response: JsonRpcResponse;
+    try {
+      response = await this._sendRequest('tools/call', { name, arguments: args });
+    } catch (error) {
+      const safeMessage = this._sanitizeRuntimeText(error);
+      if (error instanceof Error && error.message === safeMessage) throw error;
+      throw new Error(safeMessage);
+    }
 
     if (response.error) {
-      const errMsg = typeof response.error === 'object'
+      const rawMessage = typeof response.error === 'object'
         ? (response.error.message || JSON.stringify(response.error))
         : String(response.error);
       return {
-        content: [{ type: 'text', text: errMsg }],
+        content: [{ type: 'text', text: this._sanitizeRuntimeText(rawMessage) }],
         isError: true,
       };
     }
 
     const result = response.result as McpToolResult | undefined;
     if (result && !Array.isArray(result.content)) {
-      this._log(`Warning: tools/call "${name}" returned result with non-array content: ${JSON.stringify(result).slice(0, 500)}`);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: false };
+      const serialized = this._sanitizeRuntimeText(JSON.stringify(result), false);
+      this._log(`Warning: tools/call "${name}" returned result with non-array content: ${serialized.slice(0, 500)}`);
+      return { content: [{ type: 'text', text: serialized }], isError: false };
     }
-    return result ?? { content: [], isError: false };
+    return result ? this._sanitizeToolResult(result) : { content: [], isError: false };
   }
 
   /** Graceful shutdown */
@@ -177,12 +332,10 @@ export class McpClient {
   private async _connectStdio(config: McpServerConfig): Promise<void> {
     const { command, args = [], env, cwd } = config;
 
-    // Build environment: inherit process.env, overlay expanded config env
-    const childEnv = { ...process.env };
-    if (env) {
-      const expanded = expandEnvRecord(env);
-      Object.assign(childEnv, expanded);
-    }
+    // Object.fromEntries in buildMcpProcessEnv creates own data properties even
+    // for names such as "__proto__", keeping spawned behavior aligned with
+    // approval fingerprints.
+    const childEnv = buildMcpProcessEnv(env);
 
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -413,14 +566,15 @@ export class McpClient {
 
   private _httpRequestHeaders(): Record<string, string> {
     const configuredSessionHeader = this._hasConfiguredHttpSessionHeader();
-    return {
-      'Content-Type': 'application/json',
+    const entries: Array<[string, string]> = [
+      ['Content-Type', 'application/json'],
       // Streamable HTTP transport spec: client MUST advertise both response shapes.
-      Accept: 'application/json, text/event-stream',
-      // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
-      ...(this._httpSessionId && !configuredSessionHeader ? { 'Mcp-Session-Id': this._httpSessionId } : {}),
-      ...this._config!.headers,
-    };
+      ['Accept', 'application/json, text/event-stream'],
+    ];
+    // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
+    if (this._httpSessionId && !configuredSessionHeader) entries.push(['Mcp-Session-Id', this._httpSessionId]);
+    entries.push(...Object.entries(this._config!.headers ?? {}));
+    return Object.fromEntries(entries);
   }
 
   private _captureHttpSessionHeader(headers: IncomingHttpHeaders): void {
@@ -438,7 +592,9 @@ export class McpClient {
       this._captureHttpSessionHeader(response.headers);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`HTTP ${response.statusCode}: ${response.body.slice(0, 500)}`);
+        // Response bodies are remote-controlled and may echo request secrets.
+        // Health diagnostics need the status and operation, never body bytes.
+        throw new Error(`HTTP ${response.statusCode} for ${request.method}`);
       }
 
       const contentType = responseHeader(response.headers, 'content-type');
@@ -460,12 +616,17 @@ export class McpClient {
         return { jsonrpc: '2.0', id: request.id, error: { code: -1, message: 'Empty SSE response' } } as any;
       }
 
-      return JSON.parse(response.body) as JsonRpcResponse;
+      try {
+        return JSON.parse(response.body) as JsonRpcResponse;
+      } catch {
+        throw new Error(`Invalid JSON response for ${request.method}`);
+      }
     } catch (err) {
       if (err instanceof HttpRequestTimeoutError) {
         throw err;
       }
-      throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${err}`);
+      const reason = this._sanitizeRuntimeText(err);
+      throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${reason}`);
     }
   }
 
@@ -526,7 +687,8 @@ export class McpClient {
     });
 
     if (response.error) {
-      throw new Error(`[mcp:${this.serverName}] Initialize failed: ${response.error.message}`);
+      const reason = this._sanitizeRuntimeText(jsonRpcErrorMessage(response.error));
+      throw new Error(`[mcp:${this.serverName}] Initialize failed: ${reason}`);
     }
 
     // Send initialized notification
@@ -539,7 +701,32 @@ export class McpClient {
     }
   }
 
+  /** Apply every client-owned redaction input at one boundary. */
+  private _sanitizeRuntimeText(value: unknown, bounded = true): string {
+    const sanitized = sanitizeMcpRuntimeText(value, this._config, this._privateDiagnosticPaths);
+    return bounded ? sanitized.slice(0, MAX_RUNTIME_ERROR_LENGTH) : sanitized;
+  }
+
+  private _sanitizeToolResult(result: McpToolResult): McpToolResult {
+    const sanitizeString = (value: string): string => {
+      let sanitized = value;
+      for (const privatePath of this._privateDiagnosticPaths) {
+        sanitized = replaceMcpDiagnosticPath(sanitized, privatePath);
+      }
+      return sanitized;
+    };
+    const sanitizeValue = (value: unknown): unknown => {
+      if (typeof value === 'string') return sanitizeString(value);
+      if (Array.isArray(value)) return value.map(sanitizeValue);
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [sanitizeString(key), sanitizeValue(item)]));
+      }
+      return value;
+    };
+    return sanitizeValue(result) as McpToolResult;
+  }
+
   private _log(message: string): void {
-    console.error(`[mcp:${this.serverName}] ${message}`);
+    console.error(`[mcp:${this.serverName}] ${this._sanitizeRuntimeText(message)}`);
   }
 }

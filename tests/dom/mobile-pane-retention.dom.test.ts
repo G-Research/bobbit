@@ -253,9 +253,27 @@ describe("mobile side-panel pane retention", () => {
 		expect(document.querySelector(`.goal-tab-pill--active[data-panel-tab-id="${preview.id}"]`)).toBeTruthy();
 
 		// The preview iframe message path moves to the adjacent LIVE pane (review),
-		// not to the stale unfiltered index formerly occupied by preview.
+		// not to the stale unfiltered index formerly occupied by preview. Foreign,
+		// malformed and source-less messages cannot drive the privileged shell.
+		Object.defineProperty(filteredTrack.parentElement!, "clientWidth", { configurable: true, value: MOBILE_WIDTH });
+		// The retention fixture does not mount a real preview route, so install the
+		// exact active-frame channel shape that setupPreviewSwipe source-checks.
+		const previewFrame = document.createElement("iframe");
+		previewFrame.setAttribute("data-bobbit-preview-frame", "side-panel");
+		paneIn(filteredTrack, preview.id)!.appendChild(previewFrame);
+		const beforeSwipe = filteredTrack.style.transform;
 		window.dispatchEvent(new MessageEvent("message", {
 			data: { type: "preview-swipe-end", dx: -100 },
+			source: window,
+		}));
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "preview-swipe-end", dx: Number.NaN },
+			source: previewFrame.contentWindow,
+		}));
+		expect(filteredTrack.style.transform).toBe(beforeSwipe);
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "preview-swipe-end", dx: -100 },
+			source: previewFrame.contentWindow,
 		}));
 		expect(filteredTrack.style.transform).toBe(`translateX(${expectedSlideX(2, 3)}%)`);
 		renderOnce();

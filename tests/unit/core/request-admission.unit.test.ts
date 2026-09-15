@@ -4,6 +4,8 @@ import { describe, it } from "vitest";
 import {
 	admitRequest,
 	compileRequestAdmissionPolicy,
+	isLoopbackPeerAddress,
+	isTrustedLocalRequest,
 	RequestAdmissionConfigError,
 	type RequestAdmissionMetadata,
 	type RequestAdmissionPolicyInput,
@@ -40,6 +42,46 @@ function assertDenied(reason: string, overrides: Partial<RequestAdmissionMetadat
 	assert.equal(decision.allowed, false);
 	assert.equal(decision.reason, reason);
 }
+
+describe("trusted-local transport authority", () => {
+	it("recognizes IPv4, IPv6, and IPv4-mapped loopback peers", () => {
+		for (const address of [
+			"127.0.0.1",
+			"127.255.18.9",
+			"::1",
+			"0:0:0:0:0:0:0:1",
+			"::ffff:127.0.0.1",
+			"::ffff:127.42.5.9",
+			"::ffff:7f00:1",
+		]) {
+			assert.equal(isLoopbackPeerAddress(address), true, address);
+		}
+	});
+
+	it("rejects non-loopback, malformed, named, and absent peers", () => {
+		for (const address of [
+			"10.0.0.1",
+			"172.17.0.1",
+			"192.168.1.20",
+			"::2",
+			"::ffff:10.0.0.1",
+			"::ffff:c0a8:114",
+			"localhost",
+			"127.0.0.1:4242",
+			"",
+			undefined,
+		]) {
+			assert.equal(isLoopbackPeerAddress(address), false, String(address));
+		}
+	});
+
+	it("requires both admitted loopback policy and an actual loopback peer", () => {
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "127.0.0.1"), true);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "::ffff:127.0.0.1"), true);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: true }, "172.17.0.1"), false);
+		assert.equal(isTrustedLocalRequest({ trustedLocal: false }, "127.0.0.1"), false);
+	});
+});
 
 describe("request admission policy compilation", () => {
 	it("builds a finite normalized authority set without trusting wildcard listeners", () => {
@@ -486,7 +528,7 @@ describe("browser route/context matrix", () => {
 		}
 	});
 
-	it("permits same-origin embedded previews/resources and rejects same-site siblings and opaque origins", () => {
+	it("permits same-origin previews and only credentialed opaque GET/HEAD follow-ons", () => {
 		assert.equal(decide({
 			url: "/preview/session/index.html",
 			rawHeaders: fetchHeaders("same-origin", "navigate", "iframe"),
@@ -495,6 +537,37 @@ describe("browser route/context matrix", () => {
 			url: "/preview/session/style.css",
 			rawHeaders: fetchHeaders("same-origin", "no-cors", "style"),
 		}).allowed, true);
+
+		const opaqueHeaders = (mode: string, dest: string, origin?: string) => rawHeaders({
+			Host: "localhost:4242",
+			...(origin ? { Origin: origin } : {}),
+			Cookie: "other=ignored; bobbit_preview=opaque-capability",
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Mode": mode,
+			"Sec-Fetch-Dest": dest,
+		});
+		for (const [mode, dest, origin] of [
+			["cors", "empty", "null"],
+			["cors", "script", "null"],
+			["cors", "font", "null"],
+			["no-cors", "style", undefined],
+			["no-cors", "image", undefined],
+		] as const) {
+			for (const method of ["GET", "HEAD"]) {
+				const result = decide({ method, url: "/preview/session/asset", rawHeaders: opaqueHeaders(mode, dest, origin) });
+				assert.equal(result.allowed, true, `${method} ${mode}/${dest}/${origin ?? "originless"}`);
+				assert.equal(result.context, "preview-resource");
+				assert.equal(result.normalizedOrigin, origin);
+				assert.equal(result.cors, undefined, "route auth, not generic admission, owns null-origin CORS");
+			}
+		}
+		for (const url of ["/preview/session/", "/preview/session/index.html"]) {
+			assertDenied("cross-site-browser-request", {
+				url,
+				rawHeaders: opaqueHeaders("navigate", "iframe"),
+			});
+		}
+
 		assertDenied("origin-mismatch", {
 			url: "/preview/session/style.css",
 			rawHeaders: fetchHeaders("same-site", "cors", "style", "https://sibling.example"),
@@ -503,6 +576,38 @@ describe("browser route/context matrix", () => {
 			url: "/preview/session/index.html",
 			rawHeaders: fetchHeaders("cross-site", "navigate", "iframe", "null"),
 		});
+	});
+
+	it("does not widen opaque admission beyond credentialed preview subresources", () => {
+		const opaque = (overrides: Record<string, string> = {}) => rawHeaders({
+			Host: "localhost:4242",
+			Origin: "null",
+			Cookie: "bobbit_preview=opaque-capability",
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Mode": "cors",
+			"Sec-Fetch-Dest": "empty",
+			...overrides,
+		});
+		assertDenied("invalid-origin", {
+			url: "/preview/session/data.json",
+			rawHeaders: opaque({ Cookie: "bobbit_session=broad-cookie" }),
+		});
+		assertDenied("invalid-origin", { url: "/api/mcp-servers/name/approval", method: "POST", rawHeaders: opaque() });
+		assertDenied("invalid-origin", { url: "/app.js", rawHeaders: opaque() });
+		assertDenied("invalid-origin", { url: "/preview/session/data.json", method: "POST", rawHeaders: opaque() });
+		assertDenied("invalid-origin", {
+			transport: "websocket",
+			url: "/preview/session/data.json",
+			rawHeaders: opaque({ "Sec-Fetch-Mode": "websocket", "Sec-Fetch-Dest": "websocket" }),
+		});
+		const preflight = decide({
+			url: "/preview/session/data.json",
+			method: "OPTIONS",
+			rawHeaders: opaque({ "Access-Control-Request-Method": "GET" }),
+		});
+		assert.equal(preflight.allowed, false);
+		assert.equal(preflight.reason, "invalid-preflight");
+		assert.equal("cors" in preflight, false);
 	});
 
 	it("rejects partial, duplicated, and malformed Fetch Metadata", () => {

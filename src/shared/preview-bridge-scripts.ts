@@ -10,88 +10,167 @@
  * run in arbitrary user-supplied HTML documents.
  */
 
-/** Script that mirrors the host app's theme/palette/CSS-variables into the
- *  preview iframe so dark/light/palette toggles are reflected immediately. */
+export const PREVIEW_BRIDGE_VERSION = 1 as const;
+
+/** Cosmetic custom properties that the host is allowed to disclose to an
+ * opaque preview. Keep this finite and shared with the injected validator. */
+export const PREVIEW_THEME_PROPERTY_NAMES = Object.freeze([
+	"--accent", "--accent-foreground", "--ansi-black", "--ansi-blue",
+	"--ansi-bright-black", "--ansi-bright-blue", "--ansi-bright-cyan",
+	"--ansi-bright-green", "--ansi-bright-magenta", "--ansi-bright-red",
+	"--ansi-bright-white", "--ansi-bright-yellow", "--ansi-cyan", "--ansi-green",
+	"--ansi-magenta", "--ansi-red", "--ansi-white", "--ansi-yellow",
+	"--background", "--border", "--busy", "--card", "--card-foreground",
+	"--chart-1", "--chart-1-foreground", "--chart-2", "--chart-2-foreground",
+	"--chart-3", "--chart-3-foreground", "--chart-4", "--chart-4-foreground",
+	"--chart-5", "--chart-5-foreground", "--chart-6", "--chart-6-foreground",
+	"--foreground", "--info", "--info-foreground", "--input", "--labelled",
+	"--link", "--muted", "--muted-foreground", "--negative",
+	"--negative-foreground", "--notif-error-bg", "--notif-error-border",
+	"--notif-error-text", "--notif-system-bg", "--notif-system-border",
+	"--notif-system-text", "--notif-task-bg", "--notif-task-border",
+	"--notif-task-text", "--notif-team-bg", "--notif-team-border",
+	"--notif-team-text", "--popover", "--popover-foreground", "--positive",
+	"--positive-foreground", "--primary", "--primary-foreground", "--ring",
+	"--secondary", "--secondary-foreground", "--sidebar", "--sidebar-accent",
+	"--sidebar-accent-foreground", "--sidebar-border", "--sidebar-foreground",
+	"--sidebar-primary", "--sidebar-primary-foreground", "--user-msg-accent",
+	"--user-msg-bg", "--user-msg-bg2", "--user-msg-shadow",
+	"--user-msg-shadow2", "--warning", "--warning-foreground",
+] as const);
+
+export const PREVIEW_THEME_LIMITS = Object.freeze({
+	maxProperties: 96,
+	maxPropertyNameLength: 64,
+	maxPropertyValueLength: 512,
+	maxPaletteLength: 64,
+	maxFontFamilyLength: 256,
+	maxSerializedLength: 64 * 1024,
+});
+
+export type PreviewChildMessage =
+	| { type: "bobbit-preview-ready"; version: 1 }
+	| { type: "bobbit-preview-resize"; version: 1; height: number }
+	| { type: "preview-swipe-start" }
+	| { type: "preview-swipe-move"; dx: number }
+	| { type: "preview-swipe-end"; dx: number };
+
+export interface PreviewHostMessage {
+	type: "bobbit-preview-theme";
+	version: 1;
+	dark: boolean;
+	palette?: string;
+	fontFamily?: string;
+	properties: Record<string, string>;
+}
+
+export const PREVIEW_INITIAL_THEME_GLOBAL = "__bobbitPreviewInitialTheme_v1__";
+export const INLINE_PREVIEW_THEME_ATTRIBUTE = "data-bobbit-inline-theme-snapshot";
+
+/** Create the trusted inline bootstrap assignment. JSON metacharacters are
+ * escaped so CSS text cannot end a containing script element. */
+export function createPreviewInitialThemeAssignment(theme: PreviewHostMessage): string {
+	const json = JSON.stringify(theme)
+		.replace(/</g, "\\u003c")
+		.replace(/\u2028/g, "\\u2028")
+		.replace(/\u2029/g, "\\u2029");
+	return `window.${PREVIEW_INITIAL_THEME_GLOBAL}=${json};`;
+}
+
+const CHILD_ALLOWED_THEME_PROPERTIES = JSON.stringify(PREVIEW_THEME_PROPERTY_NAMES);
+const CHILD_THEME_LIMITS = JSON.stringify(PREVIEW_THEME_LIMITS);
+
+/** Message-only theme and resize bridge for opaque preview documents. It never
+ * dereferences the parent DOM; exact parent WindowProxy identity binds input. */
 export const PREVIEW_THEME_BRIDGE = `<script>
 (function() {
 	try {
-		/* Standalone tab (Open-in-new-tab): parent === window, so there is no
-		   host-app document to mirror. The server-injected inline <style data-bobbit-preview-theme>
-		   snapshot defines :root/.dark defaults — early return and let it govern.
-		   Embedded iframes (parent !== window) continue past this guard so live
-		   theme toggles in the host app flow through. */
+		/* Standalone preview routes use their server-injected theme snapshot. */
 		if (parent === window) return;
 
-		/* A repeated canonical bridge in the same document must not install
-		   another observer. document.open() keeps the Window but replaces the
-		   root, so streaming rewrites intentionally install for the new root. */
-		var installKey = '__bobbitPreviewThemeBridgeInstalled_v1__';
+		var installKey = '__bobbitPreviewBridgeInstalled_v1__';
+		var initialKey = '${PREVIEW_INITIAL_THEME_GLOBAL}';
 		var root = document.documentElement;
 		var previousInstall = window[installKey];
 		if (previousInstall && previousInstall.root === root) return;
-		if (previousInstall && previousInstall.observer) {
-			try { previousInstall.observer.disconnect(); } catch(e) {}
+		if (previousInstall && previousInstall.resizeObserver) {
+			try { previousInstall.resizeObserver.disconnect(); } catch(e) {}
 		}
-		var install = { root: root, observer: null };
+		var install = { root: root, resizeObserver: null, properties: {} };
 		window[installKey] = install;
+		var allowedNames = ${CHILD_ALLOWED_THEME_PROPERTIES};
+		var allowed = {};
+		for (var a = 0; a < allowedNames.length; a++) allowed[allowedNames[a]] = true;
+		var limits = ${CHILD_THEME_LIMITS};
 
-		var parentDocument = parent.document;
-		var parentRoot = parentDocument.documentElement;
-
-		function sync() {
+		function isRecord(value) {
+			return !!value && typeof value === 'object' && !Array.isArray(value);
+		}
+		function hasExactKeys(value, required, optional) {
+			var keys = Object.keys(value);
+			if (keys.length < required.length || keys.length > required.length + optional.length) return false;
+			for (var i = 0; i < required.length; i++) if (!Object.prototype.hasOwnProperty.call(value, required[i])) return false;
+			for (var k = 0; k < keys.length; k++) if (required.indexOf(keys[k]) < 0 && optional.indexOf(keys[k]) < 0) return false;
+			return true;
+		}
+		function validTheme(value) {
+			if (!isRecord(value) || !hasExactKeys(value, ['type', 'version', 'dark', 'properties'], ['palette', 'fontFamily'])) return false;
+			if (value.type !== 'bobbit-preview-theme' || value.version !== 1 || typeof value.dark !== 'boolean') return false;
+			if (value.palette !== undefined && (typeof value.palette !== 'string' || value.palette.length > limits.maxPaletteLength || !/^[a-zA-Z0-9_-]*$/.test(value.palette))) return false;
+			if (value.fontFamily !== undefined && (typeof value.fontFamily !== 'string' || value.fontFamily.length > limits.maxFontFamilyLength)) return false;
+			if (!isRecord(value.properties)) return false;
+			var names = Object.keys(value.properties);
+			if (names.length > limits.maxProperties) return false;
+			for (var i = 0; i < names.length; i++) {
+				var name = names[i], propertyValue = value.properties[name];
+				if (!allowed[name] || name.slice(0, 2) !== '--' || name.length > limits.maxPropertyNameLength) return false;
+				if (typeof propertyValue !== 'string' || propertyValue.length > limits.maxPropertyValueLength) return false;
+			}
+			try { if (JSON.stringify(value).length > limits.maxSerializedLength) return false; } catch(e) { return false; }
+			return true;
+		}
+		function applyTheme(value) {
+			if (!validTheme(value)) return;
+			root.classList.toggle('dark', value.dark);
+			if (value.palette) root.setAttribute('data-palette', value.palette);
+			else root.removeAttribute('data-palette');
+			root.style.fontFamily = value.fontFamily || '';
+			var next = value.properties;
+			var previous = install.properties;
+			var oldNames = Object.keys(previous);
+			for (var i = 0; i < oldNames.length; i++) if (!Object.prototype.hasOwnProperty.call(next, oldNames[i])) root.style.removeProperty(oldNames[i]);
+			var names = Object.keys(next);
+			for (var n = 0; n < names.length; n++) root.style.setProperty(names[n], next[names[n]]);
+			install.properties = next;
+		}
+		function sendHeight() {
 			try {
-				var parentStyles = parent.getComputedStyle(parentRoot);
-
-				/* Mirror dark class */
-				root.classList.toggle('dark', parentRoot.classList.contains('dark'));
-
-				/* Mirror data-palette attribute */
-				var palette = parentRoot.getAttribute('data-palette');
-				if (palette) root.setAttribute('data-palette', palette);
-				else root.removeAttribute('data-palette');
-
-				/* Copy all CSS custom properties from the app stylesheet */
-				var vars = [];
-				try {
-					for (var s = 0; s < parentDocument.styleSheets.length; s++) {
-						var sheet = parentDocument.styleSheets[s];
-						try {
-							var rules = sheet.cssRules || sheet.rules;
-							for (var r = 0; r < rules.length; r++) {
-								var rule = rules[r];
-								if (rule.style) {
-									for (var i = 0; i < rule.style.length; i++) {
-										var name = rule.style[i];
-										if (name.startsWith('--')) vars.push(name);
-									}
-								}
-							}
-						} catch(e) { /* cross-origin sheet, skip */ }
-					}
-				} catch(e) {}
-
-				/* Deduplicate and copy computed values */
-				var seen = {};
-				for (var v = 0; v < vars.length; v++) {
-					if (seen[vars[v]]) continue;
-					seen[vars[v]] = true;
-					var val = parentStyles.getPropertyValue(vars[v]);
-					if (val) root.style.setProperty(vars[v], val);
-				}
-
-				/* Copy the app font stack alongside every live theme sync. */
-				root.style.fontFamily = parentStyles.fontFamily;
-			} catch(e) { /* transient parent/style access failure — keep authored HTML running */ }
+				var bodyHeight = document.body && Number(document.body.scrollHeight) || 0;
+				var rootHeight = Number(root.scrollHeight) || 0;
+				var height = Math.max(bodyHeight, rootHeight) + 16;
+				if (Number.isFinite(height)) parent.postMessage({type:'bobbit-preview-resize',version:1,height:height}, '*');
+			} catch(e) {}
+		}
+		function installResize() {
+			if (typeof ResizeObserver !== 'function') { sendHeight(); return; }
+			try {
+				var observer = new ResizeObserver(sendHeight);
+				install.resizeObserver = observer;
+				observer.observe(root);
+				if (document.body) observer.observe(document.body);
+				sendHeight();
+			} catch(e) { sendHeight(); }
 		}
 
-		/* Initial sync */
-		sync();
-
-		/* Watch for class/attribute changes on the parent root element */
-		var observer = new MutationObserver(sync);
-		install.observer = observer;
-		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
-	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
+		applyTheme(window[initialKey]);
+		window.addEventListener('message', function(event) {
+			if (event.source !== parent) return;
+			applyTheme(event.data);
+		});
+		if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installResize, {once:true});
+		else installResize();
+		parent.postMessage({type:'bobbit-preview-ready',version:1}, '*');
+	} catch(e) { /* cosmetic bridge failure must not stop authored scripts */ }
 })();
 <\/script>`;
 

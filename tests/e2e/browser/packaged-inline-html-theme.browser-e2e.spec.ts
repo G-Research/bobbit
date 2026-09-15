@@ -29,6 +29,11 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const PACKAGE_NAME = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { name: string }).name;
 const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");
+const REPOSITORY_LOCK = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8")) as {
+	packages?: Record<string, { version?: string }>;
+};
+const LOCKED_NODE_TYPES_VERSION = REPOSITORY_LOCK.packages?.["node_modules/@types/node"]?.version;
+if (!LOCKED_NODE_TYPES_VERSION) throw new Error("repository package-lock.json must lock @types/node");
 const CANONICAL_BRIDGE_SIGNATURE = "data-bobbit-inline-theme-bridge";
 const SOURCE_BRIDGE_PATH = "src/shared/preview-bridge-scripts.ts";
 const THEME_TOKENS = ["--background", "--foreground", "--card", "--positive", "--chart-1"] as const;
@@ -242,17 +247,15 @@ async function iframeTheme(page: Page): Promise<{
 	swipeBridgeCount: number;
 	identity: string | null;
 }> {
-	return page.locator('iframe[title="theme-card.html"]').evaluate((element) => {
-		const iframe = element as HTMLIFrameElement;
-		const frameWindow = iframe.contentWindow as (Window & {
+	return page.frameLocator('iframe[title="theme-card.html"]').locator("html").evaluate(documentRoot => {
+		const frameWindow = window as Window & {
 			__packedThemeCapture?: ThemeState;
 			__packedFrameIdentity?: string;
-		}) | null;
-		const documentRoot = iframe.contentDocument!.documentElement;
-		const style = iframe.contentWindow!.getComputedStyle(documentRoot);
-		const scripts = [...iframe.contentDocument!.scripts];
+		};
+		const style = getComputedStyle(documentRoot);
+		const scripts = [...document.scripts];
 		return {
-			capture: frameWindow?.__packedThemeCapture ?? null,
+			capture: frameWindow.__packedThemeCapture ?? null,
 			current: {
 				background: style.getPropertyValue("--background").trim(),
 				foreground: style.getPropertyValue("--foreground").trim(),
@@ -266,7 +269,7 @@ async function iframeTheme(page: Page): Promise<{
 			authoredScriptRan: documentRoot.getAttribute("data-authored-script-ran") === "true",
 			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
 			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
-			identity: frameWindow?.__packedFrameIdentity ?? null,
+			identity: frameWindow.__packedFrameIdentity ?? null,
 		};
 	});
 }
@@ -424,6 +427,10 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				name: "bobbit-inline-theme-clean-consumer",
 				version: "1.0.0",
 				private: true,
+				// protobufjs accepts every @types/node release. Offline npm otherwise
+				// selects the newest cached packument entry even when its tarball is
+				// absent. Anchor that broad edge to npm ci's repository-cached artifact.
+				overrides: { "@types/node": LOCKED_NODE_TYPES_VERSION },
 			}, null, 2)}\n`);
 			await writePackedAgent(agentPath);
 
@@ -512,10 +519,19 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				expect(installedManifest.dependencies?.[name], `${name} must not ship as a production dependency`).toBeUndefined();
 			}
 			const installedLock = JSON.parse(await readFile(join(consumerDir, "package-lock.json"), "utf8")) as {
-				packages?: Record<string, { dependencies?: Record<string, string> }>;
+				packages?: Record<string, { dependencies?: Record<string, string>; version?: string }>;
 			};
-			const installedPackagePaths = Object.keys(installedLock.packages ?? {})
+			const installedPackages = installedLock.packages ?? {};
+			const installedPackagePaths = Object.keys(installedPackages)
 				.filter(path => path !== "" && /(?:^|\/)node_modules\//.test(path));
+			const nodeTypesVersions = Object.entries(installedPackages)
+				.filter(([path]) => /(?:^|\/)node_modules\/@types\/node$/.test(path))
+				.map(([, entry]) => entry.version);
+			expect(nodeTypesVersions.length, "clean consumer must install @types/node").toBeGreaterThan(0);
+			expect(
+				[...new Set(nodeTypesVersions)],
+				"every @types/node edge must use the repository-cached offline artifact",
+			).toEqual([LOCKED_NODE_TYPES_VERSION]);
 			report.packageMetrics!.installedPackageCount = installedPackagePaths.length;
 			for (const name of DEV_ONLY_BUNDLED_PACKAGES) {
 				const suffix = `/node_modules/${name}`;
@@ -739,11 +755,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expectThemeMatches(initialFrame.capture!, initialHost, "parse-time inline capture");
 			expectThemeMatches(initialFrame.current, initialHost, "initial inline computed theme");
 
-			await iframe.evaluate(element => {
-				const frameWindow = (element as HTMLIFrameElement).contentWindow as (Window & {
-					__packedFrameIdentity?: string;
-				}) | null;
-				if (frameWindow) frameWindow.__packedFrameIdentity = "same-packaged-iframe";
+			await page.frameLocator('iframe[title="theme-card.html"]').locator("html").evaluate(() => {
+				(window as Window & { __packedFrameIdentity?: string }).__packedFrameIdentity = "same-packaged-iframe";
 			});
 			await page.evaluate(() => {
 				const root = document.documentElement;

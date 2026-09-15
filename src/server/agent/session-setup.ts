@@ -434,6 +434,10 @@ export interface PipelineContext {
 	roleManager: RoleManager | null;
 	toolManager: ToolManager | null;
 	mcpManager: McpManager | null;
+	/** Rebind MCP discovery after worktree provisioning finalizes the host execution cwd. */
+	rebindMcpManager?: (sessionId: string, projectId: string | undefined, cwd: string) => Promise<McpManager | null>;
+	/** Release a session-owned worktree manager after setup fails before normal termination. */
+	releaseMcpManager?: (sessionId: string) => Promise<void>;
 	marketplacePiExtensionResolver?: MarketplacePiExtensionResolver | null;
 	/** Server-bound project/pack resolver. It never receives cwd or worktree paths. */
 	packLocalDataBindingsResolver?: PackLocalDataBindingsResolver | null;
@@ -471,6 +475,8 @@ export interface PipelineContext {
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
+	/** SessionManager-owned gateway-mode fence; production contexts always provide it. */
+	assertSandboxStartupAllowed?: () => void;
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
 	finalizeSpawnOptions?: (
@@ -1356,6 +1362,9 @@ async function withSessionToolGeneration(
  * Used by normal and delegate session creation.
  */
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	// Direct executor callers must hit the same fence as SessionManager entrypoints,
+	// before MCP/config resolution or any sandbox bootstrap can have effects.
+	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
 	resolveBridgeOptions(plan, ctx);
@@ -1456,6 +1465,10 @@ export async function executeWorktreeAsync(
 	ctx: PipelineContext,
 	preBuiltWorktreePath?: string,
 ): Promise<void> {
+	// Worktree creation, setup hooks, and worktree-scoped MCP discovery all occur
+	// below, so reject an unsafe sandbox before crossing any of those boundaries.
+	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
+
 	// Test-only knob: deterministically extend the "preparing" window so the
 	// preparing-UX banner is observable to the client. Status is already set to
 	// "preparing" by SessionManager.createSession before this fn is invoked, so
@@ -1608,6 +1621,13 @@ export async function executeWorktreeAsync(
 		}
 		ctx.store.update(session.id, persistFields);
 		console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
+	}
+
+	// MCP configuration is repository-controlled and must be discovered from the
+	// finalized host worktree, never from the registered root captured earlier.
+	// This happens before policy, proxy, guard, prompt, or agent activation.
+	if (ctx.rebindMcpManager) {
+		ctx.mcpManager = await ctx.rebindMcpManager(session.id, plan.projectId, plan.cwd);
 	}
 
 	// Run remaining pipeline steps on the worktree CWD
@@ -2120,6 +2140,7 @@ export function handleSetupFailure(
 
 	// 3. Remove from in-memory map
 	ctx.sessions.delete(session.id);
+	const mcpCleanup = ctx.releaseMcpManager?.(session.id).catch(() => undefined) ?? Promise.resolve();
 
 	// 4. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);
@@ -2155,5 +2176,5 @@ export function handleSetupFailure(
 
 	// 8. S1: drop the per-session capability secret.
 	ctx.sessionSecretStore.remove(session.id);
-	return cleanupPromise;
+	return Promise.all([cleanupPromise, mcpCleanup]).then(() => undefined);
 }

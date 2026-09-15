@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../../../../src/server/agent/session-manager.js";
+import { SandboxTokenStore } from "../../../../../src/server/auth/sandbox-token.js";
 import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
@@ -57,7 +58,6 @@ function useHostAuth(auth: unknown): void {
 	mkdirSync(path.join(root, "secrets"), { recursive: true });
 	mkdirSync(path.join(root, "state"), { recursive: true });
 	writeFileSync(path.join(root, "state", "gateway-url"), "http://127.0.0.1:3001\n");
-	writeFileSync(path.join(root, "secrets", "token"), `${"a".repeat(64)}\n`);
 	writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({
 		anthropic: auth,
 		"openai-codex": { type: "oauth", access: "unrelated-codex-access" },
@@ -163,11 +163,12 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		};
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
+		assert.equal(manager.sandboxTokenStore.lookup(bridgeOptions.gatewayToken)?.projectId, "project-test", "wiring mints a scoped gateway token");
 		assert.equal(refreshRequest.mock.calls.length, 1);
 		assert.deepEqual(bridgeOptions.sandboxCredentials, {}, "host OAuth must not also cross through the raw env handoff");
 		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {
@@ -184,7 +185,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }],
 		};
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
@@ -201,12 +202,19 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		let entries: Array<{ key: string; enabled: boolean; value?: string }> = [
 			{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true },
 		];
-		let resolveRefresh!: (response: Response) => void;
+		let releaseRefresh!: () => void;
 		let refreshStarted!: () => void;
 		const refreshStartedPromise = new Promise<void>((resolve) => { refreshStarted = resolve; });
+		const refreshResponsePromise = new Promise<Response>((resolve) => {
+			releaseRefresh = () => resolve(new Response(JSON.stringify({
+				access_token: "rotated-access",
+				refresh_token: "rotated-refresh",
+				expires_in: 3_600,
+			}), { status: 200, headers: { "Content-Type": "application/json" } }));
+		});
 		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
 			refreshStarted();
-			return await new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+			return await refreshResponsePromise;
 		});
 		const manager: any = new SessionManager();
 		manager.projectContextManager = null;
@@ -214,30 +222,44 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => entries,
 		};
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		manager.sandboxManager = isolatedSandboxManager();
 		const firstOptions: any = { cwd: "/workspace", env: {} };
 		const secondOptions: any = { cwd: "/workspace", env: {} };
 
 		const first = manager.applySandboxWiring(firstOptions, "session-one", { projectId: "project-test" });
-		await refreshStartedPromise;
-		entries = [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }];
-		const second = manager.applySandboxWiring(secondOptions, "session-two", { projectId: "project-test" });
-		let secondSettled = false;
-		void second.then(() => { secondSettled = true; });
-		await Promise.resolve();
-		assert.equal(secondSettled, false, "a second handoff must wait for the pending shared auth-file decision");
+		let second: Promise<boolean> | undefined;
+		try {
+			await Promise.race([
+				refreshStartedPromise,
+				first.then(
+					() => { throw new Error("first handoff completed before host refresh began"); },
+					(error: unknown) => { throw error; },
+				),
+			]);
+			entries = [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }];
+			const secondHandoff = manager.applySandboxWiring(secondOptions, "session-two", { projectId: "project-test" });
+			second = secondHandoff;
+			let secondSettled = false;
+			void secondHandoff.then(
+				() => { secondSettled = true; },
+				() => { secondSettled = true; },
+			);
+			await Promise.resolve();
+			assert.equal(secondSettled, false, "a second handoff must wait for the pending shared auth-file decision");
 
-		resolveRefresh(new Response(JSON.stringify({
-			access_token: "rotated-access",
-			refresh_token: "rotated-refresh",
-			expires_in: 3_600,
-		}), { status: 200, headers: { "Content-Type": "application/json" } }));
-		await Promise.all([first, second]);
+			releaseRefresh();
+			await Promise.all([first, secondHandoff]);
 
-		assert.deepEqual(firstOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
-		assert.deepEqual(secondOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
-		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+			assert.deepEqual(firstOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+			assert.deepEqual(secondOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+			assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+		} finally {
+			// Never strand the mocked refresh or leak rejected wiring promises when an
+			// earlier assertion exposes a fail-closed fixture dependency.
+			releaseRefresh();
+			await Promise.allSettled(second ? [first, second] : [first]);
+		}
 	});
 
 	it("leaves non-Anthropic startup untouched and makes API-key tombstone recovery best effort", async () => {
@@ -266,7 +288,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		};
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
@@ -285,7 +307,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [],
 		};
-		manager.sandboxTokenStore = null;
+		manager.sandboxTokenStore = new SandboxTokenStore();
 		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 

@@ -248,16 +248,23 @@ describe("preview install transaction races", () => {
 			complete: true,
 			aborted: false,
 		}) as any;
+		type HeaderValue = string | string[] | number;
 		const res = new PassThrough() as PassThrough & {
 			statusCode: number;
-			headers: Record<string, string | number>;
-			writeHead(status: number, headers?: Record<string, string | number>): void;
+			headers: Record<string, HeaderValue>;
+			getHeader(name: string): HeaderValue | undefined;
+			setHeader(name: string, value: HeaderValue): void;
+			writeHead(status: number, headers?: Record<string, HeaderValue>): void;
 		};
 		res.statusCode = 0;
 		res.headers = {};
+		res.getHeader = name => res.headers[name.toLowerCase()];
+		res.setHeader = (name, value) => {
+			res.headers[name.toLowerCase()] = value;
+		};
 		res.writeHead = (status, headers) => {
 			res.statusCode = status;
-			res.headers = headers ?? {};
+			for (const [name, value] of Object.entries(headers ?? {})) res.setHeader(name, value);
 		};
 		const route = handlePreviewRequest(
 			req,

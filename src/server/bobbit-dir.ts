@@ -86,7 +86,8 @@ export function bobbitStateDir(projectRoot = getProjectRoot()): string {
 
 /**
  * Absolute directory for LIVE server secrets — the admin bearer `token`, TLS
- * material (`tls/`), and sandbox-agent auth (`sandbox-agent-auth/`).
+ * material (`tls/`), sandbox-agent auth (`sandbox-agent-auth/`), and project MCP
+ * startup approval authority (`mcp-approvals/`).
  *
  * These MUST live OUTSIDE any project root. The default Headquarters dir is
  * `<serverRunDir>/.bobbit/headquarters`, and a normal project registered at the
@@ -120,6 +121,16 @@ export function serverSecretsDir(): string {
     }
   }
   fs.mkdirSync(dir, { recursive: true });
+  if (process.platform !== "win32") {
+    try { fs.chmodSync(dir, 0o700); } catch { /* best-effort perms */ }
+  }
+  return dir;
+}
+
+/** Private server-owned storage for project MCP startup approval authority. */
+export function mcpApprovalSecretsDir(): string {
+  const dir = path.join(serverSecretsDir(), "mcp-approvals");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     try { fs.chmodSync(dir, 0o700); } catch { /* best-effort perms */ }
   }

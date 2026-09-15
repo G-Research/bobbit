@@ -19,7 +19,7 @@ import {
 	type AgentDirRuntimeState,
 } from "../../../../../src/server/bobbit-dir.js";
 import { initAuthorSidecarDir } from "../../../../../src/server/agent/author-sidecar.js";
-import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../../../../src/server/gateway-deps.js";
+import { realClock, realCommandRunner, realFs, type CommandRunner, type GatewayDeps } from "../../../../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../../../../src/server/scaffold.js";
 import { loopbackForBind } from "../../../../../src/server/cli-loopback.js";
 import { createGateway, type GatewayConfig } from "../../../../../src/server/server.js";
@@ -144,6 +144,8 @@ function writeStaticFixture(staticDir: string): string {
 }
 
 export interface BootGatewayOptions {
+	/** Override the process-local runner when a nested gateway must retain its owner gateway's command seam. */
+	commandRunner?: CommandRunner;
 	/** Default true. False exercises API-only callback publication. */
 	serveStatic?: boolean;
 	/** Seed both legacy fallbacks before start; listener publication must supersede them. */
@@ -207,7 +209,10 @@ export async function bootGateway(
 	let gateway: ReturnType<typeof createGateway>;
 	let port: number;
 	try {
-		gateway = createGateway(gatewayConfig, gatewayDeps);
+		gateway = createGateway(gatewayConfig, {
+			...gatewayDeps,
+			commandRunner: options.commandRunner ?? gatewayDeps.commandRunner,
+		});
 		if (options.observeSessionRestoreGatewayUrl) {
 			const restoreSessions = gateway.sessionManager.restoreSessions.bind(gateway.sessionManager);
 			const agentGatewayUrl = gateway.sessionManager as unknown as {

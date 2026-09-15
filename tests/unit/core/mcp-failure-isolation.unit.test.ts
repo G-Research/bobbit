@@ -117,8 +117,8 @@ describe("McpManager failure isolation", () => {
     const mgr = makeManager({ slow, fast }, { listToolsTimeoutMs: 30 });
 
     await Promise.all([
-      mgr.connectServer("slow", STUB_CONFIG),
-      mgr.connectServer("fast", STUB_CONFIG),
+      mgr.connectPretrustedServer("slow", STUB_CONFIG),
+      mgr.connectPretrustedServer("fast", STUB_CONFIG),
     ]);
 
     const statuses = mgr.getServerStatuses();
@@ -151,7 +151,7 @@ describe("McpManager failure isolation", () => {
     });
 
     const mgr = makeManager({ mixed }, { listToolsTimeoutMs: 200 });
-    await mgr.connectServer("mixed", STUB_CONFIG);
+    await mgr.connectPretrustedServer("mixed", STUB_CONFIG);
 
     const statuses = mgr.getServerStatuses();
     const status = statuses.find((s: any) => s.name === "mixed");
@@ -176,7 +176,7 @@ describe("McpManager failure isolation", () => {
       { hung },
       { listToolsTimeoutMs: 200, callToolTimeoutMs: 25 },
     );
-    await mgr.connectServer("hung", STUB_CONFIG);
+    await mgr.connectPretrustedServer("hung", STUB_CONFIG);
 
     const start = Date.now();
     await assert.rejects(
@@ -196,7 +196,7 @@ describe("McpManager failure isolation", () => {
     });
     const mgr = makeManager({ broken }, { listToolsTimeoutMs: 20 });
 
-    await mgr.connectServer("broken", STUB_CONFIG);
+    await mgr.connectPretrustedServer("broken", STUB_CONFIG);
 
     const statuses = mgr.getServerStatuses();
     assert.equal(statuses.length, 1);
@@ -214,8 +214,8 @@ describe("McpManager failure isolation", () => {
     });
     const mgr = makeManager({ throwy }, { listToolsTimeoutMs: 200 });
 
-    // Must not throw out of connectServer.
-    await mgr.connectServer("throwy", STUB_CONFIG);
+    // Must not throw out of the explicit pretrusted client seam.
+    await mgr.connectPretrustedServer("throwy", STUB_CONFIG);
 
     const status = mgr.getServerStatuses().find((s: any) => s.name === "throwy");
     assert.equal(status?.status, "error");

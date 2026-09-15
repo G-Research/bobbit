@@ -1021,14 +1021,15 @@ describe("marketplace pi extension activation args", () => {
 
 	it("force-abort respawn retains one named-extension, provider, and guard generation across an MCP barrier", async () => {
 		const fixture = coldProjectReplacementFixture("cold-force-order");
-		const extensionA = writeTaskGeneration(fixture.projectManager, "A");
+		writeTaskGeneration(fixture.projectManager, "A");
+		let extensionB: string | undefined;
 		let activationAllowed: Array<{ name: string }> | undefined;
 		let activationResult: { args: string[]; env: Record<string, string>; runtimeExtensions: unknown[] } | undefined;
 		let requiredNames: readonly string[] | undefined;
 		let providerExtension: string | undefined;
 		let guardSource: string | undefined;
 		fixture.manager.ensureMcpManagerForContext = async () => {
-			writeTaskGeneration(fixture.projectManager, "B");
+			extensionB = writeTaskGeneration(fixture.projectManager, "B");
 			return null;
 		};
 		const originalBuildToolActivationArgs = fixture.manager.buildToolActivationArgs.bind(fixture.manager);
@@ -1087,11 +1088,20 @@ describe("marketplace pi extension activation args", () => {
 		assert.deepEqual(activationAllowed?.map((tool) => tool.name), ["task_create", "pi_dangerous_tool"]);
 		assert.deepEqual(requiredNames, ["task_create"]);
 		assert.ok(activationResult);
-		assertFilteredAdapter(activationResult, extensionA, ["task_create"]);
+		assert.ok(extensionB, "the MCP barrier must publish generation B before the frozen tool read");
+		assertFilteredAdapter(activationResult, extensionB, ["task_create"]);
 		assert.equal(new Set(extensionPaths(activationResult.args).map((entry) => path.resolve(entry))).size, extensionPaths(activationResult.args).length);
-		assert.equal(providerExtension, "task-a.ts");
+		assert.equal(providerExtension, "task-b.ts");
 		assert.ok(guardSource, "the Pi ask-policy control must produce a guard");
-		assert.equal(await evaluateGuard(guardSource)({ toolName: "task_create" }), undefined);
+		const previousSessionId = process.env.BOBBIT_SESSION_ID;
+		delete process.env.BOBBIT_SESSION_ID;
+		try {
+			const decision = await evaluateGuard(guardSource)({ toolName: "task_create" });
+			assert.match(decision?.reason ?? "", /missing BOBBIT_SESSION_ID/, "the guard must retain post-barrier generation B's ask policy");
+		} finally {
+			if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
+			else process.env.BOBBIT_SESSION_ID = previousSessionId;
+		}
 	});
 
 	it.each([

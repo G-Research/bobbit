@@ -1,8 +1,11 @@
+import { isIP } from "node:net";
+
 import {
 	API_CORS_ALLOWED_HEADERS,
 	API_CORS_ALLOWED_METHODS,
 	API_CORS_PREFLIGHT_MAX_AGE_SECONDS,
 } from "./cors.js";
+import { PREVIEW_COOKIE_NAME } from "./auth/cookie.js";
 
 export type RequestTransport = "http" | "websocket";
 
@@ -281,8 +284,9 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 
 	const originHeader = readRawHeader(metadata.rawHeaders, "origin");
 	if (originHeader.kind === "duplicate") return deny("duplicate-origin", preliminaryContext, host.serialized);
+	const hasOpaqueOrigin = originHeader.kind === "value" && originHeader.value === "null";
 	let origin: ParsedOrigin | undefined;
-	if (originHeader.kind === "value") {
+	if (originHeader.kind === "value" && !hasOpaqueOrigin) {
 		origin = parseSerializedOrigin(originHeader.value);
 		if (!origin) return deny("invalid-origin", preliminaryContext, host.serialized);
 	}
@@ -334,6 +338,11 @@ export function admitRequest(policy: RequestAdmissionPolicy, metadata: RequestAd
 	if (hasPreflightFields || context === "preflight") {
 		return admitPreflight(policy, metadata, context, host, matchingOrigins, origin, fetch, requestedMethodHeader, requestedHeadersHeader, privateNetworkHeader);
 	}
+
+	if (isOpaquePreviewFollowOn(metadata, context, fetch, hasOpaqueOrigin)) {
+		return allow(policy, context, host, matchingOrigins, hasOpaqueOrigin ? "null" : undefined, metadata.isTls);
+	}
+	if (hasOpaqueOrigin) return deny("invalid-origin", context, host.serialized);
 
 	const originKind = classifyOrigin(policy, matchingOrigins, origin);
 	if (origin && originKind === "mismatch") return deny("origin-mismatch", context, host.serialized, origin.serialized);
@@ -448,6 +457,30 @@ function isCoherentOriginlessSubresource(context: RequestRouteContext, fetch: Fe
 	return context !== "websocket" && context !== "preflight" && isCoherentFetchContext(context, fetch);
 }
 
+function isOpaquePreviewFollowOn(
+	metadata: RequestAdmissionMetadata,
+	context: RequestRouteContext,
+	fetch: FetchMetadata | undefined,
+	hasOpaqueOrigin: boolean,
+): boolean {
+	if (!SAFE_METHODS.has(normalizeMethod(metadata.method)) || !fetch || fetch.site !== "cross-site") return false;
+	if (context !== "preview-resource" || (fetch.mode !== "cors" && fetch.mode !== "no-cors")
+		|| !isCoherentFetchContext(context, fetch)) return false;
+	if (!hasOpaqueOrigin && readRawHeader(metadata.rawHeaders, "origin").kind !== "missing") return false;
+	return hasNamedCookie(metadata.rawHeaders, PREVIEW_COOKIE_NAME);
+}
+
+function hasNamedCookie(rawHeaders: readonly string[], wantedName: string): boolean {
+	const header = readRawHeader(rawHeaders, "cookie");
+	if (header.kind !== "value") return false;
+	for (const part of header.value.split(";")) {
+		const separator = part.indexOf("=");
+		if (separator < 1) continue;
+		if (part.slice(0, separator).trim() === wantedName && part.slice(separator + 1).trim() !== "") return true;
+	}
+	return false;
+}
+
 function isCoherentFetchContext(context: RequestRouteContext, fetch: FetchMetadata): boolean {
 	// WebKit identifies WebSocket handshakes with `Sec-Fetch-Dest: websocket`,
 	// while Chromium/Firefox may omit the header or send `empty`. The transport,
@@ -484,17 +517,18 @@ function allow(
 	context: RequestRouteContext,
 	host: ParsedHost,
 	matchingOrigins: readonly ParsedOrigin[],
-	origin: ParsedOrigin | undefined,
+	origin: ParsedOrigin | "null" | undefined,
 	isTls: boolean,
 	cors?: CorsProjection,
 ): RequestAdmissionAllowed {
-	const gatewayOrigin = selectGatewayOrigin(policy, matchingOrigins, origin, isTls);
+	const parsedOrigin = origin === "null" ? undefined : origin;
+	const gatewayOrigin = selectGatewayOrigin(policy, matchingOrigins, parsedOrigin, isTls);
 	return {
 		allowed: true,
 		reason: "allowed",
 		context,
 		normalizedHost: host.serialized,
-		...(origin ? { normalizedOrigin: origin.serialized } : {}),
+		...(origin ? { normalizedOrigin: origin === "null" ? origin : origin.serialized } : {}),
 		...(gatewayOrigin ? { gatewayOrigin } : {}),
 		trustedLocal: policy.allAuthoritiesLoopback,
 		...(cors ? { cors } : {}),
@@ -813,6 +847,38 @@ function isWildcardListener(hostname: string): boolean {
 
 function isLoopbackHostname(hostname: string): boolean {
 	return (LOOPBACK_HOSTS as readonly string[]).includes(hostname);
+}
+
+/**
+ * Return whether the transport peer itself is a loopback address. Host and
+ * Origin are deliberately irrelevant: they are caller-controlled authority
+ * claims and cannot establish credential-free local access.
+ */
+export function isLoopbackPeerAddress(remoteAddress: string | undefined): boolean {
+	const addressFamily = remoteAddress ? isIP(remoteAddress) : 0;
+	if (addressFamily === 4) return remoteAddress!.split(".", 1)[0] === "127";
+	if (addressFamily !== 6) return false;
+
+	let normalized: string;
+	try {
+		normalized = new URL(`http://[${remoteAddress}]`).hostname.slice(1, -1).toLowerCase();
+	} catch {
+		return false;
+	}
+	if (normalized === "::1") return true;
+
+	// Node commonly reports dual-stack IPv4 peers as ::ffff:127.x.y.z. URL
+	// canonicalization renders that mapped suffix as two hexadecimal hextets.
+	const mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+	return mapped !== null && (Number.parseInt(mapped[1]!, 16) >>> 8) === 127;
+}
+
+/** Require both admitted loopback-only policy and a proven loopback peer. */
+export function isTrustedLocalRequest(
+	admission: Pick<RequestAdmissionAllowed, "trustedLocal">,
+	remoteAddress: string | undefined,
+): boolean {
+	return admission.trustedLocal && isLoopbackPeerAddress(remoteAddress);
 }
 
 function isCleanScalar(raw: string): boolean {
