@@ -21,7 +21,7 @@ import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendi
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { discoverAigwModels, getAigwUrl, writeModelsJsonText } from "./aigw-manager.js";
+import { discoverAigwModels, getAigwApiKey, getAigwUrl, writeModelsJsonText } from "./aigw-manager.js";
 import { adoptLegacyAigwProvider, comparableAigwUrl, type AigwTargetRealm } from "./aigw-models-json.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
@@ -494,7 +494,7 @@ async function assembleModels(
 			sourceModels = [];
 		} else {
 			try {
-				const aigwModels = await discoverAigwModels(aigwUrl);
+				const aigwModels = await discoverAigwModels(aigwUrl, getAigwApiKey(prefs));
 				sourceModels = [];
 				for (const m of aigwModels) {
 					if (!m.baseUrl || !m.cost) {

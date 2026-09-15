@@ -1922,6 +1922,20 @@ The Bobbit AI Gateway user agent is sent only by AIGW-specific request paths. Di
 | Direct title / goal-summary generation | The gateway title paths in `title-generator.ts` use `aigwUserAgentHeaders()` for both `/v1/models` model-id resolution and `/v1/chat/completions` generation calls. |
 | Agent inference | `writeAigwModelsJson()` writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through the generated `aigw` provider. |
 
+### Optional gateway API key (`Authorization: Bearer`)
+
+Gateways that require authentication accept an optional bearer token, entered in Settings → Models → AI Gateway → API Key and submitted as `apiKey` on `POST /api/aigw/test` / `POST /api/aigw/configure`. The key is stored under the `providerKey.aigw` preference — the same namespace the provider-keys REST routes manage, which `GET /api/preferences` filters out and which `model-completion.ts` resolves first for server-side pi-ai calls. `GET /api/aigw/status` reports only `hasApiKey`; the value is never returned to the client.
+
+When a key is present, `aigwAuthHeaders()` attaches `Authorization: Bearer <key>` on every direct request path in the table above: well-known and `/v1/models` discovery (an explicit key also takes precedence over the best-effort `AIGW_OPENCODE_TOKEN` / opencode `auth.json` well-known token), status/refresh/startup re-discovery, `/api/models/test` probes, the `/api/aigw/v1/*` proxy, and the title-generator gateway calls. `writeAigwModelsJson()` publishes it as `providers.aigw.apiKey` so agent subprocesses authenticate their inference traffic too; without a key the historical `"none"` placeholder is preserved.
+
+Key semantics are deliberately conservative:
+
+- `configureAigw()` persists a non-empty key and clears the stored key on an empty string, but only after discovery succeeds — a failed configure changes neither `aigw.url` nor the key. Omitting `apiKey` reuses the stored key (refresh/startup path).
+- `/api/aigw/test` uses a submitted key probe-only. When no key is submitted it reuses the stored key only if the tested URL shares the configured gateway's origin; stored credentials never cross origins, mirroring the well-known `remote_config` rule.
+- `DELETE /api/aigw/configure` (Disconnect) removes `providerKey.aigw` along with the URL and generated provider block.
+
+Pinned by `tests/integration/gateway/aigw-api-key.gateway.test.ts`.
+
 ### AI Gateway model pricing
 
 AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing because completion responses include token counts but no cost and gateway aggregate endpoints are not reliable for Bobbit usage accounting. Authoritative well-known discovery reads each model's per-million-token `cost`; legacy `/v1/models` discovery reads the optional per-token `pricing` object.

@@ -12,7 +12,7 @@ import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
-import { discoverAigwModels, normalizeAigwModelString } from "./aigw-manager.js";
+import { discoverAigwModels, normalizeAigwModelString, aigwAuthHeaders } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
@@ -30,7 +30,7 @@ const FALLBACK_TTL_MS = 60_000;
  * Returns the *stripped* id (no provider prefix) suitable for generateViaGateway,
  * or null if the gateway exposes no Claude-family model.
  */
-export async function pickFallbackAigwNamingModel(aigwUrl: string, _fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+export async function pickFallbackAigwNamingModel(aigwUrl: string, _fetchImpl: typeof fetch = defaultFetch, apiKey?: string): Promise<string | null> {
 	const normalized = aigwUrl.replace(/\/+$/, "");
 	const now = Date.now();
 	if (_fallbackCache && _fallbackCache.url === normalized && _fallbackCache.expiresAt > now) {
@@ -38,7 +38,7 @@ export async function pickFallbackAigwNamingModel(aigwUrl: string, _fetchImpl: t
 	}
 	let picked: string | null = null;
 	try {
-		const models = await discoverAigwModels(normalized);
+		const models = await discoverAigwModels(normalized, apiKey);
 		const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
 		const claude = models.filter(m => m.id.toLowerCase().includes("claude"));
 		if (claude.length > 0) {
@@ -75,6 +75,8 @@ export interface TitleGenOptions {
 	namingModel?: string;
 	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
 	aigwUrl?: string;
+	/** Optional bearer token attached to direct AI Gateway requests. */
+	aigwApiKey?: string;
 	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
 	/** Model to try when no explicit naming model is configured (usually default.sessionModel). */
@@ -227,10 +229,10 @@ export function cleanTitle(raw: string): string {
  * but the gateway's /v1/chat/completions endpoint needs the full ID (e.g. "aws/us.anthropic.claude-...").
  * Queries the gateway's /v1/models endpoint to find a match.
  */
-async function resolveGatewayModelId(baseUrl: string, strippedId: string, fetchImpl: typeof fetch = defaultFetch): Promise<string> {
+async function resolveGatewayModelId(baseUrl: string, strippedId: string, fetchImpl: typeof fetch = defaultFetch, apiKey?: string): Promise<string> {
 	try {
 		const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-		const res = await fetchImpl(modelsUrl, { headers: aigwUserAgentHeaders(), signal: AbortSignal.timeout(5000) });
+		const res = await fetchImpl(modelsUrl, { headers: aigwUserAgentHeaders(aigwAuthHeaders(apiKey)), signal: AbortSignal.timeout(5000) });
 		if (!res.ok) return strippedId;
 		const data = await res.json() as { data?: Array<{ id: string }> };
 		if (!Array.isArray(data.data)) return strippedId;
@@ -257,9 +259,9 @@ async function resolveGatewayModelId(baseUrl: string, strippedId: string, fetchI
  * naming preference exists. Explicit AIGW models resolve through ApiModel and
  * completeModelText(), preserving Responses, Converse, or completions routing.
  */
-async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string, fetchImpl: typeof fetch = defaultFetch, apiKey?: string): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
-	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl);
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl, apiKey);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 	const body: any = {
@@ -295,7 +297,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 	try {
 		const response = await fetchImpl(url, {
 			method: "POST",
-			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
+			headers: aigwUserAgentHeaders({ "Content-Type": "application/json", ...aigwAuthHeaders(apiKey) }),
 			body: JSON.stringify(body),
 		});
 
@@ -484,10 +486,10 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	// Claude model from the gateway (prefer Haiku). This avoids silent failures
 	// in secure-zone deployments that cannot reach api.anthropic.com directly.
 	if (options?.aigwUrl) {
-		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl);
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl, options.aigwApiKey);
 		if (fallbackId) {
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}"`);
-			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off", fetchImpl);
+			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off", fetchImpl, options.aigwApiKey);
 		}
 		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back");
 	}
@@ -516,9 +518,9 @@ const GOAL_SUMMARY_SYSTEM = "Summarize this goal title in exactly 3 words. Wrap 
 /**
  * Generate a 3-word summary of a goal title via the AI Gateway.
  */
-async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, goalTitle: string, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, goalTitle: string, fetchImpl: typeof fetch = defaultFetch, apiKey?: string): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
-	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl);
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl, apiKey);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 	const body = {
@@ -536,7 +538,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 	try {
 		const response = await fetchImpl(url, {
 			method: "POST",
-			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
+			headers: aigwUserAgentHeaders({ "Content-Type": "application/json", ...aigwAuthHeaders(apiKey) }),
 			body: JSON.stringify(body),
 		});
 
@@ -665,10 +667,10 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 	// Gateway configured but no explicit naming model - auto-select a low-cost
 	// Claude model (prefer Haiku) rather than hitting api.anthropic.com.
 	if (options?.aigwUrl) {
-		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl);
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl, options.aigwApiKey);
 		if (fallbackId) {
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}" for goal summary`);
-			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle, fetchImpl);
+			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle, fetchImpl, options.aigwApiKey);
 		}
 		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back");
 	}
