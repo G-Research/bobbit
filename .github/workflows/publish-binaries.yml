@@ -215,7 +215,17 @@ jobs:
           fi
           git commit -m "Sync binary sub-packages to $VERSION"
           git push --force origin "$BRANCH"
-          gh pr create --base main --head "$BRANCH" \
+          # Idempotent for re-runs: an already-open PR for this head is fine. Any
+          # other create failure (e.g. the "Allow GitHub Actions to create and
+          # approve pull requests" setting is off) must fail the job, not be masked.
+          existing="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -n "$existing" ]; then
+            echo "PR already open for $BRANCH: $existing"
+            exit 0
+          fi
+          if ! gh pr create --base main --head "$BRANCH" \
             --title "Sync binary sub-packages to $VERSION" \
-            --body "Bumps the five \`@gresearch/bobbit-binaries-*\` sub-packages to \`$VERSION\` (already published to npm by this run), updates the root \`optionalDependencies\` pin, refreshes \`binaries.versions.json\`/\`binaries.checksums.json\`, and re-locks \`package-lock.json\` from the published registry values. \`npm ci --dry-run\` passed in CI before this PR was opened. Merging does not cut a root release." \
-            || echo "PR may already exist for $BRANCH"
+            --body "Bumps the five \`@gresearch/bobbit-binaries-*\` sub-packages to \`$VERSION\` (already published to npm by this run), updates the root \`optionalDependencies\` pin, refreshes \`binaries.versions.json\`/\`binaries.checksums.json\`, and re-locks \`package-lock.json\` from the published registry values. \`npm ci --dry-run\` passed in CI before this PR was opened. Merging does not cut a root release."; then
+            echo "::error::Failed to open the sync PR. The branch $BRANCH is pushed; open the PR manually, and enable Settings → Actions → General → 'Allow GitHub Actions to create and approve pull requests'."
+            exit 1
+          fi
