@@ -1,6 +1,6 @@
 {
   "name": "@gresearch/bobbit-binaries-darwin-arm64",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Bundled fd and ripgrep binaries for Bobbit (macOS arm64).",
   "license": "MIT",
   "os": [
