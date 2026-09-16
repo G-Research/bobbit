@@ -463,7 +463,7 @@ describe("release contract rules", () => {
 	it("requires optional dependencies to be immutable exact-version pins", () => {
 		assertExactOptionalDependencyPins({
 			optionalDependencies: {
-				"@bobbit/binaries-linux-x64": "0.9.0",
+				"@gresearch/bobbit-binaries-linux-x64": "0.9.0",
 				"@example/build": "1.2.3+build.7",
 			},
 		});
@@ -471,7 +471,7 @@ describe("release contract rules", () => {
 			assert.throws(
 				() =>
 					assertExactOptionalDependencyPins({
-						optionalDependencies: { "@bobbit/binaries-linux-x64": mutable },
+						optionalDependencies: { "@gresearch/bobbit-binaries-linux-x64": mutable },
 					}),
 				/must be pinned to an exact version/,
 			);

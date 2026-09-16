@@ -94,11 +94,11 @@
     "build:binaries": "node scripts/build-binaries.mjs"
   },
   "optionalDependencies": {
-    "@bobbit/binaries-darwin-arm64": "0.9.0",
-    "@bobbit/binaries-darwin-x64": "0.9.0",
-    "@bobbit/binaries-linux-arm64": "0.9.0",
-    "@bobbit/binaries-linux-x64": "0.9.0",
-    "@bobbit/binaries-win32-x64": "0.9.0"
+    "@gresearch/bobbit-binaries-darwin-arm64": "0.9.0",
+    "@gresearch/bobbit-binaries-darwin-x64": "0.9.0",
+    "@gresearch/bobbit-binaries-linux-arm64": "0.9.0",
+    "@gresearch/bobbit-binaries-linux-x64": "0.9.0",
+    "@gresearch/bobbit-binaries-win32-x64": "0.9.0"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.85.1",

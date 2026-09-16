@@ -366,7 +366,7 @@ In a scratch directory, prove the published artefact actually installs and resol
 ```bash
 cd $(mktemp -d) && npm init -y >/dev/null
 npm install @gresearch/bobbit@<new-version>
-ls node_modules/@bobbit/binaries-*/bin/
+ls node_modules/@gresearch/bobbit-binaries-*/bin/
 node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
 ```
 
