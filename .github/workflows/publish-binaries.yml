@@ -42,6 +42,10 @@ jobs:
     name: Build and stage binaries
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      # Normalized once here and reused by every downstream job so a padded
+      # dispatch input (e.g. " 0.9.1 ") can never diverge between publish and re-lock.
+      version: ${{ steps.stage.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -54,6 +58,7 @@ jobs:
           node-version: '24'
 
       - name: Validate version and stage manifests
+        id: stage
         env:
           VERSION: ${{ inputs.version }}
           FD: ${{ inputs.fd }}
@@ -85,6 +90,7 @@ jobs:
             fs.writeFileSync(vp, `${JSON.stringify(versions, null, 2)}\n`);
           }
           console.log(`staged binaries at ${version}${fd || rg ? ` (fd=${fd || "pinned"}, rg=${rg || "pinned"})` : ""}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
           NODE
 
       - name: Build binaries and refresh checksums
@@ -139,11 +145,17 @@ jobs:
 
       - name: Publish each sub-package
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           for p in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
             name="@gresearch/bobbit-binaries-$p"
+            # Artifact upload/download resets file modes to 0644; restore the
+            # executable bit the build set so the published POSIX binaries run.
+            case "$p" in
+              win32-*) : ;;  # Windows .exe needs no executable bit
+              *) chmod 0755 "./binaries/binaries-$p/bin/fd" "./binaries/binaries-$p/bin/rg" ;;
+            esac
             existing="$(npm view "$name@$VERSION" version 2>/dev/null || true)"
             if [ "$existing" = "$VERSION" ]; then
               echo "skip $name@$VERSION (already published)"
@@ -155,7 +167,7 @@ jobs:
 
   open-pr:
     name: Sync root pin and lockfile
-    needs: publish
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -180,7 +192,7 @@ jobs:
 
       - name: Re-lock root pin + lockfile and validate
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           node scripts/release/relock-binaries.mjs --version "$VERSION"
@@ -189,7 +201,7 @@ jobs:
       - name: Open sync pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           BRANCH="bot/binaries-$VERSION"

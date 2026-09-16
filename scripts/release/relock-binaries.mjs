@@ -44,7 +44,7 @@ export const BINARY_PACKAGES = BINARY_PLATFORMS.map((p) => `@gresearch/bobbit-bi
 export function registryFetchMeta({ registry = "https://registry.npmjs.org", fetchImpl = fetch } = {}) {
 	const base = registry.replace(/\/$/, "");
 	return async (name, version) => {
-		const url = `${base}/${name.replace("/", "%2f")}/${version}`;
+		const url = `${base}/${name.replaceAll("/", "%2F")}/${version}`;
 		const res = await fetchImpl(url, { headers: { accept: "application/json" } });
 		if (res.status === 404) {
 			throw new Error(`${name}@${version} is not published (404) — publish it before re-locking`);
