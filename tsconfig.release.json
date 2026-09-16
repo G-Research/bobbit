@@ -17,6 +17,7 @@
     "scripts/release/dist-tag-guard.mjs",
     "scripts/release/release-contract.mjs",
     "scripts/release/validate-release-commit.mjs",
-    "scripts/release/changelog-section.mjs"
+    "scripts/release/changelog-section.mjs",
+    "scripts/release/relock-binaries.mjs"
   ]
 }

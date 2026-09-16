@@ -181,41 +181,59 @@ upstream rarely (~yearly), so the sub-packages stay pinned across many
 `@gresearch/bobbit` releases. Only bump and republish them when `binaries.versions.json`
 changes.
 
-### Bumping fd or ripgrep
+### Publishing new binaries (automated)
 
-1. Edit `binaries.versions.json`:
+The **Publish binary sub-packages** workflow
+([`.github/workflows/publish-binaries.yml`](../.github/workflows/publish-binaries.yml))
+runs the whole flow on `workflow_dispatch`:
+
+- **Inputs:** `version` (required; exact semver, must exceed the current pin) and
+  optional `fd` / `rg` overrides (default to `binaries.versions.json`).
+- **`prepare`** bumps the five sub-package manifests, applies any fd/rg override,
+  runs `build:binaries --write-checksums` to download + verify the archives and
+  refresh `binaries.checksums.json`, and uploads the built tree as an artifact.
+- **`publish`** runs in the `npm-binaries` environment (required-reviewer gate) and
+  publishes each `@gresearch/bobbit-binaries-*` via OIDC trusted publishing (Node 24 /
+  npm ≥ 11.5.1, provenance automatic). Already-published versions are skipped, so a
+  re-run after a partial failure is safe.
+- **`open-pr`** re-locks the root `optionalDependencies` pin and `package-lock.json`
+  from the freshly-published registry values (`scripts/release/relock-binaries.mjs`),
+  gates on `npm ci --dry-run`, and opens a `bot/binaries-<version>` PR against `main`.
+
+Merge that PR to sync the repo. It does **not** cut a root release — consumers pick
+up the new binaries on the next `@gresearch/bobbit` release, whose pin the PR bumped.
+
+**One-time setup the workflow depends on:**
+
+- A **Trusted Publisher** on npmjs.com for each of the five packages, naming org
+  `G-Research`, repo `bobbit`, and workflow file `publish-binaries.yml` (keep this
+  filename in sync). A package must already exist before its trusted publisher can be
+  added — the initial `0.9.0` was published manually. See
+  [npm trusted publishers](https://docs.npmjs.com/trusted-publishers).
+- A GitHub **Environment** named `npm-binaries` with the required reviewer(s).
+- Repo setting **"Allow GitHub Actions to create and approve pull requests"** enabled
+  (the `open-pr` job uses the default `GITHUB_TOKEN`).
+
+### Publishing new binaries (manual fallback)
+
+If you must publish outside the workflow:
+
+1. Edit `binaries.versions.json` for a fd/ripgrep bump:
    ```json
    { "fd": "10.2.0", "ripgrep": "14.1.1" }
    ```
-2. (Recommended) Update `binaries.checksums.json` with SHA-256s of the
-   release archives you intend to bundle. Format:
-   ```json
-   {
-     "fd-v10.2.0-aarch64-apple-darwin.tar.gz": "<sha256 hex>",
-     "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz": "<sha256 hex>"
-   }
-   ```
-   When checksums are present, the build script enforces them.
-3. Run the build for every platform:
+2. Bump the `version` field in each `binaries/binaries-*/package.json` by hand.
+3. Build every platform and refresh the pinned checksums:
    ```bash
-   npm run build:binaries
+   node scripts/build-binaries.mjs --write-checksums
    ```
-   Or for a single platform during testing:
-   ```bash
-   node scripts/build-binaries.mjs --only linux-x64
-   ```
-4. Inspect the populated `binaries/binaries-*/bin/` directories. POSIX
-   binaries should be `+x`; Windows binaries should end in `.exe`.
-5. Commit the bumped `binaries.versions.json`, `binaries.checksums.json`,
-   and the regenerated `binaries/binaries-*/package.json` files.
-   **Do not commit the binaries themselves** (`bin/` is `.gitignore`d
-   inside each sub-package).
-6. Bump the version in each `binaries/binaries-*/package.json` by hand
-   (the build script no longer auto-bumps these). Update the matching
-   pin in the root `package.json` `optionalDependencies` block to the
-   new version.
-7. Publish each sub-package (the root is not published here — it ships via
-   CI when the release PR is merged):
+   (Use `--only linux-x64` to test a single platform; that merges into the
+   existing checksums instead of replacing them.) Inspect the populated
+   `binaries/binaries-*/bin/` directories — POSIX binaries should be `+x`,
+   Windows binaries should end in `.exe`. **Do not commit the binaries
+   themselves** (`bin/` is `.gitignore`d inside each sub-package).
+4. Publish each sub-package (`publishConfig.access: "public"` is baked in, so
+   no `--access public` is needed):
    ```bash
    npm publish ./binaries/binaries-darwin-arm64
    npm publish ./binaries/binaries-darwin-x64
@@ -223,9 +241,18 @@ changes.
    npm publish ./binaries/binaries-linux-arm64
    npm publish ./binaries/binaries-win32-x64
    ```
-   Do this **before** merging the release PR, so the sub-packages are on npm
-   before the root package that pins them is published. `publishConfig.access: "public"` is baked
-   into each sub-package, so `--access public` is not needed on the CLI.
+5. Re-lock the root pin and `package-lock.json` from the just-published registry
+   values, then confirm the lockfile is in sync:
+   ```bash
+   node scripts/release/relock-binaries.mjs --version <new-version>
+   npm ci --dry-run --package-lock=true
+   ```
+   The repo's `.npmrc` freezes `npm install` lock regeneration on purpose, so this
+   script — not `npm install` — is how the lockfile gets updated for the binaries.
+6. Commit `binaries.versions.json`, `binaries.checksums.json`, the five
+   `binaries/binaries-*/package.json`, the root `package.json`, and
+   `package-lock.json`. Do this **before** merging any root release PR that pins
+   the new version.
 
 ### Decoupled versioning
 

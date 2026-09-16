@@ -101,7 +101,7 @@ const TOOLS = {
 };
 
 function parseArgs(argv) {
-	const out = { fd: null, rg: null, only: null };
+	const out = { fd: null, rg: null, only: null, writeChecksums: false };
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
 			case "--fd":
@@ -113,6 +113,9 @@ function parseArgs(argv) {
 				break;
 			case "--only":
 				out.only = argv[++i];
+				break;
+			case "--write-checksums":
+				out.writeChecksums = true;
 				break;
 			default:
 				console.error(`Unknown arg: ${argv[i]}`);
@@ -189,6 +192,8 @@ async function buildOne(target, versions, checksums) {
 	fs.mkdirSync(binDir, { recursive: true });
 
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-bin-${target.pkg}-`));
+	/** Computed SHA-256 per downloaded asset, for optional --write-checksums. */
+	const computed = {};
 	try {
 		for (const [tool, cfg] of Object.entries(TOOLS)) {
 			const version = tool === "fd" ? versions.fd : versions.ripgrep;
@@ -203,6 +208,7 @@ async function buildOne(target, versions, checksums) {
 
 			const expectedSha = checksums?.[asset];
 			const actualSha = sha256(archivePath);
+			computed[asset] = actualSha;
 			if (expectedSha) {
 				if (expectedSha !== actualSha) {
 					throw new Error(`SHA-256 mismatch for ${asset}: expected ${expectedSha}, got ${actualSha}`);
@@ -230,6 +236,7 @@ async function buildOne(target, versions, checksums) {
 		const subPkgPath = path.join(pkgDir, "package.json");
 		const sub = JSON.parse(fs.readFileSync(subPkgPath, "utf-8"));
 		console.log(`  version: ${sub.version} (pinned, decoupled from root ${ROOT_PKG.version})`);
+		return computed;
 	} finally {
 		fs.rmSync(tmpRoot, { recursive: true, force: true });
 	}
@@ -257,8 +264,19 @@ async function main() {
 		process.exit(2);
 	}
 
+	const computedChecksums = {};
 	for (const t of targets) {
-		await buildOne(t, versions, checksums);
+		Object.assign(computedChecksums, await buildOne(t, versions, checksums));
+	}
+
+	if (args.writeChecksums) {
+		// Full builds replace the file with exactly the current assets; a --only
+		// build merges into the existing pins so it never drops other platforms.
+		const base = args.only ? loadJson(CHECKSUMS_PATH, {}) : {};
+		const merged = { ...base, ...computedChecksums };
+		const sorted = Object.fromEntries(Object.keys(merged).sort().map((k) => [k, merged[k]]));
+		fs.writeFileSync(CHECKSUMS_PATH, `${JSON.stringify(sorted, null, 2)}\n`);
+		console.log(`\nWrote ${Object.keys(sorted).length} checksums to ${path.relative(REPO_ROOT, CHECKSUMS_PATH)}`);
 	}
 
 	console.log(
