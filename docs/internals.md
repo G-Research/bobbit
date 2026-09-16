@@ -3699,4 +3699,4 @@ The agent CLI data root is configurable and startup-pinned. The default is `<pro
 | `<agentDir>/models.json` | Model registry, AI Gateway provider metadata, and model overrides. |
 | `<agentDir>/google-code-assist.json` | Google Code Assist cache/config data. |
 | `<agentDir>/settings.json` | Agent CLI compatibility settings. |
-| `<agentDir>/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@bobbit/binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |
+| `<agentDir>/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@gresearch/bobbit-binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |

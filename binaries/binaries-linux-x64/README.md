@@ -1,4 +1,4 @@
-# @bobbit/binaries-linux-x64
+# @gresearch/bobbit-binaries-linux-x64
 
 Bundled `fd` and `rg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on linux x64.
 

@@ -156,7 +156,7 @@ Unit, browser, and E2E suites intentionally do not query or assert live advisory
 
 Bobbit ships `fd` and `rg` so agents have them locally with zero network
 calls at install or runtime. Binaries live in per-platform optional npm
-sub-packages under the `@bobbit/` scope. See
+sub-packages under the `@gresearch/` scope. See
 [`src/server/binaries.ts`](../src/server/binaries.ts) for the resolver.
 
 ### Layout
@@ -277,7 +277,7 @@ npm pack
 npm pack ./binaries/binaries-$(node -e 'console.log(process.platform+"-"+process.arch)')
 mkdir /tmp/bobbit-smoke && cd /tmp/bobbit-smoke && npm init -y
 npm install /path/to/bobbit-*.tgz
-ls node_modules/@bobbit/binaries-*/bin/
+ls node_modules/@gresearch/bobbit-binaries-*/bin/
 node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
 ```
 

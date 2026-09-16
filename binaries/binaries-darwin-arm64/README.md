@@ -1,4 +1,4 @@
-# @bobbit/binaries-darwin-arm64
+# @gresearch/bobbit-binaries-darwin-arm64
 
 Bundled `fd` and `rg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on macOS arm64.
 

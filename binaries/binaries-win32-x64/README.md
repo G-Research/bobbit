@@ -1,4 +1,4 @@
-# @bobbit/binaries-win32-x64
+# @gresearch/bobbit-binaries-win32-x64
 
 Bundled `fd` and `rg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on win32 x64.
 

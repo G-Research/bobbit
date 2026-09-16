@@ -44,10 +44,10 @@ afterEach(() => {
 });
 
 describe("expectedBinaryPackage", () => {
-	it("maps supported tuples to @bobbit/binaries-<plat>-<arch>", () => {
-		assert.equal(expectedBinaryPackage("linux", "x64"), "@bobbit/binaries-linux-x64");
-		assert.equal(expectedBinaryPackage("darwin", "arm64"), "@bobbit/binaries-darwin-arm64");
-		assert.equal(expectedBinaryPackage("win32", "x64"), "@bobbit/binaries-win32-x64");
+	it("maps supported tuples to @gresearch/bobbit-binaries-<plat>-<arch>", () => {
+		assert.equal(expectedBinaryPackage("linux", "x64"), "@gresearch/bobbit-binaries-linux-x64");
+		assert.equal(expectedBinaryPackage("darwin", "arm64"), "@gresearch/bobbit-binaries-darwin-arm64");
+		assert.equal(expectedBinaryPackage("win32", "x64"), "@gresearch/bobbit-binaries-win32-x64");
 	});
 
 	it("returns null for unsupported tuples", () => {

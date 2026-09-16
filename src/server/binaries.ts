@@ -2,7 +2,7 @@
  * Bundled fd/rg binary resolution and staging.
  *
  * Bobbit ships fd and rg via per-platform optional npm sub-packages
- * (`@bobbit/binaries-<platform>-<arch>`) so agents always have them locally
+ * (`@gresearch/bobbit-binaries-<platform>-<arch>`) so agents always have them locally
  * with zero network calls at install or runtime.
  *
  * Resolution order (memoized per gateway lifetime):
@@ -71,7 +71,7 @@ export function expectedBinaryPackage(
 		case "linux-x64":
 		case "linux-arm64":
 		case "win32-x64":
-			return `@bobbit/binaries-${key}`;
+			return `@gresearch/bobbit-binaries-${key}`;
 		default:
 			return null;
 	}

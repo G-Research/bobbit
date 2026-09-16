@@ -1,4 +1,4 @@
-# @bobbit/binaries-darwin-x64
+# @gresearch/bobbit-binaries-darwin-x64
 
 Bundled `fd` and `rg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on darwin x64.
 
