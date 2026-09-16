@@ -1,0 +1,209 @@
+# Publish the five per-platform fd/rg binary sub-packages to npm via OIDC
+# trusted publishing, then open a PR syncing the repo (root pin + lockfile).
+#
+# Prerequisites (one-time, outside this file):
+#   1. Each @gresearch/bobbit-binaries-<plat>-<arch> package has a Trusted
+#      Publisher on npmjs.com naming org G-Research, repo bobbit, and workflow
+#      file `publish-binaries.yml` (this filename — keep them in sync).
+#   2. A GitHub Environment named `npm-binaries` exists with the required
+#      reviewer(s) that must approve before the publish job runs.
+#   3. Repo setting "Allow GitHub Actions to create and approve pull requests"
+#      is enabled (the open-pr job opens a PR with the default GITHUB_TOKEN).
+#
+# The binary sub-packages are versioned independently of @gresearch/bobbit and
+# change only when fd/ripgrep change. Merging the PR this workflow opens does
+# NOT cut a root release — consumers pick the new binaries up on the next root
+# release, whose optionalDependencies pin is what the PR bumps.
+
+name: Publish binary sub-packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New binary sub-package version (exact semver, must be greater than the current pin)'
+        required: true
+      fd:
+        description: 'Optional fd version override (defaults to binaries.versions.json)'
+        required: false
+      rg:
+        description: 'Optional ripgrep version override (defaults to binaries.versions.json)'
+        required: false
+
+concurrency:
+  group: publish-binaries
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Build and stage binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Validate version and stage manifests
+        env:
+          VERSION: ${{ inputs.version }}
+          FD: ${{ inputs.fd }}
+          RG: ${{ inputs.rg }}
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from "node:fs";
+          import { isExactVersion, compareReleaseVersions } from "./scripts/release/dist-tag-guard.mjs";
+          const version = (process.env.VERSION ?? "").trim();
+          if (!isExactVersion(version)) throw new Error(`version must be exact semver, got: ${version}`);
+          const platforms = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"];
+          for (const p of platforms) {
+            const file = `binaries/binaries-${p}/package.json`;
+            const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (compareReleaseVersions(version, pkg.version) <= 0) {
+              throw new Error(`${file} is at ${pkg.version}; requested ${version} must be greater`);
+            }
+            pkg.version = version;
+            fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+          }
+          const fd = (process.env.FD ?? "").trim();
+          const rg = (process.env.RG ?? "").trim();
+          if (fd || rg) {
+            const vp = "binaries.versions.json";
+            const versions = JSON.parse(fs.readFileSync(vp, "utf8"));
+            if (fd) { if (!isExactVersion(fd)) throw new Error(`fd must be exact semver: ${fd}`); versions.fd = fd; }
+            if (rg) { if (!isExactVersion(rg)) throw new Error(`rg must be exact semver: ${rg}`); versions.ripgrep = rg; }
+            fs.writeFileSync(vp, `${JSON.stringify(versions, null, 2)}\n`);
+          }
+          console.log(`staged binaries at ${version}${fd || rg ? ` (fd=${fd || "pinned"}, rg=${rg || "pinned"})` : ""}`);
+          NODE
+
+      - name: Build binaries and refresh checksums
+        run: node scripts/build-binaries.mjs --write-checksums
+
+      - name: Upload staged binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staged-binaries
+          path: |
+            binaries/
+            binaries.versions.json
+            binaries.checksums.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to npm (OIDC)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-binaries
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download staged binaries
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: staged-binaries
+
+      - name: Confirm npm supports OIDC trusted publishing
+        env:
+          MIN_NPM: '11.5.1'
+        run: |
+          set -euo pipefail
+          echo "node: $(node -v)  npm: $(npm -v)"
+          NPM_VERSION="$(npm -v)" node - <<'NODE'
+          const have = process.env.NPM_VERSION;
+          const need = process.env.MIN_NPM;
+          const parse = value => value.split(".").map(Number);
+          const [h, n] = [parse(have), parse(need)];
+          const older = h[0] !== n[0] ? h[0] < n[0] : h[1] !== n[1] ? h[1] < n[1] : h[2] < n[2];
+          if (older) throw new Error(`npm ${have} cannot use OIDC trusted publishing; needs >= ${need}`);
+          NODE
+
+      - name: Publish each sub-package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for p in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+            name="@gresearch/bobbit-binaries-$p"
+            existing="$(npm view "$name@$VERSION" version 2>/dev/null || true)"
+            if [ "$existing" = "$VERSION" ]; then
+              echo "skip $name@$VERSION (already published)"
+              continue
+            fi
+            echo "publishing $name@$VERSION"
+            npm publish "./binaries/binaries-$p" --ignore-scripts --provenance
+          done
+
+  open-pr:
+    name: Sync root pin and lockfile
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download staged binaries
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: staged-binaries
+
+      - name: Re-lock root pin + lockfile and validate
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/release/relock-binaries.mjs --version "$VERSION"
+          npm ci --dry-run --ignore-scripts --package-lock=true
+
+      - name: Open sync pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          BRANCH="bot/binaries-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add binaries package.json package-lock.json binaries.versions.json binaries.checksums.json
+          if git diff --cached --quiet; then
+            echo "nothing to sync — working tree already matches $VERSION"
+            exit 0
+          fi
+          git commit -m "Sync binary sub-packages to $VERSION"
+          git push --force origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Sync binary sub-packages to $VERSION" \
+            --body "Bumps the five \`@gresearch/bobbit-binaries-*\` sub-packages to \`$VERSION\` (already published to npm by this run), updates the root \`optionalDependencies\` pin, refreshes \`binaries.versions.json\`/\`binaries.checksums.json\`, and re-locks \`package-lock.json\` from the published registry values. \`npm ci --dry-run\` passed in CI before this PR was opened. Merging does not cut a root release." \
+            || echo "PR may already exist for $BRANCH"
