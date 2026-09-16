@@ -113,19 +113,67 @@ describe("registryFetchMeta", () => {
 		assert.deepEqual(meta, { tarball: "https://x/t.tgz", integrity: "sha512-Z" });
 	});
 
-	it("throws a publish-first error on 404", async () => {
+	it("retries a 404 until the version propagates, then returns it", async () => {
+		let calls = 0;
+		const fetchImpl = async () => {
+			calls += 1;
+			return calls < 3
+				? new Response("not found", { status: 404 })
+				: new Response(JSON.stringify({ dist: { tarball: "https://x/t.tgz", integrity: "sha512-Z" } }), { status: 200 });
+		};
+		const meta = await registryFetchMeta({
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			retries: 5,
+			sleep: async () => {},
+			log: () => {},
+		})("@gresearch/bobbit-binaries-win32-x64", "0.9.1");
+		assert.deepEqual(meta, { tarball: "https://x/t.tgz", integrity: "sha512-Z" });
+		assert.equal(calls, 3);
+	});
+
+	it("retries a transient 5xx before succeeding", async () => {
+		let calls = 0;
+		const fetchImpl = async () => {
+			calls += 1;
+			return calls < 2
+				? new Response("boom", { status: 503 })
+				: new Response(JSON.stringify({ dist: { tarball: "https://x/t.tgz", integrity: "sha512-Z" } }), { status: 200 });
+		};
+		const meta = await registryFetchMeta({
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			retries: 3,
+			sleep: async () => {},
+			log: () => {},
+		})("@gresearch/bobbit-binaries-linux-x64", "0.9.1");
+		assert.deepEqual(meta, { tarball: "https://x/t.tgz", integrity: "sha512-Z" });
+	});
+
+	it("gives up with a propagation error after exhausting retries on 404", async () => {
 		const fetchImpl = async () => new Response("not found", { status: 404 });
 		await assert.rejects(
-			() => registryFetchMeta({ fetchImpl: fetchImpl as unknown as typeof fetch })("@gresearch/bobbit-binaries-linux-x64", "9.9.9"),
-			/is not published \(404\)/,
+			() =>
+				registryFetchMeta({ fetchImpl: fetchImpl as unknown as typeof fetch, retries: 2, sleep: async () => {}, log: () => {} })(
+					"@gresearch/bobbit-binaries-linux-x64",
+					"9.9.9",
+				),
+			/did not become readable on the registry/,
 		);
 	});
 
-	it("throws on other non-ok status", async () => {
-		const fetchImpl = async () => new Response("boom", { status: 503 });
+	it("fails fast on a non-transient 4xx without retrying", async () => {
+		let calls = 0;
+		const fetchImpl = async () => {
+			calls += 1;
+			return new Response("forbidden", { status: 403 });
+		};
 		await assert.rejects(
-			() => registryFetchMeta({ fetchImpl: fetchImpl as unknown as typeof fetch })("@gresearch/bobbit-binaries-linux-x64", "0.9.1"),
-			/returned 503/,
+			() =>
+				registryFetchMeta({ fetchImpl: fetchImpl as unknown as typeof fetch, retries: 5, sleep: async () => {}, log: () => {} })(
+					"@gresearch/bobbit-binaries-linux-x64",
+					"0.9.1",
+				),
+			/returned 403/,
 		);
+		assert.equal(calls, 1);
 	});
 });

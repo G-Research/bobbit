@@ -37,23 +37,63 @@ export const BINARY_PACKAGES = BINARY_PLATFORMS.map((p) => `@gresearch/bobbit-bi
 
 /**
  * Build a registry metadata fetcher returning { tarball, integrity } for a
- * published name@version. Throws a clear error on 404 (not yet published).
- * @param {{ registry?: string, fetchImpl?: typeof fetch }} [options]
+ * published name@version.
+ *
+ * `npm publish` returns before the registry read endpoint reflects the new
+ * version, so a fetch immediately after publish can 404. This fetcher waits out
+ * that propagation lag: it retries on 404, transient 5xx, and network errors
+ * with a fixed delay, and only throws once the budget is exhausted.
+ * Non-transient responses (other 4xx, e.g. 401/403) fail fast.
+ *
+ * @param {{ registry?: string, fetchImpl?: typeof fetch, retries?: number, delayMs?: number, sleep?: (ms: number) => Promise<void>, log?: (msg: string) => void }} [options]
  * @returns {(name: string, version: string) => Promise<{ tarball?: string, integrity?: string }>}
  */
-export function registryFetchMeta({ registry = "https://registry.npmjs.org", fetchImpl = fetch } = {}) {
+export function registryFetchMeta({
+	registry = "https://registry.npmjs.org",
+	fetchImpl = fetch,
+	retries = 20,
+	delayMs = 6000,
+	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	log = (msg) => process.stderr.write(`${msg}\n`),
+} = {}) {
 	const base = registry.replace(/\/$/, "");
 	return async (name, version) => {
 		const url = `${base}/${name.replaceAll("/", "%2F")}/${version}`;
-		const res = await fetchImpl(url, { headers: { accept: "application/json" } });
-		if (res.status === 404) {
-			throw new Error(`${name}@${version} is not published (404) — publish it before re-locking`);
-		}
-		if (!res.ok) {
+		let lastReason = "unknown";
+		for (let attempt = 0; attempt <= retries; attempt += 1) {
+			if (attempt > 0) {
+				log(`  waiting for ${name}@${version} to become readable (${lastReason}); retry ${attempt}/${retries}…`);
+				await sleep(delayMs);
+			}
+			/** @type {Response} */
+			let res;
+			try {
+				res = await fetchImpl(url, { headers: { accept: "application/json" } });
+			} catch (err) {
+				lastReason = `network error (${err instanceof Error ? err.message : String(err)})`;
+				continue;
+			}
+			if (res.ok) {
+				const body = /** @type {any} */ (await res.json());
+				return { tarball: body?.dist?.tarball, integrity: body?.dist?.integrity };
+			}
+			if (res.status === 404) {
+				lastReason = "not yet published (404)";
+				continue;
+			}
+			if (res.status >= 500) {
+				lastReason = `registry returned ${res.status}`;
+				continue;
+			}
+			// Non-transient client error — no amount of waiting fixes it.
 			throw new Error(`registry lookup for ${name}@${version} returned ${res.status}`);
 		}
-		const body = /** @type {any} */ (await res.json());
-		return { tarball: body?.dist?.tarball, integrity: body?.dist?.integrity };
+		const waited = Math.round((retries * delayMs) / 1000);
+		throw new Error(
+			`${name}@${version} did not become readable on the registry after ~${waited}s ` +
+				`(${retries + 1} attempts): ${lastReason}. If it was just published, propagation is ` +
+				`unusually slow; otherwise confirm it published.`,
+		);
 	};
 }
 
