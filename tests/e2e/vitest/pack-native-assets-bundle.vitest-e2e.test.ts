@@ -10,7 +10,8 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OnResolveResult, Plugin, PluginBuild } from "esbuild";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { shutdownResourcesThenRemove } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
+import { createRunChild, removeOwnedRunChild } from "../../support/harnesses/shared/run-isolation.ts";
 
 type NativeAssetRuntime = {
 	platform: string;
@@ -40,7 +41,23 @@ type NpmLoadResult = {
 type NpmInstance = {
 	load(): Promise<NpmLoadResult>;
 	exec(command: string, args: string[]): Promise<void>;
-	unload(): void;
+	unload(): void | Promise<void>;
+};
+
+type FixtureLifecycle = {
+	commandsStarted: number;
+	commandsSettled: number;
+	activeCommands: number;
+	instancesConstructed: number;
+	instancesUnloaded: number;
+	streamsOpened: number;
+	streamsDestroyed: number;
+	packageImportsStarted: number;
+	packageImportsSettled: number;
+	phase: string;
+	lastCommand?: string;
+	failures: string[];
+	permissions: "writable" | "read-only" | "restored";
 };
 
 type NpmConstructor = new(options: {
@@ -92,7 +109,27 @@ const TARGET_RUNTIMES: ReadonlyArray<[CanonicalTarget, NativeAssetRuntime]> = [
 // release attempt crossed 120 seconds under contention, while focused runs are
 // normally far shorter. Keep bounded headroom without retrying torn-down work.
 const REAL_PROCESS_TEST_TIMEOUT_MS = 180_000;
-const temporaryRoots = new Set<string>();
+const temporaryRoots = new Map<string, FixtureLifecycle>();
+
+function createFixtureRoot(): { root: string; lifecycle: FixtureLifecycle } {
+	const root = createRunChild("pack-native-assets-release");
+	const lifecycle: FixtureLifecycle = {
+		commandsStarted: 0,
+		commandsSettled: 0,
+		activeCommands: 0,
+		instancesConstructed: 0,
+		instancesUnloaded: 0,
+		streamsOpened: 0,
+		streamsDestroyed: 0,
+		packageImportsStarted: 0,
+		packageImportsSettled: 0,
+		phase: "idle",
+		failures: [],
+		permissions: "writable",
+	};
+	temporaryRoots.set(root, lifecycle);
+	return { root, lifecycle };
+}
 
 async function loadBuildApi(): Promise<BuildApi> {
 	return await import(/* @vite-ignore */ BUILD_MODULE) as unknown as BuildApi;
@@ -179,7 +216,11 @@ function loadNpmConstructor(): NpmConstructor {
 	return createRequire(import.meta.url)(npmModule) as NpmConstructor;
 }
 
-async function runNpm(cwd: string, argv: string[]): Promise<{ stdout: string; stderr: string }> {
+async function runNpm(
+	cwd: string,
+	argv: string[],
+	lifecycle: FixtureLifecycle,
+): Promise<{ stdout: string; stderr: string }> {
 	const Npm = loadNpmConstructor();
 	const stdout = new PassThrough();
 	const stderr = new PassThrough();
@@ -189,29 +230,101 @@ async function runNpm(cwd: string, argv: string[]): Promise<{ stdout: string; st
 	stderr.setEncoding("utf8");
 	stdout.on("data", chunk => { stdoutText += String(chunk); });
 	stderr.on("data", chunk => { stderrText += String(chunk); });
+	lifecycle.commandsStarted++;
+	lifecycle.activeCommands++;
+	lifecycle.streamsOpened += 2;
+	lifecycle.lastCommand = `npm ${argv.join(" ")}`;
+	lifecycle.phase = "constructing";
 
 	const previousCwd = process.cwd();
-	process.chdir(cwd);
-	const npm = new Npm({ stdout, stderr, argv });
+	let npm: NpmInstance | undefined;
+	let result: { stdout: string; stderr: string } | undefined;
+	let operationError: unknown;
+	let unloadError: unknown;
 	try {
+		process.chdir(cwd);
+		npm = new Npm({ stdout, stderr, argv });
+		lifecycle.instancesConstructed++;
+		lifecycle.phase = "loading";
 		const loaded = await npm.load();
 		if (!loaded.exec || !loaded.command) throw new Error(`npm did not load command: ${argv.join(" ")}`);
+		lifecycle.phase = "executing";
 		await npm.exec(loaded.command, loaded.args);
 		await new Promise<void>(resolve => setImmediate(resolve));
-		return { stdout: stdoutText, stderr: stderrText };
+		result = { stdout: stdoutText, stderr: stderrText };
+	} catch (error) {
+		operationError = error;
+		lifecycle.failures.push(error instanceof Error ? error.message : String(error));
 	} finally {
-		npm.unload();
+		lifecycle.phase = "unloading";
+		if (npm) {
+			try {
+				await npm.unload();
+				lifecycle.instancesUnloaded++;
+			} catch (error) {
+				unloadError = error;
+				lifecycle.failures.push(`npm unload: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		stdout.destroy();
+		stderr.destroy();
+		lifecycle.streamsDestroyed += 2;
 		process.chdir(previousCwd);
+		lifecycle.activeCommands--;
+		lifecycle.commandsSettled++;
+		lifecycle.phase = unloadError ? "unload-failed" : "settled";
+	}
+
+	if (operationError && unloadError) {
+		throw new AggregateError([operationError, unloadError], `${lifecycle.lastCommand} failed and its npm owner did not unload`);
+	}
+	if (operationError) throw operationError;
+	if (unloadError) throw unloadError;
+	return result!;
+}
+
+function assertFixtureOwnersSettled(root: string, lifecycle: FixtureLifecycle): void {
+	const unsettled = lifecycle.activeCommands !== 0
+		|| lifecycle.commandsStarted !== lifecycle.commandsSettled
+		|| lifecycle.instancesConstructed !== lifecycle.instancesUnloaded
+		|| lifecycle.streamsOpened !== lifecycle.streamsDestroyed
+		|| lifecycle.packageImportsStarted !== lifecycle.packageImportsSettled;
+	if (unsettled) {
+		throw new Error(`native pack fixture owners remain active for ${root}: ${JSON.stringify(lifecycle)}`);
 	}
 }
 
-afterEach(() => {
-	for (const root of temporaryRoots) {
-		restoreWritable(root);
-		fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-		assert.equal(fs.existsSync(root), false, `temporary root survived cleanup: ${root}`);
-	}
+afterEach(async () => {
+	const fixtures = [...temporaryRoots.entries()];
+	// Do not retry a failed fixture from a later test hook: terminal cleanup must
+	// stay fail-loud and leave the original root intact for diagnosis.
 	temporaryRoots.clear();
+	const results = await Promise.allSettled(fixtures.map(async ([root, lifecycle]) => {
+		await shutdownResourcesThenRemove({
+			phases: [{
+				name: "npm-package-owners",
+				owners: [() => assertFixtureOwnersSettled(root, lifecycle)],
+			}],
+			remove: async () => {
+				restoreWritable(root);
+				lifecycle.permissions = "restored";
+				await removeOwnedRunChild(root, {
+					fixture: "pack-native-assets-release",
+					testHook: "afterEach settled",
+					npmPackageOwners: { ...lifecycle },
+				});
+			},
+		});
+	}));
+	const failures = results.flatMap((result, index) => result.status === "rejected"
+		? [{ root: fixtures[index]![0], reason: result.reason }]
+		: []);
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures.map(failure => failure.reason),
+			`Native pack fixture cleanup failed; retained roots: ${failures.map(failure => failure.root).join(", ")}`,
+		);
+	}
 }, REAL_PROCESS_TEST_TIMEOUT_MS);
 
 describe("bobbit:pack-native-assets build-only alias", () => {
@@ -220,8 +333,7 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		const currentBuildKey = distApi.computeDistBuildKey(REPO_ROOT);
 		expect(distApi.validateDistBuild(REPO_ROOT, currentBuildKey), "run ensure-dist before this focused E2E so compiled artifacts match the current build fingerprint").toBe(true);
 
-		const root = makeTmpDir("pack-native-assets-release-");
-		temporaryRoots.add(root);
+		const { root, lifecycle } = createFixtureRoot();
 		const releaseRoot = path.join(root, "release");
 		const releasePack = path.join(releaseRoot, "dist", "server", "builtin-packs", "market-packs", PACK_NAME);
 		const tarballRoot = path.join(root, "tarballs");
@@ -273,7 +385,7 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		fs.mkdirSync(tarballRoot, { recursive: true });
 		const packed = await runNpm(releaseRoot, [
 			"pack", "--ignore-scripts", "--json", "--pack-destination", tarballRoot, "--cache", npmCache,
-		]);
+		], lifecycle);
 		const packEntries = JSON.parse(packed.stdout) as NpmPackEntry[];
 		expect(packEntries).toHaveLength(1);
 		const packEntry = packEntries[0];
@@ -296,7 +408,7 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		await runNpm(consumerRoot, [
 			"install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-save", "--package-lock=false",
 			"--offline", "--json", "--cache", npmCache, tarball,
-		]);
+		], lifecycle);
 
 		const installedRelease = path.join(consumerRoot, "node_modules", "@fixture", "bobbit-native-release");
 		const installedPack = path.join(installedRelease, "dist", "server", "builtin-packs", "market-packs", PACK_NAME);
@@ -305,14 +417,21 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		expect(fs.existsSync(path.join(installedRelease, "node_modules"))).toBe(false);
 		expect(fs.readFileSync(path.join(installedFamily, "manifest.json"), "utf8")).toBe(manifestText);
 		makeReadOnly(installedRelease);
+		lifecycle.permissions = "read-only";
 		if (process.platform !== "win32") expect(fs.statSync(installedRelease).mode & 0o222).toBe(0);
 
 		const installedEntry = path.join(installedPack, COMPILED_ENTRY_RELATIVE);
 		const installedEntryBefore = fs.readFileSync(installedEntry);
 		expect(installedEntryBefore.equals(compiledEntryBytes)).toBe(true);
-		const installedModule = await import(`${pathToFileURL(installedEntry).href}?release=${Date.now()}`) as {
-			routes?: Record<string, unknown>;
-		};
+		lifecycle.packageImportsStarted++;
+		let installedModule: { routes?: Record<string, unknown> };
+		try {
+			installedModule = await import(`${pathToFileURL(installedEntry).href}?release=${Date.now()}`) as {
+				routes?: Record<string, unknown>;
+			};
+		} finally {
+			lifecycle.packageImportsSettled++;
+		}
 		expect(installedModule.routes).toHaveProperty("performance-snapshot");
 		const runtimeApi = await loadRuntimeApi();
 		for (const [target, runtime] of TARGET_RUNTIMES) {
