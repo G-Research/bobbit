@@ -8,10 +8,11 @@ authentication sources. Most programmatic API calls use
 `Authorization: Bearer <admin-token>`; routes that support it also accept
 `?token=`. Browser API requests and initial preview resources may instead
 authenticate with a valid `bobbit_session` cookie; matching opaque preview
-follow-ons may use the narrower `bobbit_preview` capability. Credential-free
-trusted-local authority requires both an admitted all-loopback policy and an
-actual loopback socket peer (IPv4 `127/8`, IPv6 `::1`, or IPv4-mapped loopback);
-caller-controlled Host/Origin values cannot substitute. This peer-bound rule is
+follow-ons may use the narrower `bobbit_preview` capability. Authentication is
+required by default on every bind. The explicit `--no-auth` escape hatch grants
+credential-free trusted-local authority only with both an admitted all-loopback
+policy and an actual loopback socket peer (IPv4 `127/8`, IPv6 `::1`, or
+IPv4-mapped loopback); caller-controlled Host/Origin values cannot substitute. This peer-bound rule is
 used consistently for API, preview/cookie bootstrap, and WebSocket admission.
 Scoped sandbox and session credentials remain limited to their existing route
 allow-lists.
@@ -2007,8 +2008,8 @@ may decide. A selected sandbox-scoped token is denied by the route allowlist wit
 403 before body parsing or MCP state/runtime effects. Because Docker host-gateway
 proxying can make container traffic appear loopback, sandbox creation,
 restoration, revival, respawn, and replacement are refused before side effects
-while credential-free trusted-local control is enabled; restart with `--auth`
-before using sandboxes.
+while credential-free trusted-local control is enabled; restart without
+`--no-auth` before using sandboxes.
 
 The decision body is `{ decision: "approved" | "rejected", fingerprint,
 sourceProjectId, sourceId }`. The handler revalidates the visible project and

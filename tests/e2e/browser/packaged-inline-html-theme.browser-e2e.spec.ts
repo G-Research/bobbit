@@ -714,7 +714,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				localStorage.setItem("theme", "light");
 				localStorage.setItem("palette", "ocean");
 			});
-			await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+			await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`, { waitUntil: "domcontentloaded" });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
 			// The sidebar appears in the initial gateway-starting render, before the
 			// asynchronous preference load. Wait for the app's explicit end-of-boot

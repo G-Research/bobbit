@@ -40,11 +40,11 @@ Approval and rejection use Bobbit's established gateway authentication. Any of t
 
 Direct, non-sandbox agents intentionally receive the admin `BOBBIT_TOKEN` and therefore have the same decision authority. Approval is not a human-only capability.
 
-Trusted-local authority requires both an admitted all-loopback gateway policy and an actual loopback socket peer. Bobbit recognizes IPv4 `127/8`, IPv6 `::1`, and IPv4-mapped loopback peers. A remote or container client cannot gain credential-free authority by spoofing `Host: localhost`; the same peer-bound rule protects API requests, preview/cookie bootstrap, and WebSocket admission.
+Trusted-local authority is disabled by default. With the explicit `--no-auth` escape hatch, it still requires both an admitted all-loopback gateway policy and an actual loopback socket peer. Bobbit recognizes IPv4 `127/8`, IPv6 `::1`, and IPv4-mapped loopback peers. A remote or container client cannot gain credential-free authority by spoofing `Host: localhost`; the same peer-bound rule protects API requests, preview/cookie bootstrap, and WebSocket admission.
 
 Sandbox agents receive only project-scoped gateway tokens. The MCP approval route is outside the sandbox allowlist, so a sandbox-token request returns 403 before request-body parsing, manager creation, ledger mutation, process spawn, or remote contact. A selected sandbox credential keeps that scope even on a genuine loopback connection.
 
-Docker Desktop and similar host-gateway proxies can make container traffic appear to arrive from loopback. To keep that ambiguity from granting sandbox code credential-free control, Bobbit refuses sandbox creation, restoration, revival, respawn, and replacement before side effects whenever credential-free trusted-local control is enabled. Restart Bobbit with `--auth` before using sandboxed agents. Authenticated sandboxes continue to receive server-minted scoped tokens, and configured sandbox credentials cannot override `BOBBIT_TOKEN` in any casing.
+Docker Desktop and similar host-gateway proxies can make container traffic appear to arrive from loopback. To keep that ambiguity from granting sandbox code credential-free control, Bobbit refuses sandbox creation, restoration, revival, respawn, and replacement before side effects whenever credential-free trusted-local control is enabled. Restart Bobbit without `--no-auth` before using sandboxed agents. Authenticated sandboxes continue to receive server-minted scoped tokens, and configured sandbox credentials cannot override `BOBBIT_TOKEN` in any casing.
 
 Repository previews remain opaque-origin sandboxed documents. They cannot read the parent document or application storage, and their preview-only cookie cannot authorize API or MCP decisions. See [Preview architecture](preview-architecture.md#security-boundary).
 
@@ -221,7 +221,7 @@ Do not edit, copy, or preseed private authority files to bypass review. Use **To
 |---|---|---|
 | Decision request is unauthenticated | HTTP 401 | Authenticate with the normal admin bearer/query token, use the signed same-origin UI cookie, or connect through the peer-bound trusted-local mode. |
 | Sandboxed agent receives HTTP 403 on a decision | The selected sandbox credential is correctly confined by the route allowlist | Review the definition from the authenticated UI or a direct/admin context. Do not widen the sandbox allowlist. |
-| Sandboxed session cannot start or restore in credential-free local mode | `Sandboxed agents require gateway authentication` | Restart Bobbit with `--auth`, then retry. This guard prevents Docker host-gateway proxying from turning sandbox traffic into trusted-local control. |
+| Sandboxed session cannot start or restore in credential-free local mode | `Sandboxed agents require gateway authentication` | Restart Bobbit without `--no-auth`, then retry. This guard prevents Docker host-gateway proxying from turning sandbox traffic into trusted-local control. |
 | **Pending approval** / **Not started** | `MCP_APPROVAL_PENDING` | Open **Review servers** or **Tools → MCP**, inspect the current definition, then approve or reject that server. |
 | **Rejected** / **Not started** | `MCP_APPROVAL_REJECTED` | Expand the row and choose **Approve current configuration** if it is now trusted. |
 | **Configuration changed — review again** / **Not started** | `MCP_APPROVAL_CHANGED` | Review all currently displayed behavior and decide the new fingerprint. An old decision or Marketplace attestation cannot authorize changed behavior. |

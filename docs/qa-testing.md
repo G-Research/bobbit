@@ -54,7 +54,7 @@ Key points for the start command:
 - `WORK_DIR` and `BOBBIT_DIR=$WORK_DIR/.bobbit` are exported by the QA skill itself before invoking `qa_start_command` — isolating all state to the temp directory
 - `--cwd $WORK_DIR` — prevents the ephemeral server from touching the repo
 - `--no-tls` — avoids certificate complexity for local testing
-- `--auth` — generates a token in the temp dir's state for browser authentication
+- `--auth` — explicitly retains the default token-authenticated mode for the test gateway
 
 ### Generic project example
 

@@ -12,13 +12,12 @@ Use a public origin whenever browsers address the gateway through a scheme, host
 
 ```bash
 # TLS is terminated by a reverse proxy at https://bobbit.example.
-# The public authority already enforces auth and tokenizes the CLI launch URL;
-# --auth is retained here as optional defense-in-depth.
-bobbit --host 127.0.0.1 --port 3001 --no-tls --auth \
+# Authentication is required by default and the CLI tokenizes the launch URL.
+bobbit --host 127.0.0.1 --port 3001 --no-tls \
   --public-origin https://bobbit.example
 
 # Shared-origin subpath deployment: the origin and mount are separate settings.
-bobbit --host 127.0.0.1 --port 3001 --no-tls --auth \
+bobbit --host 127.0.0.1 --port 3001 --no-tls \
   --public-origin https://tools.example --base-path /bobbit
 ```
 
@@ -164,13 +163,13 @@ Forwarded headers do not change the configured mount, participate in request adm
 
 ### Authentication, cookies, and OAuth proxies
 
-A genuinely all-loopback policy does not enforce Bobbit token authentication unless `--auth` is set. The unauthenticated startup banner does not print the generated token or secrecy warning. After startup, the CLI derives this decision from the complete trusted-authority policy: `--auth` or any non-loopback bind, public, published, TLS, or Vite authority disables the bypass. Consequently, declaring a non-loopback public origin for a loopback proxy backend automatically produces a tokenized launch URL and the matching secrecy warning. Keeping `--auth` in deployment commands remains useful as optional defense-in-depth and an explicit statement of operator intent, but it is not required for that policy-derived behavior.
+Bobbit enforces token authentication by default on every bind, including loopback, and produces a tokenized launch URL with the matching secrecy warning. `--auth` remains a backward-compatible explicit enable flag. The credential-free `--no-auth` escape hatch is effective only when the complete trusted-authority policy is all-loopback and the actual socket peer is also loopback; any non-loopback bind, public, published, TLS, or Vite authority keeps authentication enforced. In credential-free mode the startup banner omits the generated token and warns that any local process can access the gateway.
 
 The browser may store `localhost` as a local-connection sentinel. It is never emitted as `Authorization: Bearer localhost`. A public deployment cannot use that sentinel or a proxy cookie as a substitute for Bobbit authorization: bootstrap the browser through the public mounted URL with the real Bobbit token. HTTP requests then send real Bobbit bearer credentials unchanged, while Bobbit's signed cookie supports eligible same-origin browser and preview flows.
 
 For `oauth2-proxy` or a similar front end:
 
-1. Bind Bobbit to loopback with `--auth`, declare `--public-origin`, and keep the upstream unreachable except through the proxy.
+1. Bind Bobbit to loopback, declare `--public-origin`, do not pass `--no-auth`, and keep the upstream unreachable except through the proxy.
 2. Protect both the exact bare-prefix location and every descendant, including WebSocket upgrades.
 3. Preserve the external `Host`; do not rely on `Forwarded` or `X-Forwarded-*` for admission.
 4. Bootstrap Bobbit with its real token after satisfying the proxy login. Clients must continue satisfying both authorization layers.

@@ -105,7 +105,10 @@ export function buildStartupUrls(input: {
 	trustedLocal: boolean;
 }): StartupUrls {
 	const basePath = normalizeBasePath(input.basePath);
-	const authEnforced = Boolean(input.forceAuth) || !input.trustedLocal;
+	// Authentication is the default on every bind. An explicit `forceAuth: false`
+	// enables the credential-free escape hatch only when the compiled policy is
+	// genuinely all-loopback.
+	const authEnforced = input.forceAuth !== false || !input.trustedLocal;
 	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
 	const peerUrl = buildStartupPeerUrl(input);
 	const uiUrl = authEnforced
@@ -125,7 +128,6 @@ export function formatStartupBanner(input: {
 	const lines = ["", `Bobbit Gateway v${input.version}`, `  Listening:  ${input.urls.listenUrl}`];
 	if (input.urls.authEnforced) lines.push(`  Auth token: ${input.token}`);
 	lines.push(`  Agent CWD:  ${input.cwd}`);
-	if (input.staticDir) lines.push(`  UI:         ${input.urls.uiUrl}`);
 	if (input.addresses?.length) lines.push(`  Accessible from: ${input.addresses.join(", ")}`);
 	lines.push("");
 	if (input.urls.authEnforced) {
@@ -133,10 +135,82 @@ export function formatStartupBanner(input: {
 		lines.push("  Keep it secret. Regenerate with --new-token.");
 	} else {
 		lines.push("  Token authentication is disabled on this loopback bind.");
-		lines.push("  Any local process can access the gateway. Use --auth to require the token.");
+		lines.push("  Any local process can access the gateway. Remove --no-auth to require the token.");
 	}
 	lines.push("");
 	return lines.join("\n");
+}
+
+const ANSI_RESET = "\u001b[0m";
+
+function ansi(text: string, codes: string, enabled: boolean): string {
+	return enabled ? `\u001b[${codes}m${text}${ANSI_RESET}` : text;
+}
+
+function terminalBannerCapabilities(
+	stdout: NodeJS.WriteStream = process.stdout,
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): { color: boolean; unicode: boolean } {
+	const tty = stdout.isTTY === true && env.TERM !== "dumb";
+	const hasColors = typeof stdout.hasColors === "function" ? stdout.hasColors() : tty;
+	const color = tty && env.NO_COLOR === undefined && env.FORCE_COLOR !== "0" && hasColors;
+	const unicode = tty && (platform !== "win32"
+		|| Boolean(env.WT_SESSION || env.TERM_PROGRAM || env.ConEmuANSI === "ON" || env.TERM?.startsWith("xterm")));
+	return { color, unicode };
+}
+
+export function formatUiConnectionBanner(input: {
+	url: string;
+	stage: "available" | "complete";
+	color?: boolean;
+	unicode?: boolean;
+}): string {
+	const color = input.color === true;
+	const unicode = input.unicode !== false;
+	const status = input.stage === "available"
+		? (unicode ? "●  UI READY" : "[+] UI READY")
+		: (unicode ? "✓  STARTUP COMPLETE" : "[OK] STARTUP COMPLETE");
+	const glyphs = unicode
+		? {
+			top: "┏━",
+			topRule: "━",
+			rail: "┃",
+			bottom: "┗",
+			bottomRule: "━",
+			arrow: "➜",
+			sprite: ["    ▄█████▄", "  ▄█████████", "  ███ ██ ███", "  ▀████████▀", "    ▀▀▀▀▀▀"],
+		}
+		: {
+			top: "+--",
+			topRule: "-",
+			rail: "|",
+			bottom: "+",
+			bottomRule: "-",
+			arrow: "->",
+			sprite: ["    .#####.", "  .#########", "  ### ## ###", "  '########'", "    '######'"],
+		};
+	const frame = (text: string) => ansi(text, "2;32", color);
+	const accent = (text: string) => ansi(text, "1;92", color);
+	const instruction = (text: string) => ansi(text, "1;97", color);
+	const link = (text: string) => ansi(text, "1;96", color);
+	const rail = frame(glyphs.rail);
+	const row = (sprite: string, text = "") =>
+		`${rail} ${accent(text ? sprite.padEnd(18) : sprite)}${text}`;
+	const topRuleLength = unicode ? 62 : 61;
+	return [
+		"",
+		`${frame(glyphs.top)} ${accent("BOBBIT")} ${frame(glyphs.topRule.repeat(topRuleLength))}`,
+		rail,
+		row(glyphs.sprite[0]!, accent(status)),
+		row(glyphs.sprite[1]!),
+		row(glyphs.sprite[2]!, instruction("OPEN THIS LINK IN YOUR BROWSER")),
+		row(glyphs.sprite[3]!),
+		row(glyphs.sprite[4]!, `${accent(glyphs.arrow)}  ${link(input.url)}`),
+		rail,
+		frame(`${glyphs.bottom}${glyphs.bottomRule.repeat(71)}`),
+		"",
+	].join("\n");
 }
 
 /** Find the NordLynx (NordVPN mesh) interface IPv4 address, or null if not found. */
@@ -295,7 +369,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		noUi: false,
 		tls: true,  // on by default
 		tlsExplicit: false,
-		forceAuth: false,
+		forceAuth: true,
 		basePath: "",
 		publicOrigins: [],
 		viteOrigins: [],
@@ -348,7 +422,11 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 				result.noUi = true;
 				break;
 			case "--auth":
+				// Retained for compatibility and to let the last auth flag win.
 				result.forceAuth = true;
+				break;
+			case "--no-auth":
+				result.forceAuth = false;
 				break;
 			case "--tls":
 				result.tls = true;
@@ -545,6 +623,8 @@ async function main() {
 	});
 
 	const pkgVersion = readPackageVersion();
+	const terminalBanner = terminalBannerCapabilities();
+	let shutdownRequested = false;
 	// Set terminal tab title
 	process.stdout.write(`\x1b]0;Bobbit Server\x07`);
 	console.log(formatStartupBanner({
@@ -555,6 +635,23 @@ async function main() {
 		staticDir: args.staticDir,
 		addresses,
 	}));
+	if (args.staticDir) {
+		console.log(formatUiConnectionBanner({
+			url: effectiveStartupUrls.uiUrl,
+			stage: "available",
+			...terminalBanner,
+		}));
+		void gateway.whenBootTasksFinished()
+			.then(() => {
+				if (shutdownRequested) return;
+				console.log(formatUiConnectionBanner({
+					url: effectiveStartupUrls.uiUrl,
+					stage: "complete",
+					...terminalBanner,
+				}));
+			})
+			.catch((error) => console.warn("[boot] Could not report boot completion:", error));
+	}
 
 	// Auto-open browser when serving the UI, passing token so the UI auto-connects.
 	// Skipped when:
@@ -570,7 +667,6 @@ async function main() {
 
 	// Graceful shutdown. A repeated signal is an explicit escape hatch; it must
 	// never start a competing teardown against the same Git and sandbox state.
-	let shutdownRequested = false;
 	const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
 		if (shutdownRequested) {
 			console.warn("\nShutdown interrupted; exiting immediately (worktrees may be left behind).");

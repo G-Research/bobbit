@@ -33,6 +33,12 @@ interface CliModule {
 		token: string;
 		urls: StartupUrls;
 	}): string;
+	formatUiConnectionBanner(options: {
+		url: string;
+		stage: "available" | "complete";
+		color?: boolean;
+		unicode?: boolean;
+	}): string;
 }
 
 async function cliModule(): Promise<CliModule> {
@@ -70,6 +76,14 @@ describe("base-path CLI selection", () => {
 	it("defaults to root when neither flag nor environment is present", async () => {
 		const { parseArgs } = await cliModule();
 		assert.equal(parseArgs([], {}).basePath, "");
+	});
+
+	it("requires authentication by default and makes the loopback bypass explicit", async () => {
+		const { parseArgs } = await cliModule();
+		assert.equal(parseArgs([], {}).forceAuth, true);
+		assert.equal(parseArgs(["--no-auth"], {}).forceAuth, false);
+		assert.equal(parseArgs(["--no-auth", "--auth"], {}).forceAuth, true);
+		assert.equal(parseArgs(["--auth", "--no-auth"], {}).forceAuth, false);
 	});
 
 	it("uses and normalizes BOBBIT_BASE_PATH when no flag is present", async () => {
@@ -131,6 +145,7 @@ describe("mounted startup URLs", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "generated-but-unused",
+			forceAuth: false,
 			trustedLocal: true,
 		});
 		assert.equal(urls.authEnforced, false);
@@ -155,7 +170,7 @@ describe("mounted startup URLs", () => {
 		assert.equal(urls.uiUrl, "https://gateway.example:443/?token=secret");
 	});
 
-	it("keeps forced authentication on a fully trusted loopback policy", async () => {
+	it("requires authentication by default on a fully trusted loopback policy", async () => {
 		const { buildStartupUrls } = await cliModule();
 		const urls = buildStartupUrls({
 			protocol: "http",
@@ -163,11 +178,53 @@ describe("mounted startup URLs", () => {
 			port: 3001,
 			basePath: "",
 			token: "forced-secret",
-			forceAuth: true,
 			trustedLocal: true,
 		});
 		assert.equal(urls.authEnforced, true);
 		assert.equal(urls.uiUrl, "http://localhost:3001/?token=forced-secret");
+	});
+});
+
+describe("prominent UI connection banner", () => {
+	it("renders the compact Unicode Bobbit with the link beside it", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const available = formatUiConnectionBanner({ url, stage: "available", color: false, unicode: true });
+		const complete = formatUiConnectionBanner({ url, stage: "complete", color: false, unicode: true });
+
+		assert.match(available, /^┏━ BOBBIT ━{62}$/m);
+		assert.match(available, /^┃     ▄█████▄\s+●  UI READY$/m);
+		assert.match(available, /^┃   ███ ██ ███\s+OPEN THIS LINK IN YOUR BROWSER$/m);
+		assert.match(available, new RegExp(`^┃     ▀▀▀▀▀▀\\s+➜  ${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+		assert.match(complete, /✓  STARTUP COMPLETE/);
+		assert.equal(available.split("\n").findIndex(line => line.includes("OPEN THIS LINK")) + 2,
+			available.split("\n").findIndex(line => line.includes(url)));
+		assert.doesNotMatch(`${available}${complete}`, /\u001b\[/);
+	});
+
+	it("uses an uncoloured ASCII fallback when terminal features are unavailable", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const available = formatUiConnectionBanner({ url, stage: "available", color: false, unicode: false });
+		const complete = formatUiConnectionBanner({ url, stage: "complete", color: false, unicode: false });
+
+		assert.match(available, /^\+-- BOBBIT -{61}$/m);
+		assert.match(available, /\[\+\] UI READY/);
+		assert.match(complete, /\[OK\] STARTUP COMPLETE/);
+		assert.equal(available.includes(`->  ${url}`), true);
+		assert.doesNotMatch(`${available}${complete}`, /[^\x00-\x7F]/u);
+		assert.doesNotMatch(`${available}${complete}`, /\u001b\[/);
+	});
+
+	it("colours the frame, sprite, status, instruction, and URL when enabled", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const banner = formatUiConnectionBanner({ url, stage: "available", color: true, unicode: true });
+
+		assert.match(banner, /\u001b\[2;32m┏━\u001b\[0m/);
+		assert.match(banner, /\u001b\[1;92m●  UI READY\u001b\[0m/);
+		assert.match(banner, /\u001b\[1;97mOPEN THIS LINK IN YOUR BROWSER\u001b\[0m/);
+		assert.equal(banner.includes(`\u001b[1;96m${url}\u001b[0m`), true);
 	});
 });
 
@@ -205,6 +262,7 @@ describe("truthful authentication banner", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "must-not-appear",
+			forceAuth: false,
 			trustedLocal: true,
 		});
 		const banner = formatStartupBanner({
@@ -217,7 +275,7 @@ describe("truthful authentication banner", () => {
 		assert.doesNotMatch(banner, /must-not-appear|grants full shell access|keep it secret/i);
 		assert.match(banner, /token authentication is disabled/i);
 		assert.match(banner, /local process/i);
-		assert.match(banner, /--auth/);
+		assert.match(banner, /remove --no-auth/i);
 	});
 
 	it("retains the token and secrecy warning when auth is enforced", async () => {

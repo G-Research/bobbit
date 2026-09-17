@@ -91,6 +91,7 @@ async function waitForHealthyGateway(
 	url: string,
 	output: () => string,
 	label: string,
+	token?: string,
 ): Promise<GatewayHealth> {
 	const result = await pollUntil<GatewayReadiness | null>(async () => {
 		const exit = childExitDescription(child);
@@ -101,7 +102,10 @@ async function waitForHealthyGateway(
 		let response: Response;
 		let bodyText: string;
 		try {
-			response = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(5_000) });
+			response = await fetch(`${url}/api/health`, {
+				headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+				signal: AbortSignal.timeout(5_000),
+			});
 			bodyText = await response.text();
 		} catch (error) {
 			const requestExit = childExitDescription(child);
@@ -298,31 +302,141 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(parsed.hash).toBe("");
 			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
 
+			const token = readFileSync(join(root, "secrets", "token"), "utf8").trim();
 			await pollUntil(() => output.includes(`Listening:  ${persistedUrl}`)
-				&& output.includes("Token authentication is disabled on this loopback bind."), {
+				&& output.includes(`Auth token: ${token}`), {
 				timeoutMs: 5_000,
 				intervalMs: 25,
 				label: "truthful executable CLI startup banner",
 			});
+			const uiUrl = `${persistedUrl}/?token=${token}`;
+			await pollUntil(() => output.includes("[OK] STARTUP COMPLETE"), {
+				timeoutMs: 10_000,
+				intervalMs: 25,
+				label: "mounted CLI final connection banner",
+			});
 			expect(output).toMatch(new RegExp(`Listening:\\s+${escapeRegExp(persistedUrl)}`));
-			expect(output).toContain("Any local process can access the gateway. Use --auth to require the token.");
-			expect(output).not.toMatch(/Auth token:/i);
-			expect(output).not.toMatch(/token grants full shell access/i);
-			expect(output).not.toContain("?token=");
+			expect(output).toContain("[+] UI READY");
+			expect(output).toContain("[OK] STARTUP COMPLETE");
+			expect(output).toContain("OPEN THIS LINK IN YOUR BROWSER");
+			expect(output.split(uiUrl).length - 1).toBe(2);
+			expect(output).not.toMatch(/[┏┃┗━▄█▀●✓➜]/u);
+			expect(output).not.toContain("\u001b[2;32m");
+			expect(output).toMatch(/token grants full shell access/i);
+			expect(output).not.toMatch(/authentication is disabled/i);
 
-			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "mounted CLI");
-			expect(health).toMatchObject({ status: "ok", localhost: true });
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "mounted CLI", token);
+			expect(health).toMatchObject({ status: "ok", localhost: false });
 
-			const shell = await fetch(`${persistedUrl}/`, { signal: AbortSignal.timeout(5_000) });
+			const shell = await fetch(`${persistedUrl}/?token=${token}`, { signal: AbortSignal.timeout(5_000) });
 			expect(shell.status).toBe(200);
 			const shellText = await shell.text();
 			expect(shellText).toContain(SHELL_MARKER);
 			expect(shellText).toContain(`window.__BOBBIT_BASE_PATH__ = ${JSON.stringify(MOUNT)}`);
 			expect(shellText).toContain(`src="${MOUNT}/assets/smoke.js"`);
 
-			const asset = await fetch(`${persistedUrl}/assets/smoke.js`, { signal: AbortSignal.timeout(5_000) });
+			const asset = await fetch(`${persistedUrl}/assets/smoke.js`, {
+				headers: { Authorization: `Bearer ${token}` },
+				signal: AbortSignal.timeout(5_000),
+			});
 			expect(asset.status).toBe(200);
 			expect(await asset.text()).toBe(`${ASSET_MARKER}\n`);
+
+			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
+				signal: AbortSignal.timeout(5_000),
+			});
+			expect(shutdown.status).toBe(200);
+			expect(await shutdown.json()).toEqual({ status: "shutting down" });
+			expect(await waitForExit(child, 5_000)).toEqual({ code: 0, signal: null });
+		} finally {
+			await forceStop(child);
+			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
+			expect(cleanup.removed, `isolated CLI state cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
+	it("honors the explicit no-auth escape hatch in the built CLI", async () => {
+		expect(existsSync(BUILT_CLI_ENTRY), "built CLI is required for no-auth executable coverage").toBe(true);
+		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-no-auth-"));
+		const projectRoot = join(root, "project");
+		const staticDir = join(root, "static");
+		const headquartersDir = join(root, "headquarters");
+		mkdirSync(projectRoot, { recursive: true });
+		mkdirSync(staticDir, { recursive: true });
+		writeFileSync(join(staticDir, "index.html"), "<!doctype html><body>NO_AUTH_CLI_SMOKE</body>\n", "utf8");
+
+		const childEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			BOBBIT_DIR: headquartersDir,
+			BOBBIT_SECRETS_DIR: join(root, "secrets"),
+			BOBBIT_AGENT_DIR: join(root, "agent"),
+			BOBBIT_NO_OPEN: "1",
+			BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+			BOBBIT_SKIP_MCP: "1",
+			BOBBIT_SKIP_TITLE_GEN: "1",
+			BOBBIT_SKIP_WORKTREE_POOL: "1",
+			BOBBIT_TEST_NO_EXTERNAL: "1",
+			BOBBIT_TEST_NO_REMOTE: "1",
+			NODE_ENV: "test",
+		};
+		delete childEnv.BOBBIT_BASE_PATH;
+
+		const child = spawn(process.execPath, [
+			BUILT_CLI_ENTRY,
+			"--cwd", projectRoot,
+			"--host", "127.0.0.1",
+			"--port", "0",
+			"--no-tls",
+			"--no-auth",
+			"--static", staticDir,
+		], {
+			cwd: REPO_ROOT,
+			env: childEnv,
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		let output = "";
+		child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+		child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+
+		try {
+			const gatewayUrlPath = join(headquartersDir, "state", "gateway-url");
+			const persistedUrl = await pollUntil(() => {
+				if (child.exitCode !== null || child.signalCode !== null) {
+					throw new Error(`no-auth CLI exited before publishing its gateway URL (${child.exitCode ?? child.signalCode})\n${output}`);
+				}
+				if (!existsSync(gatewayUrlPath)) return "";
+				const value = readFileSync(gatewayUrlPath, "utf8").trim();
+				const parsed = new URL(value);
+				return parsed.port && parsed.port !== "0" ? value : "";
+			}, { timeoutMs: 15_000, intervalMs: 50, label: "no-auth executable CLI persisted URL" });
+
+			await pollUntil(() => output.includes(`Listening:  ${persistedUrl}`)
+				&& output.includes("Token authentication is disabled on this loopback bind."), {
+				timeoutMs: 5_000,
+				intervalMs: 25,
+				label: "no-auth executable CLI startup banner",
+			});
+			const uiUrl = `${persistedUrl}/`;
+			await pollUntil(() => output.includes("[OK] STARTUP COMPLETE"), {
+				timeoutMs: 10_000,
+				intervalMs: 25,
+				label: "no-auth executable CLI final connection banner",
+			});
+			expect(output).toContain("[+] UI READY");
+			expect(output).toContain("[OK] STARTUP COMPLETE");
+			expect(output).toContain("OPEN THIS LINK IN YOUR BROWSER");
+			expect(output.split(uiUrl).length - 1).toBe(2);
+			expect(output).not.toMatch(/[┏┃┗━▄█▀●✓➜]/u);
+			expect(output).not.toContain("\u001b[2;32m");
+			expect(output).toContain("Any local process can access the gateway. Remove --no-auth to require the token.");
+			expect(output).not.toMatch(/Auth token:/i);
+			expect(output).not.toContain("?token=");
+
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "no-auth CLI");
+			expect(health).toMatchObject({ status: "ok", localhost: true });
 
 			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
 				method: "POST",
@@ -334,7 +448,7 @@ describe("executable CLI root and nested base-path smoke", () => {
 		} finally {
 			await forceStop(child);
 			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
-			expect(cleanup.removed, `isolated CLI state cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+			expect(cleanup.removed, `isolated no-auth CLI cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 
@@ -400,11 +514,13 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(parsed.pathname).toBe("/");
 			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
 
-			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "symlinked CLI");
-			expect(health).toMatchObject({ status: "ok", localhost: true });
+			const token = readFileSync(join(root, "secrets", "token"), "utf8").trim();
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "symlinked CLI", token);
+			expect(health).toMatchObject({ status: "ok", localhost: false });
 
 			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
 				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
 				signal: AbortSignal.timeout(5_000),
 			});
 			expect(shutdown.status).toBe(200);

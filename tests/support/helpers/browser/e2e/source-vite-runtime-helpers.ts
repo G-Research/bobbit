@@ -303,14 +303,22 @@ async function joinSourceOwnership(runtime: RunningSourceProcess, deadline: numb
 	}
 }
 
-export async function waitForSourceGateway(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
+export async function waitForSourceGateway(
+	baseUrl: string,
+	runtime: RunningSourceProcess,
+	getToken: () => Promise<string>,
+	timeoutMs = 120_000,
+): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	await joinSourceOwnership(runtime, deadline);
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
 		try {
-			const response = await fetch(`${baseUrl}/api/health`);
+			const token = await getToken();
+			const response = await fetch(`${baseUrl}/api/health`, {
+				headers: { Authorization: `Bearer ${token}` },
+			});
 			if (response.ok) return;
 			lastError = `${response.status} ${response.statusText}`;
 		} catch (error) {

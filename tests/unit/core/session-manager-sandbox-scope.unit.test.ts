@@ -64,7 +64,7 @@ describe("session-manager sandbox scope regressions", () => {
 		const configureIdx = SERVER.indexOf("sessionManager.setCredentialFreeTrustedLocal(", compileIdx);
 		const restoreIdx = SERVER.indexOf("sessionManager.restoreSessions(", configureIdx);
 		assert.ok(compileIdx >= 0 && configureIdx > compileIdx && restoreIdx > configureIdx);
-		assert.match(SERVER.slice(configureIdx, restoreIdx), /!config\.forceAuth && requestAdmissionPolicy\.allAuthoritiesLoopback/);
+		assert.match(SERVER.slice(configureIdx, restoreIdx), /config\.forceAuth === false && requestAdmissionPolicy\.allAuthoritiesLoopback/);
 
 		const bootstrapIdx = SERVER.indexOf("const sandboxBootstrap: SandboxBootstrap");
 		const projectLookupIdx = SERVER.indexOf("projectRegistry.get(projectId)", bootstrapIdx);

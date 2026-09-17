@@ -50,7 +50,8 @@ bobbit [options]
 --vite-origin <url>    Trust a browser-visible Vite development origin (repeatable)
 --nord                 Bind to NordLynx mesh IP (remote access via NordVPN meshnet)
 --tls / --no-tls       Override TLS auto-detection
---auth                 Require token authentication on a loopback bind
+--no-auth              Disable token authentication (loopback-only escape hatch)
+--auth                 Explicitly re-enable authentication; retained for compatibility
 --cwd <dir>            Working directory for agent sessions (default: .)
 --agent-cli <path>     Path to pi-coding-agent cli.js
 --static <dir>         Serve a custom UI build directory
