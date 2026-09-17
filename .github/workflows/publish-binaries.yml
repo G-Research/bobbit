@@ -169,7 +169,8 @@ jobs:
     name: Sync root pin and lockfile
     needs: [prepare, publish]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Registry propagation retries can consume the full 30-minute budget.
+    timeout-minutes: 40
     permissions:
       contents: write
       pull-requests: write

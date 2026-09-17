@@ -148,6 +148,43 @@ describe("registryFetchMeta", () => {
 		assert.deepEqual(meta, { tarball: "https://x/t.tgz", integrity: "sha512-Z" });
 	});
 
+	it("uses capped exponential backoff between registry checks", async () => {
+		let calls = 0;
+		const sleeps: number[] = [];
+		const fetchImpl = async () => {
+			calls += 1;
+			return calls < 5
+				? new Response("not found", { status: 404 })
+				: new Response(JSON.stringify({ dist: { tarball: "https://x/t.tgz", integrity: "sha512-Z" } }), { status: 200 });
+		};
+		await registryFetchMeta({
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			retries: 4,
+			delayMs: 100,
+			maxDelayMs: 250,
+			sleep: async (ms: number) => { sleeps.push(ms); },
+			log: () => {},
+		})("@gresearch/bobbit-binaries-linux-x64", "0.9.1");
+		assert.deepEqual(sleeps, [100, 200, 250, 250]);
+	});
+
+	it("uses a 30-minute default retry budget with individual sleeps capped at two minutes", async () => {
+		const sleeps: number[] = [];
+		const fetchImpl = async () => new Response("not found", { status: 404 });
+		await assert.rejects(
+			() =>
+				registryFetchMeta({
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					sleep: async (ms: number) => { sleeps.push(ms); },
+					log: () => {},
+				})("@gresearch/bobbit-binaries-linux-x64", "9.9.9"),
+			/after ~1800s/,
+		);
+		assert.deepEqual(sleeps.slice(0, 8), [1000, 2000, 4000, 8000, 16000, 32000, 64000, 120000]);
+		assert.equal(Math.max(...sleeps), 120000);
+		assert.equal(sleeps.reduce((total, delay) => total + delay, 0), 30 * 60 * 1000);
+	});
+
 	it("gives up with a propagation error after exhausting retries on 404", async () => {
 		const fetchImpl = async () => new Response("not found", { status: 404 });
 		await assert.rejects(
