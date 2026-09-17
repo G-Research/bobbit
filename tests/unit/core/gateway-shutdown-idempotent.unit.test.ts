@@ -4,6 +4,7 @@ import { describe, it, vi } from "vitest";
 import {
 	closeGatewayListeners,
 	createGatewayShutdownOnce,
+	observeDeferredShutdownPhase,
 	runGatewayShutdownPhases,
 	stopWorktreePoolsForShutdown,
 } from "../../../src/server/server.ts";
@@ -48,6 +49,33 @@ describe("gateway shutdown is idempotent", () => {
 			},
 		);
 		assert.deepEqual(events, ["first", "second", "third"]);
+	});
+
+	it("observes an eager phase immediately and reports its failure at the ordered join", async () => {
+		const listenerFailure = new Error("listener close failed");
+		const eagerClose = Promise.reject(listenerFailure);
+		const catchSpy = vi.spyOn(eagerClose, "catch");
+		const listenerClose = observeDeferredShutdownPhase(eagerClose);
+
+		assert.strictEqual(listenerClose, eagerClose, "the original outcome must remain the join authority");
+		assert.equal(catchSpy.mock.calls.length, 1, "rejection observation must attach synchronously");
+		await Promise.resolve();
+
+		const events: string[] = [];
+		await assert.rejects(
+			runGatewayShutdownPhases([
+				{ name: "owner", run: () => { events.push("owner"); } },
+				{ name: "listeners", run: async () => { events.push("listeners"); await listenerClose; } },
+				{ name: "after", run: () => { events.push("after"); } },
+			]),
+			(error: unknown) => {
+				assert.ok(error instanceof AggregateError);
+				assert.match(error.message, /listeners/);
+				assert.equal((error.errors[0] as Error).cause, listenerFailure);
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["owner", "listeners", "after"]);
 	});
 
 	it("shares one production teardown across concurrent and late callers", async () => {

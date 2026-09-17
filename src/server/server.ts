@@ -2320,6 +2320,12 @@ export interface GatewayShutdownPhase {
 	run(): void | Promise<void>;
 }
 
+/** Observe an eagerly started phase now while retaining its outcome for the ordered shutdown join. */
+export function observeDeferredShutdownPhase(operation: Promise<void>): Promise<void> {
+	void operation.catch(() => {});
+	return operation;
+}
+
 /** Run every teardown phase in order, then surface all failures together. */
 export async function runGatewayShutdownPhases(phases: readonly GatewayShutdownPhase[]): Promise<void> {
 	const failures: Array<{ name: string; reason: unknown }> = [];
@@ -5936,8 +5942,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// from the logs without a profiler. Cheap (Date.now + one appended line).
 				const phase = makePhaseTimer("[shutdown]");
 				// Stop accepting NEW connections immediately, but do not await WebSocket
-				// closure until session teardown has closed the tracked clients.
-				const listenerClose = closeBoundServer();
+				// closure until session teardown has closed the tracked clients. Observe a
+				// fast close failure now so it cannot escape before the listeners phase.
+				const listenerClose = observeDeferredShutdownPhase(closeBoundServer());
 				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
 				const phases: GatewayShutdownPhase[] = [
 					{ name: "cleanup-schedule", run: () => gatewayDeps.clock.clearInterval(cleanupInterval) },
