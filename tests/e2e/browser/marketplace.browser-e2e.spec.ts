@@ -243,6 +243,10 @@ async function registerSource(page: Page, repoPath: string): Promise<void> {
 	await expect(urlInput).toHaveValue(repoPath);
 	await expect(addSourceBtn).toBeEnabled({ timeout: 15_000 });
 	await addSourceBtn.click();
+	const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+	await expect(trustDialog).toBeVisible({ timeout: 15_000 });
+	await expect(trustDialog.locator('[data-testid="trusted-location-value"]')).toHaveText(repoPath);
+	await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 	// Source actions stay on Sources; switch explicitly to Browse and poll until
 	// union-browse pack cards render (browse refresh is async after the POST).
 	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });

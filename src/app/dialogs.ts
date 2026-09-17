@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { WandSparkles } from "lucide";
+import { AlertTriangle, WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
 import {
 	state,
@@ -148,6 +148,93 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 							</div>
 						`,
 					})}
+				`,
+			}),
+			container,
+		);
+	});
+}
+
+export type TrustedLocationKind = "marketplace-source" | "project";
+
+/**
+ * Require an explicit trust decision before Bobbit accepts an external source
+ * location. Enter confirms the focused warning just like the labelled action;
+ * Escape cancels without allowing the key event to reach an underlying dialog.
+ */
+export function confirmTrustedLocation(kind: TrustedLocationKind, location: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		const isMarketplace = kind === "marketplace-source";
+		const title = isMarketplace ? "Trust this marketplace source?" : "Trust this project location?";
+		const subject = isMarketplace ? "marketplace source" : "project";
+		const confirmLabel = isMarketplace ? "Trust and add source" : "Trust and continue";
+		const consequence = isMarketplace
+			? "Content installed or loaded from a compromised source can run code or commands on your machine, read, change, or delete files, expose secrets and project data, and make network requests using your access."
+			: "A compromised project can contain instructions, configuration, or commands that cause Bobbit or its agents to run malicious code, read, change, or delete files, expose secrets and project data, and make network requests using your access.";
+
+		const cleanup = (result: boolean) => {
+			document.removeEventListener("keydown", onKeydown, true);
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const onKeydown = (event: KeyboardEvent) => {
+			if (event.key !== "Escape" && event.key !== "Enter") return;
+			// Handle the trust decision here and keep the underlying Add Project
+			// dialog from receiving the same key as a second submission.
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			cleanup(event.key === "Enter");
+		};
+		document.addEventListener("keydown", onKeydown, true);
+
+		render(
+			Dialog({
+				isOpen: true,
+				onClose: () => cleanup(false),
+				width: "min(560px, 92vw)",
+				height: "auto",
+				backdropClassName: "bg-black/60 backdrop-blur-sm",
+				children: html`
+					<div data-testid="trusted-location-dialog">
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title })}
+								<div class="mt-3 flex flex-col gap-3 text-sm">
+									<div class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-foreground" role="alert">
+										<div class="flex items-start gap-2">
+											<span class="shrink-0 text-destructive mt-0.5">${icon(AlertTriangle, "sm")}</span>
+											<p><strong>You are choosing to trust this ${subject}.</strong> You are responsible for validating that this location and the people or systems controlling it are safe.</p>
+										</div>
+									</div>
+									<div>
+										<div class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Location being trusted</div>
+										<code class="block max-h-24 overflow-auto rounded border border-border bg-secondary/50 px-3 py-2 text-xs text-foreground break-all" data-testid="trusted-location-value">${location}</code>
+									</div>
+									<p class="font-medium text-foreground" data-testid="trusted-location-consequence">${consequence}</p>
+									<p class="text-muted-foreground"><strong class="text-foreground">Do not continue unless you have independently verified this location and accept these risks.</strong></p>
+								</div>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}
+									${Button({
+										variant: "destructive" as any,
+										onClick: () => cleanup(true),
+										children: html`<span data-testid="trusted-location-confirm">${confirmLabel}</span>`,
+										className: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+									})}
+								</div>
+							`,
+						})}
+					</div>
 				`,
 			}),
 			container,
@@ -2165,6 +2252,7 @@ export function showProjectDialog(): void {
 	let scanSelection = new Set<string>();
 
 	let busy = false;
+	let trustedProjectPath: string | null = null;
 	let errorMessage: string | null = null;
 	let detectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -2265,6 +2353,7 @@ export function showProjectDialog(): void {
 
 	const onEffectivePathChange = (next: string, immediate: boolean): void => {
 		pathValue = next;
+		if (trustedProjectPath !== next.trim()) trustedProjectPath = null;
 		// Any path change drops us back to the path step and clears scan state.
 		if (step !== "path") {
 			step = "path";
@@ -2441,6 +2530,15 @@ export function showProjectDialog(): void {
 		busy = true;
 		errorMessage = null;
 		renderDialog();
+		if (trustedProjectPath !== trimmed) {
+			const trusted = await confirmTrustedLocation("project", trimmed);
+			if (!trusted) {
+				busy = false;
+				renderDialog();
+				return;
+			}
+			trustedProjectPath = trimmed;
+		}
 		try {
 			const detection = await detectProject(trimmed);
 

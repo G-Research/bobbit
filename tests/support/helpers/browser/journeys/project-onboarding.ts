@@ -21,6 +21,9 @@ export const ADD_PROJECT = {
 	browseEntry:  '[data-testid="add-project-browse-entry"]',
 	browseList:   '[data-testid="add-project-browse-list"]',
 	continue:     '[data-testid="add-project-continue"]',
+	trustDialog:  '[data-testid="trusted-location-dialog"]',
+	trustValue:   '[data-testid="trusted-location-value"]',
+	trustConfirm: '[data-testid="trusted-location-confirm"]',
 	createDirectory: '[data-testid="add-project-create-directory"]',
 	preflightPanel:'[data-testid="preflight-panel"]',
 	step:         '[data-testid="add-project-step"]',
@@ -83,6 +86,15 @@ export async function openAddProjectDialog(page: Page): Promise<void> {
  * verifies the scan controls, while the dedicated typeahead journey owns typed
  * path/debounce coverage.
  */
+export async function acceptProjectTrust(page: Page, expectedPath?: string): Promise<void> {
+	const dialog = page.locator(ADD_PROJECT.trustDialog);
+	await expect(dialog).toBeVisible({ timeout: 15_000 });
+	await expect(dialog).toContainText(/responsible for validating/i);
+	await expect(dialog.locator('[data-testid="trusted-location-consequence"]')).toContainText(/expose secrets and project data/i);
+	if (expectedPath) await expect(dialog.locator(ADD_PROJECT.trustValue)).toHaveText(expectedPath);
+	await dialog.locator(ADD_PROJECT.trustConfirm).click();
+}
+
 export async function selectCompletedProjectPath(page: Page, path: string): Promise<void> {
 	await page.locator(ADD_PROJECT.picker).evaluate((element, selectedPath) => {
 		const picker = element as HTMLElement & { setCompletedPath?: (value: string) => void };

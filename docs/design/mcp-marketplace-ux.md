@@ -76,9 +76,11 @@ Click behavior is unchanged: selecting a source switches to Browse and loads its
 
 ## Trust messaging
 
-Update the existing `market-trust-warning` copy, not a modal:
+Keep the existing `market-trust-warning` copy visible in the form:
 
 > Only add sources you trust. Packs, MCP servers, and registry entries can run code, connect to remote services, or instruct agents on your machine.
+
+The current source-boundary flow also opens an explicit confirmation modal on submission. It names the exact location, states that validation is the operator's responsibility, and warns about code execution, file damage, secret or project-data exposure, and network access before the source is registered.
 
 Extend the existing `Why?` disclosure with a fourth row:
 

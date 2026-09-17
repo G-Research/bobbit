@@ -116,6 +116,9 @@ test.describe("Add Project — post-archive routes to assistant", () => {
 		const cont = page.locator("button").filter({ hasText: "Continue" }).first();
 		await expect(cont).toBeEnabled();
 		await cont.click();
+		const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+		await expect(trustDialog).toBeVisible();
+		await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 
 		// Dialog closes either way.
 		await expect(pathInput).not.toBeVisible({ timeout: 10_000 });

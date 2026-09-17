@@ -184,6 +184,9 @@ test.describe("Journey: Project Settings — retained full-stack smokes", () => 
 			const pathInput = page.locator('input[placeholder="/path/to/project"]');
 			await pathInput.fill(dir);
 			await page.getByRole("button", { name: "Continue", exact: true }).click();
+			const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+			await expect(trustDialog).toBeVisible();
+			await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toMatch(/^#\/session\//);
 			sessionId = (await page.evaluate(() => window.location.hash)).replace(/^#\/session\//, "");
 			const sessionResponse = await apiFetch(`/api/sessions/${sessionId}`);

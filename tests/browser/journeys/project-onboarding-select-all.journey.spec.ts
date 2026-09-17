@@ -7,6 +7,7 @@ import { rmSync } from "node:fs";
 import { test, expect, openApp } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	ADD_PROJECT,
+	acceptProjectTrust,
 	clearAddedProjects,
 	makeMultiRepoFixture,
 	openAddProjectDialog,
@@ -55,6 +56,7 @@ test.describe("Journey: Project Onboarding — repository selection count", () =
 
 			// Path → scan.
 			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+			await acceptProjectTrust(page, root);
 			await expect(page.locator(ADD_PROJECT.scanChecklist)).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(ADD_PROJECT.step)).toHaveText("scan", { timeout: 10_000 });
 
