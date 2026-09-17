@@ -19,7 +19,8 @@ jobs:
   verify:
     name: Build, type-check, unit (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Hosted Windows runs the unit suite serially and can exceed 20 minutes.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
