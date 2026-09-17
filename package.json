@@ -136,7 +136,7 @@
     "@types/node": "^22.0.0",
     "@types/sortablejs": "^1.15.9",
     "@types/ws": "^8.5.14",
-    "@vitest/coverage-v8": "4.1.10",
+    "@vitest/coverage-v8": "4.1.11",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "c8": "^11.0.0",
@@ -154,6 +154,6 @@
     "tsx": "^4.23.0",
     "typescript": "^5.7.3",
     "vite": "^8.0.16",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }
