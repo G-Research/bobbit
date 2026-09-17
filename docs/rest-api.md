@@ -1778,14 +1778,16 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. `models: []` describes that live status request and does not clear eligible durable or same-process retention in `/api/models`. |
-| `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
-| `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
-| `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
-| `POST` | `/api/aigw/refresh` | Repeat configuration for the saved URL and refresh models/default seeding |
-| `*` | `/api/aigw/v1/*` | Append `/v1/*` to the configured URL and proxy the request; save the gateway origin, not an already suffixed `/v1`, when using this route |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, hasApiKey?, models? }`; configured gateways are discovered fresh using the stored key. `hasApiKey` reports presence only — the value is never returned. `models: []` describes that live status request and does not clear eligible durable or same-process retention in `/api/models`. |
+| `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url, apiKey? }`), publish `models.json`, and refresh sandbox mounts. A non-empty `apiKey` is stored under `providerKey.aigw` and published as `providers.aigw.apiKey`; an empty string clears the stored key; omitting it keeps it. Key persistence happens only after discovery succeeds. |
+| `DELETE` | `/api/aigw/configure` | Remove gateway configuration, its generated provider, and the stored gateway key |
+| `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url, apiKey? }` without saving or changing active routing. A submitted key is used probe-only; when omitted, the stored key is reused only if `url` shares the configured gateway's origin. |
+| `POST` | `/api/aigw/refresh` | Repeat configuration for the saved URL (reusing the stored key) and refresh models/default seeding |
+| `*` | `/api/aigw/v1/*` | Append `/v1/*` to the configured URL and proxy the request, attaching the stored key server-side; save the gateway origin, not an already suffixed `/v1`, when using this route |
 
 Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
+
+When a key is configured, all AIGW request paths — discovery, status, refresh, `/api/models/test` probes, the `/api/aigw/v1/*` proxy, title/goal-summary generation, and agent inference via the published `providers.aigw.apiKey` — attach `Authorization: Bearer <key>`. The stored key lives under the `providerKey.aigw` preference, which is filtered from `GET /api/preferences`. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for details.
 
 Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. If discovery throws, `/api/models` uses Pi's exact rows from a valid marked publication when its normalized `baseUrl` matches the saved `aigw.url`. If the target is absent, or a marked target cannot supply rows, it may instead use the current process's last exact discovery snapshot keyed to that unchanged normalized URL. This snapshot is in memory only and does not survive restart. A valid unmarked target remains user-owned and authoritative through Pi composition; discovery retention never bypasses it. A malformed or ambiguous target fails closed.
 

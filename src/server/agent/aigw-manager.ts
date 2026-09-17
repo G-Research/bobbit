@@ -426,13 +426,24 @@ function setBedrockEnvVars(aigwUrl: string): void {
 	console.log(`[aigw] Bedrock env configured: endpoint=${bedrockBaseUrl}`);
 }
 
-export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
+/**
+ * Bearer-token headers for direct gateway requests. Empty/absent keys produce
+ * no headers, preserving the previous unauthenticated behavior.
+ */
+export function aigwAuthHeaders(apiKey?: string): Record<string, string> {
+	const key = apiKey?.trim();
+	return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[], apiKey?: string): void {
 	const modelsPath = getModelsJsonPath();
 	const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
 	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
 	const provider = {
 		baseUrl: normalizedUrl,
-		apiKey: "none",
+		// A configured key is published so pi-ai sends `Authorization: Bearer`
+		// on agent inference; "none" keeps the historical no-auth placeholder.
+		apiKey: apiKey?.trim() || "none",
 		api: "openai-completions",
 		headers: {
 			"User-Agent": BOBBIT_AIGW_USER_AGENT,
@@ -687,8 +698,12 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 			return true;
 		}
 		try {
-			const models = await discoverAigwModels(existingUrl);
-			writeAigwModelsJson(existingUrl, models);
+			// Reuse the persisted gateway key so startup re-discovery and the
+			// models.json republication keep authenticating exactly like the
+			// original configure did.
+			const existingKey = getAigwApiKey(prefs);
+			const models = await discoverAigwModels(existingUrl, existingKey);
+			writeAigwModelsJson(existingUrl, models, existingKey);
 			normalizeAigwModelPreferences(prefs);
 			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
 		} catch (err: any) {
@@ -1048,12 +1063,15 @@ async function httpGetJson(
 
 /**
  * Proxy an HTTP request: reads the incoming request body, forwards to the
- * target URL, and pipes the response back.
+ * target URL, and pipes the response back. `extraHeaders` (e.g. the persisted
+ * gateway Authorization) are attached server-side; client-supplied headers of
+ * the same kind are never forwarded.
  */
 export function proxyRequest(
 	targetUrl: string,
 	incomingReq: http.IncomingMessage,
 	outgoingRes: http.ServerResponse,
+	extraHeaders?: Record<string, string>,
 ): void {
 	const parsed = new URL(targetUrl);
 	const transport = parsed.protocol === "https:" ? https : http;
@@ -1063,6 +1081,7 @@ export function proxyRequest(
 	incomingReq.on("end", () => {
 		const body = Buffer.concat(chunks);
 		const headers = aigwUserAgentHeaders({
+			...(extraHeaders || {}),
 			"Content-Type": "application/json",
 			...(body.length > 0 ? { "Content-Length": String(body.length) } : {}),
 		});
@@ -1315,19 +1334,21 @@ export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefin
  * - A top-level `config` wrapper is unwrapped; otherwise the object itself is
  *   treated as the config.
  */
-export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS): Promise<WellKnownConfig | null> {
+export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS, apiKey?: string): Promise<WellKnownConfig | null> {
 	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
-	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline);
+	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline, apiKey);
 }
 
-async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number): Promise<WellKnownConfig | null> {
+async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number, apiKey?: string): Promise<WellKnownConfig | null> {
 	let gateway: URL;
 	try { gateway = normalizeHttpUrl(baseUrl); }
 	catch { return null; }
 	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(gateway.href)) return null;
 	if (runtimeFlags.skipAigwDiscovery) return null;
 	const wellKnownUrl = new URL("/.well-known/opencode", gateway.origin).href;
-	const token = readOpencodeWellKnownToken(gateway.href);
+	// An explicitly configured gateway key wins over the best-effort env/auth.json
+	// token: it is the credential the user entered for THIS gateway.
+	const token = apiKey?.trim() || readOpencodeWellKnownToken(gateway.href);
 	const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 	try {
 		const payload = await httpGetJson(wellKnownUrl, gateway.origin, deadline, authHeader);
@@ -1446,7 +1467,7 @@ interface AigwDiscoveryResult {
 	wellKnown: WellKnownConfig | null;
 }
 
-async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult> {
+async function discoverAigwResult(baseUrl: string, apiKey?: string): Promise<AigwDiscoveryResult> {
 	const gateway = normalizeHttpUrl(baseUrl);
 	const url = gateway.href.replace(/\/$/, "");
 	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
@@ -1454,14 +1475,14 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 	}
 
 	const discoveryDeadline = Date.now() + WELL_KNOWN_DEADLINE_MS;
-	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline);
+	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline, apiKey);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
 		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
 		return { models: translateWellKnown(wellKnown, url), wellKnown };
 	}
 
 	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
-	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000);
+	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000, aigwAuthHeaders(apiKey));
 	if (!data?.data || !Array.isArray(data.data)) {
 		throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
 	}
@@ -1529,18 +1550,24 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 	return { models, wellKnown: null };
 }
 
-export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
-	return (await discoverAigwResult(baseUrl)).models;
+export async function discoverAigwModels(baseUrl: string, apiKey?: string): Promise<AigwModel[]> {
+	return (await discoverAigwResult(baseUrl, apiKey)).models;
 }
 
 /**
  * Full configure flow: discover models, persist preference, write models.json.
  * Returns the discovered models.
+ *
+ * `apiKey` semantics: `undefined` reuses the persisted `providerKey.aigw`
+ * (refresh/startup callers); a non-empty string replaces it; an empty string
+ * clears it. Persistence happens only after discovery succeeds, mirroring the
+ * `aigw.url` commit ordering so a failed configure changes nothing.
  */
-export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
+export async function configureAigw(baseUrl: string, prefs: PreferencesStore, apiKey?: string): Promise<AigwModel[]> {
 	const gateway = normalizeHttpUrl(baseUrl);
 	const normalizedUrl = gateway.href.replace(/\/$/, "");
-	const result = await discoverAigwResult(normalizedUrl);
+	const effectiveKey = apiKey !== undefined ? (apiKey.trim() || undefined) : getAigwApiKey(prefs);
+	const result = await discoverAigwResult(normalizedUrl, effectiveKey);
 	// Legacy fallback Claude entries are normalized during discovery. Do not
 	// remap authoritative well-known models merely because their ID contains
 	// "claude"; their adapter-selected API/baseUrl remains authoritative.
@@ -1550,8 +1577,12 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 	// discovery never reaches this point, preserving the previous models.json.
 	// The writer atomically persists routing and only then replaces the active DNS
 	// host set. Status/test discovery never calls it and cannot mutate behavior.
-	writeAigwModelsJson(normalizedUrl, models);
+	writeAigwModelsJson(normalizedUrl, models, effectiveKey);
 	prefs.set("aigw.url", normalizedUrl);
+	if (apiKey !== undefined) {
+		if (effectiveKey) prefs.set("providerKey.aigw", effectiveKey);
+		else prefs.remove("providerKey.aigw");
+	}
 	if (result.wellKnown?.model) seedDefaultModelsFromWellKnown(result.wellKnown, models, prefs);
 	normalizeAigwModelPreferences(prefs);
 	return models;
@@ -1563,6 +1594,9 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 export function removeAigw(prefs: PreferencesStore): void {
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.models");
+	// The gateway key is part of the gateway configuration, so Disconnect clears
+	// it too; a reconfigure starts from an unauthenticated slate.
+	prefs.remove("providerKey.aigw");
 	removeAigwModelsJson();
 }
 
@@ -1571,6 +1605,20 @@ export function removeAigw(prefs: PreferencesStore): void {
  */
 export function getAigwUrl(prefs: PreferencesStore): string | undefined {
 	return prefs.get("aigw.url") as string | undefined;
+}
+
+/**
+ * Get the persisted aigw bearer token (if any). Stored under the
+ * `providerKey.aigw` preference so it shares the existing provider-key
+ * namespace: filtered from `GET /api/preferences`, editable through
+ * `/api/provider-keys/aigw`, and resolved first by `model-completion.ts`
+ * for server-side pi-ai calls.
+ */
+export function getAigwApiKey(prefs: PreferencesStore): string | undefined {
+	const stored = prefs.get("providerKey.aigw");
+	if (typeof stored !== "string") return undefined;
+	const trimmed = stored.trim();
+	return trimmed ? trimmed : undefined;
 }
 
 // getAigwModels() has been removed — model-registry discovers fresh each time

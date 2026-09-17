@@ -170,7 +170,7 @@ import { McpApprovalStore, type McpApprovalDecision, type McpApprovalIdentity } 
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isReviewerBusyError, isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
+import { getAigwUrl, getAigwApiKey, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
@@ -16475,7 +16475,7 @@ export class SessionManager {
 				this.clock.now() - this._aigwModelCache.ts < SessionManager.AIGW_CACHE_TTL_MS) {
 				aigwModels = this._aigwModelCache.models;
 			} else {
-				aigwModels = await discoverAigwModels(aigwUrl);
+				aigwModels = await discoverAigwModels(aigwUrl, getAigwApiKey(this.preferencesStore));
 				this._aigwModelCache = { url: aigwUrl, models: aigwModels, ts: this.clock.now() };
 			}
 		} catch (err) {
@@ -18081,7 +18081,8 @@ export class SessionManager {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
 		const sessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
-		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
+		const aigwApiKey = this.preferencesStore ? getAigwApiKey(this.preferencesStore) : undefined;
+		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, aigwApiKey, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
