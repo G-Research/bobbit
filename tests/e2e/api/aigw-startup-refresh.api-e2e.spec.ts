@@ -213,6 +213,9 @@ const test = base;
 test.describe.configure({ mode: "serial" });
 
 test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () => {
+	// Cold gateway startup can exceed Playwright's 30s default on loaded Windows runners.
+	test.setTimeout(60_000);
+
 	test("startup with reachable aigw publishes a marked provider with exact routed models", async () => {
 		const mock = await startMockAigw([
 			"openai/gpt-5.2",

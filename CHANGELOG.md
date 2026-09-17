@@ -3,6 +3,14 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.22.0
+
+Upgrading from v0.21.0. This release protects every gateway with authentication by default, including local-only installations, while preserving an explicit loopback-only escape hatch.
+
+### ✨ New Features
+
+* 🛡️ **Secure local gateways by default**: Gateway token authentication now applies to loopback binds as well as network-accessible hosts, preventing other local processes from reaching Bobbit without credentials. Trusted local development can explicitly opt out with the loopback-only `--no-auth` flag.
+
 ## v0.21.0
 
 Upgrading from v0.20.0. This release adds explicit approval for project-defined MCP servers and trust confirmations for external locations, while strengthening verification security and package delivery.
