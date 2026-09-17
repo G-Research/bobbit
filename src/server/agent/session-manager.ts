@@ -3610,6 +3610,9 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private readonly mcpManagerInitializations = new Map<string, Promise<unknown>>();
+	private defaultMcpInitialization: Promise<void> | null = null;
+	private terminalShutdownStarted = false;
+	private shutdownPromise: Promise<void> | null = null;
 	/** Exact host discovery coordinate selected after a session worktree is provisioned. */
 	private readonly mcpSessionScopes = new Map<string, { projectId: string; cwd: string; scopeKey: string }>();
 	/** Project sources temporarily withheld while their registered root changes. */
@@ -7083,6 +7086,7 @@ export class SessionManager {
 	}
 
 	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		if (this.terminalShutdownStarted) return null;
 		if (scope?.projectId && this.suspendedMcpProjects.has(scope.projectId)) return null;
 		let cwd = scope?.cwd ? canonicalExecutionCwd(scope.cwd) : undefined;
 		const projectId = scope?.projectId;
@@ -7719,21 +7723,35 @@ export class SessionManager {
 	}
 
 	async initMcp(cwd: string): Promise<void> {
+		if (this.terminalShutdownStarted) return;
+		if (this.defaultMcpInitialization) return this.defaultMcpInitialization;
+		const initialization = this.initMcpOwned(cwd);
+		this.defaultMcpInitialization = initialization;
+		try {
+			await initialization;
+		} finally {
+			if (this.defaultMcpInitialization === initialization) this.defaultMcpInitialization = null;
+		}
+	}
+
+	private async initMcpOwned(cwd: string): Promise<void> {
 		try {
 			const mgr = this.createMcpManager(cwd);
 
 			await mgr.connectAll();
+			if (this.terminalShutdownStarted) {
+				await mgr.disconnectAll();
+				return;
+			}
 			this.mcpManager = mgr;
 
 			if (this.projectContextManager) {
 				for (const ctx of this.projectContextManager.all()) {
-					const key = this.mcpScopeKey({ projectId: ctx.project.id });
-					if (this.scopedMcpManagers.has(key)) continue;
-					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
-					this.scopedMcpManagers.set(key, scoped);
-					await scoped.connectAll();
+					if (this.terminalShutdownStarted) break;
+					await this.ensureMcpManager({ projectId: ctx.project.id, cwd: ctx.project.rootPath });
 				}
 			}
+			if (this.terminalShutdownStarted) return;
 
 			// Register MCP tools with ToolManager across default and scoped managers.
 			this.refreshExternalMcpToolRegistrations();
@@ -7741,6 +7759,7 @@ export class SessionManager {
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
+			if (this.terminalShutdownStarted) throw err;
 		}
 	}
 
@@ -20985,7 +21004,23 @@ export class SessionManager {
 	}
 
 	async shutdown(): Promise<void> {
-		await this.stopPurgeSchedule();
+		if (!this.shutdownPromise) {
+			// Fence MCP creation synchronously. Existing initializations are joined by
+			// shutdownOwned before their managers are disconnected.
+			this.terminalShutdownStarted = true;
+			this.shutdownPromise = this.shutdownOwned();
+		}
+		return this.shutdownPromise;
+	}
+
+	private async shutdownOwned(): Promise<void> {
+		const failures: Array<{ phase: string; reason: unknown }> = [];
+		const run = async (phase: string, operation: () => void | Promise<void>): Promise<void> => {
+			try { await operation(); }
+			catch (reason) { failures.push({ phase, reason }); }
+		};
+
+		await run("purge-schedule", () => this.stopPurgeSchedule());
 		if (this.mcpReconcileTimer) {
 			this.clock.clearInterval(this.mcpReconcileTimer);
 			this.mcpReconcileTimer = null;
@@ -21007,11 +21042,14 @@ export class SessionManager {
 			const session = this.sessions.get(id);
 			if (!session) continue;
 
-			this.clearToolCallProvenance(session);
+			await run(`session:${id}:tool-provenance`, () => this.clearToolCallProvenance(session));
 			// Fence lifecycle admission before the first per-session await, then retain
 			// the complete already-admitted metadata lane for the stop barrier below.
-			const metadataOwner = this.fenceTerminalMetadataAdmission(session);
-			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
+			let metadataOwner: Promise<void> | undefined;
+			await run(`session:${id}:metadata-fence`, () => {
+				metadataOwner = this.fenceTerminalMetadataAdmission(session);
+			});
+			await run(`session:${id}:extension-channels`, () => this.closeExtensionChannelsForSession(id, "gateway-shutdown"));
 
 			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
@@ -21020,35 +21058,64 @@ export class SessionManager {
 			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
 			const store = this.resolveExistingStoreForShutdown(session);
 			if (store) {
-				store.update(id, {
+				await run(`session:${id}:persist-restart-state`, () => store.update(id, {
 					wasStreaming: needsRestartRedrive,
 					streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
-				});
+				}));
 			}
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are
 			// closing in shutdown so suppress the cancellation broadcast.
-			this.cancelPendingAutoRetry(session, "shutdown");
+			await run(`session:${id}:auto-retry`, () => this.cancelPendingAutoRetry(session, "shutdown"));
 
 			// Start stop alongside the final state request so process exit cancels any
 			// unresponsive metadata RPC. Durable work is still joined before the store
 			// flush and project-context teardown below.
-			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-			if (bridgeStopError) throw bridgeStopError;
+			await run(`session:${id}:runtime`, async () => {
+				const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+				if (bridgeStopError) throw bridgeStopError;
+			});
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
 
 			for (const client of session.clients) {
-				client.close(1000, "Server shutting down");
+				await run(`session:${id}:client`, () => client.close(1000, "Server shutting down"));
 			}
 			session.clients.clear();
-			this._untrackConnectedSession(session);
+			await run(`session:${id}:untrack`, () => this._untrackConnectedSession(session));
 			this.sessions.delete(id);
 			this._taskIdCache.delete(id);
 		}
 		this._taskIdCache.clear();
+
+		// A manager can be shared by more than one scope. Join every already-started
+		// initialization, then disconnect each unique owner exactly once before any
+		// store is closed. This is terminal-only; ordinary gateway restarts still
+		// preserve durable sessions and worktree ownership above.
+		const initializations = [
+			...(this.defaultMcpInitialization ? [this.defaultMcpInitialization] : []),
+			...this.mcpManagerInitializations.values(),
+		];
+		const initializationResults = await Promise.allSettled(initializations);
+		for (const result of initializationResults) {
+			if (result.status === "rejected") failures.push({ phase: "mcp-initialization", reason: result.reason });
+		}
+		this.defaultMcpInitialization = null;
+		const mcpManagers = new Set<McpManager>([
+			...(this.mcpManager ? [this.mcpManager] : []),
+			...this.scopedMcpManagers.values(),
+		]);
+		this.mcpManager = null;
+		this.scopedMcpManagers.clear();
+		this.mcpManagerInitializations.clear();
+		this.mcpSessionScopes.clear();
+		const mcpResults = await Promise.allSettled([...mcpManagers].map((manager) => manager.disconnectAll()));
+		for (const result of mcpResults) {
+			if (result.status === "rejected") failures.push({ phase: "mcp-disconnect", reason: result.reason });
+		}
+		await run("mcp-tool-registrations", () => this.refreshExternalMcpToolRegistrations());
 
 		// Persist the trailing debounced cost window before contexts are closed.
 		// `flush()` is idempotent, so ProjectContext.close() may safely repeat it.
@@ -21098,9 +21165,16 @@ export class SessionManager {
 			const results = await Promise.allSettled(stores.map((store) => store.close()));
 			for (const result of results) {
 				if (result.status === "rejected") {
-					console.error("[session-manager] Failed to close test fallback store:", result.reason);
+					failures.push({ phase: "test-fallback-store", reason: result.reason });
 				}
 			}
+		}
+
+		if (failures.length > 0) {
+			throw new AggregateError(
+				failures.map(({ phase, reason }) => new Error(`Session manager shutdown phase "${phase}" failed`, { cause: reason })),
+				`Session manager shutdown failed in ${failures.length} phase(s): ${failures.map(({ phase }) => phase).join(", ")}`,
+			);
 		}
 	}
 }
