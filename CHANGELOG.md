@@ -3,6 +3,24 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.21.0
+
+Upgrading from v0.20.0. This release adds explicit approval for project-defined MCP servers and trust confirmations for external locations, while strengthening verification security and package delivery.
+
+### ✨ New Features
+
+* 🔌 **Approval-gated project MCP servers**: Repository-defined MCP processes and endpoints remain inactive until reviewed in Tools → MCP. Approvals track the exact configuration and worktree, reset when definitions change, redact credentials, and keep repository previews isolated from gateway authority.
+
+* 🛡️ **Explicit trust for external locations**: Bobbit now shows the exact path and security consequences before onboarding a project location or adding a Marketplace source, requiring deliberate confirmation and re-prompting when a project path changes.
+
+### 🐛 Bug Fixes
+
+* ✅ **Secure verification results**: Verification callbacks are bound to the exact verifier session, late results remain safe during teardown, and HTML reports and workspace images are processed with strict file, size, and containment checks.
+
+* 📦 **Reliable bundled search binaries**: Platform packages for `fd` and `rg` now use the `@gresearch` scope, with stronger publish automation and registry-propagation retries to keep installs consistent.
+
+* 🏷️ **Accurate npm package identity**: Package metadata, licensing, and install documentation now consistently identify `@gresearch/bobbit`.
+
 ## v0.20.0
 
 Upgrading from v0.19.0. This release adds autonomous performance optimisation, GPT-6 Astra support, richer extension-pack capabilities, and resizable persistent side panels, while strengthening gateway security, responsiveness, tool resolution, and worktree recovery.
