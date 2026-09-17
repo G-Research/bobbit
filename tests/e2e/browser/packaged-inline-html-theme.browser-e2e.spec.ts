@@ -11,10 +11,10 @@ import {
 	runPiPackedConsumerNpm,
 } from "../test-utils/pi-packed-consumer-command.js";
 import {
-	PACKED_CONSUMER_DESCRIPTOR_ENV,
 	materializePackedConsumerFixture,
 	readPreparedPackedConsumerDescriptor,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
+import { resolvePackedConsumerDescriptorPath } from "../../../scripts/run-playwright-e2e.mjs";
 import {
 	capturePackagedCli,
 	commandFailure,
@@ -418,11 +418,14 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		// Browser-v2 global setup produces a content-addressed fresh dist first.
 		// The E2E coordinator packs that exact artifact once before Group C starts.
 		const coordinatorRunRoot = process.env.BOBBIT_V2_RUN_ROOT;
-		const descriptorPath = process.env[PACKED_CONSUMER_DESCRIPTOR_ENV];
 		expect(coordinatorRunRoot, "BOBBIT_V2_RUN_ROOT must identify the authoritative E2E coordinator root").toBeTruthy();
-		expect(descriptorPath, `${PACKED_CONSUMER_DESCRIPTOR_ENV} must be published by the E2E coordinator`).toBeTruthy();
-		expect(isStrictChild(coordinatorRunRoot!, descriptorPath!), "descriptor must be owned by the authoritative coordinator root").toBe(true);
-		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath!, coordinatorRunRoot!);
+		// Config isolation deliberately strips ambient runtime pathnames before
+		// workers start. Discover the descriptor only at its fixed location below
+		// the authoritative fresh root; if a coordinator handoff survived, the
+		// resolver requires it to name that exact same path.
+		const descriptorPath = resolvePackedConsumerDescriptorPath(process.env, coordinatorRunRoot!);
+		expect(isStrictChild(coordinatorRunRoot!, descriptorPath), "descriptor must be owned by the authoritative coordinator root").toBe(true);
+		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath, coordinatorRunRoot!);
 		const materialized = await materializePackedConsumerFixture(descriptor, {
 			coordinatorRunRoot: coordinatorRunRoot!,
 			name: `inline-theme-${testInfo.workerIndex}`,

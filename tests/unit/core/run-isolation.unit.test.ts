@@ -30,6 +30,7 @@ import {
   directRunnerPackedConsumerDecision,
   isE2EAmbientRuntimeEnvKey,
   prepareDirectRunnerPackedConsumer,
+  resolvePackedConsumerDescriptorPath,
 } from "../../../scripts/run-playwright-e2e.mjs";
 import {
   createBrowserRunEnvironment,
@@ -785,6 +786,13 @@ describe("unit run isolation", () => {
     expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(ownedDescriptor);
   });
 
+  it("rejects an ambient descriptor pathname instead of treating it as a trusted handoff", () => {
+    const root = join(tmpdir(), "authoritative-packed-consumer-run");
+    expect(() => resolvePackedConsumerDescriptorPath({
+      BOBBIT_PACKED_CONSUMER_DESCRIPTOR: join(tmpdir(), "attacker-run", "prepared-packed-consumer", "descriptor.json"),
+    }, root)).toThrow(/outside the authoritative coordinator layout/);
+  });
+
   it("delegates focused Group C preparation exactly once to its nested coordinator root", async () => {
     const temp = mkdtempSync(join(tmpdir(), "focused-group-c-packed-consumer-"));
     try {
@@ -844,6 +852,16 @@ describe("unit run isolation", () => {
       expect(preparations).toBe(1);
       expect(result).toMatchObject({ selected: true, descriptorPath });
       expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+
+      // Match the full Group-C launch: playwright-e2e.config installs run
+      // isolation before workers start, stripping the handoff pathname while
+      // retaining the authoritative fresh run root. The worker must still
+      // discover exactly the descriptor prepared above, without another pack.
+      environment.BOBBIT_V2_RUN_ROOT = paths.root;
+      const workerEnvironment = sanitizeTestEnvironment(environment);
+      expect(workerEnvironment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
+      expect(resolvePackedConsumerDescriptorPath(workerEnvironment, workerEnvironment.BOBBIT_V2_RUN_ROOT!)).toBe(descriptorPath);
+      expect(preparations).toBe(1);
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }

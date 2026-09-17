@@ -297,6 +297,25 @@ function filterMaySelectPackedConsumer(filter) {
   }
 }
 
+/**
+ * Resolve the only trusted descriptor location for a coordinator run. A
+ * pathname handed through the environment is evidence only: it must equal the
+ * fixed location below the already-authoritative fresh run root.
+ */
+export function resolvePackedConsumerDescriptorPath(
+  environment,
+  authoritativeRunRoot,
+  platform = process.platform,
+) {
+  if (!authoritativeRunRoot) throw new Error("Packed-consumer descriptor resolution requires the authoritative coordinator run root");
+  const expected = join(resolve(authoritativeRunRoot), "prepared-packed-consumer", "descriptor.json");
+  const handedOff = environmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, platform);
+  if (handedOff && resolve(handedOff) !== expected) {
+    throw new Error(`Packed-consumer descriptor handoff is outside the authoritative coordinator layout: ${handedOff}`);
+  }
+  return expected;
+}
+
 /** Decide whether this direct coordinator can discover the packaged-consumer spec. */
 export function directRunnerPackedConsumerDecision(forwardedArgs = []) {
   const selectedProjects = optionValues(forwardedArgs, "--project");
@@ -329,8 +348,12 @@ export async function prepareDirectRunnerPackedConsumer(
     runRoot: paths.root,
     baseEnv: environment,
   });
-  setEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, descriptor.descriptorPath);
-  return Object.freeze({ prepare: true, reason: decision.reason, descriptorPath: descriptor.descriptorPath });
+  const descriptorPath = resolvePackedConsumerDescriptorPath(
+    { [PACKED_CONSUMER_DESCRIPTOR_ENV]: descriptor.descriptorPath },
+    paths.root,
+  );
+  setEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, descriptorPath);
+  return Object.freeze({ prepare: true, reason: decision.reason, descriptorPath });
 }
 
 export async function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {

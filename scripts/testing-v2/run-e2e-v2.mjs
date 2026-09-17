@@ -49,6 +49,7 @@ import {
 	createE2ERunPaths,
 	createIsolatedE2EEnvironment,
 	createPlaywrightE2EInvocation,
+	resolvePackedConsumerDescriptorPath,
 } from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
@@ -510,10 +511,14 @@ export async function prepareGroupCPackedConsumer(specs, environment, paths, pre
 		runRoot: paths.root,
 		baseEnv: environment,
 	});
-	environment[PACKED_CONSUMER_DESCRIPTOR_ENV] = descriptor.descriptorPath;
+	const descriptorPath = resolvePackedConsumerDescriptorPath(
+		{ [PACKED_CONSUMER_DESCRIPTOR_ENV]: descriptor.descriptorPath },
+		paths.root,
+	);
+	environment[PACKED_CONSUMER_DESCRIPTOR_ENV] = descriptorPath;
 	return {
 		selected: true,
-		descriptorPath: descriptor.descriptorPath,
+		descriptorPath,
 		tarballPath: descriptor.tarballPath,
 		templateDir: descriptor.templateDir,
 		wallMs: Math.round(performance.now() - startedAt),
