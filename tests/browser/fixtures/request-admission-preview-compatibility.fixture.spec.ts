@@ -4,14 +4,17 @@ import { buildBundle } from "../../support/helpers/browser/fixtures/build-bundle
 import {
 	apiFetch,
 	createSession,
-	nonGitCwd,
 	readE2ETokenAsync,
 } from "../../support/harnesses/browser/e2e-setup.js";
 import { createServer, type Server } from "node:http";
-import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
+import {
+	createRunChild,
+	removeOwnedRunChild,
+} from "../../support/harnesses/shared/run-isolation.js";
+import { shutdownResourcesThenRemove } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
 
 const ENTRY = "request-admission-preview.html";
 const INITIAL_MARKER = "REQUEST_ADMISSION_PREVIEW_INITIAL";
@@ -27,7 +30,7 @@ const INLINE_DARK = {
 	chart: "rgb(211, 71, 91)",
 };
 
-const bundleRoot = mkdtempSync(join(tmpdir(), "bobbit-request-admission-browser-"));
+const bundleRoot = createRunChild("request-admission-browser");
 const bundleEntry = join(bundleRoot, "inline-html-entry.ts");
 const bundlePath = join(bundleRoot, "inline-html-bundle.js");
 let attackerServer: Server | undefined;
@@ -298,19 +301,29 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-	await stopAttackerServer();
-	rmSync(bundleRoot, { recursive: true, force: true });
+	try {
+		await shutdownResourcesThenRemove({
+			phases: [{ name: "attacker server", owners: [stopAttackerServer] }],
+			remove: () => removeOwnedRunChild(bundleRoot, {
+				attackerServer: "close resolved",
+				bundleConsumers: "tests settled",
+			}),
+		});
+	} catch (error) {
+		throw new AggregateError([error], `request admission bundle cleanup failed; retained diagnostics: ${bundleRoot}`);
+	}
 });
 
 test.describe("Request admission preview compatibility", () => {
 	test("admits trusted top-level, iframe, asset, redirect, SSE, popout, and restart preview flows while rejecting cross-site embedding", async ({ page, gateway }) => {
 		test.setTimeout(55_000);
-		const fixtureDir = mkdtempSync(join(nonGitCwd(), "request-admission-preview-"));
+		const fixtureDir = createRunChild("request-admission-preview");
 		const assetsDir = join(fixtureDir, "assets");
 		const htmlPath = join(fixtureDir, ENTRY);
 		let sessionId: string | undefined;
 		let popup: Page | undefined;
 		let attacker: Page | undefined;
+		let bodyFailure: unknown;
 		const previewFailures: string[] = [];
 		const successfulPreviewResponses = new Map<string, { csp: string; allowOrigin: string; allowCredentials: string }>();
 
@@ -504,17 +517,49 @@ test.describe("Request admission preview compatibility", () => {
 				}
 			}
 			expect(previewFailures, `trusted preview traffic must not fail admission: ${previewFailures.join(", ")}`).toEqual([]);
+		} catch (error) {
+			bodyFailure = error;
 		} finally {
-			if (popup && !popup.isClosed()) await popup.close().catch(() => {});
-			if (attacker && !attacker.isClosed()) await attacker.close().catch(() => {});
-			// Release the iframe, relative assets, EventSource, and app WebSocket before
-			// asking Windows to remove the directory they were consuming.
-			await page.goto("about:blank", { waitUntil: "load" });
-			if (sessionId) {
-				const response = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-				expect(response.status, `session cleanup failed: ${await response.text()}`).toBe(200);
+			let cleanupFailure: unknown;
+			const sessionToDelete = sessionId;
+			try {
+				await shutdownResourcesThenRemove({
+					phases: [
+						{
+							name: "browser pages",
+							// Release every browser owner of the iframe, relative assets,
+							// EventSource, and app WebSocket before stopping file watchers.
+							owners: [
+								() => popup && !popup.isClosed() ? popup.close() : undefined,
+								() => attacker && !attacker.isClosed() ? attacker.close() : undefined,
+								() => !page.isClosed() ? page.close() : undefined,
+							],
+						},
+						{
+							name: "preview session",
+							owners: sessionToDelete ? [async () => {
+								const response = await apiFetch(`/api/sessions/${sessionToDelete}`, { method: "DELETE" });
+								if (response.status !== 200) {
+									throw new Error(`session cleanup failed: ${response.status} ${await response.text()}`);
+								}
+							}] : [],
+						},
+					],
+					remove: () => removeOwnedRunChild(fixtureDir, {
+						browser: "popup, attacker, and page close settled",
+						session: sessionToDelete ? "delete acknowledged" : "not created",
+						previewResources: "browser and session owners released",
+					}),
+				});
+			} catch (error) {
+				cleanupFailure = error;
 			}
-			rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+
+			if (cleanupFailure) {
+				const failures = bodyFailure ? [bodyFailure, cleanupFailure] : [cleanupFailure];
+				throw new AggregateError(failures, `request admission preview cleanup failed; retained diagnostics: ${fixtureDir}`);
+			}
+			if (bodyFailure) throw bodyFailure;
 		}
 	});
 
