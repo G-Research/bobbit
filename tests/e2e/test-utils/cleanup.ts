@@ -1,52 +1,51 @@
 /**
- * Bounded-retry filesystem cleanup for E2E harness teardown.
- *
- * Why: rmSync(..., { recursive: true, force: true }) on Windows under heavy
- * parallel load deadlocks against Windows Defender, which holds file handles
- * for ~50–500ms after the last write. The previous fire-and-forget
- * `void rmAsync(...)` strategy hid the failures behind a global teardown
- * sweep; this helper bounds the work, retries with backoff, and surfaces
- * the leak count if cleanup never completes.
- *
- * Used by gateway-harness.ts, in-process-harness.ts,
- * in-process-harness-realpush.ts and the global teardown.
+ * Compatibility entrypoint for ownership-checked E2E filesystem cleanup.
+ * Windows transient lock errors use the shared bounded retry/deadline policy;
+ * terminal diagnostics preserve the complete attempt and lifecycle history.
  */
-import { rm } from "node:fs/promises";
+import { dirname } from "node:path";
+import { removeOwnedPath } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
 
 export interface AwaitableRmOptions {
+	ownerRoot?: string;
+	allowOwnerRoot?: boolean;
+	owner?: { kind: string; id: string };
+	lifecycle?: Record<string, unknown>;
 	maxAttempts?: number;
+	deadlineMs?: number;
 	backoffMs?: number;
+	maxDelayMs?: number;
+	throwOnFailure?: boolean;
 	onFinalFailure?: (err: unknown) => void;
 }
 
 /**
- * Recursively remove a directory tree, retrying transient FS errors.
- *
- * Resolves when removal succeeds or the budget is exhausted (does NOT throw).
- * On final failure, calls `onFinalFailure` if provided so the global teardown
- * can track leaks. Safe to await from worker teardown — bounded by
- * `maxAttempts * backoffMs * 2^maxAttempts` worst-case.
+ * Compatibility facade for legacy fixtures. New harness cleanup should supply
+ * its coordinator run root and opt into fail-loud terminal errors.
  */
 export async function awaitableRm(
 	path: string,
 	opts: AwaitableRmOptions = {},
-): Promise<{ removed: boolean; attempts: number; lastError?: unknown }> {
-	const max = opts.maxAttempts ?? 5;
-	const base = opts.backoffMs ?? 200;
-	let lastErr: unknown;
-	for (let attempt = 1; attempt <= max; attempt++) {
-		try {
-			await rm(path, { recursive: true, force: true });
-			return { removed: true, attempts: attempt };
-		} catch (err) {
-			lastErr = err;
-			if (attempt === max) break;
-			// Exponential backoff: 200ms, 400ms, 800ms, 1600ms
-			await new Promise(r => setTimeout(r, base * Math.pow(2, attempt - 1)));
-		}
+): Promise<{ removed: boolean; attempts: number; history?: unknown[]; lastError?: unknown }> {
+	try {
+		return await removeOwnedPath(path, {
+			ownerRoot: opts.ownerRoot ?? dirname(path),
+			allowOwnerRoot: opts.allowOwnerRoot,
+			owner: opts.owner,
+			lifecycle: opts.lifecycle,
+			maxAttempts: opts.maxAttempts,
+			deadlineMs: opts.deadlineMs,
+			initialDelayMs: opts.backoffMs,
+			maxDelayMs: opts.maxDelayMs,
+		});
+	} catch (error) {
+		opts.onFinalFailure?.(error);
+		if (opts.throwOnFailure) throw error;
+		const attempts = typeof (error as { attempts?: unknown })?.attempts === "number"
+			? (error as { attempts: number }).attempts
+			: 1;
+		return { removed: false, attempts, lastError: error };
 	}
-	if (opts.onFinalFailure) opts.onFinalFailure(lastErr);
-	return { removed: false, attempts: max, lastError: lastErr };
 }
 
 /**

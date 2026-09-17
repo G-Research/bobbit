@@ -383,19 +383,15 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			registerTeamLeadSecretSource(undefined);
 		} catch { /* best-effort */ }
 		await gw.shutdown();
-		// Bounded-retry cleanup — see gateway-harness.ts for rationale.
-		await awaitableRm(bobbitDir, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[in-process-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
-			},
-		});
-		await awaitableRm(defaultProjectRoot, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[in-process-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
-			},
-		});
+		const lifecycle = { browserFixture: "settled", gateway: "shutdown resolved", secretStores: "unregistered" };
+		const cleanupResults = await Promise.allSettled([bobbitDir, defaultProjectRoot].map(target => awaitableRm(target, {
+			ownerRoot: getRunRoot(),
+			owner: { kind: "worker", id: String(process.pid) },
+			lifecycle,
+			throwOnFailure: true,
+		})));
+		const cleanupFailures = cleanupResults.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (cleanupFailures.length) throw new AggregateError(cleanupFailures.map(result => result.reason), "in-process harness path cleanup failed");
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

@@ -32,7 +32,7 @@ import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
 import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
-import { createRunChild, getRunRoot } from "./run-isolation.js";
+import { createRunChild, getRunRoot, removeOwnedRunChild } from "./run-isolation.js";
 
 type ResolvePath = (...paths: string[]) => string;
 
@@ -518,13 +518,16 @@ async function boot(): Promise<BootedGateway> {
 		},
 		async shutdown() {
 			await gw.shutdown();
-			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			await removeOwnedRunChild(bobbitDir, { gateway: "shutdown resolved" });
 		},
 	};
 
 	if (!exitHookRegistered) {
 		exitHookRegistered = true;
-		process.once("exit", () => { try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* sync best-effort */ } });
+		process.once("exit", () => {
+			try { rmSync(bobbitDir, { recursive: true, force: true }); }
+			catch (error) { console.error(`[tests/gateway] best-effort exit cleanup failed for ${bobbitDir}: ${String(error)}`); }
+		});
 	}
 
 	void authHeaders; // reserved for future WS/header helpers

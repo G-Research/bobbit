@@ -34,7 +34,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { join, resolve } from "node:path";
-import { createRunChild, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
+import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
 import { fileURLToPath } from "node:url";
@@ -212,12 +212,11 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 
 		// Teardown — use existing shutdown() for proper cleanup
 		await gw.shutdown();
-		// Bounded-retry cleanup — see gateway-harness.ts for rationale.
 		await awaitableRm(bobbitDir, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[in-process-harness-realpush] cleanup deferred for ${bobbitDir}: ${msg}`);
-			},
+			ownerRoot: getRunRoot(),
+			owner: { kind: "worker", id: String(process.pid) },
+			lifecycle: { browserFixture: "settled", gateway: "shutdown resolved", gitRemote: "fixture settled" },
+			throwOnFailure: true,
 		});
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 });
