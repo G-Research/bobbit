@@ -21096,21 +21096,23 @@ export class SessionManager {
 		// preserve durable sessions and worktree ownership above.
 		const initializations = [
 			...(this.defaultMcpInitialization ? [this.defaultMcpInitialization] : []),
-			...this.mcpManagerInitializations.values(),
+			...(this.mcpManagerInitializations?.values() ?? []),
 		];
 		const initializationResults = await Promise.allSettled(initializations);
 		for (const result of initializationResults) {
 			if (result.status === "rejected") failures.push({ phase: "mcp-initialization", reason: result.reason });
 		}
 		this.defaultMcpInitialization = null;
-		const mcpManagers = new Set<McpManager>([
-			...(this.mcpManager ? [this.mcpManager] : []),
-			...this.scopedMcpManagers.values(),
-		]);
+		// Shutdown may be asked to drain a partially initialized instance. Only
+		// disconnect-capable values represent MCP process ownership.
+		const mcpManagers = new Set<McpManager>(
+			[this.mcpManager, ...(this.scopedMcpManagers?.values() ?? [])]
+				.filter((manager): manager is McpManager => typeof manager?.disconnectAll === "function"),
+		);
 		this.mcpManager = null;
-		this.scopedMcpManagers.clear();
-		this.mcpManagerInitializations.clear();
-		this.mcpSessionScopes.clear();
+		this.scopedMcpManagers?.clear();
+		this.mcpManagerInitializations?.clear();
+		this.mcpSessionScopes?.clear();
 		const mcpResults = await Promise.allSettled([...mcpManagers].map((manager) => manager.disconnectAll()));
 		for (const result of mcpResults) {
 			if (result.status === "rejected") failures.push({ phase: "mcp-disconnect", reason: result.reason });
