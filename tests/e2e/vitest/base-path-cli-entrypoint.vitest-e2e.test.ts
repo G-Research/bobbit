@@ -346,6 +346,90 @@ describe("executable CLI root and nested base-path smoke", () => {
 		}
 	});
 
+	it("honors the explicit no-auth escape hatch in the built CLI", async () => {
+		expect(existsSync(BUILT_CLI_ENTRY), "built CLI is required for no-auth executable coverage").toBe(true);
+		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-no-auth-"));
+		const projectRoot = join(root, "project");
+		const staticDir = join(root, "static");
+		const headquartersDir = join(root, "headquarters");
+		mkdirSync(projectRoot, { recursive: true });
+		mkdirSync(staticDir, { recursive: true });
+		writeFileSync(join(staticDir, "index.html"), "<!doctype html><body>NO_AUTH_CLI_SMOKE</body>\n", "utf8");
+
+		const childEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			BOBBIT_DIR: headquartersDir,
+			BOBBIT_SECRETS_DIR: join(root, "secrets"),
+			BOBBIT_AGENT_DIR: join(root, "agent"),
+			BOBBIT_NO_OPEN: "1",
+			BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+			BOBBIT_SKIP_MCP: "1",
+			BOBBIT_SKIP_TITLE_GEN: "1",
+			BOBBIT_SKIP_WORKTREE_POOL: "1",
+			BOBBIT_TEST_NO_EXTERNAL: "1",
+			BOBBIT_TEST_NO_REMOTE: "1",
+			NODE_ENV: "test",
+		};
+		delete childEnv.BOBBIT_BASE_PATH;
+
+		const child = spawn(process.execPath, [
+			BUILT_CLI_ENTRY,
+			"--cwd", projectRoot,
+			"--host", "127.0.0.1",
+			"--port", "0",
+			"--no-tls",
+			"--no-auth",
+			"--static", staticDir,
+		], {
+			cwd: REPO_ROOT,
+			env: childEnv,
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		let output = "";
+		child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+		child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+
+		try {
+			const gatewayUrlPath = join(headquartersDir, "state", "gateway-url");
+			const persistedUrl = await pollUntil(() => {
+				if (child.exitCode !== null || child.signalCode !== null) {
+					throw new Error(`no-auth CLI exited before publishing its gateway URL (${child.exitCode ?? child.signalCode})\n${output}`);
+				}
+				if (!existsSync(gatewayUrlPath)) return "";
+				const value = readFileSync(gatewayUrlPath, "utf8").trim();
+				const parsed = new URL(value);
+				return parsed.port && parsed.port !== "0" ? value : "";
+			}, { timeoutMs: 15_000, intervalMs: 50, label: "no-auth executable CLI persisted URL" });
+
+			await pollUntil(() => output.includes(`Listening:  ${persistedUrl}`)
+				&& output.includes("Token authentication is disabled on this loopback bind."), {
+				timeoutMs: 5_000,
+				intervalMs: 25,
+				label: "no-auth executable CLI startup banner",
+			});
+			expect(output).toContain(`UI:         ${persistedUrl}/`);
+			expect(output).toContain("Any local process can access the gateway. Remove --no-auth to require the token.");
+			expect(output).not.toMatch(/Auth token:/i);
+			expect(output).not.toContain("?token=");
+
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "no-auth CLI");
+			expect(health).toMatchObject({ status: "ok", localhost: true });
+
+			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
+				method: "POST",
+				signal: AbortSignal.timeout(5_000),
+			});
+			expect(shutdown.status).toBe(200);
+			expect(await shutdown.json()).toEqual({ status: "shutting down" });
+			expect(await waitForExit(child, 5_000)).toEqual({ code: 0, signal: null });
+		} finally {
+			await forceStop(child);
+			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
+			expect(cleanup.removed, `isolated no-auth CLI cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
 	it.skipIf(process.platform === "win32")("starts the built CLI through an npm-style POSIX bin symlink", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-symlink-smoke-"));
 		const projectRoot = join(root, "project");
