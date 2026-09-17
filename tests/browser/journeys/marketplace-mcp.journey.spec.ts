@@ -246,6 +246,13 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect(page.locator('[data-testid="market-mcp-source-helper"]')).toContainText("one provider pack per namespace");
 	await page.locator('[data-testid="market-source-url"]').fill(GATEWAY_URL);
 	await page.locator('[data-testid="market-add-source"]').click();
+	const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+	await expect(trustDialog).toBeVisible();
+	await expect(trustDialog).toContainText(/responsible for validating/i);
+	await expect(trustDialog.locator('[data-testid="trusted-location-value"]')).toHaveText(GATEWAY_URL);
+	await expect(trustDialog.locator('[data-testid="trusted-location-consequence"]')).toContainText(/expose secrets and project data/i);
+	await expect.poll(() => posts.addSource.length).toBe(0);
+	await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 	await expect.poll(() => posts.addSource.length, { timeout: 10_000 }).toBe(1);
 	await expect(posts.addSource[0]).toMatchObject({ url: GATEWAY_URL, type: "mcp-gateway" });
 	await expect(JSON.stringify(posts.addSource[0])).not.toContain('"ref"');

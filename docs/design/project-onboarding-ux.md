@@ -258,6 +258,20 @@ the footer or autocomplete overlay.
 See [Add Project inline directory creation UX](add-project-inline-create.md) for
 the shipped behavior and test references.
 
+### D13. Project locations require an explicit trust decision
+
+**Continue** opens a confirmation over the Add Project dialog before
+registration, project scanning, or assistant handoff proceeds. The confirmation shows
+the exact path, makes the operator responsible for validating the location and
+who controls it, and warns that compromised project instructions,
+configuration, or commands can execute malicious code, damage files, expose
+secrets or project data, and use the operator's network access.
+
+Cancelling returns to the unchanged Add Project dialog. Acceptance is retained
+only for that exact path while the dialog remains open; editing the path requires
+a fresh decision. The confirmation deliberately ignores Enter as acceptance so
+trust always requires a click on the explicit **Trust and continue** action.
+
 ## Where it lives
 
 | Concern | File |

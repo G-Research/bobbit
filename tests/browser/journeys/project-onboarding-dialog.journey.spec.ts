@@ -71,6 +71,40 @@ test.describe("Journey: Project Onboarding", () => {
 		await expect(page.locator(ADD_PROJECT.statusSlot)).toBeVisible({ timeout: 15_000 });
 	});
 
+	test("Continue requires explicit trust for the exact project location", async ({ page }) => {
+		const projectDir = uniqueDir("trust-warning");
+		mkdirSync(projectDir, { recursive: true });
+		try {
+			await openApp(page);
+			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+
+			const addBtn = page.getByRole("button", { name: /add project/i }).first();
+			await expect(addBtn).toBeVisible({ timeout: 15_000 });
+			await addBtn.click();
+			const projectDialog = page.locator(ADD_PROJECT.dialog);
+			await expect(projectDialog).toBeVisible({ timeout: 15_000 });
+			await projectDialog.locator(ADD_PROJECT.pickerInput).fill(projectDir);
+
+			const continueButton = projectDialog.locator(ADD_PROJECT.continue);
+			await expect(continueButton).toBeEnabled({ timeout: 15_000 });
+			await continueButton.click();
+
+			const trustDialog = page.locator(ADD_PROJECT.trustDialog);
+			await expect(trustDialog).toBeVisible({ timeout: 15_000 });
+			await expect(trustDialog).toContainText(/responsible for validating/i);
+			await expect(trustDialog.locator(ADD_PROJECT.trustValue)).toHaveText(projectDir);
+			await expect(trustDialog.locator('[data-testid="trusted-location-consequence"]')).toContainText(/run malicious code/i);
+			await trustDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+			await expect(trustDialog).toHaveCount(0);
+			await expect(projectDialog).toBeVisible();
+			await expect(projectDialog.locator(ADD_PROJECT.pickerInput)).toHaveValue(projectDir);
+		} finally {
+			try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
 	test("Browse button opens add-project-browse-dialog overlay", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });

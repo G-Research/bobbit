@@ -135,6 +135,11 @@ describe("Marketplace MCP UI", () => {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 		await vi.waitFor(() => expect((document.querySelector('[data-testid="market-add-source"]') as HTMLButtonElement).disabled).toBe(false));
 		(document.querySelector('[data-testid="market-add-source"]') as HTMLButtonElement).click();
+		await vi.waitFor(() => expect(document.querySelector('[data-testid="trusted-location-dialog"]')).not.toBeNull());
+		expect(document.querySelector('[data-testid="trusted-location-value"]')?.textContent).toBe(GATEWAY_URL);
+		expect(document.querySelector('[data-testid="trusted-location-consequence"]')?.textContent).toMatch(/run code or commands/i);
+		expect(capturedSourceBody).toBeUndefined();
+		(document.querySelector('[data-testid="trusted-location-confirm"]') as HTMLElement).click();
 		await vi.waitFor(() => expect(capturedSourceBody).toEqual({ url: GATEWAY_URL, type: "mcp-gateway" }));
 	});
 

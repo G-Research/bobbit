@@ -136,8 +136,11 @@ test.describe("Add Project flow (UI)", () => {
 		// Type the path
 		await page.locator('input[placeholder="/path/to/project"]').fill(dir);
 
-		// Click Continue
+		// Click Continue and explicitly trust the selected project location.
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
+		const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+		await expect(trustDialog).toBeVisible({ timeout: 10_000 });
+		await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 
 		// The dialog should close and the project should appear in the sidebar
 		// Wait for dialog to disappear
@@ -207,6 +210,9 @@ test.describe("Add Project flow (UI)", () => {
 				}
 			});
 			await continueButton.click();
+			const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+			await expect(trustDialog).toBeVisible({ timeout: 10_000 });
+			await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 			const sessionResponse = await sessionPost;
 			const session = await sessionResponse.json() as { provisionalProjectId?: string };
 			expect(session.provisionalProjectId).toBeTruthy();
@@ -399,8 +405,11 @@ test.describe("Add Project flow (UI)", () => {
 		// Type the path
 		await page.locator('input[placeholder="/path/to/project"]').fill(dir);
 
-		// Click Continue
+		// Click Continue and explicitly trust the selected project location.
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
+		const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+		await expect(trustDialog).toBeVisible({ timeout: 10_000 });
+		await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 
 		// Dialog should close
 		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });

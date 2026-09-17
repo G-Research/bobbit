@@ -152,6 +152,9 @@ test.describe("Add Project — footer position invariant", () => {
 			// Click Continue → moves to scan step (the multi-repo fixture
 			// produces 2 detected repos so this is the path → scan branch).
 			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+			const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+			await expect(trustDialog).toBeVisible({ timeout: 10_000 });
+			await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 			await expect(page.locator(ADD_PROJECT.scanChecklist)).toBeVisible({ timeout: 10_000 });
 			await expect(page.locator(ADD_PROJECT.step)).toHaveText("scan");
 			await assertNoShift("scan step displayed");

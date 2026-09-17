@@ -463,10 +463,17 @@ async function refreshConfigPages(): Promise<void> {
 
 async function handleAddSource(): Promise<void> {
 	const url = newSourceUrl.trim();
-	if (!url) return;
+	if (!url || addingSource) return;
 	addingSource = true;
 	sourcesError = "";
 	renderApp();
+	const { confirmTrustedLocation } = await import("./dialogs.js");
+	const trusted = await confirmTrustedLocation("marketplace-source", url);
+	if (!trusted) {
+		addingSource = false;
+		renderApp();
+		return;
+	}
 	const res = await addMarketplaceSource(url, newSourceType === "pack" ? (newSourceRef.trim() || undefined) : undefined, newSourceType);
 	addingSource = false;
 	if (res.ok) {

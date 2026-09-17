@@ -100,6 +100,10 @@ test.describe("Add Project — symlink confirm flow", () => {
 		// Type the symlinked path and open the confirm modal.
 		await pathInput.fill(link);
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
+		const trustDialog = page.locator('[data-testid="trusted-location-dialog"]');
+		await expect(trustDialog).toBeVisible({ timeout: 10_000 });
+		await expect(trustDialog.locator('[data-testid="trusted-location-value"]')).toHaveText(link);
+		await trustDialog.locator('[data-testid="trusted-location-confirm"]').click();
 
 		// Confirm modal appears with both paths visible.
 		const symlinkConfirm = page.locator('[data-testid="symlink-confirm"]');
