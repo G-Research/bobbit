@@ -26,6 +26,10 @@ import {
   setEnvironmentValue,
 } from "./testing-v2/environment-policy.mjs";
 import { removeOwnedPath } from "./testing-v2/owned-path-cleanup.mjs";
+import {
+  PACKED_CONSUMER_DESCRIPTOR_ENV,
+  preparePackedConsumerFixture,
+} from "./testing-v2/prewarm-packed-consumer-cache.mjs";
 
 export {
   isAmbientBobbitRuntimeEnvKey as isE2EAmbientRuntimeEnvKey,
@@ -37,6 +41,35 @@ const projectRoot = resolve(__dirname, "..");
 const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const PLAYWRIGHT_CLI = join(projectRoot, "node_modules", "playwright", "cli.js");
+const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
+const PACKAGED_CONSUMER_PROJECT = "browser-canonical";
+const PLAYWRIGHT_OPTIONS_WITH_VALUES = new Set([
+  "--browser",
+  "-c", "--config",
+  "--debug",
+  "--global-timeout",
+  "-g", "--grep",
+  "--grep-invert",
+  "-j", "--workers",
+  "--max-failures",
+  "--only-changed",
+  "--output",
+  "--project",
+  "--repeat-each",
+  "--reporter",
+  "--retries",
+  "--run-agents",
+  "--shard",
+  "--test-list",
+  "--test-list-invert",
+  "--timeout",
+  "--trace",
+  "--tsconfig",
+  "--ui-host",
+  "--ui-port",
+  "-u", "--update-snapshots",
+  "--update-source-method",
+]);
 
 /** Build a shell-free local Playwright invocation or fail before spawning. */
 export function createPlaywrightE2EInvocation(forwardedArgs = [], {
@@ -215,6 +248,100 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   return env;
 }
 
+function optionValues(args, option) {
+  const values = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === option && args[index + 1] !== undefined) values.push(args[index + 1]);
+    else if (argument.startsWith(`${option}=`)) values.push(argument.slice(option.length + 1));
+  }
+  return values;
+}
+
+function positionalTestFilters(args) {
+  const filters = [];
+  let afterOptions = false;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (afterOptions) {
+      filters.push(argument);
+      continue;
+    }
+    if (argument === "--") {
+      afterOptions = true;
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      const option = argument.split("=", 1)[0];
+      if (!argument.includes("=") && PLAYWRIGHT_OPTIONS_WITH_VALUES.has(option)) index++;
+      continue;
+    }
+    filters.push(argument);
+  }
+  return filters;
+}
+
+function wildcardMatches(value, pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${escaped}$`, "i").test(value);
+}
+
+function filterMaySelectPackedConsumer(filter) {
+  const normalized = filter.replaceAll("\\", "/");
+  const basenameFilter = basename(normalized);
+  if (normalized === PACKAGED_CONSUMER_SPEC || basenameFilter === basename(PACKAGED_CONSUMER_SPEC)) return true;
+  try {
+    return new RegExp(normalized).test(PACKAGED_CONSUMER_SPEC);
+  } catch {
+    return PACKAGED_CONSUMER_SPEC.includes(normalized);
+  }
+}
+
+/**
+ * Decide whether a direct Playwright wrapper invocation can discover the
+ * packaged-consumer spec. An inherited descriptor belongs to an outer E2E v2
+ * coordinator and must never trigger a second pack/install.
+ */
+export function directRunnerPackedConsumerDecision(
+  forwardedArgs = [],
+  inheritedEnv = process.env,
+  platform = process.platform,
+) {
+  const inheritedDescriptor = environmentValue(inheritedEnv, PACKED_CONSUMER_DESCRIPTOR_ENV, platform);
+  if (inheritedDescriptor) {
+    return Object.freeze({ prepare: false, reason: "inherited-descriptor", descriptorPath: inheritedDescriptor });
+  }
+
+  const selectedProjects = optionValues(forwardedArgs, "--project");
+  if (selectedProjects.length > 0 && !selectedProjects.some(project => wildcardMatches(PACKAGED_CONSUMER_PROJECT, project))) {
+    return Object.freeze({ prepare: false, reason: "project-excludes-packaged-consumer", descriptorPath: null });
+  }
+
+  const filters = positionalTestFilters(forwardedArgs);
+  if (filters.length > 0 && !filters.some(filterMaySelectPackedConsumer)) {
+    return Object.freeze({ prepare: false, reason: "test-filter-excludes-packaged-consumer", descriptorPath: null });
+  }
+  return Object.freeze({ prepare: true, reason: filters.length === 0 ? "unfiltered" : "packaged-consumer-selected", descriptorPath: null });
+}
+
+/** Prepare once below the direct wrapper's root and publish into its child env. */
+export async function prepareDirectRunnerPackedConsumer(
+  forwardedArgs,
+  environment,
+  paths,
+  prepare = preparePackedConsumerFixture,
+) {
+  const decision = directRunnerPackedConsumerDecision(forwardedArgs, environment);
+  if (!decision.prepare) return decision;
+  const descriptor = await prepare({
+    repoRoot: projectRoot,
+    runRoot: paths.root,
+    baseEnv: environment,
+  });
+  setEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, descriptor.descriptorPath);
+  return Object.freeze({ prepare: true, reason: decision.reason, descriptorPath: descriptor.descriptorPath });
+}
+
 export async function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
 const invocation = createPlaywrightE2EInvocation(forwardedArgs);
 const paths = createE2ERunPaths(coordinatorTempDirectory());
@@ -240,6 +367,8 @@ setEnvironmentValue(env, "BOBBIT_TEST_NO_REMOTE", environmentValue(env, "BOBBIT_
 setEnvironmentValue(env, "NODE_DISABLE_COMPILE_CACHE", "1");
 deleteEnvironmentValue(env, "NODE_COMPILE_CACHE");
 setEnvironmentValue(env, "NODE_OPTIONS", [`--require=${cacheBootstrap}`, environmentValue(env, "NODE_OPTIONS")].filter(Boolean).join(" "));
+
+await prepareDirectRunnerPackedConsumer(forwardedArgs, env, paths);
 
 if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
   console.error(`[e2e] BOBBIT_V2_RUN_ROOT=${paths.root}`);
