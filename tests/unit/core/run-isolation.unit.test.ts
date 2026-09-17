@@ -738,7 +738,43 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("skips packed-consumer preparation for grep-only direct runs", async () => {
+  it("prepares the packed consumer once for matching direct title greps", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-matching-grep-"));
+    try {
+      const matchingForms = [
+        ["--project=browser-canonical", "--grep", "clean consumer"],
+        ["-g", "^browser-canonical packaged-inline-html-theme\\.browser-e2e\\.spec\\.ts packed Bobbit inline HTML runtime clean consumer.*theme bridge$"],
+        ["--grep=^browser-canonical tests/e2e/browser/packaged-inline-html-theme\\.browser-e2e\\.spec\\.ts packed Bobbit inline HTML runtime clean consumer.*theme bridge$"],
+        ["--grep=/CLEAN CONSUMER/i"],
+        ["--grep", "@smoke", "-g", "clean consumer"],
+        ["--grep", "["],
+        ["--grep"],
+      ];
+
+      for (const args of matchingForms) {
+        const paths = createE2ERunPaths(temp);
+        const environment: NodeJS.ProcessEnv = {};
+        const descriptorPath = join(paths.root, "prepared-packed-consumer", "descriptor.json");
+        let preparations = 0;
+        const result = await prepareDirectRunnerPackedConsumer(args, environment, paths, async () => {
+          preparations++;
+          return { descriptorPath };
+        });
+
+        expect(preparations, args.join(" ")).toBe(1);
+        expect(result, args.join(" ")).toEqual({
+          prepare: true,
+          reason: "packaged-consumer-selected",
+          descriptorPath,
+        });
+        expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR, args.join(" ")).toBe(descriptorPath);
+      }
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips packed-consumer preparation for proven nonmatching direct title greps", async () => {
     const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-grep-"));
     try {
       const paths = createE2ERunPaths(temp);
@@ -751,6 +787,8 @@ describe("unit run isolation", () => {
         ["--grep", "@smoke"],
         ["-g", "@smoke"],
         ["--grep=@smoke"],
+        ["--project=browser-canonical", "--grep", "unrelated title"],
+        ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts", "-g", "@smoke"],
       ];
 
       for (const args of grepForms) {

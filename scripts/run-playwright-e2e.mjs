@@ -43,6 +43,11 @@ const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const PLAYWRIGHT_CLI = join(projectRoot, "node_modules", "playwright", "cli.js");
 const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
 const PACKAGED_CONSUMER_PROJECT = "browser-canonical";
+const PACKAGED_CONSUMER_TITLE_HIERARCHY = "packed Bobbit inline HTML runtime clean consumer serves dist UI and executes the bundled canonical theme bridge";
+const PACKAGED_CONSUMER_TEST_TITLES = Object.freeze([
+  `${PACKAGED_CONSUMER_PROJECT} ${basename(PACKAGED_CONSUMER_SPEC)} ${PACKAGED_CONSUMER_TITLE_HIERARCHY}`,
+  `${PACKAGED_CONSUMER_PROJECT} ${PACKAGED_CONSUMER_SPEC} ${PACKAGED_CONSUMER_TITLE_HIERARCHY}`,
+]);
 const PLAYWRIGHT_OPTIONS_WITH_VALUES = new Set([
   "--browser",
   "-c", "--config",
@@ -297,6 +302,50 @@ function filterMaySelectPackedConsumer(filter) {
   }
 }
 
+function compilePlaywrightTitleGrep(pattern) {
+  const literal = pattern.match(/^\/(.*)\/([gi]*)$/);
+  return literal ? new RegExp(literal[1], literal[2]) : new RegExp(pattern, "gi");
+}
+
+function titleGrepsMaySelectPackedConsumer(args) {
+  const patterns = [];
+  let supplied = false;
+  let ambiguous = false;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--grep" || argument === "-g") {
+      supplied = true;
+      const pattern = args[index + 1];
+      if (pattern === undefined || pattern.startsWith("-")) {
+        ambiguous = true;
+      } else {
+        patterns.push(pattern);
+        index++;
+      }
+      continue;
+    }
+    if (argument.startsWith("--grep=") || argument.startsWith("-g=")) {
+      supplied = true;
+      patterns.push(argument.slice(argument.indexOf("=") + 1));
+    }
+  }
+  if (!supplied) return Object.freeze({ supplied: false, maySelect: false });
+  if (ambiguous) return Object.freeze({ supplied: true, maySelect: true });
+  for (const pattern of patterns) {
+    try {
+      const matcher = compilePlaywrightTitleGrep(pattern);
+      if (PACKAGED_CONSUMER_TEST_TITLES.some(title => matcher.test(title))) {
+        return Object.freeze({ supplied: true, maySelect: true });
+      }
+    } catch {
+      // Playwright owns selector validation. Prepare conservatively so an
+      // invalid selector cannot accidentally suppress a selected fixture.
+      return Object.freeze({ supplied: true, maySelect: true });
+    }
+  }
+  return Object.freeze({ supplied: true, maySelect: false });
+}
+
 /**
  * Resolve the only trusted descriptor location for a coordinator run. A
  * pathname handed through the environment is evidence only: it must equal the
@@ -327,12 +376,11 @@ export function directRunnerPackedConsumerDecision(forwardedArgs = []) {
   if (filters.length > 0 && !filters.some(filterMaySelectPackedConsumer)) {
     return Object.freeze({ prepare: false, reason: "test-filter-excludes-packaged-consumer", descriptorPath: null });
   }
-  // A title grep alone does not establish that the costly packaged fixture is
-  // selected. An explicit packaged-spec filter above remains authoritative.
-  if (filters.length === 0 && ["--grep", "-g"].some(option => optionValues(forwardedArgs, option).length > 0)) {
+  const titleGreps = titleGrepsMaySelectPackedConsumer(forwardedArgs);
+  if (titleGreps.supplied && !titleGreps.maySelect) {
     return Object.freeze({ prepare: false, reason: "title-filter-excludes-packaged-consumer", descriptorPath: null });
   }
-  const explicitlySelected = filters.length > 0 || selectedProjects.length > 0;
+  const explicitlySelected = filters.length > 0 || selectedProjects.length > 0 || titleGreps.supplied;
   return Object.freeze({ prepare: true, reason: explicitlySelected ? "packaged-consumer-selected" : "unfiltered", descriptorPath: null });
 }
 
