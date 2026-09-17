@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
 
 import {
+	closeGatewayListeners,
 	createGatewayShutdownOnce,
+	runGatewayShutdownPhases,
 	stopWorktreePoolsForShutdown,
 } from "../../../src/server/server.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
@@ -10,6 +12,44 @@ import type { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 import type { PoolRecordSink } from "../../../src/server/agent/worktree-pool-record.ts";
 
 describe("gateway shutdown is idempotent", () => {
+	it("awaits both listener close callbacks after starting them together", async () => {
+		const callbacks = new Map<string, (error?: Error) => void>();
+		const closeable = (name: string) => ({
+			close(callback: (error?: Error) => void) { callbacks.set(name, callback); },
+		});
+		let settled = false;
+		const closing = closeGatewayListeners(closeable("http"), closeable("ws"))
+			.then(() => { settled = true; });
+
+		assert.deepEqual([...callbacks.keys()], ["http", "ws"]);
+		callbacks.get("http")!();
+		await Promise.resolve();
+		assert.equal(settled, false, "HTTP closure alone must not release teardown");
+		callbacks.get("ws")!();
+		await closing;
+		assert.equal(settled, true);
+	});
+
+	it("continues later teardown phases and aggregates phase failures", async () => {
+		const events: string[] = [];
+		const firstFailure = new Error("first failed");
+		const thirdFailure = new Error("third failed");
+		await assert.rejects(
+			runGatewayShutdownPhases([
+				{ name: "first", run: () => { events.push("first"); throw firstFailure; } },
+				{ name: "second", run: () => { events.push("second"); } },
+				{ name: "third", run: async () => { events.push("third"); throw thirdFailure; } },
+			]),
+			(error: unknown) => {
+				assert.ok(error instanceof AggregateError);
+				assert.match(error.message, /first, third/);
+				assert.equal(error.errors.length, 2);
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["first", "second", "third"]);
+	});
+
 	it("shares one production teardown across concurrent and late callers", async () => {
 		let release!: () => void;
 		const blocked = new Promise<void>(resolve => { release = resolve; });
@@ -44,6 +84,79 @@ describe("gateway shutdown is idempotent", () => {
 		assert.ok(results.every(result => result.status === "rejected" && result.reason === expected));
 		await assert.rejects(shutdown(), error => error === expected);
 		assert.equal(runs, 1);
+	});
+});
+
+describe("session-manager terminal owner shutdown", () => {
+	it("joins an in-flight default MCP initialization and disconnects its late owner", async () => {
+		let connectStarted!: () => void;
+		let releaseConnect!: () => void;
+		const started = new Promise<void>(resolve => { connectStarted = resolve; });
+		const connect = new Promise<void>(resolve => { releaseConnect = resolve; });
+		const events: string[] = [];
+		const manager: any = new SessionManager();
+		manager.createMcpManager = () => ({
+			async connectAll() { events.push("connect"); connectStarted(); await connect; },
+			async disconnectAll() { events.push("disconnect"); },
+		});
+
+		const initializing = manager.initMcp("C:/fixture");
+		await started;
+		const shutdown = manager.shutdown();
+		await Promise.resolve();
+		assert.deepEqual(events, ["connect"]);
+		releaseConnect();
+		await Promise.all([initializing, shutdown]);
+		assert.deepEqual(events, ["connect", "disconnect"]);
+		assert.equal(manager.mcpManager, null, "the late owner must never become active");
+	});
+
+	it("joins MCP initialization, disconnects each unique owner once, then closes stores", async () => {
+		let releaseInitialization!: () => void;
+		const initialization = new Promise<void>(resolve => { releaseInitialization = resolve; });
+		const events: string[] = [];
+		const mcp = { async disconnectAll() { events.push("mcp"); } };
+		const manager: any = new SessionManager();
+		manager.mcpManager = mcp;
+		manager.scopedMcpManagers.set("project:p", mcp);
+		manager.mcpManagerInitializations.set("project:p", initialization);
+		manager._testGoalStore = { async close() { events.push("store"); } };
+		manager._testTaskStore = null;
+
+		const first = manager.shutdown();
+		const second = manager.shutdown();
+		await Promise.resolve();
+		assert.deepEqual(events, [], "resource teardown must wait for initialization ownership");
+		releaseInitialization();
+		await Promise.all([first, second]);
+		assert.deepEqual(events, ["mcp", "store"]);
+
+		await manager.shutdown();
+		assert.deepEqual(events, ["mcp", "store"], "late shutdown must not rerun owners or stores");
+	});
+
+	it("continues disconnecting owners and closes stores after an owner failure", async () => {
+		const events: string[] = [];
+		const manager: any = new SessionManager();
+		manager.mcpManager = {
+			async disconnectAll() { events.push("mcp:failed"); throw new Error("disconnect failed"); },
+		};
+		manager.scopedMcpManagers.set("project:p", {
+			async disconnectAll() { events.push("mcp:ok"); },
+		});
+		manager._testGoalStore = { async close() { events.push("store"); } };
+		manager._testTaskStore = null;
+
+		await assert.rejects(manager.shutdown(), (error: unknown) => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(error.message, /mcp-disconnect/);
+			return true;
+		});
+		assert.deepEqual(events.slice(0, 2).sort(), ["mcp:failed", "mcp:ok"]);
+		assert.equal(events.at(-1), "store", "stores close only after terminal MCP owners settle");
+
+		await assert.rejects(manager.shutdown());
+		assert.equal(events.filter(event => event === "store").length, 1, "failed shutdown is still exact-once");
 	});
 });
 
