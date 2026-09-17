@@ -31,11 +31,13 @@ import {
 } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import { SandboxSessionFilesystem } from "../../../tests/support/harnesses/shared/sandbox-session-filesystem.js";
+import { shutdownResourcesThenRemove } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
 import {
 	FIXTURE_TIME,
 	historyFork,
 	messageEntry,
 	ordinaryHistory,
+	removeHistoryForkFixtureRoots,
 	responseJson,
 	seedTranscript,
 	setPersistedTranscriptPath,
@@ -48,6 +50,7 @@ let serverModule: any;
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
+const fixtureProjectIds: string[] = [];
 const sandboxFixtureFinalizers: Array<() => Promise<void>> = [];
 
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
@@ -181,6 +184,7 @@ async function registerUntrackedFixtureProject(gateway: any, label: string): Pro
 	});
 	expect(response.status, await response.clone().text()).toBe(201);
 	const project = await response.json();
+	fixtureProjectIds.push(project.id as string);
 	return { id: project.id as string, rootPath };
 }
 
@@ -284,19 +288,48 @@ test.describe("history fork API", () => {
 	});
 
 	test.afterEach(async ({ gateway }) => {
-		serverModule?.__clearHistoryForkSidecarCopyFake();
-		try {
-			await sessions.cleanup(gateway);
-		} finally {
-			for (const finalize of sandboxFixtureFinalizers.splice(0).reverse()) {
-				await finalize();
-			}
-			for (const root of fixtureRoots.splice(0)) {
-				try {
-					fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
-				} catch { /* the isolated run-root owner performs the final safety sweep */ }
-			}
-		}
+		const roots = fixtureRoots.splice(0);
+		const projectIds = fixtureProjectIds.splice(0).reverse();
+		const finalizers = sandboxFixtureFinalizers.splice(0).reverse();
+		await shutdownResourcesThenRemove({
+			phases: [
+				{
+					name: "history-fork-test-hooks",
+					owners: [() => serverModule?.__clearHistoryForkSidecarCopyFake()],
+				},
+				{
+					name: "history-fork-sessions",
+					owners: [() => sessions.cleanup(gateway)],
+				},
+				{
+					name: "history-fork-sandbox-resources",
+					owners: [async () => {
+						const failures: unknown[] = [];
+						for (const finalize of finalizers) {
+							try { await finalize(); } catch (error) { failures.push(error); }
+						}
+						if (failures.length > 0) {
+							throw new AggregateError(failures, "Failed to finalize history-fork sandbox resources");
+						}
+					}],
+				},
+				{
+					name: "history-fork-projects",
+					owners: projectIds.map(projectId => async () => {
+						const response = await localApiFetch(gateway, `/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+						if (!response.ok && response.status !== 404) {
+							throw new Error(`Failed to delete history-fork fixture project ${projectId}: ${response.status} ${await response.text()}`);
+						}
+					}),
+				},
+			],
+			remove: () => removeHistoryForkFixtureRoots(roots, {
+				gateway: "shared fork gateway active; fixture-owned sessions and projects settled",
+				sessions: "termination and purge resolved",
+				sandboxResources: `${finalizers.length} finalizer(s) resolved`,
+				projects: `${projectIds.length} deletion(s) resolved`,
+			}),
+		});
 	});
 
 	test("cuts the active branch before the prompt, preserves source/context and filters sidecars", async ({ gateway }) => {
