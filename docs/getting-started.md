@@ -28,25 +28,22 @@ bobbit
 
 ## First launch
 
-On the default loopback bind, Bobbit starts without enforcing token authentication. The terminal output looks like this:
+Bobbit requires token authentication by default, including on the default loopback bind. The terminal output prints the token and opens the browser at a tokenized bootstrap URL:
 
 ```
 Bobbit Gateway v<version>
   Listening:  http://localhost:3001
+  Auth token: <token>
   Agent CWD:  <current directory>
-  UI:         http://localhost:3001/
+  UI:         http://localhost:3001/?token=<token>
 
-  Token authentication is disabled on this loopback bind.
-  Any local process can access the gateway. Use --auth to require the token.
+  ⚠ This token grants full shell access to this machine.
+  Keep it secret. Regenerate with --new-token.
 ```
 
-Your browser should open automatically at the untokenized UI URL. If it doesn't, copy that URL from the terminal. Because the gateway is local-only but any local process can access it, use `--auth` when you want Bobbit to enforce its token:
+The browser exchanges the bootstrap token for its normal authenticated session. The token is generated once and saved in Bobbit's private OS-user secrets directory; `bobbit --show-token` prints it when needed.
 
-```bash
-bobbit --auth
-```
-
-With `--auth`, the banner prints the auth token and secrecy warning, and the browser opens a tokenized URL. The token is generated once and saved in `.bobbit/state/token`. Bobbit also enforces token authentication automatically on non-loopback binds; see [Networking](networking.md) for remote-access guidance.
+For isolated local troubleshooting only, `bobbit --no-auth` enables credential-free access when the complete gateway policy and actual client are both loopback. Any local process can then control Bobbit, and sandboxed agents are unavailable until the gateway is restarted without `--no-auth`. Non-loopback configurations always require authentication. See [Networking](networking.md) for remote-access guidance.
 
 ## Your first session
 

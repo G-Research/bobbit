@@ -91,6 +91,7 @@ async function waitForHealthyGateway(
 	url: string,
 	output: () => string,
 	label: string,
+	token?: string,
 ): Promise<GatewayHealth> {
 	const result = await pollUntil<GatewayReadiness | null>(async () => {
 		const exit = childExitDescription(child);
@@ -101,7 +102,10 @@ async function waitForHealthyGateway(
 		let response: Response;
 		let bodyText: string;
 		try {
-			response = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(5_000) });
+			response = await fetch(`${url}/api/health`, {
+				headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+				signal: AbortSignal.timeout(5_000),
+			});
 			bodyText = await response.text();
 		} catch (error) {
 			const requestExit = childExitDescription(child);
@@ -298,34 +302,38 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(parsed.hash).toBe("");
 			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
 
+			const token = readFileSync(join(root, "secrets", "token"), "utf8").trim();
 			await pollUntil(() => output.includes(`Listening:  ${persistedUrl}`)
-				&& output.includes("Token authentication is disabled on this loopback bind."), {
+				&& output.includes(`Auth token: ${token}`), {
 				timeoutMs: 5_000,
 				intervalMs: 25,
 				label: "truthful executable CLI startup banner",
 			});
 			expect(output).toMatch(new RegExp(`Listening:\\s+${escapeRegExp(persistedUrl)}`));
-			expect(output).toContain("Any local process can access the gateway. Use --auth to require the token.");
-			expect(output).not.toMatch(/Auth token:/i);
-			expect(output).not.toMatch(/token grants full shell access/i);
-			expect(output).not.toContain("?token=");
+			expect(output).toContain(`UI:         ${persistedUrl}/?token=${token}`);
+			expect(output).toMatch(/token grants full shell access/i);
+			expect(output).not.toMatch(/authentication is disabled/i);
 
-			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "mounted CLI");
-			expect(health).toMatchObject({ status: "ok", localhost: true });
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "mounted CLI", token);
+			expect(health).toMatchObject({ status: "ok", localhost: false });
 
-			const shell = await fetch(`${persistedUrl}/`, { signal: AbortSignal.timeout(5_000) });
+			const shell = await fetch(`${persistedUrl}/?token=${token}`, { signal: AbortSignal.timeout(5_000) });
 			expect(shell.status).toBe(200);
 			const shellText = await shell.text();
 			expect(shellText).toContain(SHELL_MARKER);
 			expect(shellText).toContain(`window.__BOBBIT_BASE_PATH__ = ${JSON.stringify(MOUNT)}`);
 			expect(shellText).toContain(`src="${MOUNT}/assets/smoke.js"`);
 
-			const asset = await fetch(`${persistedUrl}/assets/smoke.js`, { signal: AbortSignal.timeout(5_000) });
+			const asset = await fetch(`${persistedUrl}/assets/smoke.js`, {
+				headers: { Authorization: `Bearer ${token}` },
+				signal: AbortSignal.timeout(5_000),
+			});
 			expect(asset.status).toBe(200);
 			expect(await asset.text()).toBe(`${ASSET_MARKER}\n`);
 
 			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
 				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
 				signal: AbortSignal.timeout(5_000),
 			});
 			expect(shutdown.status).toBe(200);
@@ -400,11 +408,13 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(parsed.pathname).toBe("/");
 			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
 
-			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "symlinked CLI");
-			expect(health).toMatchObject({ status: "ok", localhost: true });
+			const token = readFileSync(join(root, "secrets", "token"), "utf8").trim();
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "symlinked CLI", token);
+			expect(health).toMatchObject({ status: "ok", localhost: false });
 
 			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
 				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
 				signal: AbortSignal.timeout(5_000),
 			});
 			expect(shutdown.status).toBe(200);

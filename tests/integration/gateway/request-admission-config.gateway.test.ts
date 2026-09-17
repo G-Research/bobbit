@@ -561,8 +561,27 @@ describe.sequential("public authority provenance on a loopback backend", () => {
 		expect(preview.body).toContain("originless cookie preview");
 	});
 
-	it("retains the credential-free bypass for a genuinely all-loopback policy", async () => {
-		const localGateway = createGateway({ ...gatewayConfig, publicOrigins: undefined }, gatewayDeps);
+	it("requires authentication by default for a genuinely all-loopback policy", async () => {
+		const { forceAuth: _forceAuth, ...defaultAuthConfig } = gatewayConfig;
+		const localGateway = createGateway({ ...defaultAuthConfig, publicOrigins: undefined }, gatewayDeps);
+		try {
+			const localPort = await localGateway.start();
+			expect(localGateway.trustedLocal).toBe(true);
+			const unauthenticated = await plainRequest(localPort, "/api/health", { Host: `127.0.0.1:${localPort}` });
+			expect(unauthenticated.status).toBe(401);
+			const authenticated = await plainRequest(localPort, "/api/health", {
+				Host: `127.0.0.1:${localPort}`,
+				...authorization(),
+			});
+			expect(authenticated.status, authenticated.body).toBe(200);
+			expect(JSON.parse(authenticated.body)).toMatchObject({ localhost: false });
+		} finally {
+			await localGateway.shutdown();
+		}
+	});
+
+	it("retains an explicit credential-free bypass for a genuinely all-loopback policy", async () => {
+		const localGateway = createGateway({ ...gatewayConfig, publicOrigins: undefined, forceAuth: false }, gatewayDeps);
 		expect(() => localGateway.trustedLocal).toThrow(/before successful start/i);
 		try {
 			const localPort = await localGateway.start();

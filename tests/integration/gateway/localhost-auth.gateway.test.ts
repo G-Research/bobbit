@@ -1,21 +1,16 @@
 /**
- * E2E tests for the --auth flag and localhost mode health response.
+ * Gateway tests for the default authenticated localhost mode.
  *
- * The main E2E server runs with --auth (forceAuth), so auth is enforced
- * even though it binds to 127.0.0.1. These tests verify that:
- *   - /api/health reports localhost: false when --auth is active
- *   - Auth enforcement works (complementing existing auth tests in tools-e2e)
- *
- * The actual auth *bypass* in localhost mode (no --auth) is pure conditional
- * logic — tested implicitly: if isLocalhostMode is true, the auth block is
- * skipped entirely. The --auth flag is the only toggle, and we verify it works.
+ * The shared E2E gateway explicitly enables auth, matching the production
+ * default. The separate request-admission integration suite pins the opt-in
+ * `forceAuth: false` / `--no-auth` loopback escape hatch.
  */
 
 import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { base, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
-test.describe("Localhost auth flag", () => {
-	test("health returns localhost: false when --auth is set", async () => {
+test.describe("Authenticated localhost", () => {
+	test("health returns localhost: false when auth is required", async () => {
 		const token = readE2EToken();
 		const res = await fetch(`${base()}/api/health`, {
 			headers: { Authorization: `Bearer ${token}` },
@@ -35,8 +30,8 @@ test.describe("Localhost auth flag", () => {
 		expect(typeof data.localhost).toBe("boolean");
 	});
 
-	test("unauthenticated requests are rejected when --auth is set", async () => {
-		// Complementary to tools-e2e auth tests — confirms --auth forces auth
+	test("unauthenticated requests are rejected by default", async () => {
+		// Complementary to tools-e2e auth tests — confirms localhost requires auth.
 		const res = await fetch(`${base()}/api/sessions`);
 		expect(res.status).toBe(401);
 	});

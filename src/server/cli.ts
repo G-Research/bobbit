@@ -105,7 +105,10 @@ export function buildStartupUrls(input: {
 	trustedLocal: boolean;
 }): StartupUrls {
 	const basePath = normalizeBasePath(input.basePath);
-	const authEnforced = Boolean(input.forceAuth) || !input.trustedLocal;
+	// Authentication is the default on every bind. An explicit `forceAuth: false`
+	// enables the credential-free escape hatch only when the compiled policy is
+	// genuinely all-loopback.
+	const authEnforced = input.forceAuth !== false || !input.trustedLocal;
 	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
 	const peerUrl = buildStartupPeerUrl(input);
 	const uiUrl = authEnforced
@@ -133,7 +136,7 @@ export function formatStartupBanner(input: {
 		lines.push("  Keep it secret. Regenerate with --new-token.");
 	} else {
 		lines.push("  Token authentication is disabled on this loopback bind.");
-		lines.push("  Any local process can access the gateway. Use --auth to require the token.");
+		lines.push("  Any local process can access the gateway. Remove --no-auth to require the token.");
 	}
 	lines.push("");
 	return lines.join("\n");
@@ -295,7 +298,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		noUi: false,
 		tls: true,  // on by default
 		tlsExplicit: false,
-		forceAuth: false,
+		forceAuth: true,
 		basePath: "",
 		publicOrigins: [],
 		viteOrigins: [],
@@ -348,7 +351,11 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 				result.noUi = true;
 				break;
 			case "--auth":
+				// Retained for compatibility and to let the last auth flag win.
 				result.forceAuth = true;
+				break;
+			case "--no-auth":
+				result.forceAuth = false;
 				break;
 			case "--tls":
 				result.tls = true;

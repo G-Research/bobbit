@@ -72,6 +72,14 @@ describe("base-path CLI selection", () => {
 		assert.equal(parseArgs([], {}).basePath, "");
 	});
 
+	it("requires authentication by default and makes the loopback bypass explicit", async () => {
+		const { parseArgs } = await cliModule();
+		assert.equal(parseArgs([], {}).forceAuth, true);
+		assert.equal(parseArgs(["--no-auth"], {}).forceAuth, false);
+		assert.equal(parseArgs(["--no-auth", "--auth"], {}).forceAuth, true);
+		assert.equal(parseArgs(["--auth", "--no-auth"], {}).forceAuth, false);
+	});
+
 	it("uses and normalizes BOBBIT_BASE_PATH when no flag is present", async () => {
 		const { parseArgs } = await cliModule();
 		assert.equal(parseArgs([], { BOBBIT_BASE_PATH: "team/bobbit/" }).basePath, "/team/bobbit");
@@ -131,6 +139,7 @@ describe("mounted startup URLs", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "generated-but-unused",
+			forceAuth: false,
 			trustedLocal: true,
 		});
 		assert.equal(urls.authEnforced, false);
@@ -155,7 +164,7 @@ describe("mounted startup URLs", () => {
 		assert.equal(urls.uiUrl, "https://gateway.example:443/?token=secret");
 	});
 
-	it("keeps forced authentication on a fully trusted loopback policy", async () => {
+	it("requires authentication by default on a fully trusted loopback policy", async () => {
 		const { buildStartupUrls } = await cliModule();
 		const urls = buildStartupUrls({
 			protocol: "http",
@@ -163,7 +172,6 @@ describe("mounted startup URLs", () => {
 			port: 3001,
 			basePath: "",
 			token: "forced-secret",
-			forceAuth: true,
 			trustedLocal: true,
 		});
 		assert.equal(urls.authEnforced, true);
@@ -205,6 +213,7 @@ describe("truthful authentication banner", () => {
 			port: 3001,
 			basePath: "/bobbit",
 			token: "must-not-appear",
+			forceAuth: false,
 			trustedLocal: true,
 		});
 		const banner = formatStartupBanner({
@@ -217,7 +226,7 @@ describe("truthful authentication banner", () => {
 		assert.doesNotMatch(banner, /must-not-appear|grants full shell access|keep it secret/i);
 		assert.match(banner, /token authentication is disabled/i);
 		assert.match(banner, /local process/i);
-		assert.match(banner, /--auth/);
+		assert.match(banner, /remove --no-auth/i);
 	});
 
 	it("retains the token and secrecy warning when auth is enforced", async () => {

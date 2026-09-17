@@ -5345,7 +5345,7 @@ export class SessionManager {
 
 	assertSandboxStartupAllowed(): void {
 		if (this.credentialFreeTrustedLocal) {
-			throw new Error("Sandboxed agents require gateway authentication. Restart Bobbit with --auth before starting or restoring a sandboxed agent.");
+			throw new Error("Sandboxed agents require gateway authentication. --auth is the default; restart Bobbit without --no-auth before starting or restoring a sandboxed agent.");
 		}
 	}
 

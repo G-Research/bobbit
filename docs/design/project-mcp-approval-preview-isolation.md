@@ -7,7 +7,7 @@ This document records the final implemented design for explicit approval of proj
 Three decisions are selected and implemented:
 
 1. **Use established gateway authentication for MCP decisions.** A request that has passed normal gateway admission and authentication through a signed `bobbit_session`, the admin bearer/query token, or trusted-local mode may approve or reject an exact current definition. Direct agents intentionally receive the admin `BOBBIT_TOKEN` and therefore may decide. Sandbox agents receive only sandbox-scoped tokens; `isSandboxAllowed()` default-denies the approval route before its body, ledger, or runtime can be touched.
-2. **Bind trusted-local authority to the transport peer and fail closed for sandboxes.** Credential-free control requires both an admitted all-loopback policy and an actual loopback peer. Docker host-gateway proxying can erase container provenance, so sandbox creation/restoration/revival/respawn/replacement is refused before side effects in credential-free mode; operators must restart with `--auth`.
+2. **Bind trusted-local authority to the transport peer and fail closed for sandboxes.** Credential-free control is an explicit `--no-auth` opt-out and requires both an admitted all-loopback policy and an actual loopback peer. Docker host-gateway proxying can erase container provenance, so sandbox creation/restoration/revival/respawn/replacement is refused before side effects in credential-free mode; operators must restart without `--no-auth`.
 3. **Keep every repository-authored preview browsing context opaque.** Embedded previews omit `allow-same-origin`, and every successful preview content response has a CSP `sandbox` directive without `allow-same-origin`. A session-bound preview resource cookie and bounded `postMessage` bridges preserve assets and cosmetic behavior without giving repository content gateway authority.
 
 The removed terminal/browser pairing system is not replaced with another principal or capability subsystem. The approval route composes with the existing global gateway boundary and retains every project, cwd, source, fingerprint, ledger, and reload check. Approval remains a deliberate per-server action and remains separate from `Allow` / `Ask` / `Never` tool invocation policy.
@@ -93,7 +93,7 @@ The revised decision was validated against the current implementation rather tha
 The global API boundary in `src/server/server.ts` remains the only credential verifier:
 
 1. `admitRequest()` validates the finite Host/Origin/Fetch Metadata/CORS context.
-2. The gateway derives trusted-local authority only when `!forceAuth`, the admitted policy is all-loopback, and `req.socket.remoteAddress` is IPv4 `127/8`, IPv6 `::1`, or IPv4-mapped loopback. The same predicate feeds API, preview/cookie bootstrap, and WebSocket paths.
+2. The gateway derives trusted-local authority only when `forceAuth === false` (the explicit `--no-auth` mode), the admitted policy is all-loopback, and `req.socket.remoteAddress` is IPv4 `127/8`, IPv6 `::1`, or IPv4-mapped loopback. The same predicate feeds API, preview/cookie bootstrap, and WebSocket paths.
 3. `CookieStore.verify()` accepts a genuine signed `bobbit_session`.
 4. Otherwise, `validateToken()` accepts the admin Bearer/query token, `SandboxTokenStore.lookup()` resolves a scoped sandbox token, or a peer-bound trusted-local request uses the no-token contract. A selected sandbox credential retains sandbox scope even on a genuine loopback peer.
 5. If a sandbox token won, `sandboxScope` is passed through `isSandboxAllowed()` before route dispatch. MCP approval is not allowlisted, so the gateway returns 403 before handler body parsing, manager creation, ledger access, or reload.
@@ -128,7 +128,7 @@ A valid normal credential is not downgraded merely because the request also cont
 
 `RpcBridge.spawnDockerExec()` reserves `BOBBIT_TOKEN` case-insensitively when projecting `sandboxCredentials`. The final Docker exec environment contains exactly the server-minted scoped token. `BOBBIT_TOKEN` and `BOBBIT_GATEWAY_URL` remain omitted from PID 1; session-secret delivery stays limited to the agent process, and private-locator filtering plus cwd/remapping remain intact.
 
-A separate `SessionManager.assertSandboxStartupAllowed()` guard addresses Docker peer ambiguity. When the compiled gateway permits credential-free trusted-local control, it refuses sandbox creation, restoration, revival, respawn, replacement, and direct sandbox bootstrap before any container, image/network, worktree, hook, credential, or agent effect. The gateway installs this mode before restoring sessions. Restarting with `--auth` disables credential-free control and allows authenticated sandboxes to continue with scoped tokens.
+A separate `SessionManager.assertSandboxStartupAllowed()` guard addresses Docker peer ambiguity. When the compiled gateway permits credential-free trusted-local control, it refuses sandbox creation, restoration, revival, respawn, replacement, and direct sandbox bootstrap before any container, image/network, worktree, hook, credential, or agent effect. The gateway installs this mode before restoring sessions. Restarting without `--no-auth` disables credential-free control and allows authenticated sandboxes to continue with scoped tokens.
 
 Direct-agent behavior is not hardened away. `applyScopedGatewayCredentials()` and `scopedGatewayEnvForDirectAgent()` continue to inject the admin token for create/delegate/restore/revive/respawn. A failure to read that credential remains a direct-agent startup error.
 
@@ -338,7 +338,7 @@ This is stale-while-revalidate for periodic Tools reconciliation, not optimistic
 - Direct agents may now approve by design. This is not presented as human-only behavior.
 - A genuine signed browser cookie and peer-bound trusted-local mode may decide under their existing contracts. Trusted-local requires both an all-loopback admitted policy and an actual loopback socket peer.
 - Sandbox-only requests continue to receive a generic pre-handler 403. The obsolete-header-only case receives outer 401 because the header is not authentication.
-- Credential-free trusted-local deployments cannot start or restore sandbox agents. This is a deliberate safety fallback for host-gateway proxies that can erase container provenance; restart with `--auth` to use sandboxes.
+- Credential-free trusted-local deployments cannot start or restore sandbox agents. This is a deliberate safety fallback for host-gateway proxies that can erase container provenance; restart without `--no-auth` to use sandboxes.
 
 ### Preview compatibility
 
@@ -464,7 +464,7 @@ Replace `HtmlRenderer` `contentDocument` resize with child `ResizeObserver` mess
 | `src/server/server.ts` | global API auth/guard; `handleApiRoute()`; MCP approval route | Approval uses normal gateway auth and remains behind the sandbox guard; retired pairing construction/route/hook/header checks are absent. The same peer-bound trusted-local predicate feeds API, preview, and WebSocket paths. | Project/cwd/source/fingerprint validation, ledger/reload, safe status, generic auth precedence. |
 | `src/server/request-admission.ts` | `isLoopbackPeerAddress()`, `isTrustedLocalRequest()` | Accepts IPv4 `127/8`, IPv6 `::1`, and IPv4-mapped loopback only when the admitted policy is all-loopback. | Host and Origin never prove the transport peer. |
 | `src/server/auth/mcp-operator-authorizer.ts` | Retired authorizer | Deleted; this row is migration history only. | Approval ledger/key are unrelated and remain. |
-| `src/server/cli.ts` | normal gateway startup | Pairing output/lifecycle is absent; startup uses the established gateway token and `--auth` mode. | Normal token/startup URL, auto-open, Vite/base-path/remote behavior. |
+| `src/server/cli.ts` | normal gateway startup | Pairing output/lifecycle is absent; startup requires the established gateway token by default, with explicit `--no-auth` opt-out. | Normal token/startup URL, auto-open, Vite/base-path/remote behavior. |
 | `src/server/cors.ts` | `API_CORS_ALLOWED_HEADERS` | The retired MCP operator header is absent. | `Authorization`, `Content-Type`, finite origins, non-credentialed generic CORS. |
 | `src/server/agent/session-manager.ts` | `applySandboxWiring()`, `mintScopedGatewayToken()`, `assertSandboxStartupAllowed()`, direct credential helpers | Requires a sandbox scoped token with no `readToken()` fallback; keeps direct admin injection; refuses every sandbox startup path before side effects in credential-free mode. | Create/delegate/restore/revive/respawn lifecycle and sandbox worktree ownership. |
 | `src/server/agent/rpc-bridge.ts` | `spawnDockerExec()` environment projection | Skips sandbox credential key `BOBBIT_TOKEN` case-insensitively and emits one scoped token. | PID-1 omission, session secret, cwd/remap/private-env behavior. |
@@ -505,7 +505,7 @@ These tests protect reused seams; revised coverage supplements rather than repla
 7. `isSandboxAllowed('/api/mcp-servers/name/approval', 'POST', scope)` remains false.
 8. Sandbox wiring without a `SandboxTokenStore` or minted token throws and never reads/injects admin.
 9. A sandbox credential named any casing of `BOBBIT_TOKEN` cannot override the server-minted scoped value; Docker exec contains exactly the scoped token and no admin sentinel.
-10. Credential-free trusted-local mode refuses sandbox create/restore/revive/respawn/replacement and direct bootstrap before Docker, worktree, hook, credential, or agent effects, with recovery guidance to restart using `--auth`.
+10. Credential-free trusted-local mode refuses sandbox create/restore/revive/respawn/replacement and direct bootstrap before Docker, worktree, hook, credential, or agent effects, with recovery guidance to restart without `--no-auth`.
 11. Direct create/delegate/restore/revive/respawn still receive the admin token.
 12. Existing `hasSandboxCredential` cases continue to deny cookie bootstrap/renewal when a recognized sandbox credential is presented.
 
@@ -613,7 +613,7 @@ Credible but larger. It preserves the pairing-free Tools approval journey and is
 - [x] Direct non-sandbox agents retain admin `BOBBIT_TOKEN` and may decide by design.
 - [x] Sandbox agents receive only a server-minted scoped token; missing minting fails startup and configured credentials cannot override `BOBBIT_TOKEN`.
 - [x] Sandbox approval requests are rejected before body, ledger, manager, spawn, or network activity, including from a loopback peer.
-- [x] Credential-free trusted-local mode refuses sandbox creation, restoration, revival, respawn, replacement, and direct bootstrap before side effects and instructs the operator to restart with `--auth`.
+- [x] Credential-free trusted-local mode refuses sandbox creation, restoration, revival, respawn, replacement, and direct sandbox bootstrap before side effects and instructs the operator to restart without `--no-auth`.
 - [x] No active pairing endpoint, header, authorizer, CLI output, browser module, Tools callout, CSS, error code, or test helper remains.
 - [x] Obsolete browser storage is removed without touching gateway connection state; obsolete server verifier is ignored and never auto-migrated.
 - [x] Every approval still validates project, cwd, source project, source ID, server name, and current fingerprint before atomic persistence/reload.
@@ -631,7 +631,7 @@ Credible but larger. It preserves the pairing-free Tools approval journey and is
 
 The approval trust gate and the gateway login boundary answer different questions. The trust gate determines whether a repository-supplied MCP definition may start; the established gateway credential determines who may make that control-plane decision. Under the amended product model, a direct agent intentionally holds the same admin credential as the UI operator, so a second terminal-paired browser secret is both semantically wrong and unnecessary.
 
-The smallest robust design is subtraction plus narrow guards at the real boundaries. Pairing is gone, and an existing globally authenticated request reaches the exact, fail-closed decision handler. Confinement comes from mandatory scoped-token minting, case-insensitive `BOBBIT_TOKEN` reservation, the pre-handler default-deny sandbox guard, and peer-bound trusted-local admission. Because some Docker host-gateway proxies can erase container provenance, credential-free mode also refuses every sandbox startup/restoration/revival/respawn/replacement path before side effects and directs the operator to restart with `--auth`. This adds no principal, capability token, middleware, endpoint, or persistent authority.
+The smallest robust design is subtraction plus narrow guards at the real boundaries. Pairing is gone, and an existing globally authenticated request reaches the exact, fail-closed decision handler. Confinement comes from mandatory scoped-token minting, case-insensitive `BOBBIT_TOKEN` reservation, the pre-handler default-deny sandbox guard, and peer-bound trusted-local admission. Because some Docker host-gateway proxies can erase container provenance, credential-free mode also refuses every sandbox startup/restoration/revival/respawn/replacement path before side effects and directs the operator to restart without `--no-auth`. This adds no principal, capability token, middleware, endpoint, or persistent authority.
 
 Opaque preview isolation remains security-critical because a normal gateway cookie or stored admin bearer now authorizes decisions. Repository-authored content must not share the application origin that holds or spends those credentials. The selected iframe/CSP boundary, SID-scoped read cookie, narrow admission, and cosmetic message bridge remove that path without changing MCP identity, persistence, runtime, Tools UX, or deployment topology.
 

@@ -2523,7 +2523,7 @@ export interface GatewayConfig {
 	agentCliPath?: string;
 	systemPromptPath?: string;
 	tls?: TlsConfig;
-	/** Force auth even on localhost (used by E2E tests). */
+	/** Require auth on localhost. Defaults to true; false explicitly enables trusted-local bypass. */
 	forceAuth?: boolean;
 	/** Runtime boundary flag for legacy BOBBIT_SKIP_MCP behavior. */
 	skipMcp?: boolean;
@@ -4212,10 +4212,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.end("Gateway starting");
 			return;
 		}
-		// Credential-free local authority requires both an all-loopback admitted
-		// policy and the actual socket peer to be loopback. Host is caller-controlled:
-		// a Docker/remote peer that sends `Host: localhost` must authenticate normally.
-		const trustedLocalRequest = !config.forceAuth
+		// Credential-free local authority is an explicit opt-out and still requires
+		// both an all-loopback admitted policy and an actual loopback socket peer.
+		// Host is caller-controlled: a Docker/remote peer that sends
+		// `Host: localhost` must authenticate normally.
+		const trustedLocalRequest = config.forceAuth === false
 			&& isTrustedLocalRequest(admission, req.socket.remoteAddress);
 
 		// Content-origin preview route — served before API auth so iframe loads
@@ -5267,7 +5268,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 		const ip = req.socket.remoteAddress || "unknown";
-		const trustedLocalRequest = !config.forceAuth
+		const trustedLocalRequest = config.forceAuth === false
 			&& isTrustedLocalRequest(admission, req.socket.remoteAddress);
 		if (!trustedLocalRequest && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
@@ -5589,7 +5590,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// from a loopback peer. Preserve trusted-local host access, but never
 				// start a sandbox unless this compiled gateway policy requires auth.
 				sessionManager.setCredentialFreeTrustedLocal(
-					!config.forceAuth && requestAdmissionPolicy.allAuthoritiesLoopback,
+					config.forceAuth === false && requestAdmissionPolicy.allAuthoritiesLoopback,
 				);
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
