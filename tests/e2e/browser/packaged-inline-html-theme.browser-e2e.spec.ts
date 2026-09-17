@@ -2,8 +2,7 @@ import { test, expect, type Page, type TestInfo } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -11,6 +10,11 @@ import {
 	runPiPackedConsumerCommand,
 	runPiPackedConsumerNpm,
 } from "../test-utils/pi-packed-consumer-command.js";
+import {
+	PACKED_CONSUMER_DESCRIPTOR_ENV,
+	materializePackedConsumerFixture,
+	readPreparedPackedConsumerDescriptor,
+} from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
 import {
 	capturePackagedCli,
 	commandFailure,
@@ -406,45 +410,41 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
-		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-inline-theme-"));
-		const packDir = join(tempRoot, "pack");
-		const consumerDir = join(tempRoot, "consumer");
+		// Browser-v2 global setup produces a content-addressed fresh dist first.
+		// The E2E coordinator packs that exact artifact once before Group C starts.
+		const descriptorPath = process.env[PACKED_CONSUMER_DESCRIPTOR_ENV];
+		expect(descriptorPath, `${PACKED_CONSUMER_DESCRIPTOR_ENV} must be published by the E2E coordinator`).toBeTruthy();
+		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath!);
+		const materialized = await materializePackedConsumerFixture(descriptor, {
+			runRoot: descriptor.runRoot,
+			name: `inline-theme-${testInfo.workerIndex}`,
+		});
+		const consumerDir = materialized.consumerDir;
 		const workspaceDir = join(consumerDir, "workspace");
 		const secretsDir = join(consumerDir, "secrets");
 		const agentDir = join(consumerDir, "agent-state");
 		const agentPath = join(consumerDir, "packed-write-agent.mjs");
-		const report: RuntimeReport = { commands: [], packFiles: [], bridgeAssets: [], requests: [] };
+		const report: RuntimeReport = {
+			commands: [...descriptor.commands],
+			packFiles: [],
+			bridgeAssets: [],
+			requests: [],
+		};
 		let runtime: RunningCli | undefined;
 
 		try {
 			await Promise.all([
-				mkdir(packDir, { recursive: true }),
 				mkdir(workspaceDir, { recursive: true }),
 				mkdir(secretsDir, { recursive: true }),
 				mkdir(agentDir, { recursive: true }),
 			]);
-			await writeFile(join(consumerDir, "package.json"), `${JSON.stringify({
-				name: "bobbit-inline-theme-clean-consumer",
-				version: "1.0.0",
-				private: true,
-				// protobufjs accepts every @types/node release. Offline npm otherwise
-				// selects the newest cached packument entry even when its tarball is
-				// absent. Anchor that broad edge to npm ci's repository-cached artifact.
-				overrides: { "@types/node": LOCKED_NODE_TYPES_VERSION },
-			}, null, 2)}\n`);
 			await writePackedAgent(agentPath);
 
-			// Browser-v2 global setup produces a content-addressed fresh dist first.
-			// npm pack therefore tests the same built artifact published to npx users
-			// without running an expensive build inside this E2E spec.
-			const packed = await runPiPackedConsumerNpm(
-				["pack", "--json", "--ignore-scripts", "--pack-destination", packDir],
-				{ cwd: REPO_ROOT, timeoutMs: 3 * 60_000 },
-			);
-			report.commands.push(packed);
-			expect(packed.code, commandFailure(packed)).toBe(0);
-			const { entry: pack, report: packReport } = parsePackResult(packed.stdout);
+			// The coordinator ran one real npm pack and one strict-offline install.
+			// This worker consumes their immutable descriptor and a private real copy.
+			const { entry: pack, report: packReport } = parsePackResult(JSON.stringify(descriptor.packReport));
 			report.pack = packReport;
+			expect(pack).toEqual(descriptor.packEntry);
 			expect(pack.name).toBe(PACKAGE_NAME);
 			expect(typeof pack.filename).toBe("string");
 			report.packFiles = normalizedPackagePaths(pack);
@@ -468,8 +468,17 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				"tarball must contain compiled dist/ui CSS assets",
 			).toBe(true);
 
-			const tarballPath = resolve(packDir, pack.filename!);
-			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
+			const tarballPath = resolve(descriptor.tarballPath);
+			expect(existsSync(tarballPath), `prepared npm pack tarball is missing at ${tarballPath}`).toBe(true);
+			const packCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("pack"));
+			const installs = descriptor.commands.filter((command: CommandResult) => command.args.includes("install") && command.args.includes("--offline"));
+			expect(packCommands, "coordinator must execute npm pack exactly once").toHaveLength(1);
+			expect(installs, "coordinator must execute one strict-offline install").toHaveLength(1);
+			for (const required of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"]) {
+				expect(installs[0]!.args, `prepared install must pass ${required}`).toContain(required);
+			}
+			expect(installs[0]!.args.map((argument: string) => resolve(argument))).toContain(tarballPath);
+
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runPiPackedConsumerNpm(
 				["config", "get", "package-lock"],
@@ -478,15 +487,6 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(lockConfig);
 			expect(lockConfig.code, commandFailure(lockConfig)).toBe(0);
 			expect(lockConfig.stdout.trim(), "clean consumer must use npm's normal package-lock=true default").toBe("true");
-
-			// CI prewarms every tarball selected by this clean consumer. Offline mode
-			// fails closed instead of letting this deterministic E2E consult a registry.
-			const install = await runPiPackedConsumerNpm(
-				["install", "--offline", tarballPath],
-				{ cwd: consumerDir, env: consumerEnv, timeoutMs: 10 * 60_000 },
-			);
-			report.commands.push(install);
-			expect(install.code, commandFailure(install)).toBe(0);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
 			const installedPiRoot = join(consumerDir, "node_modules", "@earendil-works", "pi-coding-agent");
 			expect(
@@ -832,7 +832,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				report.cliStderr = runtime.stderr.join("");
 			}
 			await attachReport(testInfo, report);
-			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+			// The coordinator owns this materialized copy and removes it only after
+			// Playwright (and therefore every browser/runtime handle) has closed.
 		}
 	});
 });
