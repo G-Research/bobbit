@@ -188,6 +188,16 @@ async function registerUntrackedFixtureProject(gateway: any, label: string): Pro
 	return { id: project.id as string, rootPath };
 }
 
+async function deleteTrackedFixtureProject(gateway: any, projectId: string): Promise<Response> {
+	const response = await localApiFetch(gateway, `/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+	if (response.ok) {
+		const ownedIndex = fixtureProjectIds.indexOf(projectId);
+		if (ownedIndex === -1) throw new Error(`Deleted untracked history-fork fixture project ${projectId}`);
+		fixtureProjectIds.splice(ownedIndex, 1);
+	}
+	return response;
+}
+
 function installSandboxSessionFilesystem(
 	gateway: any,
 	label: string,
@@ -941,7 +951,7 @@ test.describe("history fork API", () => {
 		};
 
 		try {
-			response = await localApiFetch(gateway, `/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
+			response = await deleteTrackedFixtureProject(gateway, project.id);
 		} finally {
 			manager.terminateSession = originalTerminateSession;
 			manager.sandboxManager = originalSandboxManager;
@@ -949,7 +959,7 @@ test.describe("history fork API", () => {
 			if (response?.status !== 200) {
 				await manager.terminateSession(borrowerId).catch(() => undefined);
 				await manager.terminateSession(ownerId).catch(() => undefined);
-				await localApiFetch(gateway, `/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" }).catch(() => undefined);
+				await deleteTrackedFixtureProject(gateway, project.id).catch(() => undefined);
 			}
 		}
 
