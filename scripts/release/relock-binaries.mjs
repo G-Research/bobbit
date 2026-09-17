@@ -42,29 +42,43 @@ export const BINARY_PACKAGES = BINARY_PLATFORMS.map((p) => `@gresearch/bobbit-bi
  * `npm publish` returns before the registry read endpoint reflects the new
  * version, so a fetch immediately after publish can 404. This fetcher waits out
  * that propagation lag: it retries on 404, transient 5xx, and network errors
- * with a fixed delay, and only throws once the budget is exhausted.
+ * with exponential backoff, and only throws once the shared retry budget is
+ * exhausted. The budget is shared across every package checked by one fetcher:
+ * later packages have already been propagating while earlier checks wait.
  * Non-transient responses (other 4xx, e.g. 401/403) fail fast.
  *
- * @param {{ registry?: string, fetchImpl?: typeof fetch, retries?: number, delayMs?: number, sleep?: (ms: number) => Promise<void>, log?: (msg: string) => void }} [options]
+ * @param {{ registry?: string, fetchImpl?: typeof fetch, retries?: number, delayMs?: number, maxDelayMs?: number, maxWaitMs?: number, sleep?: (ms: number) => Promise<void>, log?: (msg: string) => void }} [options]
  * @returns {(name: string, version: string) => Promise<{ tarball?: string, integrity?: string }>}
  */
 export function registryFetchMeta({
 	registry = "https://registry.npmjs.org",
 	fetchImpl = fetch,
-	retries = 20,
-	delayMs = 6000,
+	retries = 21,
+	delayMs = 1000,
+	maxDelayMs = 120000,
+	maxWaitMs = 30 * 60 * 1000,
 	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	log = (msg) => process.stderr.write(`${msg}\n`),
 } = {}) {
 	const base = registry.replace(/\/$/, "");
+	let totalWaitMs = 0;
 	return async (name, version) => {
 		const url = `${base}/${name.replaceAll("/", "%2F")}/${version}`;
 		let lastReason = "unknown";
+		let attempts = 0;
 		for (let attempt = 0; attempt <= retries; attempt += 1) {
 			if (attempt > 0) {
-				log(`  waiting for ${name}@${version} to become readable (${lastReason}); retry ${attempt}/${retries}…`);
-				await sleep(delayMs);
+				const remainingWaitMs = maxWaitMs - totalWaitMs;
+				if (remainingWaitMs <= 0) break;
+				const retryDelayMs = Math.min(delayMs * 2 ** (attempt - 1), maxDelayMs, remainingWaitMs);
+				log(
+					`  waiting for ${name}@${version} to become readable (${lastReason}); ` +
+						`retry ${attempt}/${retries} in ${retryDelayMs / 1000}s…`,
+				);
+				totalWaitMs += retryDelayMs;
+				await sleep(retryDelayMs);
 			}
+			attempts += 1;
 			/** @type {Response} */
 			let res;
 			try {
@@ -88,10 +102,10 @@ export function registryFetchMeta({
 			// Non-transient client error — no amount of waiting fixes it.
 			throw new Error(`registry lookup for ${name}@${version} returned ${res.status}`);
 		}
-		const waited = Math.round((retries * delayMs) / 1000);
+		const waited = Math.round(totalWaitMs / 1000);
 		throw new Error(
-			`${name}@${version} did not become readable on the registry after ~${waited}s ` +
-				`(${retries + 1} attempts): ${lastReason}. If it was just published, propagation is ` +
+			`${name}@${version} did not become readable on the registry after ~${waited}s of shared retry waits ` +
+				`(${attempts} attempts for this package): ${lastReason}. If it was just published, propagation is ` +
 				`unusually slow; otherwise confirm it published.`,
 		);
 	};

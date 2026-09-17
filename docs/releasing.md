@@ -197,8 +197,11 @@ runs the whole flow on `workflow_dispatch`:
   npm ≥ 11.5.1, provenance automatic). Already-published versions are skipped, so a
   re-run after a partial failure is safe.
 - **`open-pr`** re-locks the root `optionalDependencies` pin and `package-lock.json`
-  from the freshly-published registry values (`scripts/release/relock-binaries.mjs`),
-  gates on `npm ci --dry-run`, and opens a `bot/binaries-<version>` PR against `main`.
+  from the freshly-published registry values (`scripts/release/relock-binaries.mjs`).
+  Registry checks share a 30-minute exponential-backoff budget across all five
+  packages while npm propagates them, with each individual wait capped at two minutes.
+  The job then gates on `npm ci --dry-run` and opens a `bot/binaries-<version>` PR
+  against `main`.
 
 Merge that PR to sync the repo. It does **not** cut a root release — consumers pick
 up the new binaries on the next `@gresearch/bobbit` release, whose pin the PR bumped.
