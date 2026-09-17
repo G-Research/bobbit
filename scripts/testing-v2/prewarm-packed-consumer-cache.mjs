@@ -98,15 +98,24 @@ async function defaultSpawnOwned(command, args, options) {
 	});
 }
 
-function commandDiagnostic({ rendered, cwd, child, ownershipState, killRequested, closed, treeExited, treeExitTimeoutMs, stdout, stderr }) {
+function commandDiagnostic({ rendered, cwd, child, ownershipState, killRequested, killError, closed, treeExit, treeExitTimeoutMs, stdout, stderr }) {
+	const rootClose = closed.observed
+		? `code=${closed.code ?? "null"}, signal=${closed.signal ?? "none"}`
+		: `not observed within ${treeExitTimeoutMs}ms after termination request`;
+	let treeExitDiagnostic = "verification not started";
+	if (treeExit.attempted) {
+		if (!treeExit.settled) treeExitDiagnostic = `verification did not complete within ${treeExitTimeoutMs}ms`;
+		else if (treeExit.error) treeExitDiagnostic = `verification failed: ${treeExit.error.message}`;
+		else treeExitDiagnostic = treeExit.verified ? "verified complete" : "not verified";
+	}
 	return [
 		`command: ${rendered}`,
 		`cwd: ${cwd}`,
 		`pid: ${child.pid ?? "unavailable"}`,
 		`ownership: ${ownershipState}`,
-		`tree termination requested: ${killRequested ? "yes (SIGKILL)" : "no"}`,
-		`root exit: code=${closed.code ?? "null"}, signal=${closed.signal ?? "none"}`,
-		`tree exit: ${treeExited ? "verified complete" : `not verified within ${treeExitTimeoutMs}ms`}`,
+		`tree termination requested: ${killRequested ? "yes (SIGKILL)" : "no"}${killError ? `; request failed: ${killError.message}` : ""}`,
+		`root close: ${rootClose}`,
+		`tree exit: ${treeExitDiagnostic}`,
 		`stdout:\n${stdout}`,
 		`stderr:\n${stderr}`,
 	].join("\n");
@@ -128,6 +137,8 @@ export async function runOwnedCommand(command, args, {
 	spawnOwned = defaultSpawnOwned,
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
+	setCompletionTimer = setTimeout,
+	clearCompletionTimer = clearTimeout,
 } = {}) {
 	if (!cwd) throw new Error("cwd is required");
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be a positive number");
@@ -145,15 +156,50 @@ export async function runOwnedCommand(command, args, {
 	let outputBytes = 0;
 	let terminalError;
 	let killRequested = false;
+	let killError;
 	let ownershipState = "pending";
 	let ownershipTimer;
 	let executionTimer;
+	let completionTimer;
+	let resolveKillRequested;
+	let resolveCompletionTimeout;
+	const killRequestedResult = new Promise(resolveKill => { resolveKillRequested = resolveKill; });
+	const completionTimeoutResult = new Promise(resolveTimeout => { resolveCompletionTimeout = resolveTimeout; });
+	const treeExit = { attempted: false, settled: false, verified: false, error: undefined };
+	let treeExitResult;
 
+	const startTreeExitVerification = () => {
+		if (treeExitResult) return treeExitResult;
+		treeExit.attempted = true;
+		treeExitResult = (async () => {
+			try {
+				const verified = await tracked.waitForTreeExit(treeExitTimeoutMs);
+				treeExit.settled = true;
+				treeExit.verified = verified === true;
+			} catch (error) {
+				treeExit.settled = true;
+				treeExit.error = error instanceof Error ? error : new Error(String(error));
+			}
+		})();
+		return treeExitResult;
+	};
+	const armCompletionTimeout = () => {
+		if (completionTimer !== undefined) return;
+		completionTimer = setCompletionTimer(() => resolveCompletionTimeout(), treeExitTimeoutMs);
+	};
 	const requestOwnedKill = (error) => {
 		if (!terminalError) terminalError = error;
 		if (killRequested) return;
 		killRequested = true;
-		tracked.killTree("SIGKILL");
+		armCompletionTimeout();
+		resolveKillRequested();
+		try {
+			tracked.killTree("SIGKILL");
+		} catch (error) {
+			killError = error instanceof Error ? error : new Error(String(error));
+		} finally {
+			startTreeExitVerification();
+		}
 	};
 	const collect = (target, chunk) => {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -170,34 +216,40 @@ export async function runOwnedCommand(command, args, {
 	child.stderr?.on("data", collectStderr);
 
 	let closeSettled = false;
-	const closeResult = new Promise(resolveClose => {
-		const finishClose = result => {
-			if (closeSettled) return;
-			closeSettled = true;
-			child.off("error", onError);
-			child.off("close", onClose);
-			resolveClose(result);
-		};
-		const onError = error => finishClose({ spawnError: error, code: null, signal: null });
-		const onClose = (code, signal) => finishClose({ code, signal });
-		child.once("error", onError);
-		child.once("close", onClose);
-	});
+	let resolveCloseResult;
+	const closeResult = new Promise(resolveClose => { resolveCloseResult = resolveClose; });
+	const finishClose = result => {
+		if (closeSettled) return;
+		closeSettled = true;
+		child.off("error", onError);
+		child.off("close", onClose);
+		resolveCloseResult(result);
+	};
+	const onError = error => finishClose({ spawnError: error, code: null, signal: null });
+	const onClose = (code, signal) => finishClose({ code, signal });
+	child.once("error", onError);
+	child.once("close", onClose);
 
 	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`);
+	const terminationDuringOwnership = Symbol("termination-during-ownership");
 	try {
 		await Promise.race([
 			tracked.ownershipReady,
 			new Promise((_, reject) => {
 				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipEstablishmentTimeoutMs);
 			}),
+			killRequestedResult.then(() => { throw terminationDuringOwnership; }),
 		]);
 		ownershipState = "established";
 	} catch (error) {
-		ownershipState = error === ownershipTimeoutError ? "timed out" : "failed";
-		requestOwnedKill(error === ownershipTimeoutError
-			? ownershipTimeoutError
-			: new Error(`${rendered} did not establish process-tree ownership`, { cause: error }));
+		if (error === terminationDuringOwnership) {
+			ownershipState = "termination requested before readiness";
+		} else {
+			ownershipState = error === ownershipTimeoutError ? "timed out" : "failed";
+			requestOwnedKill(error === ownershipTimeoutError
+				? ownershipTimeoutError
+				: new Error(`${rendered} did not establish process-tree ownership`, { cause: error }));
+		}
 	} finally {
 		if (ownershipTimer !== undefined) clearTimer(ownershipTimer);
 	}
@@ -205,11 +257,45 @@ export async function runOwnedCommand(command, args, {
 		executionTimer = setTimer(() => requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`)), timeoutMs);
 	}
 
-	const closed = await closeResult;
-	child.stdout?.off("data", collectStdout);
-	child.stderr?.off("data", collectStderr);
+	const closed = { observed: false, code: null, signal: null, spawnError: undefined };
+	let outputDetached = false;
+	const detachOutputListeners = () => {
+		if (outputDetached) return;
+		outputDetached = true;
+		child.stdout?.off("data", collectStdout);
+		child.stderr?.off("data", collectStderr);
+	};
+	const observedCloseResult = closeResult.then(result => {
+		closed.observed = true;
+		closed.code = result.code;
+		closed.signal = result.signal;
+		closed.spawnError = result.spawnError;
+		detachOutputListeners();
+		if (executionTimer !== undefined) {
+			clearTimer(executionTimer);
+			executionTimer = undefined;
+		}
+	});
+	let completionTimedOut = false;
+	const firstBoundary = await Promise.race([
+		observedCloseResult.then(() => "close"),
+		killRequestedResult.then(() => "kill"),
+	]);
+	if (firstBoundary === "close") {
+		startTreeExitVerification();
+		armCompletionTimeout();
+	}
+	const completionResult = Promise.all([observedCloseResult, startTreeExitVerification()]);
+	completionTimedOut = await Promise.race([
+		completionResult.then(() => false),
+		completionTimeoutResult.then(() => true),
+	]);
+
+	child.off("error", onError);
+	child.off("close", onClose);
+	detachOutputListeners();
 	if (executionTimer !== undefined) clearTimer(executionTimer);
-	const treeExited = await tracked.waitForTreeExit(treeExitTimeoutMs);
+	if (completionTimer !== undefined) clearCompletionTimer(completionTimer);
 	const stdoutText = Buffer.concat(stdout).toString("utf8");
 	const stderrText = Buffer.concat(stderr).toString("utf8");
 	const diagnostic = commandDiagnostic({
@@ -218,15 +304,20 @@ export async function runOwnedCommand(command, args, {
 		child,
 		ownershipState,
 		killRequested,
+		killError,
 		closed,
-		treeExited,
+		treeExit,
 		treeExitTimeoutMs,
 		stdout: stdoutText,
 		stderr: stderrText,
 	});
 
-	if (!treeExited) {
-		throw new Error(`${rendered} closed without verified process-tree completion\n${diagnostic}`, { cause: terminalError });
+	if (completionTimedOut || !closed.observed) {
+		const terminalContext = terminalError ? `${terminalError.message}\n` : "";
+		throw new Error(`${terminalContext}${rendered} did not complete its process-tree shutdown within ${treeExitTimeoutMs}ms\n${diagnostic}`, { cause: terminalError });
+	}
+	if (!treeExit.verified) {
+		throw new Error(`${rendered} closed without verified process-tree completion\n${diagnostic}`, { cause: treeExit.error ?? terminalError });
 	}
 	if (terminalError) throw new Error(`${terminalError.message}\n${diagnostic}`, { cause: terminalError });
 	if (closed.spawnError) throw new Error(`Failed to spawn ${rendered}: ${closed.spawnError.message}\n${diagnostic}`, { cause: closed.spawnError });

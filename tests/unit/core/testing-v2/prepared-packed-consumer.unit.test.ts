@@ -249,4 +249,131 @@ describe("prepared packed consumer", () => {
 			assert.match(diagnostic, pattern, `${FAILURE_PREFIX}: timeout diagnostics must include ${label}`);
 		}
 	});
+
+	it("bounds post-kill completion when neither root close nor tree verification settles", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 5151,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let fireExecutionTimeout: (() => void) | undefined;
+		let fireCompletionTimeout: (() => void) | undefined;
+		let killCount = 0;
+		let treeExitAttempts = 0;
+		const completionTimer = Symbol("completion-timer");
+		const clearedCompletionTimers: symbol[] = [];
+		const running = packedConsumerModule.runOwnedCommand("node", ["npm-cli.js", "install"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 41,
+			ownershipEstablishmentTimeoutMs: 17,
+			treeExitTimeoutMs: 29,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => { killCount++; },
+				waitForTreeExit: async (timeoutMs: number) => {
+					assert.equal(timeoutMs, 29);
+					treeExitAttempts++;
+					return new Promise<boolean>(() => {});
+				},
+			}),
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				if (timeoutMs === 41) fireExecutionTimeout = callback;
+				return Symbol(`timer-${timeoutMs}`);
+			},
+			clearTimer: () => {},
+			setCompletionTimer: (callback: () => void, timeoutMs: number) => {
+				assert.equal(timeoutMs, 29);
+				fireCompletionTimeout = callback;
+				return completionTimer;
+			},
+			clearCompletionTimer: (timer: symbol) => { clearedCompletionTimers.push(timer); },
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		child.stdout.write("root-close stdout marker");
+		child.stderr.write("root-close stderr marker");
+		assert.ok(fireExecutionTimeout, `${FAILURE_PREFIX}: execution timeout did not arm`);
+		fireExecutionTimeout();
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(killCount, 1, `${FAILURE_PREFIX}: timeout must request one kill`);
+		assert.equal(treeExitAttempts, 1, `${FAILURE_PREFIX}: timeout must attempt tree verification without root close`);
+		assert.ok(fireCompletionTimeout, `${FAILURE_PREFIX}: post-kill completion timeout did not arm`);
+		fireCompletionTimeout();
+
+		await assert.rejects(running, (error: Error) => {
+			assert.match(error.message, /timed out after 41ms/i);
+			assert.match(error.message, /pid[^\n]*5151/i);
+			assert.match(error.message, /root close: not observed within 29ms/i);
+			assert.match(error.message, /tree exit: verification did not complete within 29ms/i);
+			assert.match(error.message, /root-close stdout marker/);
+			assert.match(error.message, /root-close stderr marker/);
+			return true;
+		});
+		assert.equal(killCount, 1, `${FAILURE_PREFIX}: completion expiry must not request another kill`);
+		assert.deepEqual(clearedCompletionTimers, [completionTimer]);
+		assert.equal(child.listenerCount("error"), 0);
+		assert.equal(child.listenerCount("close"), 0);
+		assert.equal(child.stdout.listenerCount("data"), 0);
+		assert.equal(child.stderr.listenerCount("data"), 0);
+	});
+
+	it("bounds tree verification after an overflowing command reports root close", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 6161,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let fireCompletionTimeout: (() => void) | undefined;
+		let killCount = 0;
+		let treeExitAttempts = 0;
+		const completionTimer = Symbol("completion-timer");
+		const clearedCompletionTimers: symbol[] = [];
+		const running = packedConsumerModule.runOwnedCommand("node", ["npm-cli.js", "pack"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 1_000,
+			maxOutputBytes: 32,
+			treeExitTimeoutMs: 37,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => {
+					killCount++;
+					child.emit("close", null, "SIGKILL");
+				},
+				waitForTreeExit: async () => {
+					treeExitAttempts++;
+					return new Promise<boolean>(() => {});
+				},
+			}),
+			setCompletionTimer: (callback: () => void, timeoutMs: number) => {
+				assert.equal(timeoutMs, 37);
+				fireCompletionTimeout = callback;
+				return completionTimer;
+			},
+			clearCompletionTimer: (timer: symbol) => { clearedCompletionTimers.push(timer); },
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		child.stderr.write("retained overflow stderr");
+		child.stdout.write("output that crosses the configured maximum");
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(killCount, 1, `${FAILURE_PREFIX}: overflow must request one kill`);
+		assert.equal(treeExitAttempts, 1);
+		assert.ok(fireCompletionTimeout, `${FAILURE_PREFIX}: tree-verification timeout did not arm`);
+		fireCompletionTimeout();
+
+		await assert.rejects(running, (error: Error) => {
+			assert.match(error.message, /exceeded the 32-byte output limit/i);
+			assert.match(error.message, /pid[^\n]*6161/i);
+			assert.match(error.message, /root close: code=null, signal=SIGKILL/i);
+			assert.match(error.message, /tree exit: verification did not complete within 37ms/i);
+			assert.match(error.message, /retained overflow stderr/);
+			return true;
+		});
+		assert.equal(killCount, 1, `${FAILURE_PREFIX}: tree expiry must not request another kill`);
+		assert.deepEqual(clearedCompletionTimers, [completionTimer]);
+		assert.equal(child.listenerCount("error"), 0);
+		assert.equal(child.listenerCount("close"), 0);
+		assert.equal(child.stdout.listenerCount("data"), 0);
+		assert.equal(child.stderr.listenerCount("data"), 0);
+	});
 });
