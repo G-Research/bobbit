@@ -10,7 +10,7 @@
  * each Playwright worker its own process-local cache directory.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -25,6 +25,7 @@ import {
   sanitizeTestEnvironment,
   setEnvironmentValue,
 } from "./testing-v2/environment-policy.mjs";
+import { removeOwnedPath } from "./testing-v2/owned-path-cleanup.mjs";
 
 export {
   isAmbientBobbitRuntimeEnvKey as isE2EAmbientRuntimeEnvKey,
@@ -214,7 +215,7 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   return env;
 }
 
-export function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
+export async function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
 const invocation = createPlaywrightE2EInvocation(forwardedArgs);
 const paths = createE2ERunPaths(coordinatorTempDirectory());
 const cacheRoot = paths.cacheRoot;
@@ -252,12 +253,22 @@ const result = spawnSync(invocation.command, invocation.args, {
   shell: false,
 });
 
+let cleanupFailed = false;
 if (result.status === 0 && !result.signal && process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1") {
   try {
     // Never sweep a shared temp parent: this coordinator owns exactly paths.root.
-    rmSync(paths.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-  } catch {
-    console.error(`[e2e] could not remove successful run root: ${paths.root}`);
+    await removeOwnedPath(paths.root, {
+      ownerRoot: paths.root,
+      allowOwnerRoot: true,
+      owner: { kind: "coordinator", id: paths.runId },
+      lifecycle: {
+        playwright: { state: "closed", status: result.status, signal: result.signal },
+        reporters: "closed with Playwright process",
+      },
+    });
+  } catch (error) {
+    cleanupFailed = true;
+    console.error(`[e2e] could not remove successful run root: ${paths.root}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
   }
 } else {
   console.error(`[e2e] retained failure diagnostics: ${paths.root}`);
@@ -268,8 +279,17 @@ if (result.signal) {
   process.kill(process.pid, result.signal);
   return 1;
 }
+if (cleanupFailed) return 1;
 return result.status ?? 1;
 }
 
 const invokedAsScript = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedAsScript) process.exit(runPlaywrightE2E());
+if (invokedAsScript) {
+  runPlaywrightE2E().then(
+    code => { process.exitCode = code; },
+    error => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
+}

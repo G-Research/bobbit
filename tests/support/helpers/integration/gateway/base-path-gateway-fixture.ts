@@ -206,7 +206,7 @@ export async function bootGateway(
 		basePath,
 		...(options.onBound ? { onBound: options.onBound } : {}),
 	} as Parameters<typeof createGateway>[0] & { basePath: string };
-	let gateway: ReturnType<typeof createGateway>;
+	let gateway: ReturnType<typeof createGateway> | undefined;
 	let port: number;
 	try {
 		gateway = createGateway(gatewayConfig, {
@@ -225,9 +225,13 @@ export async function bootGateway(
 		}
 		port = await gateway.start();
 	} catch (error) {
-		try { await gateway!.shutdown(); } catch { /* best-effort rejected-start cleanup */ }
+		let shutdownError: unknown;
+		if (gateway) {
+			try { await gateway.shutdown(); } catch (failure) { shutdownError = failure; }
+		}
 		restoreProcessState(processState);
-		removeOwnedRunChild(root);
+		if (shutdownError) throw new AggregateError([error, shutdownError], `base-path gateway startup and shutdown failed; retained diagnostics: ${root}`);
+		await removeOwnedRunChild(root, { gateway: "rejected start shutdown settled", processState: "restored" });
 		throw error;
 	}
 	const peerHost = loopbackForBind(host.trim());
@@ -254,13 +258,13 @@ export async function bootGateway(
 			return manager.readGatewayUrlForAgent();
 		},
 		async shutdown() {
-			try { await gateway.shutdown(); }
-			finally {
-				// createGateway resolves these process-wide values during startup. Restore
-				// every one before deleting the directories they previously referenced.
-				restoreProcessState(processState);
-				removeOwnedRunChild(root);
-			}
+			let shutdownError: unknown;
+			try { await gateway.shutdown(); } catch (error) { shutdownError = error; }
+			// createGateway resolves these process-wide values during startup. Restore
+			// every one even when shutdown fails; deletion remains blocked in that case.
+			restoreProcessState(processState);
+			if (shutdownError) throw shutdownError;
+			await removeOwnedRunChild(root, { gateway: "shutdown resolved", processState: "restored" });
 		},
 	};
 	return running;

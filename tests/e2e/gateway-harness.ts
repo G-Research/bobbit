@@ -29,6 +29,7 @@ import type { AddressInfo } from "node:net";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
+import { shutdownResourcesThenRemove } from "../../scripts/testing-v2/owned-path-cleanup.mjs";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
@@ -788,39 +789,31 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		await use(info);
 		bgProcessSpawnErrorArm = undefined;
 
-		// Teardown — use existing shutdown() for proper cleanup. Close the optional
-		// static-only UI origin first so no late browser request races directory
-		// removal after the gateway has stopped.
-		await closeServer(staticUiServer);
-		await gw.shutdown();
-		// Bounded-retry cleanup. Replaces the previous fire-and-forget
-		// `void rmAsync(...)` strategy: that hid Windows Defender / FS-handle
-		// races behind the global teardown sweep and produced spurious leak
-		// reports. awaitableRm() retries with backoff (5 attempts, 200ms
-		// base, exponential) and falls back to the global sweep on final
-		// failure — so worker teardown is bounded but no longer silent.
-		await awaitableRm(bobbitDir, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[gateway-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
-			},
-		});
-		await awaitableRm(defaultProjectRoot, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[gateway-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
-			},
-		});
-		if (splitHeadquartersServerRoot) {
-			await awaitableRm(serverRoot, {
-				onFinalFailure: (err) => {
-					const msg = (err as Error)?.message ?? String(err);
-					console.warn(`[gateway-harness] cleanup deferred for ${serverRoot}: ${msg}`);
+		// The Playwright fixture has settled. Drain every remaining owner in order;
+		// a shutdown failure retains all paths for diagnosis and skips deletion.
+		try {
+			await shutdownResourcesThenRemove({
+				phases: [
+					{ name: "fixture-servers", owners: [() => closeServer(staticUiServer)] },
+					{ name: "gateway-http-ws", owners: [() => gw.shutdown()] },
+				],
+				remove: async () => {
+					const lifecycle = { browserFixture: "settled", staticUiServer: "closed", gateway: "shutdown resolved" };
+					const targets = [bobbitDir, defaultProjectRoot, ...(splitHeadquartersServerRoot ? [serverRoot] : [])];
+					const results = await Promise.allSettled(targets.map(target => awaitableRm(target, {
+						ownerRoot: getRunRoot(),
+						owner: { kind: "worker", id: String(process.pid) },
+						lifecycle,
+						throwOnFailure: true,
+					})));
+					const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+					if (failures.length) throw new AggregateError(failures.map(result => result.reason), "gateway harness path cleanup failed");
 				},
 			});
+		} finally {
+			if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
+			else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 		}
-		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
-		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

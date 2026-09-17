@@ -26,7 +26,7 @@ const contextRoots: string[] = [];
 
 afterEach(async () => {
 	await Promise.allSettled(contexts.splice(0).map(context => context.close()));
-	for (const root of contextRoots.splice(0)) removeOwnedRunChild(root);
+	await Promise.all(contextRoots.splice(0).map(root => removeOwnedRunChild(root, { contexts: "closed" })));
 });
 
 function project(id: string, rootPath: string): RegisteredProject {
@@ -45,20 +45,17 @@ function context(id: string, fs = createMemFs()): ProjectContext {
 	const rootPath = createRunChild("host-hooks-project");
 	const registered = project(id, rootPath);
 	fs.mkdirSync(registered.rootPath, { recursive: true });
-	try {
-		const ctx = new ProjectContext(registered, {
-			fsImpl: fs,
-			goalPersistence: "json",
-			taskPersistence: "json",
-			gatePersistence: "json",
-		});
-		contexts.push(ctx);
-		contextRoots.push(rootPath);
-		return ctx;
-	} catch (error) {
-		removeOwnedRunChild(rootPath);
-		throw error;
-	}
+	// Register ownership before construction so afterEach also cleans a rejected
+	// context start, while keeping deletion behind the async owner-close barrier.
+	contextRoots.push(rootPath);
+	const ctx = new ProjectContext(registered, {
+		fsImpl: fs,
+		goalPersistence: "json",
+		taskPersistence: "json",
+		gatePersistence: "json",
+	});
+	contexts.push(ctx);
+	return ctx;
 }
 
 async function settleFanout(): Promise<void> {

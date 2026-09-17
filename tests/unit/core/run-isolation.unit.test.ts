@@ -59,7 +59,7 @@ function restoreBaselineEnv(): void {
 afterEach(restoreBaselineEnv);
 
 describe("unit run isolation", () => {
-  it("owns one canonical root and only removes children beneath it", () => {
+  it("owns one canonical root and only removes children beneath it", async () => {
     const root = getRunRoot();
     const child = createRunChild("core-isolation");
     try {
@@ -80,7 +80,7 @@ describe("unit run isolation", () => {
         false,
       );
     } finally {
-      removeOwnedRunChild(child);
+      await removeOwnedRunChild(child, { assertions: "settled" });
     }
   });
 
@@ -712,12 +712,12 @@ describe("unit run isolation", () => {
     );
     expect(basePathSource).toContain('from "../../../harnesses/shared/run-isolation.js"');
     expect(basePathSource).toContain('createRunChild("base-path-gateway")');
-    expect(basePathSource.match(/removeOwnedRunChild\(root\)/g)).toHaveLength(2);
+    expect(basePathSource.match(/await removeOwnedRunChild\(root,/g)).toHaveLength(2);
     expect(basePathSource).toMatch(
-      /catch \(error\) \{\s*try \{ await gateway!\.shutdown\(\); \} catch \{[^}]*\}\s*restoreProcessState\(processState\);\s*removeOwnedRunChild\(root\);/,
+      /catch \(error\) \{[\s\S]*?restoreProcessState\(processState\);[\s\S]*?if \(shutdownError\) throw[\s\S]*?await removeOwnedRunChild\(root,/,
     );
     expect(basePathSource).toMatch(
-      /async shutdown\(\) \{\s*try \{ await gateway\.shutdown\(\); \}\s*finally \{[\s\S]*?restoreProcessState\(processState\);\s*removeOwnedRunChild\(root\);/,
+      /async shutdown\(\) \{[\s\S]*?restoreProcessState\(processState\);\s*if \(shutdownError\) throw shutdownError;\s*await removeOwnedRunChild\(root,/,
     );
     expect(basePathSource).not.toContain("tmpdir");
     expect(basePathSource).not.toContain("mkdtempSync");
