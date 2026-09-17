@@ -42,7 +42,9 @@ export const BINARY_PACKAGES = BINARY_PLATFORMS.map((p) => `@gresearch/bobbit-bi
  * `npm publish` returns before the registry read endpoint reflects the new
  * version, so a fetch immediately after publish can 404. This fetcher waits out
  * that propagation lag: it retries on 404, transient 5xx, and network errors
- * with exponential backoff, and only throws once the budget is exhausted.
+ * with exponential backoff, and only throws once the shared retry budget is
+ * exhausted. The budget is shared across every package checked by one fetcher:
+ * later packages have already been propagating while earlier checks wait.
  * Non-transient responses (other 4xx, e.g. 401/403) fail fast.
  *
  * @param {{ registry?: string, fetchImpl?: typeof fetch, retries?: number, delayMs?: number, maxDelayMs?: number, maxWaitMs?: number, sleep?: (ms: number) => Promise<void>, log?: (msg: string) => void }} [options]
@@ -59,10 +61,10 @@ export function registryFetchMeta({
 	log = (msg) => process.stderr.write(`${msg}\n`),
 } = {}) {
 	const base = registry.replace(/\/$/, "");
+	let totalWaitMs = 0;
 	return async (name, version) => {
 		const url = `${base}/${name.replaceAll("/", "%2F")}/${version}`;
 		let lastReason = "unknown";
-		let totalWaitMs = 0;
 		let attempts = 0;
 		for (let attempt = 0; attempt <= retries; attempt += 1) {
 			if (attempt > 0) {
@@ -102,8 +104,8 @@ export function registryFetchMeta({
 		}
 		const waited = Math.round(totalWaitMs / 1000);
 		throw new Error(
-			`${name}@${version} did not become readable on the registry after ~${waited}s ` +
-				`(${attempts} attempts): ${lastReason}. If it was just published, propagation is ` +
+			`${name}@${version} did not become readable on the registry after ~${waited}s of shared retry waits ` +
+				`(${attempts} attempts for this package): ${lastReason}. If it was just published, propagation is ` +
 				`unusually slow; otherwise confirm it published.`,
 		);
 	};

@@ -168,6 +168,32 @@ describe("registryFetchMeta", () => {
 		assert.deepEqual(sleeps, [100, 200, 250, 250]);
 	});
 
+	it("shares the retry budget across sequential package checks", async () => {
+		const sleeps: number[] = [];
+		let firstPackageCalls = 0;
+		const fetchImpl = async (url: string | URL | Request) => {
+			if (String(url).includes("first")) {
+				firstPackageCalls += 1;
+				if (firstPackageCalls >= 3) {
+					return new Response(JSON.stringify({ dist: { tarball: "https://x/t.tgz", integrity: "sha512-Z" } }), { status: 200 });
+				}
+			}
+			return new Response("not found", { status: 404 });
+		};
+		const fetchMeta = registryFetchMeta({
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			retries: 10,
+			delayMs: 100,
+			maxDelayMs: 400,
+			maxWaitMs: 1000,
+			sleep: async (ms: number) => { sleeps.push(ms); },
+			log: () => {},
+		});
+		await fetchMeta("@example/first", "0.9.1");
+		await assert.rejects(() => fetchMeta("@example/second", "0.9.1"), /after ~1s of shared retry waits/);
+		assert.deepEqual(sleeps, [100, 200, 100, 200, 400]);
+	});
+
 	it("uses a 30-minute default retry budget with individual sleeps capped at two minutes", async () => {
 		const sleeps: number[] = [];
 		const fetchImpl = async () => new Response("not found", { status: 404 });

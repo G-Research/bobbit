@@ -198,8 +198,8 @@ runs the whole flow on `workflow_dispatch`:
   re-run after a partial failure is safe.
 - **`open-pr`** re-locks the root `optionalDependencies` pin and `package-lock.json`
   from the freshly-published registry values (`scripts/release/relock-binaries.mjs`).
-  Registry checks use exponential backoff for up to 30 minutes while npm propagates
-  each version, with each individual wait capped at two minutes.
+  Registry checks share a 30-minute exponential-backoff budget across all five
+  packages while npm propagates them, with each individual wait capped at two minutes.
   The job then gates on `npm ci --dry-run` and opens a `bot/binaries-<version>` PR
   against `main`.
 
