@@ -1,5 +1,6 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { throwIfCleanupRejected } from "../../../e2e/test-utils/cleanup.js";
 
 const CONTRACT_PREFIX = "WINDOWS_CLEANUP_CONTRACT";
 const CLEANUP_MODULE_URL = new URL("../../../../scripts/testing-v2/owned-path-cleanup.mjs", import.meta.url).href;
@@ -140,6 +141,48 @@ describe("owned path cleanup contract", () => {
 			{ attempt: 2, elapsedMs: 10, code: "EPERM" },
 			{ attempt: 3, elapsedMs: 30, code: "ENOTEMPTY" },
 			{ attempt: 4, elapsedMs: 70, code: "OK" },
+		]);
+	});
+
+	it("uses the default deadline budget beyond eight transient failures", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("default-policy-run-root");
+		const target = path.join(ownerRoot, "locked-worker");
+		const delays: number[] = [];
+		let now = 1_000;
+		let attempts = 0;
+
+		const result = await removeOwnedPath(target, {
+			ownerRoot,
+			seams: {
+				remove: async candidate => {
+					attempts++;
+					if (attempts <= 8) throw fsError("EBUSY", candidate, `locked-attempt-${attempts}`);
+				},
+				sleep: async delayMs => {
+					delays.push(delayMs);
+					now += delayMs;
+				},
+				now: () => now,
+			},
+		});
+
+		expect(result).toMatchObject({ removed: true, attempts: 9 });
+		expect(delays).toEqual([25, 50, 100, 200, 400, 500, 500, 500]);
+		expect(result.history.map(({ attempt, elapsedMs, code }) => ({
+			attempt,
+			elapsedMs,
+			code: code ?? "OK",
+		}))).toEqual([
+			{ attempt: 1, elapsedMs: 0, code: "EBUSY" },
+			{ attempt: 2, elapsedMs: 25, code: "EBUSY" },
+			{ attempt: 3, elapsedMs: 75, code: "EBUSY" },
+			{ attempt: 4, elapsedMs: 175, code: "EBUSY" },
+			{ attempt: 5, elapsedMs: 375, code: "EBUSY" },
+			{ attempt: 6, elapsedMs: 775, code: "EBUSY" },
+			{ attempt: 7, elapsedMs: 1_275, code: "EBUSY" },
+			{ attempt: 8, elapsedMs: 1_775, code: "EBUSY" },
+			{ attempt: 9, elapsedMs: 2_275, code: "OK" },
 		]);
 	});
 
@@ -356,6 +399,64 @@ describe("owned path cleanup contract", () => {
 		})).resolves.toMatchObject({ removed: true, attempts: 1 });
 		expect(remove).toHaveBeenCalledOnce();
 		expect(remove).toHaveBeenCalledWith(ownerRoot, { recursive: true, force: true });
+	});
+
+	it("preserves concurrent cleanup causes and exposes every child diagnostic", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("aggregate-diagnostics-run-root");
+		const firstTarget = path.join(ownerRoot, "locked-first");
+		const secondTarget = path.join(ownerRoot, "locked-second");
+		const firstLifecycle = { gateway: "shutdown resolved", resource: "first watcher pending" };
+		const secondLifecycle = { gateway: "shutdown resolved", resource: "second browser pending" };
+
+		const results = await Promise.allSettled([
+			removeOwnedPath(firstTarget, {
+				ownerRoot,
+				lifecycle: firstLifecycle,
+				maxAttempts: 1,
+				seams: {
+					remove: async candidate => { throw fsError("EBUSY", candidate, "first path remained locked"); },
+					now: () => 0,
+				},
+			}),
+			removeOwnedPath(secondTarget, {
+				ownerRoot,
+				lifecycle: secondLifecycle,
+				maxAttempts: 1,
+				seams: {
+					remove: async candidate => { throw fsError("EPERM", candidate, "second path denied"); },
+					now: () => 0,
+				},
+			}),
+		]);
+		const originalReasons = results
+			.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+			.map(result => result.reason);
+
+		let failure: unknown;
+		try {
+			throwIfCleanupRejected(results, "fixture path cleanup failed");
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(AggregateError);
+		const aggregate = failure as AggregateError;
+		expect(aggregate.errors).toHaveLength(2);
+		expect(aggregate.errors[0]).toBe(originalReasons[0]);
+		expect(aggregate.errors[1]).toBe(originalReasons[1]);
+		for (const evidence of [
+			firstTarget,
+			secondTarget,
+			"EBUSY",
+			"EPERM",
+			"history",
+			"lifecycle",
+			"first watcher pending",
+			"second browser pending",
+		]) {
+			expect(aggregate.message, `aggregate diagnostic missing ${evidence}`).toContain(evidence);
+		}
 	});
 });
 

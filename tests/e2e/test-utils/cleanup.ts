@@ -19,6 +19,35 @@ export interface AwaitableRmOptions {
 	onFinalFailure?: (err: unknown) => void;
 }
 
+function formatRejectedReason(reason: unknown): string {
+	if (reason instanceof Error) return `${reason.name}: ${reason.message}`;
+	if (typeof reason === "string") return reason;
+	try {
+		return JSON.stringify(reason) ?? String(reason);
+	} catch {
+		return String(reason);
+	}
+}
+
+/**
+ * Throw concurrent cleanup failures without hiding the child diagnostics.
+ * AggregateError.errors contains the original rejection reasons unchanged.
+ */
+export function throwIfCleanupRejected(
+	results: readonly PromiseSettledResult<unknown>[],
+	summary: string,
+): void {
+	const reasons = results
+		.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+		.map(result => result.reason);
+	if (reasons.length === 0) return;
+
+	const diagnostics = reasons
+		.map((reason, index) => `[${index + 1}] ${formatRejectedReason(reason)}`)
+		.join("\n");
+	throw new AggregateError(reasons, `${summary}:\n${diagnostics}`);
+}
+
 /**
  * Compatibility facade for legacy fixtures. New harness cleanup should supply
  * its coordinator run root and opt into fail-loud terminal errors.

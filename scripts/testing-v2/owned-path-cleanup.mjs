@@ -3,7 +3,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 const TRANSIENT_REMOVAL_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
-const DEFAULT_MAX_ATTEMPTS = 8;
+const DEFAULT_MAX_ATTEMPTS = 32;
 const DEFAULT_DEADLINE_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 25;
 const DEFAULT_MAX_DELAY_MS = 500;
