@@ -73,7 +73,10 @@ export class OwnedPathCleanupError extends Error {
 			history,
 			lifecycle: lifecycle ?? null,
 		};
-		super(`Failed to remove owned path: ${diagnosticJson(details)}`, { cause });
+		super(
+			`Failed to remove owned path "${target}" within owner root "${ownerRoot}": ${diagnosticJson(details)}`,
+			{ cause },
+		);
 		this.name = "OwnedPathCleanupError";
 		this.target = target;
 		this.ownerRoot = ownerRoot;
