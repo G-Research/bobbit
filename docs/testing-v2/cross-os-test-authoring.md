@@ -37,6 +37,8 @@ Use the browser and E2E coordinator wrappers rather than invoking Playwright aga
 
 The harness generates `BOBBIT_E2E_RUN_ID`; callers must not supply it or any run-root, temp-root, report, or cache-root variable. Those values are coordinator outputs, not configuration. Legacy worktree and Docker resources carry the generated ID in their paths, names, and labels. Docker teardown discovers resources by `bobbit-e2e-run=<run-id>` and removes only matching, namespace-validated containers and volumes. Never sweep a temp parent, checkout path, unlabelled resource, or another run's worktree/container/volume.
 
+See [Windows browser and E2E stability](windows-e2e-stability.md) for the shared owner-shutdown/removal lifecycle, prepared packed-consumer reuse, process-tree bounds, and focused reliability evidence.
+
 ## Lifecycle observation and qualification
 
 Synchronize on the event that proves the behavior: a health/readiness response, route or hydration completion, mutation registered before the action, correlated stream marker, settled output condition, focus boundary, media completion, or process/terminal close. Cleanup must wait for the resource it owns to settle.
