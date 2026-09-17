@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * Populate the inherited npm cache for the authoritative packed-consumer E2E.
+ * Prepare the authoritative packed-consumer fixture once inside an E2E run.
  *
- * A lock-driven `npm ci` caches its exact artifacts, but a fresh consumer with
- * no lockfile also needs registry packuments and may select additional tarballs.
- * This preparation installs the real Bobbit tarball online once, with lifecycle
- * scripts disabled, into a disposable consumer. The E2E remains a distinct,
- * fresh, strict-offline install with its full publication assertions.
+ * The coordinator packs Bobbit, resolves a lock-free external consumer into a
+ * run-owned npm cache, installs the emitted tarball strictly offline into an
+ * immutable template, and atomically publishes a descriptor. Browser workers
+ * only copy that template; they never run npm pack/install themselves.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -21,7 +20,11 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
+const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const CACHE_BATCH_SIZE = 32;
+const DESCRIPTOR_VERSION = 1;
+const FIXTURE_DIRECTORY = "prepared-packed-consumer";
+export const PACKED_CONSUMER_DESCRIPTOR_ENV = "BOBBIT_PACKED_CONSUMER_DESCRIPTOR";
 // Hosted Windows may spend more than 10 seconds establishing the Job-backed
 // ownership handshake under concurrent runner load. This deadline covers only
 // process-tree ownership setup; command execution retains its separate budget.
@@ -40,18 +43,11 @@ function npmInvocation(env = process.env) {
 		resolve(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 	].filter(candidate => typeof candidate === "string" && candidate.length > 0);
 	const cli = candidates.find(candidate => existsSync(candidate));
-	if (!cli) {
-		throw new Error(`Unable to locate npm's JavaScript CLI beside ${process.execPath}`);
-	}
+	if (!cli) throw new Error(`Unable to locate npm's JavaScript CLI beside ${process.execPath}`);
 	return { command: process.execPath, argsPrefix: [cli] };
 }
 
-/**
- * Remove only npm-script/project state that could make the empty consumer
- * inherit Bobbit's package-lock=false or workspace/lifecycle configuration.
- * Cache, registry, authentication, proxy, certificate, and user config remain
- * inherited from the workflow environment.
- */
+/** Remove npm-script/project state that an external consumer must not inherit. */
 export function packedConsumerNpmEnv(cwd, baseEnv = process.env) {
 	const env = { ...baseEnv };
 	const projectScopedKeys = new Set([
@@ -76,15 +72,22 @@ export function packedConsumerNpmEnv(cwd, baseEnv = process.env) {
 	}
 	delete env.INIT_CWD;
 	delete env.init_cwd;
-	// npm sets dependency lifecycle INIT_CWD from this value. Prewarm disables
-	// scripts, but retaining normal consumer semantics prevents ambient leakage.
 	env.INIT_CWD = cwd;
 	return env;
 }
 
+function isolatedNpmEnv(cwd, cacheDir, baseEnv) {
+	const env = packedConsumerNpmEnv(cwd, baseEnv);
+	for (const key of Object.keys(env)) {
+		if (key.toLowerCase() === "npm_config_cache") delete env[key];
+	}
+	env.npm_config_cache = cacheDir;
+	return env;
+}
+
 async function defaultSpawnOwned(command, args, options) {
-	// ensureDistBuild() runs before this path, so the built lifecycle primitive is
-	// available without coupling injected unit tests to a pre-existing dist tree.
+	// ensureDistBuild() runs before production preparation, so the built lifecycle
+	// primitive is available without coupling injected unit tests to dist.
 	const spawnTreeUrl = pathToFileURL(join(options.repoRoot, "dist", "server", "agent", "spawn-tree.js")).href;
 	const { spawnTracked } = await import(spawnTreeUrl);
 	return spawnTracked(command, args, {
@@ -95,11 +98,24 @@ async function defaultSpawnOwned(command, args, options) {
 	});
 }
 
+function commandDiagnostic({ rendered, cwd, child, ownershipState, killRequested, closed, treeExited, treeExitTimeoutMs, stdout, stderr }) {
+	return [
+		`command: ${rendered}`,
+		`cwd: ${cwd}`,
+		`pid: ${child.pid ?? "unavailable"}`,
+		`ownership: ${ownershipState}`,
+		`tree termination requested: ${killRequested ? "yes (SIGKILL)" : "no"}`,
+		`root exit: code=${closed.code ?? "null"}, signal=${closed.signal ?? "none"}`,
+		`tree exit: ${treeExited ? "verified complete" : `not verified within ${treeExitTimeoutMs}ms`}`,
+		`stdout:\n${stdout}`,
+		`stderr:\n${stderr}`,
+	].join("\n");
+}
+
 /**
- * Run a shell-free command whose whole process tree is owned. The ownership
- * handshake has its own setup deadline and is joined before the execution
- * deadline starts. Timeout/overflow requests one final owned kill, and every
- * outcome requires verified tree completion before it can be returned or thrown.
+ * Run a shell-free command whose whole process tree is owned. Timeout/overflow
+ * requests one owned-tree kill, then joins both root close and the tracked
+ * tree-completion barrier before returning diagnostics.
  */
 export async function runOwnedCommand(command, args, {
 	cwd,
@@ -113,6 +129,7 @@ export async function runOwnedCommand(command, args, {
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
 } = {}) {
+	if (!cwd) throw new Error("cwd is required");
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be a positive number");
 	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("maxOutputBytes must be a positive number");
 	if (!Number.isFinite(ownershipEstablishmentTimeoutMs) || ownershipEstablishmentTimeoutMs <= 0) {
@@ -128,6 +145,7 @@ export async function runOwnedCommand(command, args, {
 	let outputBytes = 0;
 	let terminalError;
 	let killRequested = false;
+	let ownershipState = "pending";
 	let ownershipTimer;
 	let executionTimer;
 
@@ -138,13 +156,12 @@ export async function runOwnedCommand(command, args, {
 		tracked.killTree("SIGKILL");
 	};
 	const collect = (target, chunk) => {
-		if (terminalError) return;
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-		outputBytes += buffer.byteLength;
-		if (outputBytes > maxOutputBytes) {
+		if (outputBytes + buffer.byteLength > maxOutputBytes) {
 			requestOwnedKill(new Error(`${rendered} exceeded the ${maxOutputBytes}-byte output limit`));
 			return;
 		}
+		outputBytes += buffer.byteLength;
 		target.push(buffer);
 	};
 	const collectStdout = chunk => collect(stdout, chunk);
@@ -167,9 +184,7 @@ export async function runOwnedCommand(command, args, {
 		child.once("close", onClose);
 	});
 
-	const ownershipTimeoutError = new Error(
-		`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`,
-	);
+	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`);
 	try {
 		await Promise.race([
 			tracked.ownershipReady,
@@ -177,7 +192,9 @@ export async function runOwnedCommand(command, args, {
 				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipEstablishmentTimeoutMs);
 			}),
 		]);
+		ownershipState = "established";
 	} catch (error) {
+		ownershipState = error === ownershipTimeoutError ? "timed out" : "failed";
 		requestOwnedKill(error === ownershipTimeoutError
 			? ownershipTimeoutError
 			: new Error(`${rendered} did not establish process-tree ownership`, { cause: error }));
@@ -185,9 +202,7 @@ export async function runOwnedCommand(command, args, {
 		if (ownershipTimer !== undefined) clearTimer(ownershipTimer);
 	}
 	if (!terminalError) {
-		executionTimer = setTimer(() => {
-			requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
+		executionTimer = setTimer(() => requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`)), timeoutMs);
 	}
 
 	const closed = await closeResult;
@@ -195,38 +210,38 @@ export async function runOwnedCommand(command, args, {
 	child.stderr?.off("data", collectStderr);
 	if (executionTimer !== undefined) clearTimer(executionTimer);
 	const treeExited = await tracked.waitForTreeExit(treeExitTimeoutMs);
-	if (!treeExited) {
-		throw new Error(`${rendered} closed without verified process-tree completion`, {
-			cause: terminalError,
-		});
-	}
-
 	const stdoutText = Buffer.concat(stdout).toString("utf8");
 	const stderrText = Buffer.concat(stderr).toString("utf8");
-	if (terminalError) {
-		throw new Error(`${terminalError.message}\nstdout:\n${stdoutText}\nstderr:\n${stderrText}`, { cause: terminalError });
+	const diagnostic = commandDiagnostic({
+		rendered,
+		cwd,
+		child,
+		ownershipState,
+		killRequested,
+		closed,
+		treeExited,
+		treeExitTimeoutMs,
+		stdout: stdoutText,
+		stderr: stderrText,
+	});
+
+	if (!treeExited) {
+		throw new Error(`${rendered} closed without verified process-tree completion\n${diagnostic}`, { cause: terminalError });
 	}
-	if (closed.spawnError) {
-		throw new Error(`Failed to spawn ${rendered}: ${closed.spawnError.message}`, { cause: closed.spawnError });
-	}
-	if (closed.signal || closed.code === null) {
-		throw new Error(`${rendered} terminated without an exit code (signal: ${closed.signal ?? "unknown"})`);
-	}
+	if (terminalError) throw new Error(`${terminalError.message}\n${diagnostic}`, { cause: terminalError });
+	if (closed.spawnError) throw new Error(`Failed to spawn ${rendered}: ${closed.spawnError.message}\n${diagnostic}`, { cause: closed.spawnError });
+	if (closed.signal || closed.code === null) throw new Error(`${rendered} terminated without an exit code\n${diagnostic}`);
 	return { command, args: [...args], code: closed.code, stdout: stdoutText, stderr: stderrText };
 }
 
 function requireSuccess(result) {
 	if (result.code === 0) return;
-	throw new Error(
-		`${displayCommand(result.command, result.args)} exited ${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-	);
+	throw new Error(`${displayCommand(result.command, result.args)} exited ${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
 }
 
 function parsePackResult(stdout, expectedPackageName) {
 	let parsed;
-	try {
-		parsed = JSON.parse(stdout);
-	} catch (error) {
+	try { parsed = JSON.parse(stdout); } catch (error) {
 		throw new Error(`npm pack emitted malformed JSON: ${error.message}`, { cause: error });
 	}
 	if (!Array.isArray(parsed) || parsed.length !== 1) {
@@ -237,14 +252,12 @@ function parsePackResult(stdout, expectedPackageName) {
 		typeof entry.filename !== "string" || entry.filename.length === 0 || basename(entry.filename) !== entry.filename) {
 		throw new Error(`npm pack reported an invalid result: ${JSON.stringify(entry)}`);
 	}
-	return entry;
+	return { entry, report: parsed };
 }
 
 function readPackageLock(path, label) {
 	let parsed;
-	try {
-		parsed = JSON.parse(readFileSync(path, "utf8"));
-	} catch (error) {
+	try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
 		throw new Error(`${label} is not valid JSON: ${error.message}`, { cause: error });
 	}
 	if (!parsed || typeof parsed !== "object" || parsed.lockfileVersion !== 3 ||
@@ -270,9 +283,7 @@ function allowsRuntime(values, actual, field, location) {
 		if (denied) {
 			negated++;
 			if (actual === expected) return false;
-		} else if (actual === expected) {
-			matched = true;
-		}
+		} else if (actual === expected) matched = true;
 	}
 	return matched || negated === list.length;
 }
@@ -310,65 +321,105 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 	return [...required].filter(url => !alreadyCached.has(url)).sort();
 }
 
+function isStrictChild(root, candidate) {
+	const child = relative(resolve(root), resolve(candidate));
+	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+function assertOwnedPath(runRoot, candidate, label) {
+	if (!isStrictChild(runRoot, candidate)) throw new Error(`${label} must be a strict child of the E2E run root`);
+}
+
 async function measured(label, operation) {
 	const start = Date.now();
-	console.log(`[packed-cache-prewarm] ${label}: started`);
+	console.log(`[packed-consumer] ${label}: started`);
 	try {
 		const result = await operation();
-		console.log(`[packed-cache-prewarm] ${label}: completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+		console.log(`[packed-consumer] ${label}: completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
 		return result;
 	} catch (error) {
-		console.error(`[packed-cache-prewarm] ${label}: failed after ${((Date.now() - start) / 1000).toFixed(1)}s`);
+		console.error(`[packed-consumer] ${label}: failed after ${((Date.now() - start) / 1000).toFixed(1)}s`);
 		throw error;
 	}
 }
 
-/** Resolve the fresh consumer online, then cache only tarballs absent from npm ci. */
-export async function prewarmPackedConsumerCache({
+function cleanConsumerManifest(nodeTypesVersion) {
+	return {
+		name: "bobbit-inline-theme-clean-consumer",
+		version: "1.0.0",
+		private: true,
+		...(nodeTypesVersion ? { overrides: { "@types/node": nodeTypesVersion } } : {}),
+	};
+}
+
+async function writeManifest(directory, manifest) {
+	await writeFile(join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/**
+ * Build one immutable packed-consumer template and publish its descriptor only
+ * after the actual tarball, lockfile, and installed dependency tree exist.
+ */
+export async function preparePackedConsumerFixture({
 	repoRoot = REPO_ROOT,
+	runRoot,
 	baseEnv = process.env,
 	ensureDist = () => ensureDistBuild({ repoRoot }),
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
-	tempParent = tmpdir(),
 	runtime,
 } = {}) {
+	if (!runRoot) throw new Error("preparePackedConsumerFixture requires runRoot");
+	const absoluteRunRoot = resolve(runRoot);
+	const fixtureRoot = join(absoluteRunRoot, FIXTURE_DIRECTORY);
+	const packDir = join(fixtureRoot, "pack");
+	// Template and materialized consumers stay at the same directory depth so
+	// npm's saved relative file: reference to the real tarball remains valid.
+	const preparationDir = join(fixtureRoot, "preparation");
+	const resolverDir = join(preparationDir, "resolver");
+	const templateDir = join(preparationDir, "template");
+	const cacheDir = join(fixtureRoot, "npm-cache");
+	const consumersDir = join(fixtureRoot, "materialized");
+	const descriptorPath = join(fixtureRoot, "descriptor.json");
+	for (const [label, candidate] of Object.entries({ fixtureRoot, packDir, preparationDir, resolverDir, templateDir, cacheDir, consumersDir, descriptorPath })) {
+		assertOwnedPath(absoluteRunRoot, candidate, label);
+	}
+	if (existsSync(fixtureRoot)) throw new Error(`Packed-consumer fixture was already prepared at ${fixtureRoot}`);
+
 	await measured("build", () => ensureDist());
-	const packageName = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).name;
+	const packageManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+	const packageName = packageManifest.name;
 	if (typeof packageName !== "string" || packageName.length === 0) throw new Error("package.json must declare a package name");
 	const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
+	const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
 	const npm = resolveNpm(baseEnv);
-	let tempRoot;
+	const commands = [];
+
 	try {
-		tempRoot = await mkdtemp(join(tempParent, "bobbit-packed-cache-prewarm-"));
-		const packDir = join(tempRoot, "pack");
-		const consumerDir = join(tempRoot, "consumer");
-		await mkdir(packDir);
-		await mkdir(consumerDir);
-		await writeFile(join(consumerDir, "package.json"), `${JSON.stringify({
-			name: "bobbit-packed-cache-prewarm",
-			version: "1.0.0",
-			private: true,
-		}, null, 2)}\n`);
+		await Promise.all([
+			mkdir(packDir, { recursive: true }),
+			mkdir(resolverDir, { recursive: true }),
+			mkdir(templateDir, { recursive: true }),
+			mkdir(cacheDir, { recursive: true }),
+			mkdir(consumersDir, { recursive: true }),
+		]);
+		const consumerManifest = cleanConsumerManifest(nodeTypesVersion);
+		await Promise.all([writeManifest(resolverDir, consumerManifest), writeManifest(templateDir, consumerManifest)]);
 
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
-		const packed = await measured("pack", async () => {
-			const result = await runCommand(npm.command, packArgs, {
-				cwd: repoRoot,
-				env: baseEnv,
-				timeoutMs: PACK_TIMEOUT_MS,
-				repoRoot,
-			});
+		const packCommand = await measured("pack", async () => {
+			const result = await runCommand(npm.command, packArgs, { cwd: repoRoot, env: baseEnv, timeoutMs: PACK_TIMEOUT_MS, repoRoot });
 			requireSuccess(result);
 			return result;
 		});
-		const packEntry = parsePackResult(packed.stdout, packageName);
+		commands.push(packCommand);
+		const { entry: packEntry, report: packReport } = parsePackResult(packCommand.stdout, packageName);
 		const tarballPath = resolve(packDir, packEntry.filename);
+		assertOwnedPath(absoluteRunRoot, tarballPath, "tarballPath");
 		const tarball = await stat(tarballPath).catch(() => undefined);
 		if (!tarball?.isFile()) throw new Error(`npm pack did not create ${tarballPath}`);
-		console.log(`[packed-cache-prewarm] pack: ${packEntry.entryCount ?? "?"} files, ${packEntry.size ?? "?"} packed bytes, ${packEntry.unpackedSize ?? "?"} unpacked bytes`);
 
-		const consumerEnv = packedConsumerNpmEnv(consumerDir, baseEnv);
+		const resolverEnv = isolatedNpmEnv(resolverDir, cacheDir, baseEnv);
 		const resolveArgs = [
 			...npm.argsPrefix,
 			"install",
@@ -376,45 +427,132 @@ export async function prewarmPackedConsumerCache({
 			"--ignore-scripts",
 			"--no-audit",
 			"--no-fund",
+			"--cache", cacheDir,
 			tarballPath,
 		];
-		await measured("resolve lock", async () => {
+		const resolveCommand = await measured("resolve lock", async () => {
 			const result = await runCommand(npm.command, resolveArgs, {
-				cwd: consumerDir,
-				env: consumerEnv,
+				cwd: resolverDir,
+				env: resolverEnv,
 				timeoutMs: LOCK_RESOLUTION_TIMEOUT_MS,
 				repoRoot,
 			});
 			requireSuccess(result);
+			return result;
 		});
-		const consumerLock = readPackageLock(join(consumerDir, "package-lock.json"), "generated consumer package-lock.json");
-		const missingTarballs = lockedTarballsMissingFromRepository(consumerLock, repositoryLock, runtime);
-		console.log(`[packed-cache-prewarm] cache: ${missingTarballs.length} tarballs absent from the repository lock`);
-		for (let offset = 0; offset < missingTarballs.length; offset += CACHE_BATCH_SIZE) {
-			const batch = missingTarballs.slice(offset, offset + CACHE_BATCH_SIZE);
-			const batchNumber = Math.floor(offset / CACHE_BATCH_SIZE) + 1;
-			const batchCount = Math.ceil(missingTarballs.length / CACHE_BATCH_SIZE);
-			await measured(`cache batch ${batchNumber}/${batchCount}`, async () => {
-				const result = await runCommand(npm.command, [...npm.argsPrefix, "cache", "add", ...batch], {
-					cwd: consumerDir,
-					env: consumerEnv,
+		commands.push(resolveCommand);
+		const consumerLock = readPackageLock(join(resolverDir, "package-lock.json"), "generated consumer package-lock.json");
+		const selectedTarballs = [...compatibleRegistryTarballs(consumerLock, runtime)].sort();
+		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs`);
+		for (let offset = 0; offset < selectedTarballs.length; offset += CACHE_BATCH_SIZE) {
+			const batch = selectedTarballs.slice(offset, offset + CACHE_BATCH_SIZE);
+			const result = await measured(`cache batch ${Math.floor(offset / CACHE_BATCH_SIZE) + 1}/${Math.ceil(selectedTarballs.length / CACHE_BATCH_SIZE)}`, () =>
+				runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
+					cwd: resolverDir,
+					env: resolverEnv,
 					timeoutMs: CACHE_BATCH_TIMEOUT_MS,
 					repoRoot,
-				});
-				requireSuccess(result);
+				}),
+			);
+			requireSuccess(result);
+			commands.push(result);
+		}
+
+		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
+		const installArgs = [
+			...npm.argsPrefix,
+			"install",
+			"--offline",
+			"--ignore-scripts",
+			"--no-audit",
+			"--no-fund",
+			"--cache", cacheDir,
+			tarballPath,
+		];
+		const installCommand = await measured("offline template install", async () => {
+			const result = await runCommand(npm.command, installArgs, {
+				cwd: templateDir,
+				env: templateEnv,
+				timeoutMs: OFFLINE_INSTALL_TIMEOUT_MS,
+				repoRoot,
 			});
+			requireSuccess(result);
+			return result;
+		});
+		commands.push(installCommand);
+
+		const [templateLock, templateModules] = await Promise.all([
+			stat(join(templateDir, "package-lock.json")).catch(() => undefined),
+			stat(join(templateDir, "node_modules")).catch(() => undefined),
+		]);
+		if (!templateLock?.isFile() || !templateModules?.isDirectory()) {
+			throw new Error("Offline packed-consumer template validation failed: package-lock.json or node_modules is missing");
 		}
-		console.log(`[packed-cache-prewarm] cached dependencies selected by ${packEntry.filename}`);
-	} finally {
-		if (tempRoot) {
-			await measured("cleanup", () => rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }));
-		}
+
+		const descriptor = {
+			version: DESCRIPTOR_VERSION,
+			runRoot: absoluteRunRoot,
+			fixtureRoot,
+			templateDir,
+			consumersDir,
+			tarballPath,
+			cacheDir,
+			descriptorPath,
+			packageName,
+			packEntry,
+			packReport,
+			commands,
+			preparedAt: new Date().toISOString(),
+		};
+		const temporaryDescriptor = `${descriptorPath}.tmp-${process.pid}-${randomUUID()}`;
+		await writeFile(temporaryDescriptor, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx" });
+		await rename(temporaryDescriptor, descriptorPath);
+		console.log(`[packed-consumer] descriptor: ${descriptorPath}`);
+		return descriptor;
+	} catch (error) {
+		await rm(fixtureRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }).catch(() => {});
+		throw error;
 	}
 }
 
+function validateDescriptor(descriptor) {
+	if (!descriptor || typeof descriptor !== "object" || descriptor.version !== DESCRIPTOR_VERSION) {
+		throw new Error("Prepared packed-consumer descriptor has an unsupported format");
+	}
+	for (const key of ["runRoot", "fixtureRoot", "templateDir", "consumersDir", "tarballPath", "cacheDir", "descriptorPath", "packageName"]) {
+		if (typeof descriptor[key] !== "string" || descriptor[key].length === 0) throw new Error(`Prepared packed-consumer descriptor is missing ${key}`);
+	}
+	for (const key of ["fixtureRoot", "templateDir", "consumersDir", "tarballPath", "cacheDir", "descriptorPath"]) {
+		assertOwnedPath(descriptor.runRoot, descriptor[key], key);
+	}
+	return descriptor;
+}
+
+export async function readPreparedPackedConsumerDescriptor(descriptorPath) {
+	const parsed = JSON.parse(await readFile(descriptorPath, "utf8"));
+	const descriptor = validateDescriptor(parsed);
+	if (resolve(descriptor.descriptorPath) !== resolve(descriptorPath)) {
+		throw new Error(`Prepared packed-consumer descriptor path mismatch: ${descriptorPath}`);
+	}
+	return descriptor;
+}
+
+/** Copy the installed template into a unique, mutable, run-owned consumer. */
+export async function materializePackedConsumerFixture(descriptor, {
+	runRoot = descriptor?.runRoot,
+	name = "consumer",
+} = {}) {
+	validateDescriptor(descriptor);
+	if (resolve(runRoot) !== resolve(descriptor.runRoot)) throw new Error("Materialized consumer must use the descriptor's E2E run root");
+	const safeName = String(name).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "consumer";
+	const consumerDir = join(descriptor.consumersDir, `${safeName}-${process.pid}-${randomUUID()}`);
+	assertOwnedPath(descriptor.runRoot, consumerDir, "consumerDir");
+	await mkdir(descriptor.consumersDir, { recursive: true });
+	await cp(descriptor.templateDir, consumerDir, { recursive: true, force: false, errorOnExist: true });
+	return { consumerDir };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	prewarmPackedConsumerCache().catch(error => {
-		console.error(error?.stack ?? error);
-		process.exitCode = 1;
-	});
+	console.error("This module is prepared by scripts/testing-v2/run-e2e-v2.mjs; standalone cache prewarming was removed.");
+	process.exitCode = 1;
 }
