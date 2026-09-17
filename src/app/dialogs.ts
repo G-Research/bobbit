@@ -159,8 +159,8 @@ export type TrustedLocationKind = "marketplace-source" | "project";
 
 /**
  * Require an explicit trust decision before Bobbit accepts an external source
- * location. This intentionally does not accept Enter as confirmation: the user
- * must click the strongly labelled action after reviewing the exact location.
+ * location. Enter confirms the focused warning just like the labelled action;
+ * Escape cancels without allowing the key event to reach an underlying dialog.
  */
 export function confirmTrustedLocation(kind: TrustedLocationKind, location: string): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -184,10 +184,11 @@ export function confirmTrustedLocation(kind: TrustedLocationKind, location: stri
 
 		const onKeydown = (event: KeyboardEvent) => {
 			if (event.key !== "Escape" && event.key !== "Enter") return;
-			// Keep the underlying Add Project dialog from receiving the same key.
+			// Handle the trust decision here and keep the underlying Add Project
+			// dialog from receiving the same key as a second submission.
 			event.preventDefault();
 			event.stopImmediatePropagation();
-			if (event.key === "Escape") cleanup(false);
+			cleanup(event.key === "Enter");
 		};
 		document.addEventListener("keydown", onKeydown, true);
 

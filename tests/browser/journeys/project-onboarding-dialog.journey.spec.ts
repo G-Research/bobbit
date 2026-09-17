@@ -10,6 +10,7 @@ import { test, expect, openApp } from "../../support/helpers/browser/journeys/jo
 import {
 	ADD_PROJECT,
 	clearAddedProjects,
+	makeMultiRepoFixture,
 	uniqueDir,
 } from "../../support/helpers/browser/journeys/project-onboarding.js";
 
@@ -71,9 +72,9 @@ test.describe("Journey: Project Onboarding", () => {
 		await expect(page.locator(ADD_PROJECT.statusSlot)).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("Continue requires explicit trust for the exact project location", async ({ page }) => {
-		const projectDir = uniqueDir("trust-warning");
-		mkdirSync(projectDir, { recursive: true });
+	test("trust confirmation accepts Enter and re-prompts after the path changes", async ({ page }) => {
+		const projectDir = makeMultiRepoFixture("trust-enter", ["one", "two"]);
+		const changedDir = makeMultiRepoFixture("trust-changed", ["three", "four"]);
 		try {
 			await openApp(page);
 			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
@@ -84,7 +85,8 @@ test.describe("Journey: Project Onboarding", () => {
 			await addBtn.click();
 			const projectDialog = page.locator(ADD_PROJECT.dialog);
 			await expect(projectDialog).toBeVisible({ timeout: 15_000 });
-			await projectDialog.locator(ADD_PROJECT.pickerInput).fill(projectDir);
+			const pathInput = projectDialog.locator(ADD_PROJECT.pickerInput);
+			await pathInput.fill(projectDir);
 
 			const continueButton = projectDialog.locator(ADD_PROJECT.continue);
 			await expect(continueButton).toBeEnabled({ timeout: 15_000 });
@@ -95,13 +97,26 @@ test.describe("Journey: Project Onboarding", () => {
 			await expect(trustDialog).toContainText(/responsible for validating/i);
 			await expect(trustDialog.locator(ADD_PROJECT.trustValue)).toHaveText(projectDir);
 			await expect(trustDialog.locator('[data-testid="trusted-location-consequence"]')).toContainText(/run malicious code/i);
-			await trustDialog.getByRole("button", { name: "Cancel", exact: true }).click();
 
+			await page.keyboard.press("Enter");
+			await expect(trustDialog).toHaveCount(0);
+			await expect(projectDialog.locator(ADD_PROJECT.scanChecklist)).toBeVisible({ timeout: 15_000 });
+
+			await projectDialog.getByRole("button", { name: "Back", exact: true }).click();
+			await pathInput.fill(changedDir);
+			await expect(continueButton).toBeEnabled({ timeout: 15_000 });
+			await continueButton.click();
+
+			await expect(trustDialog).toBeVisible({ timeout: 15_000 });
+			await expect(trustDialog.locator(ADD_PROJECT.trustValue)).toHaveText(changedDir);
+			await trustDialog.getByRole("button", { name: "Cancel", exact: true }).click();
 			await expect(trustDialog).toHaveCount(0);
 			await expect(projectDialog).toBeVisible();
-			await expect(projectDialog.locator(ADD_PROJECT.pickerInput)).toHaveValue(projectDir);
+			await expect(pathInput).toHaveValue(changedDir);
 		} finally {
-			try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			for (const dir of [projectDir, changedDir]) {
+				try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			}
 		}
 	});
 

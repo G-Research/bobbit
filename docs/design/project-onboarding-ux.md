@@ -269,8 +269,9 @@ secrets or project data, and use the operator's network access.
 
 Cancelling returns to the unchanged Add Project dialog. Acceptance is retained
 only for that exact path while the dialog remains open; editing the path requires
-a fresh decision. The confirmation deliberately ignores Enter as acceptance so
-trust always requires a click on the explicit **Trust and continue** action.
+a fresh decision. Enter activates the confirmation while Escape cancels it;
+both keys are consumed by the trust modal so the underlying Add Project dialog
+cannot receive the same key as a second submission.
 
 ## Where it lives
 
