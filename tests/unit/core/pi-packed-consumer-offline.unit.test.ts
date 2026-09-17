@@ -289,13 +289,17 @@ describe("packed-consumer offline install contract", () => {
 			label: "malformed pack output",
 			pack: { stdout: "[]" },
 			expected: /npm pack must report exactly one result/,
+			expectedCommands: 1,
+			expectedLastCode: 0,
 		},
 		{
 			label: "lock resolution failure",
 			pack: { stdout: JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-1.0.0.tgz" }]) },
 			expected: /exited 17/,
+			expectedCommands: 2,
+			expectedLastCode: 17,
 		},
-	])("propagates $label and still removes the owned root", async ({ pack, expected }) => {
+	])("propagates $label and retains partial fixture command evidence", async ({ pack, expected, expectedCommands, expectedLastCode }) => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-failure-pin-"));
 		try {
 			await assert.rejects(preparePackedConsumerFixture({
@@ -313,8 +317,21 @@ describe("packed-consumer offline install contract", () => {
 					}
 					return commandResult(command, args, { code: 17, stderr: "injected lock resolution failure" });
 				},
-			}), expected);
-			assert.deepEqual(readdirSync(tempParent), [], "failed prewarm must remove its disposable root");
+			}), (error: Error) => {
+				assert.match(error.message, expected);
+				assert.match(error.message, /retained partial fixture and command evidence/);
+				return true;
+			});
+			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
+			const evidencePath = join(fixtureRoot, "preparation-failure.json");
+			assert.ok(readdirSync(tempParent).includes("prepared-packed-consumer"), "failed preparation must remain in the coordinator-owned run root");
+			const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+			assert.equal(evidence.status, "failed");
+			assert.equal(evidence.fixtureRoot, fixtureRoot);
+			assert.match(evidence.error.message, expected);
+			assert.equal(evidence.commands.length, expectedCommands);
+			assert.equal(evidence.commands.at(-1)?.code, expectedLastCode,
+				"failure evidence must include the last completed command result, including nonzero exits");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });
 		}

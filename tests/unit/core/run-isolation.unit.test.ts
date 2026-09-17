@@ -43,9 +43,11 @@ import {
   createSerialPlaywrightEnvironment,
   createSerialPlaywrightPhaseInvocation,
   fanOutSerialTransformCache,
+  finalizeE2ERunCleanup,
   groupDVitestArgs,
   resolveE2ERetryCount,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
+import { removeOwnedPath } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
 
 const baselineEnv = { ...process.env };
 
@@ -559,6 +561,88 @@ describe("unit run isolation", () => {
     } finally {
       rmSync(runRoot, { recursive: true, force: true });
     }
+  });
+
+  it("retries transient coordinator cleanup and reports terminal history while retaining failed runs", async () => {
+    const root = resolve("injected-e2e-coordinator-root");
+    const paths = { root, runId: "injected-run" };
+    const lifecycle = {
+      coordinator: { state: "groups-settled" },
+      sampler: { state: "stopped" },
+      reporting: { state: "written", marker: "injected-report" },
+    };
+    let transientAttempts = 0;
+    let observedLifecycle: unknown;
+    const successCode = await finalizeE2ERunCleanup({
+      paths,
+      anyFailed: false,
+      lifecycle,
+      remove: async (target: string, options: Record<string, unknown>) => {
+        observedLifecycle = options.lifecycle;
+        return removeOwnedPath(target, {
+          ...options,
+          platform: "win32",
+          initialDelayMs: 1,
+          seams: {
+            remove: async () => {
+              transientAttempts++;
+              if (transientAttempts === 1) {
+                throw Object.assign(new Error("injected transient lock"), { code: "EPERM", path: target });
+              }
+            },
+            sleep: async () => {},
+          },
+        });
+      },
+      logError: () => { throw new Error("successful cleanup must not log an error"); },
+    });
+    expect(successCode).toBe(0);
+    expect(transientAttempts).toBe(2);
+    expect(observedLifecycle).toBe(lifecycle);
+
+    const terminalLogs: string[] = [];
+    let terminalAttempts = 0;
+    const terminalCode = await finalizeE2ERunCleanup({
+      paths,
+      anyFailed: false,
+      lifecycle,
+      remove: (target: string, options: Record<string, unknown>) => removeOwnedPath(target, {
+        ...options,
+        platform: "win32",
+        maxAttempts: 2,
+        initialDelayMs: 0,
+        seams: {
+          remove: async () => {
+            terminalAttempts++;
+            const code = terminalAttempts === 1 ? "EBUSY" : "ENOTEMPTY";
+            throw Object.assign(new Error(`injected ${code}`), { code, path: target });
+          },
+          sleep: async () => {},
+        },
+      }),
+      logError: (message: string) => terminalLogs.push(message),
+    });
+    expect(terminalCode).toBe(1);
+    expect(terminalAttempts).toBe(2);
+    expect(terminalLogs.join("\n")).toContain(root);
+    expect(terminalLogs.join("\n")).toContain("EBUSY");
+    expect(terminalLogs.join("\n")).toContain("ENOTEMPTY");
+    expect(terminalLogs.join("\n")).toContain("injected-report");
+
+    let failedRunRemovalAttempted = false;
+    const failedCode = await finalizeE2ERunCleanup({
+      paths,
+      anyFailed: true,
+      lifecycle,
+      remove: async () => {
+        failedRunRemovalAttempted = true;
+        throw new Error("failed runs must be retained");
+      },
+      logError: (message: string) => terminalLogs.push(message),
+    });
+    expect(failedCode).toBe(1);
+    expect(failedRunRemovalAttempted).toBe(false);
+    expect(terminalLogs.at(-1)).toContain("retained failure diagnostics");
   });
 
   it("keeps Group A naturally retryless through its fixture teardowns", () => {

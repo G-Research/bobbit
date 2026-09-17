@@ -58,6 +58,7 @@ import {
 	PACKED_CONSUMER_DESCRIPTOR_ENV,
 	preparePackedConsumerFixture,
 } from "./prewarm-packed-consumer-cache.mjs";
+import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -201,14 +202,37 @@ export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.
 	}, platform);
 }
 
-function cleanup(root) {
+function formatFailure(error) {
+	return error instanceof Error ? error.stack ?? error.message : String(error);
+}
+
+/**
+ * Retain failed runs, but fail a green run if its owned root cannot be removed.
+ * The injected remover seam keeps coordinator policy independently testable;
+ * production always uses the shared bounded Windows cleanup implementation.
+ */
+export async function finalizeE2ERunCleanup({
+	paths,
+	anyFailed,
+	lifecycle,
+	remove = removeOwnedPath,
+	logError = (message) => console.error(message),
+}) {
+	if (anyFailed) {
+		logError(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
+		return 1;
+	}
 	try {
-		// Windows can briefly retain Playwright output handles after its child
-		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
-		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-		return true;
-	} catch {
-		return false;
+		await remove(paths.root, {
+			ownerRoot: paths.root,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: paths.runId },
+			lifecycle,
+		});
+		return 0;
+	} catch (error) {
+		logError(`[e2e-v2] could not remove successful run root: ${paths.root}\n${formatFailure(error)}`);
+		return 1;
 	}
 }
 
@@ -804,15 +828,25 @@ async function main() {
 	console.log(`[e2e-v2] report: ${samplePath}`);
 
 	const anyFailed = results.some((r) => r.code !== 0);
-	if (anyFailed) {
-		console.error(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
-		process.exit(1);
-	}
-	if (!cleanup(paths.root)) {
-		console.error(`[e2e-v2] could not remove successful run root: ${paths.root}`);
-		process.exit(1);
-	}
-	process.exit(0);
+	const exitCode = await finalizeE2ERunCleanup({
+		paths,
+		anyFailed,
+		lifecycle: {
+			coordinator: { pid: process.pid, state: "groups-settled" },
+			groups: results.map((result) => ({ label: result.label, state: "closed", code: result.code })),
+			sampler: { state: "stopped", wallMs, cpuMs: sample.cpuMs },
+			reporting: {
+				state: "written",
+				samplePath,
+				jsonPath: args.json ?? null,
+				profiles: profileRefs.map((reference) => reference.path),
+			},
+			packedConsumer: packedConsumer.selected
+				? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
+				: { state: "not-selected" },
+		},
+	});
+	process.exit(exitCode);
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

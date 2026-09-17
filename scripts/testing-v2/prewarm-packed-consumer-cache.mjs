@@ -9,7 +9,7 @@
  * only copy that template; they never run npm pack/install themselves.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -356,6 +356,49 @@ async function writeManifest(directory, manifest) {
 	await writeFile(join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+function errorEvidence(error) {
+	if (!(error instanceof Error)) return { message: String(error) };
+	const cause = error.cause;
+	return {
+		name: error.name,
+		message: error.message,
+		stack: error.stack,
+		...(cause === undefined ? {} : {
+			cause: cause instanceof Error
+				? { name: cause.name, message: cause.message, stack: cause.stack }
+				: { message: String(cause) },
+		}),
+	};
+}
+
+async function retainPreparationFailure({ fixtureRoot, commands, error }) {
+	const evidencePath = join(fixtureRoot, "preparation-failure.json");
+	const evidence = {
+		status: "failed",
+		fixtureRoot,
+		failedAt: new Date().toISOString(),
+		error: errorEvidence(error),
+		commands,
+	};
+	try {
+		await mkdir(fixtureRoot, { recursive: true });
+		await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { flag: "wx" });
+	} catch (evidenceError) {
+		throw new AggregateError(
+			[error, evidenceError],
+			`Packed-consumer preparation failed and failure evidence could not be written at ${evidencePath}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	const retained = new Error(
+		`Packed-consumer preparation failed; retained partial fixture and command evidence at ${evidencePath}: ${error instanceof Error ? error.message : String(error)}`,
+		{ cause: error },
+	);
+	retained.fixtureRoot = fixtureRoot;
+	retained.evidencePath = evidencePath;
+	retained.commands = commands;
+	throw retained;
+}
+
 /**
  * Build one immutable packed-consumer template and publish its descriptor only
  * after the actual tarball, lockfile, and installed dependency tree exist.
@@ -409,10 +452,10 @@ export async function preparePackedConsumerFixture({
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
 		const packCommand = await measured("pack", async () => {
 			const result = await runCommand(npm.command, packArgs, { cwd: repoRoot, env: baseEnv, timeoutMs: PACK_TIMEOUT_MS, repoRoot });
+			commands.push(result);
 			requireSuccess(result);
 			return result;
 		});
-		commands.push(packCommand);
 		const { entry: packEntry, report: packReport } = parsePackResult(packCommand.stdout, packageName);
 		const tarballPath = resolve(packDir, packEntry.filename);
 		assertOwnedPath(absoluteRunRoot, tarballPath, "tarballPath");
@@ -437,10 +480,10 @@ export async function preparePackedConsumerFixture({
 				timeoutMs: LOCK_RESOLUTION_TIMEOUT_MS,
 				repoRoot,
 			});
+			commands.push(result);
 			requireSuccess(result);
 			return result;
 		});
-		commands.push(resolveCommand);
 		const consumerLock = readPackageLock(join(resolverDir, "package-lock.json"), "generated consumer package-lock.json");
 		const selectedTarballs = [...compatibleRegistryTarballs(consumerLock, runtime)].sort();
 		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs`);
@@ -454,8 +497,8 @@ export async function preparePackedConsumerFixture({
 					repoRoot,
 				}),
 			);
-			requireSuccess(result);
 			commands.push(result);
+			requireSuccess(result);
 		}
 
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
@@ -476,10 +519,10 @@ export async function preparePackedConsumerFixture({
 				timeoutMs: OFFLINE_INSTALL_TIMEOUT_MS,
 				repoRoot,
 			});
+			commands.push(result);
 			requireSuccess(result);
 			return result;
 		});
-		commands.push(installCommand);
 
 		const [templateLock, templateModules] = await Promise.all([
 			stat(join(templateDir, "package-lock.json")).catch(() => undefined),
@@ -510,8 +553,10 @@ export async function preparePackedConsumerFixture({
 		console.log(`[packed-consumer] descriptor: ${descriptorPath}`);
 		return descriptor;
 	} catch (error) {
-		await rm(fixtureRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }).catch(() => {});
-		throw error;
+		// The coordinator retains failed run roots. Keep this partial fixture too:
+		// deleting it here used a second retry algorithm, could hide cleanup errors,
+		// and discarded the exact npm command evidence needed to diagnose failures.
+		await retainPreparationFailure({ fixtureRoot, commands, error });
 	}
 }
 
