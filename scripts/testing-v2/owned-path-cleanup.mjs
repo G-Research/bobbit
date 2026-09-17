@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-const WINDOWS_TRANSIENT_REMOVAL_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
+const TRANSIENT_REMOVAL_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
 const DEFAULT_MAX_ATTEMPTS = 8;
 const DEFAULT_DEADLINE_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 25;
@@ -91,9 +91,9 @@ export class OwnedPathCleanupError extends Error {
 /**
  * Recursively remove a path owned by a test run.
  *
- * Windows lock errors receive bounded exponential backoff. Other errors fail
- * immediately, and removing the owner root itself requires explicit
- * coordinator permission.
+ * Transient lock and directory-removal errors receive bounded exponential
+ * backoff on every platform. Other errors fail immediately, and removing the
+ * owner root itself requires explicit coordinator permission.
  */
 export async function removeOwnedPath(target, options = {}) {
 	if (typeof target !== "string" || target.length === 0) {
@@ -121,7 +121,6 @@ export async function removeOwnedPath(target, options = {}) {
 	const remove = options.seams?.remove ?? ((candidate, removeOptions) => rm(candidate, removeOptions));
 	const sleep = options.seams?.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
 	const now = options.seams?.now ?? (() => performance.now());
-	const platform = options.platform ?? process.platform;
 	const history = [];
 	const startedAt = now();
 	let lastError;
@@ -151,7 +150,7 @@ export async function removeOwnedPath(target, options = {}) {
 				return { removed: true, attempts: attempt, history };
 			}
 
-			const transient = platform === "win32" && WINDOWS_TRANSIENT_REMOVAL_CODES.has(record.code);
+			const transient = TRANSIENT_REMOVAL_CODES.has(record.code);
 			const exponentialDelayMs = initialDelayMs === 0
 				? 0
 				: initialDelayMs * (2 ** Math.min(attempt - 1, 52));

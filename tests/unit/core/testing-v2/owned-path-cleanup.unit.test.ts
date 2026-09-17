@@ -99,7 +99,7 @@ function controlledOwner(name: string, events: string[]) {
 }
 
 describe("owned path cleanup contract", () => {
-	it("retries only transient Windows removal failures with capped exponential delays", async () => {
+	it("retries transient Windows removal failures with capped exponential delays", async () => {
 		const { removeOwnedPath } = await loadCleanupContract();
 		const ownerRoot = path.resolve("fixture-run-root");
 		const target = path.join(ownerRoot, "worker-a");
@@ -140,6 +140,50 @@ describe("owned path cleanup contract", () => {
 			{ attempt: 2, elapsedMs: 10, code: "EPERM" },
 			{ attempt: 3, elapsedMs: 30, code: "ENOTEMPTY" },
 			{ attempt: 4, elapsedMs: 70, code: "OK" },
+		]);
+	});
+
+	it.each([
+		{ platform: "linux" as const, code: "ENOTEMPTY" },
+		{ platform: "darwin" as const, code: "EPERM" },
+	])("retries $code on $platform with the same bounded history", async ({ platform, code }) => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve(`${platform}-run-root`);
+		const target = path.join(ownerRoot, "worker-a");
+		const removals: string[] = [];
+		const delays: number[] = [];
+		let now = 1_000;
+
+		const result = await removeOwnedPath(target, {
+			ownerRoot,
+			platform,
+			maxAttempts: 3,
+			deadlineMs: 100,
+			initialDelayMs: 7,
+			maxDelayMs: 20,
+			seams: {
+				remove: async candidate => {
+					removals.push(candidate);
+					if (removals.length === 1) throw fsError(code, candidate);
+				},
+				sleep: async delayMs => {
+					delays.push(delayMs);
+					now += delayMs;
+				},
+				now: () => now,
+			},
+		});
+
+		expect(result).toMatchObject({ removed: true, attempts: 2 });
+		expect(removals).toEqual([target, target]);
+		expect(delays).toEqual([7]);
+		expect(result.history.map(({ attempt, elapsedMs, code: attemptCode }) => ({
+			attempt,
+			elapsedMs,
+			code: attemptCode ?? "OK",
+		}))).toEqual([
+			{ attempt: 1, elapsedMs: 0, code },
+			{ attempt: 2, elapsedMs: 7, code: "OK" },
 		]);
 	});
 
