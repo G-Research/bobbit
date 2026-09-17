@@ -39,6 +39,10 @@ export interface SourceRuntimeFinalizationOptions {
 	gateway?: RunningSourceProcess;
 	stopOptions?: StopSourceProcessOptions;
 	bodyFailure?: { reason: unknown };
+	callerClose: {
+		label: string;
+		result: PromiseSettledResult<void>;
+	};
 	report: () => Promise<void>;
 	removeTemp: () => Promise<void>;
 }
@@ -547,10 +551,16 @@ function cleanupStageFailure(label: string, reason: unknown): Error {
 
 /**
  * Stop every owned source runtime before diagnostics and temporary files are
- * finalized. No stage may prevent the next one from being attempted.
+ * finalized. Every stop and the report are attempted; removal requires every
+ * caller and source-process owner to prove shutdown.
  */
 export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationOptions): Promise<void> {
 	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	let ownersReleased = options.callerClose.result.status === "fulfilled";
+	if (options.callerClose.result.status === "rejected") {
+		failures.push(cleanupStageFailure(options.callerClose.label, options.callerClose.result.reason));
+	}
+
 	const runtimes = [
 		options.vite ? { label: `${options.vite.label} stop`, runtime: options.vite } : undefined,
 		options.gateway ? { label: `${options.gateway.label} stop`, runtime: options.gateway } : undefined,
@@ -559,14 +569,21 @@ export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationO
 		runtimes.map(({ runtime }) => stopSourceProcess(runtime, options.stopOptions)),
 	);
 	for (const [index, result] of stopResults.entries()) {
-		if (result.status === "rejected") failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+		if (result.status === "rejected") {
+			ownersReleased = false;
+			failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+		}
 	}
 
 	try {
 		await options.report();
 	} catch (error) {
 		failures.push(cleanupStageFailure("source runtime report", error));
-	} finally {
+	}
+
+	// Diagnostic roots stay intact whenever a caller or source-process owner did
+	// not prove shutdown. Reporting is still attempted, but deletion is not.
+	if (ownersReleased) {
 		try {
 			await options.removeTemp();
 		} catch (error) {

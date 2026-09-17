@@ -355,18 +355,15 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				bodyFailure = { reason: error };
 			}
 		} finally {
-			try {
-				await page.close();
-			} catch (error) {
-				const pageFailure = new Error("source runtime page shutdown failed", { cause: error });
-				bodyFailure = bodyFailure
-					? { reason: new AggregateError([bodyFailure.reason, pageFailure], "source runtime body and page shutdown failed") }
-					: { reason: pageFailure };
-			}
+			const [pageCloseResult] = await Promise.allSettled([page.close()]);
 			await finalizeSourceRuntimes({
 				vite,
 				gateway,
 				bodyFailure,
+				callerClose: {
+					label: "source runtime page shutdown",
+					result: pageCloseResult,
+				},
 				report: async () => {
 					const gatewayLog = processLog(gateway);
 					const viteLog = processLog(vite);

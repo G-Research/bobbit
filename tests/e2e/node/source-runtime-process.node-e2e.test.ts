@@ -188,7 +188,7 @@ describe("source runtime process ownership and teardown", () => {
 		assert.equal(runtime.child.stderr?.destroyed, true);
 	});
 
-	it("source finalization attempts both tracked stops, reporting, and removal before surfacing exact failures", { timeout: 10_000 }, async () => {
+	it("source finalization attempts both tracked stops and reporting but retains the root after an unverified stop", { timeout: 10_000 }, async () => {
 		const firstChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
@@ -233,7 +233,6 @@ describe("source runtime process ownership and teardown", () => {
 		const secondRuntime = captureSourceProcess(secondChild, "verified second source runtime", secondAuthority);
 		const bodyFailure = new Error("fixture body assertion failed");
 		const reportFailure = new Error("fixture report attachment failed");
-		const removalFailure = new Error("fixture temporary removal failed");
 		const baseline = _trackedCount();
 
 		let finalizationFailure: unknown;
@@ -243,16 +242,14 @@ describe("source runtime process ownership and teardown", () => {
 				gateway: secondRuntime,
 				stopOptions: { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 },
 				bodyFailure: { reason: bodyFailure },
+				callerClose: { label: "page close", result: { status: "fulfilled", value: undefined } },
 				report: async () => {
 					events.push("report");
 					assert.equal(firstRuntime.stdout.join(""), "");
 					assert.equal(secondRuntime.stderr.join(""), "");
 					throw reportFailure;
 				},
-				removeTemp: async () => {
-					events.push("remove-temp");
-					throw removalFailure;
-				},
+				removeTemp: async () => { events.push("remove-temp"); },
 			});
 		} catch (error) {
 			finalizationFailure = error;
@@ -270,17 +267,73 @@ describe("source runtime process ownership and teardown", () => {
 		assert.equal(secondWaits, 1);
 		assert.equal(firstRuntime.closed, true);
 		assert.equal(secondRuntime.closed, true);
-		assert.deepEqual(events, ["first-stop:SIGKILL", "second-stop:SIGKILL", "report", "remove-temp"]);
+		assert.deepEqual(events, ["first-stop:SIGKILL", "second-stop:SIGKILL", "report"]);
 		assert.equal(_trackedCount(), baseline);
 		assert.ok(finalizationFailure instanceof AggregateError);
 		const failures = finalizationFailure.errors as Error[];
-		assert.equal(failures.length, 4);
+		assert.equal(failures.length, 3);
 		assert.equal(failures[0], bodyFailure);
 		assert.match(failures[1].message, /unverified first source runtime stop failed/);
 		assert.match(failures[1].message, /tree completion was not verified within 50ms/);
 		assert.match((failures[1].cause as Error).message, /unverified first source runtime/);
 		assert.equal(failures[2].cause, reportFailure);
-		assert.equal(failures[3].cause, removalFailure);
+	});
+
+	it("source finalization reports but retains the root after the caller close barrier fails", async () => {
+		const events: string[] = [];
+		const closeFailure = new Error("page remained open");
+
+		await assert.rejects(
+			finalizeSourceRuntimes({
+				callerClose: { label: "page close", result: { status: "rejected", reason: closeFailure } },
+				report: async () => { events.push("report"); },
+				removeTemp: async () => { events.push("remove-temp"); },
+			}),
+			(error: Error) => {
+				assert.match(error.message, /page close failed: page remained open/);
+				assert.equal(error.cause, closeFailure);
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["report"]);
+	});
+
+	it("source finalization removes the root last after every owner proves shutdown", { timeout: 10_000 }, async () => {
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		const events: string[] = [];
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				events.push(`stop:${signal}`);
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: async () => {
+				await childClosed;
+				events.push("tree-exit-verified");
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "verified source runtime", authority);
+
+		await finalizeSourceRuntimes({
+			vite: runtime,
+			stopOptions: { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 2_000 },
+			callerClose: { label: "page close", result: { status: "fulfilled", value: undefined } },
+			report: async () => {
+				assert.equal(runtime.closed, true);
+				events.push("report");
+			},
+			removeTemp: async () => {
+				assert.equal(runtime.closed, true);
+				events.push("remove-temp");
+			},
+		});
+
+		assert.deepEqual(events, ["stop:SIGKILL", "tree-exit-verified", "report", "remove-temp"]);
 	});
 
 	it("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
