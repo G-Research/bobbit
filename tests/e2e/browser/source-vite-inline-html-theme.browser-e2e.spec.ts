@@ -1,6 +1,5 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
 	createProjectAndSession,
@@ -19,6 +18,10 @@ import {
 	type RunningSourceProcess,
 } from "../../../tests/support/helpers/browser/e2e/source-vite-runtime-helpers.js";
 import { _trackedCount } from "../../../src/server/agent/spawn-tree.js";
+import {
+	createRunChild,
+	removeOwnedRunChild,
+} from "../../../tests/support/harnesses/shared/run-isolation.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const SOURCE_MODULE_PATHS = {
@@ -151,7 +154,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 
 	test("real chat WriteRenderer uses the canonical source bridge at parse time and across a live theme switch", async ({ page }, testInfo) => {
 		test.setTimeout(4 * 60_000);
-		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-source-vite-inline-theme-"));
+		const tempRoot = createRunChild("source-vite-inline-theme");
 		const workspaceDir = join(tempRoot, "workspace");
 		const agentPath = join(tempRoot, "source-vite-write-agent.mjs");
 		const report: RuntimeReport = { requests: [], responses: [] };
@@ -352,7 +355,14 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				bodyFailure = { reason: error };
 			}
 		} finally {
-			await page.close().catch(() => undefined);
+			try {
+				await page.close();
+			} catch (error) {
+				const pageFailure = new Error("source runtime page shutdown failed", { cause: error });
+				bodyFailure = bodyFailure
+					? { reason: new AggregateError([bodyFailure.reason, pageFailure], "source runtime body and page shutdown failed") }
+					: { reason: pageFailure };
+			}
 			await finalizeSourceRuntimes({
 				vite,
 				gateway,
@@ -366,7 +376,12 @@ test.describe("source Vite inline HTML theme runtime", () => {
 					report.viteStderr = viteLog.stderr;
 					await attachReport(testInfo, report);
 				},
-				removeTemp: () => rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }),
+				removeTemp: () => removeOwnedRunChild(tempRoot, {
+					browser: "page close resolved",
+					vite: vite ? "process-tree stop settled" : "not started",
+					gateway: gateway ? "process-tree stop settled" : "not started",
+					report: "attachment settled",
+				}),
 			});
 		}
 	});
