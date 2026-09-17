@@ -143,6 +143,50 @@ describe("owned path cleanup contract", () => {
 		]);
 	});
 
+	it("does not retry after an overslept delay crosses the monotonic deadline", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("overslept-run-root");
+		const target = path.join(ownerRoot, "locked-worker");
+		const lifecycle = { processTree: "stopped", gateway: "closed" };
+		let now = 2_000;
+		const remove = vi.fn(async candidate => {
+			if (remove.mock.calls.length === 1) {
+				throw fsError("EBUSY", candidate, "worker lock still held");
+			}
+		});
+
+		const failure = await removeOwnedPath(target, {
+			ownerRoot,
+			owner: { kind: "coordinator", id: "overslept-run" },
+			lifecycle,
+			platform: "win32",
+			maxAttempts: 3,
+			deadlineMs: 10,
+			initialDelayMs: 5,
+			seams: {
+				remove,
+				sleep: async () => { now += 11; },
+				now: () => now,
+			},
+		}).then(() => undefined, (error: unknown) => error);
+
+		expect(remove, `${CONTRACT_PREFIX}_ABSOLUTE_DEADLINE: cleanup must not retry after its deadline`).toHaveBeenCalledOnce();
+		expect(failure).toMatchObject({
+			name: "OwnedPathCleanupError",
+			attempts: 1,
+			elapsedMs: 11,
+			lifecycle,
+			history: [expect.objectContaining({
+				attempt: 1,
+				elapsedMs: 0,
+				code: "EBUSY",
+				message: "worker lock still held",
+			})],
+		});
+		expect((failure as Error).message).toContain("overslept-run");
+		expect((failure as Error).message).toContain("worker lock still held");
+	});
+
 	it("stops at the monotonic deadline and reports every failure plus lifecycle state", async () => {
 		const { removeOwnedPath } = await loadCleanupContract();
 		const ownerRoot = path.resolve("diagnostic-run-root");

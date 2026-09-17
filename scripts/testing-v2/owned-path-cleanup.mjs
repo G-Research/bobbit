@@ -128,6 +128,17 @@ export async function removeOwnedPath(target, options = {}) {
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const elapsedMs = Math.max(0, now() - startedAt);
+		if (attempt > 1 && elapsedMs >= deadlineMs) {
+			throw new OwnedPathCleanupError({
+				target: resolvedTarget,
+				ownerRoot,
+				owner: options.owner,
+				lifecycle: options.lifecycle,
+				history,
+				elapsedMs,
+				cause: lastError,
+			});
+		}
 		try {
 			await remove(resolvedTarget, { recursive: true, force: true });
 			history.push({ attempt, elapsedMs });
