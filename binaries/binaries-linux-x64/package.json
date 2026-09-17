@@ -1,6 +1,6 @@
 {
   "name": "@gresearch/bobbit-binaries-linux-x64",
-  "version": "0.9.1",
+  "version": "0.9.3",
   "description": "Bundled fd and ripgrep binaries for Bobbit (linux-x64).",
   "license": "MIT",
   "os": [
