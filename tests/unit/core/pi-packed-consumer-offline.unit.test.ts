@@ -142,7 +142,7 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
 		assert.match(source, /"install",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
-		assert.match(source, /await cp\(descriptor\.templateDir, consumerDir/,
+		assert.match(source, /await copy\(validated\.templateDir, consumerDir/,
 			"materialization must copy the prepared installed dependency graph");
 		assert.match(source, /const OFFLINE_INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
 		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
