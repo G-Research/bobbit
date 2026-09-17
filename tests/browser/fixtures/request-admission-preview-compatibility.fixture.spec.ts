@@ -5,6 +5,7 @@ import {
 	apiFetch,
 	createSession,
 	readE2ETokenAsync,
+	registerProject,
 } from "../../support/harnesses/browser/e2e-setup.js";
 import { createServer, type Server } from "node:http";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -320,6 +321,7 @@ test.describe("Request admission preview compatibility", () => {
 		const fixtureDir = createRunChild("request-admission-preview");
 		const assetsDir = join(fixtureDir, "assets");
 		const htmlPath = join(fixtureDir, ENTRY);
+		let projectId: string | undefined;
 		let sessionId: string | undefined;
 		let popup: Page | undefined;
 		let attacker: Page | undefined;
@@ -338,7 +340,12 @@ test.describe("Request admission preview compatibility", () => {
 		writeFileSync(htmlPath, previewHtml(INITIAL_MARKER), "utf8");
 
 		try {
-			sessionId = await createSession({ cwd: fixtureDir });
+			projectId = (await registerProject({
+				name: `request-admission-preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+				rootPath: fixtureDir,
+				seedWorkflows: false,
+			})).id;
+			sessionId = await createSession({ cwd: fixtureDir, projectId });
 			await enablePreview(sessionId);
 			const initialMount = await mountFilePreview(sessionId, htmlPath);
 
@@ -522,6 +529,7 @@ test.describe("Request admission preview compatibility", () => {
 		} finally {
 			let cleanupFailure: unknown;
 			const sessionToDelete = sessionId;
+			const projectToDelete = projectId;
 			try {
 				await shutdownResourcesThenRemove({
 					phases: [
@@ -538,9 +546,18 @@ test.describe("Request admission preview compatibility", () => {
 						{
 							name: "preview session",
 							owners: sessionToDelete ? [async () => {
-								const response = await apiFetch(`/api/sessions/${sessionToDelete}`, { method: "DELETE" });
+								const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionToDelete)}`, { method: "DELETE" });
 								if (response.status !== 200) {
 									throw new Error(`session cleanup failed: ${response.status} ${await response.text()}`);
+								}
+							}] : [],
+						},
+						{
+							name: "preview project",
+							owners: projectToDelete ? [async () => {
+								const response = await apiFetch(`/api/projects/${encodeURIComponent(projectToDelete)}`, { method: "DELETE" });
+								if (response.status !== 200) {
+									throw new Error(`project cleanup failed: ${response.status} ${await response.text()}`);
 								}
 							}] : [],
 						},
@@ -548,7 +565,8 @@ test.describe("Request admission preview compatibility", () => {
 					remove: () => removeOwnedRunChild(fixtureDir, {
 						browser: "popup, attacker, and page close settled",
 						session: sessionToDelete ? "delete acknowledged" : "not created",
-						previewResources: "browser and session owners released",
+						project: projectToDelete ? "delete acknowledged" : "not registered",
+						previewResources: "browser, session, and project owners released",
 					}),
 				});
 			} catch (error) {
