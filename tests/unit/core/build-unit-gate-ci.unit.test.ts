@@ -102,7 +102,7 @@ describe("native CI qualification workflows", () => {
 		const verify = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs.verify;
 		const matrix = verify.strategy.matrix;
 		assert.equal(verify["runs-on"], "${{ matrix.os }}");
-		assert.equal(verify["timeout-minutes"], 20, "qualification must retain the original timeout");
+		assert.equal(verify["timeout-minutes"], 30, "qualification must allow the serial Windows unit suite to finish");
 		assert.deepEqual(matrix.os, ["ubuntu-latest", "windows-latest", "macos-latest"]);
 		assert.deepEqual(matrix.node, ["22.19.0"]);
 		assert.deepEqual(matrix.include, [{ os: "ubuntu-latest", node: "26.x" }]);
