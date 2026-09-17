@@ -327,7 +327,13 @@ export function directRunnerPackedConsumerDecision(forwardedArgs = []) {
   if (filters.length > 0 && !filters.some(filterMaySelectPackedConsumer)) {
     return Object.freeze({ prepare: false, reason: "test-filter-excludes-packaged-consumer", descriptorPath: null });
   }
-  return Object.freeze({ prepare: true, reason: filters.length === 0 ? "unfiltered" : "packaged-consumer-selected", descriptorPath: null });
+  // A title grep alone does not establish that the costly packaged fixture is
+  // selected. An explicit packaged-spec filter above remains authoritative.
+  if (filters.length === 0 && ["--grep", "-g"].some(option => optionValues(forwardedArgs, option).length > 0)) {
+    return Object.freeze({ prepare: false, reason: "title-filter-excludes-packaged-consumer", descriptorPath: null });
+  }
+  const explicitlySelected = filters.length > 0 || selectedProjects.length > 0;
+  return Object.freeze({ prepare: true, reason: explicitlySelected ? "packaged-consumer-selected" : "unfiltered", descriptorPath: null });
 }
 
 /** Prepare once below the direct wrapper's root and publish into its child env. */
