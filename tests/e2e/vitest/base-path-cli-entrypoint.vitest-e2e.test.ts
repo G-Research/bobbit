@@ -309,8 +309,19 @@ describe("executable CLI root and nested base-path smoke", () => {
 				intervalMs: 25,
 				label: "truthful executable CLI startup banner",
 			});
+			const uiUrl = `${persistedUrl}/?token=${token}`;
+			await pollUntil(() => output.includes("[OK] STARTUP COMPLETE"), {
+				timeoutMs: 10_000,
+				intervalMs: 25,
+				label: "mounted CLI final connection banner",
+			});
 			expect(output).toMatch(new RegExp(`Listening:\\s+${escapeRegExp(persistedUrl)}`));
-			expect(output).toContain(`UI:         ${persistedUrl}/?token=${token}`);
+			expect(output).toContain("[+] UI READY");
+			expect(output).toContain("[OK] STARTUP COMPLETE");
+			expect(output).toContain("OPEN THIS LINK IN YOUR BROWSER");
+			expect(output.split(uiUrl).length - 1).toBe(2);
+			expect(output).not.toMatch(/[┏┃┗━▄█▀●✓➜]/u);
+			expect(output).not.toContain("\u001b[2;32m");
 			expect(output).toMatch(/token grants full shell access/i);
 			expect(output).not.toMatch(/authentication is disabled/i);
 
@@ -408,7 +419,18 @@ describe("executable CLI root and nested base-path smoke", () => {
 				intervalMs: 25,
 				label: "no-auth executable CLI startup banner",
 			});
-			expect(output).toContain(`UI:         ${persistedUrl}/`);
+			const uiUrl = `${persistedUrl}/`;
+			await pollUntil(() => output.includes("[OK] STARTUP COMPLETE"), {
+				timeoutMs: 10_000,
+				intervalMs: 25,
+				label: "no-auth executable CLI final connection banner",
+			});
+			expect(output).toContain("[+] UI READY");
+			expect(output).toContain("[OK] STARTUP COMPLETE");
+			expect(output).toContain("OPEN THIS LINK IN YOUR BROWSER");
+			expect(output.split(uiUrl).length - 1).toBe(2);
+			expect(output).not.toMatch(/[┏┃┗━▄█▀●✓➜]/u);
+			expect(output).not.toContain("\u001b[2;32m");
 			expect(output).toContain("Any local process can access the gateway. Remove --no-auth to require the token.");
 			expect(output).not.toMatch(/Auth token:/i);
 			expect(output).not.toContain("?token=");

@@ -5351,6 +5351,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			return requestAdmissionPolicy.allAuthoritiesLoopback;
 		},
+		/** Resolve after every non-critical boot task has settled. */
+		async whenBootTasksFinished(): Promise<void> {
+			if (!gatewayReady || !bootBackgroundTask) {
+				throw new Error("Gateway boot tasks are unavailable before successful start");
+			}
+			await bootBackgroundTask;
+		},
 		async start(): Promise<number> {
 			// Phase timer for the pre-listen critical path: everything awaited here
 			// blocks `server.listen()`, i.e. delays the UI becoming reachable.

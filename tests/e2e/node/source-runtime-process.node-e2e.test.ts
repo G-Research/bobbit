@@ -71,17 +71,20 @@ describe("source runtime process ownership and teardown", () => {
 		const runtime = captureSourceProcess(child, "ownership-gated source fixture", authority);
 		const originalFetch = globalThis.fetch;
 		let fetchCalls = 0;
-		globalThis.fetch = (async () => {
+		let authorization: string | null = null;
+		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
 			fetchCalls++;
+			authorization = new Headers(init?.headers).get("authorization");
 			return new Response('{"status":"ok"}', { status: 200 });
 		}) as typeof fetch;
 		try {
-			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, async () => "test-token", 1_000);
 			await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
 			assert.equal(fetchCalls, 0, "health must remain behind spawn-time Job ownership");
 			resolveOwnership();
 			await readiness;
 			assert.equal(fetchCalls, 1);
+			assert.equal(authorization, "Bearer test-token");
 		} finally {
 			globalThis.fetch = originalFetch;
 			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
@@ -113,7 +116,7 @@ describe("source runtime process ownership and teardown", () => {
 			return new Response('{"status":"ok"}', { status: 200 });
 		}) as typeof fetch;
 		try {
-			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, async () => "test-token", 1_000);
 			rejectOwnership(new Error("fixture Job assignment failed"));
 			await assert.rejects(readiness, /ownership-failed source fixture failed before ownership readiness/);
 			assert.equal(fetchCalls, 0, "failed Job ownership must never publish health readiness");

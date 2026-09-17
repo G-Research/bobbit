@@ -33,6 +33,12 @@ interface CliModule {
 		token: string;
 		urls: StartupUrls;
 	}): string;
+	formatUiConnectionBanner(options: {
+		url: string;
+		stage: "available" | "complete";
+		color?: boolean;
+		unicode?: boolean;
+	}): string;
 }
 
 async function cliModule(): Promise<CliModule> {
@@ -176,6 +182,49 @@ describe("mounted startup URLs", () => {
 		});
 		assert.equal(urls.authEnforced, true);
 		assert.equal(urls.uiUrl, "http://localhost:3001/?token=forced-secret");
+	});
+});
+
+describe("prominent UI connection banner", () => {
+	it("renders the compact Unicode Bobbit with the link beside it", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const available = formatUiConnectionBanner({ url, stage: "available", color: false, unicode: true });
+		const complete = formatUiConnectionBanner({ url, stage: "complete", color: false, unicode: true });
+
+		assert.match(available, /^┏━ BOBBIT ━{62}$/m);
+		assert.match(available, /^┃     ▄█████▄\s+●  UI READY$/m);
+		assert.match(available, /^┃   ███ ██ ███\s+OPEN THIS LINK IN YOUR BROWSER$/m);
+		assert.match(available, new RegExp(`^┃     ▀▀▀▀▀▀\\s+➜  ${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+		assert.match(complete, /✓  STARTUP COMPLETE/);
+		assert.equal(available.split("\n").findIndex(line => line.includes("OPEN THIS LINK")) + 2,
+			available.split("\n").findIndex(line => line.includes(url)));
+		assert.doesNotMatch(`${available}${complete}`, /\u001b\[/);
+	});
+
+	it("uses an uncoloured ASCII fallback when terminal features are unavailable", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const available = formatUiConnectionBanner({ url, stage: "available", color: false, unicode: false });
+		const complete = formatUiConnectionBanner({ url, stage: "complete", color: false, unicode: false });
+
+		assert.match(available, /^\+-- BOBBIT -{61}$/m);
+		assert.match(available, /\[\+\] UI READY/);
+		assert.match(complete, /\[OK\] STARTUP COMPLETE/);
+		assert.equal(available.includes(`->  ${url}`), true);
+		assert.doesNotMatch(`${available}${complete}`, /[^\x00-\x7F]/u);
+		assert.doesNotMatch(`${available}${complete}`, /\u001b\[/);
+	});
+
+	it("colours the frame, sprite, status, instruction, and URL when enabled", async () => {
+		const { formatUiConnectionBanner } = await cliModule();
+		const url = "http://localhost:3002/?token=12345";
+		const banner = formatUiConnectionBanner({ url, stage: "available", color: true, unicode: true });
+
+		assert.match(banner, /\u001b\[2;32m┏━\u001b\[0m/);
+		assert.match(banner, /\u001b\[1;92m●  UI READY\u001b\[0m/);
+		assert.match(banner, /\u001b\[1;97mOPEN THIS LINK IN YOUR BROWSER\u001b\[0m/);
+		assert.equal(banner.includes(`\u001b[1;96m${url}\u001b[0m`), true);
 	});
 });
 

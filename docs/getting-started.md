@@ -35,13 +35,22 @@ Bobbit Gateway v<version>
   Listening:  http://localhost:3001
   Auth token: <token>
   Agent CWD:  <current directory>
-  UI:         http://localhost:3001/?token=<token>
 
   ⚠ This token grants full shell access to this machine.
   Keep it secret. Regenerate with --new-token.
+
+┏━ BOBBIT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃
+┃     ▄█████▄       ●  UI READY
+┃   ▄█████████
+┃   ███ ██ ███      OPEN THIS LINK IN YOUR BROWSER
+┃   ▀████████▀
+┃     ▀▀▀▀▀▀        ➜  http://localhost:3001/?token=<token>
+┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-The browser exchanges the bootstrap token for its normal authenticated session. The token is generated once and saved in Bobbit's private OS-user secrets directory; `bobbit --show-token` prints it when needed.
+The connection panel appears as soon as the UI can accept requests and is printed again with `✓  STARTUP COMPLETE` after every background boot task finishes, keeping the link easy to find below intervening startup logs. Terminals without Unicode or colour support receive a plain ASCII version. The browser exchanges the bootstrap token for its normal authenticated session. The token is generated once and saved in Bobbit's private OS-user secrets directory; `bobbit --show-token` prints it when needed.
 
 For isolated local troubleshooting only, `bobbit --no-auth` enables credential-free access when the complete gateway policy and actual client are both loopback. Any local process can then control Bobbit, and sandboxed agents are unavailable until the gateway is restarted without `--no-auth`. Non-loopback configurations always require authentication. See [Networking](networking.md) for remote-access guidance.
 

@@ -177,8 +177,9 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				port: gatewayPort,
 				viteOrigin: viteBaseUrl,
 			});
-			await waitForSourceGateway(gatewayBaseUrl, gateway);
-			const token = await readToken(join(tempRoot, "secrets"));
+			const secretsDir = join(tempRoot, "secrets");
+			await waitForSourceGateway(gatewayBaseUrl, gateway, () => readToken(secretsDir));
+			const token = await readToken(secretsDir);
 			const preferenceHeaders = {
 				Authorization: `Bearer ${token}`,
 				"Content-Type": "application/json",
