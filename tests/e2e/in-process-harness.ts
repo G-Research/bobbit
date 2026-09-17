@@ -23,7 +23,7 @@ import { test as base } from "@playwright/test";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { awaitableRm } from "./test-utils/cleanup.js";
+import { awaitableRm, throwIfCleanupRejected } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
@@ -390,8 +390,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			lifecycle,
 			throwOnFailure: true,
 		})));
-		const cleanupFailures = cleanupResults.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-		if (cleanupFailures.length) throw new AggregateError(cleanupFailures.map(result => result.reason), "in-process harness path cleanup failed");
+		throwIfCleanupRejected(cleanupResults, "in-process harness path cleanup failed");
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

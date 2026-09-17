@@ -28,7 +28,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { awaitableRm } from "./test-utils/cleanup.js";
+import { awaitableRm, throwIfCleanupRejected } from "./test-utils/cleanup.js";
 import { shutdownResourcesThenRemove } from "../../scripts/testing-v2/owned-path-cleanup.mjs";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
@@ -806,8 +806,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 						lifecycle,
 						throwOnFailure: true,
 					})));
-					const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-					if (failures.length) throw new AggregateError(failures.map(result => result.reason), "gateway harness path cleanup failed");
+					throwIfCleanupRejected(results, "gateway harness path cleanup failed");
 				},
 			});
 		} finally {
