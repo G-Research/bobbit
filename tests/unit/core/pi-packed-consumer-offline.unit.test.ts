@@ -588,8 +588,10 @@ describe("packed-consumer offline install contract", () => {
 
 	it("hands the actual packed tarball and strict-offline install evidence to the browser", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
-		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath!, coordinatorRunRoot!\)/,
-			"the browser journey must bind the descriptor to the authoritative coordinator root");
+		assert.match(packedConsumer, /const descriptorPath = resolvePackedConsumerDescriptorPath\(process\.env, coordinatorRunRoot!\)/,
+			"the browser journey must resolve the canonical coordinator-owned descriptor path");
+		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath, coordinatorRunRoot!\)/,
+			"the browser journey must bind the canonical descriptor to the authoritative coordinator root");
 		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor, \{\s*coordinatorRunRoot: coordinatorRunRoot!/s,
 			"the browser journey must use an authoritative-root-bound private template copy");
 		assert.match(packedConsumer, /const tarballPath = resolve\(descriptor\.tarballPath\)/,
