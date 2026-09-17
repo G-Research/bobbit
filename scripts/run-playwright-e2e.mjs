@@ -297,21 +297,8 @@ function filterMaySelectPackedConsumer(filter) {
   }
 }
 
-/**
- * Decide whether a direct Playwright wrapper invocation can discover the
- * packaged-consumer spec. An inherited descriptor belongs to an outer E2E v2
- * coordinator and must never trigger a second pack/install.
- */
-export function directRunnerPackedConsumerDecision(
-  forwardedArgs = [],
-  inheritedEnv = process.env,
-  platform = process.platform,
-) {
-  const inheritedDescriptor = environmentValue(inheritedEnv, PACKED_CONSUMER_DESCRIPTOR_ENV, platform);
-  if (inheritedDescriptor) {
-    return Object.freeze({ prepare: false, reason: "inherited-descriptor", descriptorPath: inheritedDescriptor });
-  }
-
+/** Decide whether this direct coordinator can discover the packaged-consumer spec. */
+export function directRunnerPackedConsumerDecision(forwardedArgs = []) {
   const selectedProjects = optionValues(forwardedArgs, "--project");
   if (selectedProjects.length > 0 && !selectedProjects.some(project => wildcardMatches(PACKAGED_CONSUMER_PROJECT, project))) {
     return Object.freeze({ prepare: false, reason: "project-excludes-packaged-consumer", descriptorPath: null });
@@ -331,7 +318,11 @@ export async function prepareDirectRunnerPackedConsumer(
   paths,
   prepare = preparePackedConsumerFixture,
 ) {
-  const decision = directRunnerPackedConsumerDecision(forwardedArgs, environment);
+  // The descriptor is coordinator output, never an ambient input. Scrub it
+  // again at this boundary so direct helper callers cannot bypass the shared
+  // environment sanitizer and suppress preparation with a forged pathname.
+  deleteEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV);
+  const decision = directRunnerPackedConsumerDecision(forwardedArgs);
   if (!decision.prepare) return decision;
   const descriptor = await prepare({
     repoRoot: projectRoot,

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	piPackedConsumerNpmEnv,
@@ -114,6 +114,11 @@ function asRecord(value: unknown, label: string): JsonRecord {
 	expect(typeof value, `${label} must be an object`).toBe("object");
 	expect(Array.isArray(value), `${label} must not be an array`).toBe(false);
 	return value as JsonRecord;
+}
+
+function isStrictChild(root: string, candidate: string): boolean {
+	const child = relative(resolve(root), resolve(candidate));
+	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }
 
 function parseJson(stdout: string, label: string): unknown {
@@ -412,11 +417,14 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		test.setTimeout(15 * 60_000);
 		// Browser-v2 global setup produces a content-addressed fresh dist first.
 		// The E2E coordinator packs that exact artifact once before Group C starts.
+		const coordinatorRunRoot = process.env.BOBBIT_V2_RUN_ROOT;
 		const descriptorPath = process.env[PACKED_CONSUMER_DESCRIPTOR_ENV];
+		expect(coordinatorRunRoot, "BOBBIT_V2_RUN_ROOT must identify the authoritative E2E coordinator root").toBeTruthy();
 		expect(descriptorPath, `${PACKED_CONSUMER_DESCRIPTOR_ENV} must be published by the E2E coordinator`).toBeTruthy();
-		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath!);
+		expect(isStrictChild(coordinatorRunRoot!, descriptorPath!), "descriptor must be owned by the authoritative coordinator root").toBe(true);
+		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath!, coordinatorRunRoot!);
 		const materialized = await materializePackedConsumerFixture(descriptor, {
-			runRoot: descriptor.runRoot,
+			coordinatorRunRoot: coordinatorRunRoot!,
 			name: `inline-theme-${testInfo.workerIndex}`,
 		});
 		const consumerDir = materialized.consumerDir;
@@ -469,6 +477,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			).toBe(true);
 
 			const tarballPath = resolve(descriptor.tarballPath);
+			expect(isStrictChild(coordinatorRunRoot!, tarballPath), "packed tarball must be owned by the authoritative coordinator root").toBe(true);
 			expect(existsSync(tarballPath), `prepared npm pack tarball is missing at ${tarballPath}`).toBe(true);
 			const packCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("pack"));
 			const installs = descriptor.commands.filter((command: CommandResult) => command.args.includes("install") && command.args.includes("--offline"));
@@ -653,8 +662,10 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			const port = await getFreePort();
 			const baseUrl = `http://127.0.0.1:${port}`;
 			const wsBaseUrl = `ws://127.0.0.1:${port}`;
+			const packagedCliPath = join(installedRoot, "dist", "server", "cli.js");
+			expect(isStrictChild(coordinatorRunRoot!, packagedCliPath), "executed packed CLI must be owned by the authoritative coordinator root").toBe(true);
 			runtime = startPackagedCli({
-				cliPath: join(installedRoot, "dist", "server", "cli.js"),
+				cliPath: packagedCliPath,
 				consumerDir,
 				workspaceDir,
 				agentPath,

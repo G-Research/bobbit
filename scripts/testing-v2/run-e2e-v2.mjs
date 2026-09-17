@@ -262,6 +262,9 @@ export function createNestedE2EEnvironment(coordinatorEnv, platform = process.pl
 		"BOBBIT_E2E_PWTEST_CACHE_OWNED",
 		"BOBBIT_PWTEST_CACHE_ROOT",
 		"BOBBIT_E2E_V8CACHE_ROOT",
+		// Focused Group C delegates preparation to the nested Playwright
+		// coordinator. Never hand it a parent- or host-supplied descriptor.
+		PACKED_CONSUMER_DESCRIPTOR_ENV,
 	]) deleteEnvironmentValue(nestedEnv, key, platform);
 	return nestedEnv;
 }
@@ -727,7 +730,13 @@ async function main() {
 		if (only === "A") { results.push(await runGroupA(A, coordinatorEnv)); captureLatestProfile("A"); }
 		if (only === "B") { results.push(await runGroupB(B, coordinatorEnv)); captureLatestProfile("B"); }
 		if (only === "C") {
-			packedConsumer = await prepareGroupCPackedConsumer(C, coordinatorEnv, paths);
+			// The focused path launches the legacy Playwright wrapper, which owns a
+			// fresh nested run root and prepares exactly once below that root.
+			// Preparing here would either duplicate work or require trusting an
+			// environment pathname across coordinator ownership boundaries.
+			packedConsumer = C.includes(PACKAGED_CONSUMER_SPEC)
+				? { selected: true, delegated: true, descriptorPath: null, wallMs: 0 }
+				: packedConsumer;
 			results.push(await runGroupC(C, coordinatorEnv));
 			captureLatestProfile("C");
 		}
@@ -792,7 +801,9 @@ async function main() {
 		docker,
 		dockerCapability,
 		bundle,
-		packedConsumer,
+		packedConsumer: packedConsumer.delegated
+			? { ...packedConsumer, state: "delegated-to-nested-coordinator" }
+			: packedConsumer,
 		serialTransformCache,
 		profiling: profile ? {
 			enabled: true,
@@ -841,9 +852,11 @@ async function main() {
 				jsonPath: args.json ?? null,
 				profiles: profileRefs.map((reference) => reference.path),
 			},
-			packedConsumer: packedConsumer.selected
-				? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
-				: { state: "not-selected" },
+			packedConsumer: packedConsumer.delegated
+				? { state: "delegated-to-nested-coordinator" }
+				: packedConsumer.selected
+					? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
+					: { state: "not-selected" },
 		},
 	});
 	process.exit(exitCode);

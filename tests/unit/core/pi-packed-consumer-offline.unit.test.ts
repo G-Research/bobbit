@@ -588,12 +588,16 @@ describe("packed-consumer offline install contract", () => {
 
 	it("hands the actual packed tarball and strict-offline install evidence to the browser", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
-		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath!\)/,
-			"the browser journey must consume the coordinator descriptor");
-		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor/,
-			"the browser journey must use a private template copy");
+		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath!, coordinatorRunRoot!\)/,
+			"the browser journey must bind the descriptor to the authoritative coordinator root");
+		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor, \{\s*coordinatorRunRoot: coordinatorRunRoot!/s,
+			"the browser journey must use an authoritative-root-bound private template copy");
 		assert.match(packedConsumer, /const tarballPath = resolve\(descriptor\.tarballPath\)/,
 			"the browser must validate npm pack's actual emitted tarball");
+		assert.match(packedConsumer, /packed tarball must be owned by the authoritative coordinator root/,
+			"the packed tarball must remain bound to the coordinator root");
+		assert.match(packedConsumer, /executed packed CLI must be owned by the authoritative coordinator root/,
+			"the executed CLI must come from the coordinator-owned consumer copy");
 		assert.match(packedConsumer, /command\.args\.includes\("install"\) && command\.args\.includes\("--offline"\)/,
 			"the browser must verify strict-offline install evidence");
 		assert.match(packedConsumer, /\["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"\]/,

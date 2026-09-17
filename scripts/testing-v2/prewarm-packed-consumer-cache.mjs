@@ -651,40 +651,65 @@ export async function preparePackedConsumerFixture({
 	}
 }
 
-function validateDescriptor(descriptor) {
+function assertMatchingPath(actual, expected, label) {
+	if (resolve(actual) !== resolve(expected)) {
+		throw new Error(`Prepared packed-consumer ${label} does not match the authoritative E2E run layout`);
+	}
+}
+
+function validateDescriptor(descriptor, coordinatorRunRoot) {
+	if (!coordinatorRunRoot) throw new Error("Prepared packed-consumer validation requires the authoritative coordinator run root");
 	if (!descriptor || typeof descriptor !== "object" || descriptor.version !== DESCRIPTOR_VERSION) {
 		throw new Error("Prepared packed-consumer descriptor has an unsupported format");
 	}
 	for (const key of ["runRoot", "fixtureRoot", "templateDir", "consumersDir", "tarballPath", "cacheDir", "descriptorPath", "packageName"]) {
 		if (typeof descriptor[key] !== "string" || descriptor[key].length === 0) throw new Error(`Prepared packed-consumer descriptor is missing ${key}`);
 	}
-	for (const key of ["fixtureRoot", "templateDir", "consumersDir", "tarballPath", "cacheDir", "descriptorPath"]) {
-		assertOwnedPath(descriptor.runRoot, descriptor[key], key);
+	if (!descriptor.packEntry || typeof descriptor.packEntry !== "object" || typeof descriptor.packEntry.filename !== "string" || descriptor.packEntry.filename.length === 0) {
+		throw new Error("Prepared packed-consumer descriptor is missing packEntry.filename");
 	}
+
+	const runRoot = resolve(coordinatorRunRoot);
+	assertMatchingPath(descriptor.runRoot, runRoot, "declared run root");
+	for (const key of ["fixtureRoot", "templateDir", "consumersDir", "tarballPath", "cacheDir", "descriptorPath"]) {
+		assertOwnedPath(runRoot, descriptor[key], key);
+	}
+
+	const fixtureRoot = join(runRoot, FIXTURE_DIRECTORY);
+	assertMatchingPath(descriptor.fixtureRoot, fixtureRoot, "fixture root");
+	assertMatchingPath(descriptor.templateDir, join(fixtureRoot, "preparation", "template"), "template path");
+	assertMatchingPath(descriptor.consumersDir, join(fixtureRoot, "materialized"), "consumer root");
+	assertMatchingPath(descriptor.cacheDir, join(fixtureRoot, "npm-cache"), "cache path");
+	assertMatchingPath(descriptor.descriptorPath, join(fixtureRoot, "descriptor.json"), "descriptor path");
+	const packRoot = join(fixtureRoot, "pack");
+	assertOwnedPath(packRoot, descriptor.tarballPath, "tarballPath");
+	assertMatchingPath(descriptor.tarballPath, join(packRoot, descriptor.packEntry.filename), "tarball path");
 	return descriptor;
 }
 
-export async function readPreparedPackedConsumerDescriptor(descriptorPath) {
+export async function readPreparedPackedConsumerDescriptor(descriptorPath, coordinatorRunRoot) {
+	if (!coordinatorRunRoot) throw new Error("readPreparedPackedConsumerDescriptor requires the authoritative coordinator run root");
+	const runRoot = resolve(coordinatorRunRoot);
+	assertOwnedPath(runRoot, descriptorPath, "descriptorPath");
+	assertMatchingPath(descriptorPath, join(runRoot, FIXTURE_DIRECTORY, "descriptor.json"), "input descriptor path");
 	const parsed = JSON.parse(await readFile(descriptorPath, "utf8"));
-	const descriptor = validateDescriptor(parsed);
-	if (resolve(descriptor.descriptorPath) !== resolve(descriptorPath)) {
-		throw new Error(`Prepared packed-consumer descriptor path mismatch: ${descriptorPath}`);
-	}
+	const descriptor = validateDescriptor(parsed, runRoot);
+	assertMatchingPath(descriptor.descriptorPath, descriptorPath, "descriptor path");
 	return descriptor;
 }
 
 /** Copy the installed template into a unique, mutable, run-owned consumer. */
 export async function materializePackedConsumerFixture(descriptor, {
-	runRoot = descriptor?.runRoot,
+	coordinatorRunRoot,
 	name = "consumer",
+	copy = cp,
 } = {}) {
-	validateDescriptor(descriptor);
-	if (resolve(runRoot) !== resolve(descriptor.runRoot)) throw new Error("Materialized consumer must use the descriptor's E2E run root");
+	const validated = validateDescriptor(descriptor, coordinatorRunRoot);
 	const safeName = String(name).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "consumer";
-	const consumerDir = join(descriptor.consumersDir, `${safeName}-${process.pid}-${randomUUID()}`);
-	assertOwnedPath(descriptor.runRoot, consumerDir, "consumerDir");
-	await mkdir(descriptor.consumersDir, { recursive: true });
-	await cp(descriptor.templateDir, consumerDir, { recursive: true, force: false, errorOnExist: true });
+	const consumerDir = join(validated.consumersDir, `${safeName}-${process.pid}-${randomUUID()}`);
+	assertOwnedPath(resolve(coordinatorRunRoot), consumerDir, "consumerDir");
+	await mkdir(validated.consumersDir, { recursive: true });
+	await copy(validated.templateDir, consumerDir, { recursive: true, force: false, errorOnExist: true });
 	return { consumerDir };
 }
 

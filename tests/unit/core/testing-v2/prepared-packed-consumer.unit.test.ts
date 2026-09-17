@@ -24,9 +24,17 @@ type CommandCall = {
 };
 
 type PreparedDescriptor = {
+	version: number;
+	runRoot: string;
+	fixtureRoot: string;
 	templateDir: string;
+	consumersDir: string;
 	tarballPath: string;
 	cacheDir: string;
+	descriptorPath: string;
+	packageName: string;
+	packEntry: { filename: string };
+	commands: unknown[];
 };
 
 type PackedConsumerApi = {
@@ -44,9 +52,17 @@ type PackedConsumerApi = {
 			stderr: string;
 		}>;
 	}) => Promise<PreparedDescriptor>;
+	readPreparedPackedConsumerDescriptor?: (
+		descriptorPath: string,
+		coordinatorRunRoot: string,
+	) => Promise<PreparedDescriptor>;
 	materializePackedConsumerFixture?: (
 		descriptor: PreparedDescriptor,
-		options: { runRoot: string; name?: string },
+		options: {
+			coordinatorRunRoot: string;
+			name?: string;
+			copy?: (source: string, destination: string, options: object) => Promise<void>;
+		},
 	) => Promise<string | { consumerDir: string }>;
 };
 
@@ -170,8 +186,8 @@ describe("prepared packed consumer", () => {
 		const { runRoot, calls, descriptor } = await prepareFixture();
 		const materialize = requireApi("materializePackedConsumerFixture");
 		const packageCommandCount = calls.length;
-		const first = consumerPath(await materialize(descriptor, { runRoot, name: "first" }));
-		const second = consumerPath(await materialize(descriptor, { runRoot, name: "second" }));
+		const first = consumerPath(await materialize(descriptor, { coordinatorRunRoot: runRoot, name: "first" }));
+		const second = consumerPath(await materialize(descriptor, { coordinatorRunRoot: runRoot, name: "second" }));
 
 		assert.equal(calls.length, packageCommandCount, `${FAILURE_PREFIX}: materialization must reuse preparation without npm pack/install`);
 		assert.notEqual(resolve(first), resolve(second), `${FAILURE_PREFIX}: each consumer needs a unique directory`);
@@ -193,6 +209,58 @@ describe("prepared packed consumer", () => {
 			(error: NodeJS.ErrnoException) => error.code === "ENOENT",
 			`${FAILURE_PREFIX}: consumer workspace state must remain isolated`,
 		);
+	});
+
+	it("rejects a self-consistent descriptor owned by a different run root before reuse", async () => {
+		const { calls, descriptor } = await prepareFixture();
+		const authoritativeRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-authoritative-unit-"));
+		roots.push(authoritativeRoot);
+		const commandCount = calls.length;
+		const readDescriptor = requireApi("readPreparedPackedConsumerDescriptor");
+
+		await assert.rejects(
+			readDescriptor(descriptor.descriptorPath, authoritativeRoot),
+			/descriptorPath must be a strict child of the E2E run root/,
+		);
+		assert.equal(calls.length, commandCount, `${FAILURE_PREFIX}: rejected provenance must not invoke a package command`);
+	});
+
+	it("rejects a descriptor whose declared file identity differs from the coordinator path", async () => {
+		const { runRoot, calls, descriptor } = await prepareFixture();
+		const commandCount = calls.length;
+		await writeFile(descriptor.descriptorPath, `${JSON.stringify({
+			...descriptor,
+			descriptorPath: join(descriptor.fixtureRoot, "other-descriptor.json"),
+		})}\n`);
+		const readDescriptor = requireApi("readPreparedPackedConsumerDescriptor");
+
+		await assert.rejects(
+			readDescriptor(descriptor.descriptorPath, runRoot),
+			/descriptor path does not match the authoritative E2E run layout/,
+		);
+		assert.equal(calls.length, commandCount, `${FAILURE_PREFIX}: descriptor mismatch must not invoke a package command`);
+	});
+
+	it("rejects an external template before copying or invoking package commands", async () => {
+		const { runRoot, calls, descriptor } = await prepareFixture();
+		const externalRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-external-template-unit-"));
+		roots.push(externalRoot);
+		const externalTemplate = join(externalRoot, "template");
+		await mkdir(externalTemplate, { recursive: true });
+		const forged = { ...descriptor, templateDir: externalTemplate };
+		const commandCount = calls.length;
+		let copies = 0;
+		const materialize = requireApi("materializePackedConsumerFixture");
+
+		await assert.rejects(
+			materialize(forged, {
+				coordinatorRunRoot: runRoot,
+				copy: async () => { copies++; },
+			}),
+			/templateDir must be a strict child of the E2E run root/,
+		);
+		assert.equal(copies, 0, `${FAILURE_PREFIX}: an external template must be rejected before cp`);
+		assert.equal(calls.length, commandCount, `${FAILURE_PREFIX}: rejected materialization must not invoke a package command`);
 	});
 
 	it("reports timeout ownership, tree termination, exit state, cwd, and retained output", async () => {

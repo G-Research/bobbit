@@ -47,9 +47,11 @@ import {
   fanOutSerialTransformCache,
   finalizeE2ERunCleanup,
   groupDVitestArgs,
+  prepareGroupCPackedConsumer,
   resolveE2ERetryCount,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 import { removeOwnedPath } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
+import { sanitizeTestEnvironment } from "../../../scripts/testing-v2/environment-policy.mjs";
 
 const baselineEnv = { ...process.env };
 
@@ -63,6 +65,20 @@ function restoreBaselineEnv(): void {
 afterEach(restoreBaselineEnv);
 
 describe("unit run isolation", () => {
+  it("strips ambient packed-consumer descriptors with platform environment semantics", () => {
+    expect(sanitizeTestEnvironment({
+      BOBBIT_PACKED_CONSUMER_DESCRIPTOR: "/host/forged.json",
+      BOBBIT_TEST_NO_EXTERNAL: "1",
+    }, "linux")).toEqual({ BOBBIT_TEST_NO_EXTERNAL: "1" });
+
+    const windows = sanitizeTestEnvironment({
+      bObBiT_pAcKeD_cOnSuMeR_dEsCrIpToR: "C:\\host\\forged.json",
+      BOBBIT_TEST_NO_EXTERNAL: "1",
+    }, "win32");
+    expect(Object.keys(windows).map(key => key.toUpperCase())).not.toContain("BOBBIT_PACKED_CONSUMER_DESCRIPTOR");
+    expect(windows.BOBBIT_TEST_NO_EXTERNAL).toBe("1");
+  });
+
   it("owns one canonical root and only removes children beneath it", async () => {
     const root = getRunRoot();
     const child = createRunChild("core-isolation");
@@ -291,6 +307,7 @@ describe("unit run isolation", () => {
         BOBBIT_GATEWAY_URL: "https://host.invalid",
         BOBBIT_SESSION_ID: "host-session",
         BOBBIT_GH_COMMAND: "/host/gh",
+        BOBBIT_PACKED_CONSUMER_DESCRIPTOR: "/host/forged-packed-consumer.json",
         BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: "/host/stale-bundle.mjs",
         BOBBIT_TEST_NO_EXTERNAL: "1",
         BOBBIT_V2_RETRY_FREE: "1",
@@ -313,6 +330,7 @@ describe("unit run isolation", () => {
         expect(environment.BOBBIT_GATEWAY_URL).toBeUndefined();
         expect(environment.BOBBIT_SESSION_ID).toBeUndefined();
         expect(environment.BOBBIT_GH_COMMAND).toBeUndefined();
+        expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
         expect(environment.BOBBIT_TEST_NO_EXTERNAL).toBe("1");
         expect(environment.BOBBIT_V2_RETRY_FREE).toBe("1");
         expect(isOwnedRunChild(paths.root, environment.HOME!)).toBe(true);
@@ -386,6 +404,7 @@ describe("unit run isolation", () => {
         pwtest_cache_dir: "stale-pwtest-cache-dir",
         BoBbIt_E2e_PwTeSt_CaChE_Dir: "stale-cache-dir",
         bObBiT_E2E_v8CaChE_rOoT: "stale-v8-cache-root",
+        bObBiT_pAcKeD_cOnSuMeR_dEsCrIpToR: "stale-forged-descriptor",
         bObBiT_v2_E2E_DiSt_SeRvEr_PrEbUnDlE: "stale-bundle",
       };
       const isolated = createIsolatedE2EEnvironment(
@@ -399,6 +418,7 @@ describe("unit run isolation", () => {
       const nested = createNestedE2EEnvironment({
         bObBiT_E2E_PwTeSt_CaChE_Root: "stale-cache-root",
         BoBbIt_E2E_V8cAcHe_RoOt: "stale-v8-cache",
+        bObBiT_pAcKeD_cOnSuMeR_dEsCrIpToR: "stale-forged-descriptor",
       }, "win32");
       const child = composeE2EChildEnvironment({
         bobbit_v2_run_root: "stale-run-root",
@@ -412,6 +432,7 @@ describe("unit run isolation", () => {
         expect(environment.openai_api_key).toBeUndefined();
         expect(environment.bObBiT_tEsT_fIxTuRe_Token).toBe("preserve-test-token");
         expect(environment.BoBbIt_V2_Command_Override).toBe("preserve-v2-command");
+        expect(Object.keys(environment).map((key) => key.toUpperCase())).not.toContain("BOBBIT_PACKED_CONSUMER_DESCRIPTOR");
       }
       expect(Object.keys(e2e).map((key) => key.toUpperCase())).not.toContain("BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
       for (const environment of [browser, e2e]) {
@@ -436,6 +457,7 @@ describe("unit run isolation", () => {
       expect(child.BOBBIT_V2_RUN_ROOT).toBe(paths.root);
       expect(Object.keys(nested).map((key) => key.toUpperCase())).not.toContain("BOBBIT_E2E_PWTEST_CACHE_ROOT");
       expect(Object.keys(nested).map((key) => key.toUpperCase())).not.toContain("BOBBIT_E2E_V8CACHE_ROOT");
+      expect(Object.keys(nested).map((key) => key.toUpperCase())).not.toContain("BOBBIT_PACKED_CONSUMER_DESCRIPTOR");
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
@@ -738,25 +760,93 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("reuses an inherited packed-consumer descriptor without duplicate preparation", async () => {
-    const descriptorPath = join(tmpdir(), "outer-run", "prepared-packed-consumer", "descriptor.json");
-    const environment = { BOBBIT_PACKED_CONSUMER_DESCRIPTOR: descriptorPath };
-    const decision = directRunnerPackedConsumerDecision([], environment);
+  it("does not let an ambient descriptor suppress direct-runner preparation", async () => {
+    const root = join(tmpdir(), "direct-packed-consumer-owned-run");
+    const forgedDescriptor = join(tmpdir(), "attacker-run", "prepared-packed-consumer", "descriptor.json");
+    const ownedDescriptor = join(root, "prepared-packed-consumer", "descriptor.json");
+    const environment = { BOBBIT_PACKED_CONSUMER_DESCRIPTOR: forgedDescriptor };
+    const decision = directRunnerPackedConsumerDecision([]);
     let preparations = 0;
     const result = await prepareDirectRunnerPackedConsumer(
       ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
       environment,
-      { root: join(tmpdir(), "nested-direct-run") },
-      async () => {
+      { root },
+      async ({ runRoot }: { runRoot: string }) => {
         preparations++;
-        return { descriptorPath: "unexpected" };
+        expect(runRoot).toBe(root);
+        expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
+        return { descriptorPath: ownedDescriptor };
       },
     );
 
-    expect(preparations).toBe(0);
-    expect(decision).toEqual({ prepare: false, reason: "inherited-descriptor", descriptorPath });
-    expect(result).toEqual(decision);
-    expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+    expect(preparations).toBe(1);
+    expect(decision).toEqual({ prepare: true, reason: "unfiltered", descriptorPath: null });
+    expect(result).toEqual({ prepare: true, reason: "packaged-consumer-selected", descriptorPath: ownedDescriptor });
+    expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(ownedDescriptor);
+  });
+
+  it("delegates focused Group C preparation exactly once to its nested coordinator root", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "focused-group-c-packed-consumer-"));
+    try {
+      const outerPaths = createE2ERunPaths(temp);
+      const nestedEnvironment = createNestedE2EEnvironment({
+        BOBBIT_PACKED_CONSUMER_DESCRIPTOR: join(outerPaths.root, "forged.json"),
+      });
+      expect(nestedEnvironment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
+      const innerPaths = createE2ERunPaths(temp);
+      const descriptorPath = join(innerPaths.root, "prepared-packed-consumer", "descriptor.json");
+      let preparations = 0;
+
+      await prepareDirectRunnerPackedConsumer(
+        ["--project=browser-canonical", "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
+        nestedEnvironment,
+        innerPaths,
+        async ({ runRoot }: { runRoot: string }) => {
+          preparations++;
+          expect(runRoot).toBe(innerPaths.root);
+          return { descriptorPath };
+        },
+      );
+
+      expect(preparations).toBe(1);
+      expect(nestedEnvironment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+      const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
+      const focusedBranch = source.match(/if \(only === "C"\) \{[\s\S]*?captureLatestProfile\("C"\);\n\t\t\}/)?.[0];
+      expect(focusedBranch).toBeDefined();
+      expect(focusedBranch).not.toContain("prepareGroupCPackedConsumer");
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("prepares full serial Group C exactly once in the authoritative coordinator root", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "serial-group-c-packed-consumer-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      const environment: NodeJS.ProcessEnv = {};
+      const descriptorPath = join(paths.root, "prepared-packed-consumer", "descriptor.json");
+      let preparations = 0;
+      const result = await prepareGroupCPackedConsumer(
+        ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
+        environment,
+        paths,
+        async ({ runRoot }: { runRoot: string }) => {
+          preparations++;
+          expect(runRoot).toBe(paths.root);
+          return {
+            descriptorPath,
+            tarballPath: join(paths.root, "prepared-packed-consumer", "pack", "bobbit.tgz"),
+            templateDir: join(paths.root, "prepared-packed-consumer", "preparation", "template"),
+          };
+        },
+      );
+
+      expect(preparations).toBe(1);
+      expect(result).toMatchObject({ selected: true, descriptorPath });
+      expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it("keeps discovered E2E paths as shell-free argv values for every local runner", () => {
