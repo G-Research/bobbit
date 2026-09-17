@@ -726,6 +726,46 @@ describe("unit run isolation", () => {
       expect(preparations).toBe(1);
       expect(result).toMatchObject({ prepare: true, reason: "packaged-consumer-selected", descriptorPath });
       expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+      expect(directRunnerPackedConsumerDecision(["--project=browser-canonical"]))
+        .toMatchObject({ prepare: true, reason: "packaged-consumer-selected" });
+      expect(directRunnerPackedConsumerDecision([
+        "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts",
+        "--grep",
+        "clean consumer",
+      ])).toMatchObject({ prepare: true, reason: "packaged-consumer-selected" });
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips packed-consumer preparation for grep-only direct runs", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-grep-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      let preparations = 0;
+      const prepare = async () => {
+        preparations++;
+        return { descriptorPath: join(paths.root, "unexpected.json") };
+      };
+      const grepForms = [
+        ["--grep", "@smoke"],
+        ["-g", "@smoke"],
+        ["--grep=@smoke"],
+      ];
+
+      for (const args of grepForms) {
+        expect(directRunnerPackedConsumerDecision(args)).toEqual({
+          prepare: false,
+          reason: "title-filter-excludes-packaged-consumer",
+          descriptorPath: null,
+        });
+        await expect(prepareDirectRunnerPackedConsumer(args, {}, paths, prepare)).resolves.toEqual({
+          prepare: false,
+          reason: "title-filter-excludes-packaged-consumer",
+          descriptorPath: null,
+        });
+      }
+      expect(preparations).toBe(0);
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
