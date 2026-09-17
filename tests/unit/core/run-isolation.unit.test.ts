@@ -27,7 +27,9 @@ import {
   createE2ERunPaths,
   createIsolatedE2EEnvironment,
   createPlaywrightE2EInvocation,
+  directRunnerPackedConsumerDecision,
   isE2EAmbientRuntimeEnvKey,
+  prepareDirectRunnerPackedConsumer,
 } from "../../../scripts/run-playwright-e2e.mjs";
 import {
   createBrowserRunEnvironment,
@@ -657,6 +659,104 @@ describe("unit run isolation", () => {
     expect(groupA).not.toContain("--test-force-exit");
     expect(groupA).toContain("createGroupAInvocation(specs, { nodeConcurrency: nodeConc })");
     expect(groupA).not.toMatch(/--retr(?:y|ies)(?:=|\b)/);
+  });
+
+  it("prepares the packed consumer for unfiltered direct Playwright runs", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-unfiltered-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      const environment: NodeJS.ProcessEnv = {};
+      const calls: Array<{ repoRoot: string; runRoot: string; baseEnv: NodeJS.ProcessEnv }> = [];
+      const descriptorPath = join(paths.root, "prepared-packed-consumer", "descriptor.json");
+      const result = await prepareDirectRunnerPackedConsumer([], environment, paths, async (options: { repoRoot: string; runRoot: string; baseEnv: NodeJS.ProcessEnv }) => {
+        calls.push(options);
+        return { descriptorPath };
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.runRoot).toBe(paths.root);
+      expect(calls[0]!.baseEnv).toBe(environment);
+      expect(result).toMatchObject({ prepare: true, reason: "unfiltered", descriptorPath });
+      expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("prepares the packed consumer when a direct run targets its spec", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-targeted-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      const environment: NodeJS.ProcessEnv = {};
+      const descriptorPath = join(paths.root, "prepared-packed-consumer", "descriptor.json");
+      let preparations = 0;
+      const result = await prepareDirectRunnerPackedConsumer(
+        ["--project=browser-canonical", "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
+        environment,
+        paths,
+        async () => {
+          preparations++;
+          return { descriptorPath };
+        },
+      );
+
+      expect(preparations).toBe(1);
+      expect(result).toMatchObject({ prepare: true, reason: "packaged-consumer-selected", descriptorPath });
+      expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips packed-consumer preparation for unrelated direct targets and projects", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "direct-packed-consumer-unrelated-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      let preparations = 0;
+      const prepare = async () => {
+        preparations++;
+        return { descriptorPath: join(paths.root, "unexpected.json") };
+      };
+      const targeted = await prepareDirectRunnerPackedConsumer(
+        ["tests/e2e/api/session.api-e2e.spec.ts"],
+        {},
+        paths,
+        prepare,
+      );
+      const projectOnly = await prepareDirectRunnerPackedConsumer(
+        ["--project", "api-canonical"],
+        {},
+        paths,
+        prepare,
+      );
+
+      expect(preparations).toBe(0);
+      expect(targeted).toMatchObject({ prepare: false, reason: "test-filter-excludes-packaged-consumer" });
+      expect(projectOnly).toMatchObject({ prepare: false, reason: "project-excludes-packaged-consumer" });
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses an inherited packed-consumer descriptor without duplicate preparation", async () => {
+    const descriptorPath = join(tmpdir(), "outer-run", "prepared-packed-consumer", "descriptor.json");
+    const environment = { BOBBIT_PACKED_CONSUMER_DESCRIPTOR: descriptorPath };
+    const decision = directRunnerPackedConsumerDecision([], environment);
+    let preparations = 0;
+    const result = await prepareDirectRunnerPackedConsumer(
+      ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
+      environment,
+      { root: join(tmpdir(), "nested-direct-run") },
+      async () => {
+        preparations++;
+        return { descriptorPath: "unexpected" };
+      },
+    );
+
+    expect(preparations).toBe(0);
+    expect(decision).toEqual({ prepare: false, reason: "inherited-descriptor", descriptorPath });
+    expect(result).toEqual(decision);
+    expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
   });
 
   it("keeps discovered E2E paths as shell-free argv values for every local runner", () => {
