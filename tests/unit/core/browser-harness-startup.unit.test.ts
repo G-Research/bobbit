@@ -271,6 +271,36 @@ describe("browser harness startup", () => {
 		}
 	});
 
+	it("serializes only MCP workers before browser and gateway ownership", () => {
+		const source = readFileSync(resolve(PROJECT_ROOT, "tests/e2e/gateway-harness.ts"), "utf8");
+		const mcpLeaseAt = source.indexOf("\tmcpBrowserLease: [async");
+		const browserLeaseAt = source.indexOf("\tbrowserRenderLease: [async");
+		const gatewayAt = source.indexOf("\tgateway: [async");
+		assert.ok(mcpLeaseAt > 0 && browserLeaseAt > mcpLeaseAt && gatewayAt > browserLeaseAt);
+
+		const mcpBlock = source.slice(mcpLeaseAt, browserLeaseAt);
+		assert.match(mcpBlock, /async \(\{ enableMcp \}, use\)/, "MCP admission must remain worker-option aware");
+		assert.match(mcpBlock, /if \(enableMcp && process\.env\.BOBBIT_V2_BROWSER_LEASE === "1"\)/);
+		assert.match(mcpBlock, /acquireLease\("mcp-browser", \{\s*cap: 1,\s*timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,/s);
+		assert.match(mcpBlock, /scope: "worker", auto: true/);
+		const useAt = mcpBlock.indexOf("await use();");
+		const finallyAt = mcpBlock.indexOf("} finally {", useAt);
+		const releaseAt = mcpBlock.indexOf("\n\t\t\trelease();", finallyAt);
+		assert.ok(useAt > 0 && finallyAt > useAt && releaseAt > finallyAt, "the MCP lease must outlive every dependent worker fixture");
+		assert.match(mcpBlock, /finally \{\s*release\(\);/s, "failure must still release the MCP lease");
+		assert.match(mcpBlock, /lease\.forced/, "bounded fail-open acquisition must be diagnostic");
+		assert.doesNotMatch(mcpBlock, /error\.(?:message|stack)/, "lease diagnostics must not expose paths or secrets");
+
+		const browserBlock = source.slice(browserLeaseAt, gatewayAt);
+		assert.match(browserBlock, /async \(\{ mcpBrowserLease \}, use\)/);
+		assert.ok(
+			browserBlock.indexOf("void mcpBrowserLease;") < browserBlock.indexOf("acquireBrowserRenderLease()"),
+			"MCP workers must queue before acquiring Chromium capacity",
+		);
+		const gatewaySignature = source.slice(gatewayAt, source.indexOf("=> {", gatewayAt));
+		assert.match(gatewaySignature, /browserRenderLease/, "gateway startup must stay downstream of browser admission");
+	});
+
 	it("routes every Group B executable server import through exactly one runtime mode", () => {
 		const groupB = [...discoverTests().e2eGroups.B];
 		assert.deepEqual(groupB.filter(file => classifyHarness(file) === "in-process").sort(), IN_PROCESS_B);

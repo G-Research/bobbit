@@ -60,6 +60,16 @@ function loadLedger(): Promise<any> {
 }
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
+const MCP_BROWSER_LEASE_TIMEOUT_MS = 120_000;
+
+function safeLeaseFailure(error: unknown): string {
+	const code = error && typeof error === "object" && "code" in error
+		? (error as { code?: unknown }).code
+		: undefined;
+	if (typeof code === "string" && /^[A-Z0-9_-]{1,40}$/i.test(code)) return `code=${code}`;
+	if (error instanceof Error && /^[A-Z][A-Za-z0-9_-]{0,39}$/.test(error.name)) return `name=${error.name}`;
+	return "unknown";
+}
 
 const STATIC_MIME_TYPES: Record<string, string> = {
 	".css": "text/css; charset=utf-8",
@@ -336,9 +346,52 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	sameRootProjectAtStartup: boolean;
 	basePath: string;
 	separateUiOrigin: boolean;
+	mcpBrowserLease: void;
 	browserRenderLease: void;
 	gateway: GatewayInfo;
 }>({
+	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
+	// at the top of a spec file. Playwright groups tests with matching option
+	// values onto the same worker, so each spec file effectively gets its own gateway.
+	enableMcp: [false, { scope: "worker", option: true }],
+
+	// MCP browser journeys are substantially heavier than the ordinary browser
+	// pool. Serialise opted-in v2 workers before they acquire a Chromium render
+	// slot or boot a gateway; the dependency chain tears those resources down
+	// before this lease is released. Non-MCP and legacy workers do not load or
+	// touch the lease ledger. Acquisition is bounded and fail-open so a damaged
+	// ledger cannot deadlock the suite. Diagnostics deliberately expose only
+	// lifecycle timings and sanitised error identity, never paths or environment.
+	mcpBrowserLease: [async ({ enableMcp }, use) => {
+		let release: () => void = () => {};
+		let acquiredAt: number | undefined;
+		if (enableMcp && process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
+			const startedAt = Date.now();
+			try {
+				const { acquireLease } = await loadLedger();
+				const lease = await acquireLease("mcp-browser", {
+					cap: 1,
+					timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,
+				});
+				acquiredAt = Date.now();
+				release = () => lease.release();
+				const message = `[gateway-harness] MCP browser lease acquired waitMs=${acquiredAt - startedAt} cap=${lease.cap} forced=${lease.forced}`;
+				if (lease.forced) console.warn(message);
+				else console.log(message);
+			} catch (error) {
+				console.warn(`[gateway-harness] MCP browser lease unavailable; continuing without serialization (${safeLeaseFailure(error)})`);
+			}
+		}
+		try {
+			await use();
+		} finally {
+			release();
+			if (acquiredAt !== undefined) {
+				console.log(`[gateway-harness] MCP browser lease released holdMs=${Date.now() - acquiredAt}`);
+			}
+		}
+	}, { scope: "worker", auto: true, timeout: MCP_BROWSER_LEASE_TIMEOUT_MS + 30_000 }],
+
 	// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): cap the TOTAL number of
 	// Chromium browser workers rendering the app at once across ALL concurrent
 	// test:v2/e2e runs. Each Playwright worker = one Chromium browser; this
@@ -352,7 +405,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// without a lease. Its own large fixture timeout covers a long queue wait — the
 	// wait is charged here, NOT against the 60 s gateway/test timeouts. Cap in
 	// tests/support/data/quality/budgets/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
-	browserRenderLease: [async ({}, use) => {
+	browserRenderLease: [async ({ mcpBrowserLease }, use) => {
+		// The value is void; consuming it makes MCP admission the outer fixture, so
+		// queued MCP workers own neither Chromium nor a gateway.
+		void mcpBrowserLease;
 		let release: () => void = () => {};
 		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
 			try {
@@ -366,10 +422,6 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		await use();
 		release();
 	}, { scope: "worker", auto: true, timeout: 1_500_000 }],
-	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
-	// at the top of a spec file. Playwright groups tests with matching option
-	// values onto the same worker, so each spec file effectively gets its own gateway.
-	enableMcp: [false, { scope: "worker", option: true }],
 
 	// Worker-scoped option. Default false — opt in via `test.use({ enableWorktreePool: true })`.
 	enableWorktreePool: [false, { scope: "worker", option: true }],
