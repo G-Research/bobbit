@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test, expect } from "../in-process-harness.js";
-import { apiFetch, rawApiFetch, registerProject, deleteSession } from "../e2e-setup.js";
+import { apiFetch, rawApiFetch, registerProject } from "../e2e-setup.js";
+import { awaitableRm } from "../test-utils/cleanup.js";
 import { pollSessionUntil } from "../test-utils/pool-polling.mjs";
 
 type ProjectRecord = { id: string; rootPath: string; [key: string]: unknown };
@@ -152,12 +153,16 @@ async function putStaff(id: string, body: Record<string, unknown>): Promise<Staf
 	return { status: res.status, text, json };
 }
 
-async function deleteStaff(id: string): Promise<void> {
-	await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
-}
+type CleanupResource = "staff" | "sessions" | "projects";
 
-async function deleteProject(id: string): Promise<void> {
-	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+async function deleteCleanupResource(resource: CleanupResource, id: string): Promise<void> {
+	const response = await apiFetch(`/api/${resource}/${encodeURIComponent(id)}`, { method: "DELETE" });
+	const text = await response.text();
+	// Every recorded id was created by this test and is deleted exactly once in
+	// dependency order. Staff deletion owns its permanent session, but none of
+	// those session ids are separately recorded here, so a 404 is not an
+	// idempotent success for any of these requests.
+	expect(response.status, `delete ${resource} ${id} failed: ${text}`).toBe(200);
 }
 
 function seedLegacySystemStaff(gateway: any, patch: Partial<any> = {}): any {
@@ -191,17 +196,51 @@ test.describe("staff cwd parity regressions", () => {
 	let cleanupDirs: string[] = [];
 
 	test.afterEach(async () => {
-		for (const id of cleanupStaffIds.splice(0).reverse()) {
-			await deleteStaff(id);
+		const lifecycleErrors: unknown[] = [];
+		const deleteRecorded = async (resource: CleanupResource, ids: string[]): Promise<void> => {
+			for (const id of ids.splice(0).reverse()) {
+				try {
+					await deleteCleanupResource(resource, id);
+				} catch (error) {
+					lifecycleErrors.push(error);
+				}
+			}
+		};
+
+		// Keep teardown strictly owner-first. A successful project DELETE is the
+		// awaitable barrier that closes and removes its ProjectContext, including
+		// queued store writes, before any fixture path may be removed.
+		await deleteRecorded("staff", cleanupStaffIds);
+		await deleteRecorded("sessions", cleanupSessionIds);
+		await deleteRecorded("projects", cleanupProjectIds);
+
+		const dirs = cleanupDirs.splice(0).reverse();
+		if (lifecycleErrors.length > 0) {
+			const retained = dirs.join(", ");
+			throw new AggregateError(
+				lifecycleErrors,
+				`staff cwd fixture lifecycle cleanup failed; retained roots: ${retained || "none"}`,
+			);
 		}
-		for (const id of cleanupSessionIds.splice(0).reverse()) {
-			await deleteSession(id);
+
+		const removalErrors: unknown[] = [];
+		for (const dir of dirs) {
+			try {
+				await awaitableRm(dir, {
+					throwOnFailure: true,
+					lifecycle: {
+						staff: "deleted",
+						sessions: "deleted",
+						projectContexts: "removed",
+					},
+				});
+			} catch (error) {
+				removalErrors.push(error);
+			}
 		}
-		for (const id of cleanupProjectIds.splice(0).reverse()) {
-			await deleteProject(id);
-		}
-		for (const dir of cleanupDirs.splice(0).reverse()) {
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+		if (removalErrors.length === 1) throw removalErrors[0];
+		if (removalErrors.length > 1) {
+			throw new AggregateError(removalErrors, "staff cwd fixture path cleanup failed");
 		}
 	});
 
