@@ -5936,6 +5936,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		shutdown() {
 			return shutdownOnce(async () => {
+				// Close session-startup admission before listener closure or any awaited
+				// teardown phase. Existing WebSocket clients retain their established
+				// closure order, but can no longer publish a late runtime owner.
+				sessionManager.beginTerminalShutdown();
 				const shutdownStart = Date.now();
 				bootMark(`SHUTDOWN ${new Date().toISOString()}`);
 				// Phase timer: log each teardown phase so a slow shutdown is diagnosable
