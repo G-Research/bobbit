@@ -142,15 +142,27 @@ and puts `outputDir`, its JSON report, and private transform/V8/profile caches
 under owned artifacts. Coordinator roots and cache paths are internal outputs,
 not caller-selected shared locations.
 
-`scripts/testing-v2/run-e2e-v2.mjs` makes one equivalent coordinator environment
-for Groups A through D. Groups A, C, and D inherit that environment; Group B
-first removes outer cache variables and invokes `scripts/run-playwright-e2e.mjs`
-to allocate a nested legacy root. It never re-merges `process.env` during
-spawns. The nested wrapper removes only its own successful root, retains a
-failed root, and retains a successful root when `BOBBIT_KEEP_PWTEST_CACHE=1`.
-Both `playwright-v2.config.ts` projects and `playwright-e2e.config.ts` use
-normal developer `retries: 3` and set retries to zero only when
-`BOBBIT_V2_RETRY_FREE=1`; Group A has no retry mechanism.
+`scripts/testing-v2/run-e2e-v2.mjs` creates one coordinator environment for
+Groups A through D and never re-merges `process.env` during spawns. In a full
+run, A and D use that environment directly. B then C run serially through a
+serial-cache environment beneath the same coordinator-owned root. B processes
+write PID-scoped transform slots; after B exits, the coordinator unions completed
+slots into a contained snapshot, and each C process seeds a fresh PID-scoped slot.
+No writable slot is shared. The runner removes B's dist-prebundle setting before
+the snapshot handoff and C start, so C remains raw.
+
+Focused B/C runs use neither the full-run prebundle nor the B→C cache handoff.
+They remove outer cache variables and invoke `scripts/run-playwright-e2e.mjs`,
+which allocates a nested legacy root. The outer coordinator removes a successful
+full-run root after reporting and retains a failed root. The nested wrapper
+removes only its own successful root, retains failures, and retains a successful
+root when `BOBBIT_KEEP_PWTEST_CACHE=1`; that flag does not retain the outer
+full-run root. Both `playwright-v2.config.ts` projects and
+`playwright-e2e.config.ts` use normal developer `retries: 3` and set retries to
+zero only when `BOBBIT_V2_RETRY_FREE=1`; Group A has no retry mechanism. See the
+[safe-gains E2E close-out](../e2e-performance/speed-up-e2e-332a47cc/close-out.md)
+for measured performance and the distinction between diagnostics and
+qualification.
 
 Integration tests use the same Vitest owner and `tests2/harness/gateway.ts`;
 they therefore receive the same roots and scrubber rather than inventing a
