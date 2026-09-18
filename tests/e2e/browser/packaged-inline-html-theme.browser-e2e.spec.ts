@@ -483,13 +483,23 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expect(isStrictChild(coordinatorRunRoot!, tarballPath), "packed tarball must be owned by the authoritative coordinator root").toBe(true);
 			expect(existsSync(tarballPath), `prepared npm pack tarball is missing at ${tarballPath}`).toBe(true);
 			const packCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("pack"));
-			const installs = descriptor.commands.filter((command: CommandResult) => command.args.includes("install") && command.args.includes("--offline"));
+			const offlineCiCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("ci") && command.args.includes("--offline"));
 			expect(packCommands, "coordinator must execute npm pack exactly once").toHaveLength(1);
-			expect(installs, "coordinator must execute one strict-offline install").toHaveLength(1);
+			expect(offlineCiCommands, "coordinator must execute one strict-offline npm ci").toHaveLength(1);
+			const offlineCi = offlineCiCommands[0]!;
 			for (const required of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"]) {
-				expect(installs[0]!.args, `prepared install must pass ${required}`).toContain(required);
+				expect(offlineCi.args, `prepared npm ci must pass ${required}`).toContain(required);
 			}
-			expect(installs[0]!.args.map((argument: string) => resolve(argument))).toContain(tarballPath);
+			const cacheFlagIndex = offlineCi.args.indexOf("--cache");
+			expect(resolve(offlineCi.args[cacheFlagIndex + 1]!), "prepared npm ci must use the descriptor's isolated cache")
+				.toBe(resolve(descriptor.cacheDir));
+			const ciIndex = offlineCi.args.indexOf("ci");
+			const ciArgs = offlineCi.args.slice(ciIndex + 1);
+			const packageOperands = ciArgs.filter((argument: string, index: number) =>
+				!argument.startsWith("-") && ciArgs[index - 1] !== "--cache");
+			expect(packageOperands, "offline npm ci must not receive a package operand").toEqual([]);
+			expect(offlineCi.args.map((argument: string) => resolve(argument)), "offline npm ci must consume the lock instead of the tarball operand")
+				.not.toContain(tarballPath);
 
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runPiPackedConsumerNpm(
@@ -531,9 +541,20 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				expect(installedManifest.dependencies?.[name], `${name} must not ship as a production dependency`).toBeUndefined();
 			}
 			const installedLock = JSON.parse(await readFile(join(consumerDir, "package-lock.json"), "utf8")) as {
-				packages?: Record<string, { dependencies?: Record<string, string>; version?: string }>;
+				packages?: Record<string, { dependencies?: Record<string, string>; resolved?: string; version?: string }>;
 			};
 			const installedPackages = installedLock.packages ?? {};
+			const packedArtifactLockReferences = [
+				["root dependency", installedPackages[""]?.dependencies?.[PACKAGE_NAME]],
+				["installed package", installedPackages[`node_modules/${PACKAGE_NAME}`]?.resolved],
+			] as const;
+			for (const [label, reference] of packedArtifactLockReferences) {
+				expect(reference, `consumer lock ${label} must be a file: reference`).toMatch(/^file:/);
+				expect(
+					resolve(consumerDir, decodeURIComponent(reference!.slice("file:".length))),
+					`consumer lock ${label} must resolve to the actual packed tarball`,
+				).toBe(tarballPath);
+			}
 			const installedPackagePaths = Object.keys(installedPackages)
 				.filter(path => path !== "" && /(?:^|\/)node_modules\//.test(path));
 			const nodeTypesVersions = Object.entries(installedPackages)

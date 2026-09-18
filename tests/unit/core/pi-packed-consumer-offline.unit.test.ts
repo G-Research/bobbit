@@ -620,10 +620,18 @@ describe("packed-consumer offline install contract", () => {
 			"the packed tarball must remain bound to the coordinator root");
 		assert.match(packedConsumer, /executed packed CLI must be owned by the authoritative coordinator root/,
 			"the executed CLI must come from the coordinator-owned consumer copy");
-		assert.match(packedConsumer, /command\.args\.includes\("install"\) && command\.args\.includes\("--offline"\)/,
-			"the browser must verify strict-offline install evidence");
+		assert.match(packedConsumer, /command\.args\.includes\("ci"\) && command\.args\.includes\("--offline"\)/,
+			"the browser must verify strict-offline npm ci evidence");
 		assert.match(packedConsumer, /\["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"\]/,
-			"deterministic install flags and the isolated cache must remain asserted");
+			"deterministic npm ci flags must remain asserted");
+		assert.match(packedConsumer, /prepared npm ci must use the descriptor's isolated cache/,
+			"the browser must bind npm ci to the prepared fixture's isolated cache");
+		assert.match(packedConsumer, /offline npm ci must not receive a package operand/,
+			"the browser must reject a second packed-artifact operand during lock-driven npm ci");
+		assert.match(packedConsumer, /installedPackages\[`node_modules\/\$\{PACKAGE_NAME\}`\]\?\.resolved/,
+			"the copied consumer lock must prove the installed package resolves from the packed artifact");
+		assert.match(packedConsumer, /consumer lock \$\{label\} must resolve to the actual packed tarball/,
+			"the browser must bind the copied lock reference to the coordinator's actual tarball");
 		assert.match(packedConsumer, /test\.describe\.configure\(\{ retries: 0 \}\)/,
 			"the retained clean-consumer browser journey must remain first-attempt only");
 		assert.doesNotMatch(packedConsumer, /testInfo\.retry/,
