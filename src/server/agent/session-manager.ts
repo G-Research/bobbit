@@ -3651,7 +3651,7 @@ export class SessionManager {
 	private terminalShutdownStarted = false;
 	private shutdownPromise: Promise<void> | null = null;
 	/** Startups admitted before the monotonic terminal latch, including detached worktree setup. */
-	private readonly terminalStartupAttempts = new Set<TerminalStartupAttempt>();
+	private terminalStartupAttempts = new Set<TerminalStartupAttempt>();
 	/** Exact host discovery coordinate selected after a session worktree is provisioned. */
 	private readonly mcpSessionScopes = new Map<string, { projectId: string; cwd: string; scopeKey: string }>();
 	/** Project sources temporarily withheld while their registered root changes. */
@@ -3800,6 +3800,16 @@ export class SessionManager {
 		if (this.terminalShutdownStarted) throw new SessionStartupShutdownError();
 	}
 
+	/**
+	 * Some focused lifecycle fixtures deliberately instantiate the prototype
+	 * without running the constructor. Keep that supported without weakening the
+	 * production latch: the registry is still per-manager and is created before
+	 * an operation can be admitted.
+	 */
+	private terminalStartupRegistry(): Set<TerminalStartupAttempt> {
+		return this.terminalStartupAttempts ??= new Set<TerminalStartupAttempt>();
+	}
+
 	/** Register before invoking operation so even its synchronous prefix is owned. */
 	private trackTerminalStartup<T>(label: string, operation: () => T | Promise<T>): Promise<T> {
 		try {
@@ -3818,7 +3828,8 @@ export class SessionManager {
 		// observer as well so a caller-abandoned startup never becomes unhandled.
 		void settled.catch(() => undefined);
 		const attempt: TerminalStartupAttempt = { label, settled };
-		this.terminalStartupAttempts.add(attempt);
+		const attempts = this.terminalStartupRegistry();
+		attempts.add(attempt);
 
 		let result: Promise<T>;
 		try {
@@ -3827,8 +3838,8 @@ export class SessionManager {
 			result = Promise.reject(error);
 		}
 		void result.then(
-			() => { this.terminalStartupAttempts.delete(attempt); resolveSettled(); },
-			(error) => { this.terminalStartupAttempts.delete(attempt); rejectSettled(error); },
+			() => { attempts.delete(attempt); resolveSettled(); },
+			(error) => { attempts.delete(attempt); rejectSettled(error); },
 		);
 		return result;
 	}
@@ -3843,22 +3854,24 @@ export class SessionManager {
 		});
 		void settled.catch(() => undefined);
 		const attempt: TerminalStartupAttempt = { label, settled };
-		this.terminalStartupAttempts.add(attempt);
+		const attempts = this.terminalStartupRegistry();
+		attempts.add(attempt);
 		void operation.then(
-			() => { this.terminalStartupAttempts.delete(attempt); resolveSettled(); },
-			(error) => { this.terminalStartupAttempts.delete(attempt); rejectSettled(error); },
+			() => { attempts.delete(attempt); resolveSettled(); },
+			(error) => { attempts.delete(attempt); rejectSettled(error); },
 		);
 	}
 
 	private async joinTerminalStartups(): Promise<void> {
 		const failures: Error[] = [];
 		const deadline = this.clock.now() + TERMINAL_STARTUP_DRAIN_TIMEOUT_MS;
+		const attempts = this.terminalStartupRegistry();
 		// An admitted parent (notably createSession's preparing response) may publish
 		// its detached setup owner while this join is already waiting. Admission is
 		// closed, so drain dynamically without polling; an absolute deadline retains
 		// the run root rather than making gateway shutdown wait without bound.
-		while (this.terminalStartupAttempts.size > 0) {
-			const admitted = [...this.terminalStartupAttempts];
+		while (attempts.size > 0) {
+			const admitted = [...attempts];
 			const remainingMs = Math.max(0, deadline - this.clock.now());
 			if (remainingMs === 0) {
 				throw new Error(
@@ -4717,10 +4730,11 @@ export class SessionManager {
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(ps.id, "restore", async () => {
-			await this.restoreSessionAdmitted(ps);
-			return this.sessions.get(ps.id);
-		}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined });
+		return this.trackTerminalStartup(`restore:${ps.id}`, () =>
+			this._coordinateSessionReplacement(ps.id, "restore", async () => {
+				await this.restoreSession(ps);
+				return this.sessions.get(ps.id);
+			}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined }));
 	}
 
 	/**
@@ -13050,15 +13064,16 @@ export class SessionManager {
 			useRequestedPersistedSnapshot?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
-			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
-				// Owner-sensitive recovery must reach its own serialized admission
-				// check; joining a generic rehydrate would inherit another operation's
-				// replacement without ever proving ownership of its stopped bridge.
-				coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
-				drainOnRelease: opts?.deferQueueDrain !== true,
-				cancelOnTerminal: () => undefined,
-			});
+		return this.trackTerminalStartup(`respawn:${session.id}`, () =>
+			this._coordinateSessionReplacement(session.id, "respawn", (token) =>
+				this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
+					// Owner-sensitive recovery must reach its own serialized admission
+					// check; joining a generic rehydrate would inherit another operation's
+					// replacement without ever proving ownership of its stopped bridge.
+					coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
+					drainOnRelease: opts?.deferQueueDrain !== true,
+					cancelOnTerminal: () => undefined,
+				}));
 	}
 
 	private async _respawnAgentInPlaceOwned(
@@ -13114,7 +13129,7 @@ export class SessionManager {
 		if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
 		opts?.mutatePs?.(ps);
 		try {
-			await this.restoreSessionAdmitted(ps);
+			await this.restoreSession(ps);
 			if (token.coordinator.terminalRequest) {
 				const cancelled = this.sessions.get(id);
 				if (cancelled && cancelled !== session) {
@@ -13196,43 +13211,41 @@ export class SessionManager {
 	 * Stops any remnant process, then restores from persisted state.
 	 * Re-attaches existing WS clients so the user can keep working.
 	 */
-	restartAgent(...args: Parameters<SessionManager["restartAgentOwned"]>): Promise<void> {
-		return this.trackTerminalStartup(`restart:${args[0]}`, () => this.restartAgentOwned(...args));
-	}
+	async restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
+		return this.trackTerminalStartup(`restart:${sessionId}`, async () => {
+			this.assertTerminalStartupAllowed();
+			this.assertSessionGoalPromotionMutationAllowed(sessionId);
+			this._assertModelSelectionReady(sessionId);
+			const session = this.sessions.get(sessionId);
+			if (!session) throw new Error("Session not found");
 
-	private async restartAgentOwned(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
-		this.assertTerminalStartupAllowed();
-		this.assertSessionGoalPromotionMutationAllowed(sessionId);
-		this._assertModelSelectionReady(sessionId);
-		const session = this.sessions.get(sessionId);
-		if (!session) throw new Error("Session not found");
+			const ps = this.resolveStoreForSession(session.id).get(session.id);
+			if (!ps) throw new Error("No persisted session data");
 
-		const ps = this.resolveStoreForSession(session.id).get(session.id);
-		if (!ps) throw new Error("No persisted session data");
+			const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
+			const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+			const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
+			// One-time grants authorize only the currently blocked invocation; do not
+			// pre-populate the guard's process-local cache across respawn/refresh.
+			const overrideGrantedTools = savedSessionOnlyGrantedTools;
+			this.assertTerminalStartupAllowed();
 
-		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
-		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
-		// One-time grants authorize only the currently blocked invocation; do not
-		// pre-populate the guard's process-local cache across respawn/refresh.
-		const overrideGrantedTools = savedSessionOnlyGrantedTools;
-		this.assertTerminalStartupAllowed();
+			const restored = await this._respawnAgentInPlace(session, ps, {
+				mutatePs: p => {
+					if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+					if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
+				},
+				expectedOwner,
+				restartZombieGuard: true,
+			});
 
-		const restored = await this._respawnAgentInPlace(session, ps, {
-			mutatePs: p => {
-				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
-				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
-			},
-			expectedOwner,
-			restartZombieGuard: true,
+			if (restored) {
+				if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
+				if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
+			} else {
+				throw new Error("Failed to restore session after restart");
+			}
 		});
-
-		if (restored) {
-			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
-			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-		} else {
-			throw new Error("Failed to restore session after restart");
-		}
 	}
 
 	/**
@@ -13423,9 +13436,9 @@ export class SessionManager {
 	 * Restore sessions from disk on startup.
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
-	restoreSessions(): Promise<void>;
-	restoreSessions(suppressedSessionIds: ReadonlySet<string>): Promise<void>;
-	restoreSessions(suppressedSessionIds: ReadonlySet<string> = new Set()): Promise<void> {
+	async restoreSessions(): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string>): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string> = new Set()): Promise<void> {
 		return this.trackTerminalStartup("restore-all", () => this.restoreSessionsOwned(suppressedSessionIds));
 	}
 
@@ -14149,10 +14162,6 @@ export class SessionManager {
 			agentSessionFile: recovery.newAgentSessionFile,
 			contextClearBoundaries: recovery.boundaries,
 		};
-	}
-
-	private async restoreSessionAdmitted(ps: PersistedSession): Promise<void> {
-		return this.trackTerminalStartup(`restore:${ps.id}`, () => this.restoreSession(ps));
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
@@ -14912,7 +14921,7 @@ export class SessionManager {
 			let candidateRestoreStarted = false;
 			try {
 				candidateRestoreStarted = true;
-				await this.restoreSessionAdmitted(replacementPs);
+				await this.trackTerminalStartup(`model-recovery:${sessionId}`, () => this.restoreSession(replacementPs));
 				candidate = this.sessions.get(sessionId);
 				const verifiedModel = `${selectedProvider}/${selectedModelId}`;
 				if (
@@ -15024,9 +15033,9 @@ export class SessionManager {
 		} });
 	}
 
-	createSession(...args: Parameters<SessionManager["createSessionOwned"]>): Promise<SessionInfo> {
-		const requestedId = args[4]?.sessionId;
-		return this.trackTerminalStartup(`create:${requestedId ?? "new"}`, () => this.createSessionOwned(...args));
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+		return this.trackTerminalStartup(`create:${opts?.sessionId ?? "new"}`, () =>
+			this.createSessionOwned(cwd, agentArgs, goalId, assistantType, opts));
 	}
 
 	private async createSessionOwned(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
@@ -15473,8 +15482,8 @@ export class SessionManager {
 	 * After creation, the instructions are automatically sent as the first prompt.
 	 * Returns the session info immediately (the prompt runs asynchronously).
 	 */
-	createDelegateSession(...args: Parameters<SessionManager["createDelegateSessionOwned"]>): Promise<SessionInfo> {
-		return this.trackTerminalStartup(`delegate:${args[0]}`, () => this.createDelegateSessionOwned(...args));
+	async createDelegateSession(parentSessionId: string, opts: Parameters<SessionManager["createDelegateSessionOwned"]>[1]): Promise<SessionInfo> {
+		return this.trackTerminalStartup(`delegate:${parentSessionId}`, () => this.createDelegateSessionOwned(parentSessionId, opts));
 	}
 
 	private async createDelegateSessionOwned(parentSessionId: string, opts: {
