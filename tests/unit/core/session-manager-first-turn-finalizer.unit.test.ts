@@ -40,7 +40,8 @@ function liveSession(id: string, root: string, events: string[]): any {
 				if (stopped) return Promise.resolve({ success: false, error: "bridge stopped" });
 				return new Promise((_resolve, reject) => { stateWaiters.add(reject); });
 			},
-			stop: async () => {
+			stop: async () => { assert.fail("terminal paths must use owned-tree proof, not ordinary stop"); },
+			terminateOwnedTree: async () => {
 				events.push(`${id}:stop`);
 				stopped = true;
 				for (const reject of stateWaiters) reject(new Error("process stopped"));
@@ -212,6 +213,45 @@ it("fences late first-turn metadata and uses process stop to settle terminate, q
 	}
 });
 
+it("retains cleanup-pending owners when terminate, quiesce, or shutdown tree proof fails", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-terminal-tree-proof-"));
+	try {
+		for (const terminal of ["terminate", "quiesce", "shutdown"] as const) {
+			const store = new SessionStore(path.join(root, terminal));
+			const manager = lifecycleManager(store);
+			const events: string[] = [];
+			manager._events = events;
+			const id = `tree-proof-${terminal}`;
+			const session = liveSession(id, root, events);
+			session.rpcClient.getState = async () => ({ success: true });
+			let proofCalls = 0;
+			session.rpcClient.terminateOwnedTree = async () => {
+				proofCalls++;
+				throw new Error("owned descendant still live token=private-value");
+			};
+			store.put(persisted(id, root) as any);
+			manager.sessions.set(id, session);
+
+			const operation = terminal === "terminate"
+				? manager.terminateSession(id)
+				: terminal === "quiesce"
+					? manager.quiesceSessionRuntime(id)
+					: manager.shutdown();
+			await assert.rejects(operation, /runtime cleanup remains pending|Session manager shutdown failed/);
+
+			assert.equal(proofCalls, 1, `${terminal} gets one bounded terminal tree attempt`);
+			assert.strictEqual(manager.sessions.get(id), session, `${terminal} retains the exact owner`);
+			assert.notEqual(session.status, "terminated", `${terminal} cannot publish termination without proof`);
+			assert.equal(session.terminalCleanupPending?.attempts, 1);
+			assert.match(session.terminalCleanupPending?.errors[0] ?? "", /<redacted-token>/);
+			assert.doesNotMatch(session.terminalCleanupPending?.errors[0] ?? "", /private-value/);
+			assert.equal(store.get(id)?.archived, undefined, `${terminal} cannot archive before proof`);
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 it("rechecks the terminal fence after a metadata retry timer fires but before its await continues", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-metadata-retry-fence-"));
 	try {
@@ -233,7 +273,8 @@ it("rechecks the terminal fence after a metadata retry timer fires but before it
 					if (stateCalls === 1 && failure === "exception") throw new Error("metadata state failed");
 					return { success: false, error: "no session file" };
 				},
-				stop: async () => { events.push(`${id}:stop`); },
+				stop: async () => { assert.fail("termination must use owned-tree proof"); },
+				terminateOwnedTree: async () => { events.push(`${id}:stop`); },
 			};
 			store.put({ ...persisted(id, root), agentSessionFile: originalSessionFile });
 			await store.flushAsync();

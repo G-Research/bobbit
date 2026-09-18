@@ -7,6 +7,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import { RpcBridge } from "../../../src/server/agent/rpc-bridge.ts";
+import type { TrackedChild } from "../../../src/server/agent/spawn-tree.ts";
 
 interface FakeRpcChild extends EventEmitter {
 	pid: number;
@@ -48,6 +49,117 @@ function attachFakeChild(bridge: RpcBridge, child: FakeRpcChild): void {
 }
 
 describe("RpcBridge lifecycle", () => {
+	it("does not publish a direct start until spawn-time tree ownership is ready", async () => {
+		const child = makeCrashOnPromptChild();
+		let releaseOwnership!: () => void;
+		const ownershipReady = new Promise<void>(resolve => { releaseOwnership = resolve; });
+		const tracked = {
+			child: child as any,
+			ownershipReady,
+			killTree() {},
+			waitForTreeExit: async () => true,
+			killed: () => false,
+			timedOut: () => false,
+			markSurvival() {},
+		} satisfies TrackedChild;
+		const bridge = new RpcBridge({
+			cliPath: process.execPath,
+			args: ["--no-extensions"],
+			clock: {
+				now: () => Date.now(),
+				setTimeout: (fn: () => void) => { queueMicrotask(fn); return 1 as any; },
+				clearTimeout: () => {},
+				setInterval: setInterval as any,
+				clearInterval,
+			},
+		}, {
+			spawnDirectTracked: () => tracked,
+		});
+
+		let started = false;
+		const start = bridge.start().then(() => { started = true; });
+		await Promise.resolve();
+		assert.equal(started, false, "start must remain behind the ownership barrier");
+		releaseOwnership();
+		await start;
+		assert.equal(started, true);
+	});
+
+	it("requests one owned-tree kill and requires bounded tree-exit proof", async () => {
+		const child = makeCrashOnPromptChild();
+		let killCalls = 0;
+		let releaseTreeExit!: (value: boolean) => void;
+		const treeExit = new Promise<boolean>(resolve => { releaseTreeExit = resolve; });
+		const tracked = {
+			child: child as any,
+			ownershipReady: Promise.resolve(),
+			killTree(signal?: "SIGTERM" | "SIGKILL") {
+				killCalls++;
+				assert.equal(signal, "SIGTERM");
+			},
+			waitForTreeExit: async (timeoutMs?: number) => {
+				assert.equal(timeoutMs, 321);
+				return treeExit;
+			},
+			killed: () => false,
+			timedOut: () => false,
+			markSurvival() {},
+		} satisfies TrackedChild;
+		const bridge = new RpcBridge({
+			cliPath: process.execPath,
+			args: ["--no-extensions"],
+			clock: {
+				now: () => Date.now(),
+				setTimeout: (fn: () => void) => { queueMicrotask(fn); return 1 as any; },
+				clearTimeout: () => {},
+				setInterval: setInterval as any,
+				clearInterval,
+			},
+		}, {
+			spawnDirectTracked: () => tracked,
+		});
+		await bridge.start();
+
+		let settled = false;
+		const terminal = bridge.terminateOwnedTree(321).then(() => { settled = true; });
+		await Promise.resolve();
+		assert.equal(killCalls, 1);
+		assert.equal(settled, false, "signal delivery alone cannot release terminal ownership");
+		releaseTreeExit(true);
+		await terminal;
+		assert.equal(settled, true);
+	});
+
+	it("rejects terminal cleanup when the owned tree cannot be proven gone", async () => {
+		const child = makeCrashOnPromptChild();
+		const tracked = {
+			child: child as any,
+			ownershipReady: Promise.resolve(),
+			killTree() {},
+			waitForTreeExit: async () => false,
+			killed: () => true,
+			timedOut: () => false,
+			markSurvival() {},
+		} satisfies TrackedChild;
+		const bridge = new RpcBridge({
+			cliPath: process.execPath,
+			args: ["--no-extensions"],
+			clock: {
+				now: () => Date.now(),
+				setTimeout: (fn: () => void) => { queueMicrotask(fn); return 1 as any; },
+				clearTimeout: () => {},
+				setInterval: setInterval as any,
+				clearInterval,
+			},
+		}, { spawnDirectTracked: () => tracked });
+		await bridge.start();
+
+		await assert.rejects(
+			bridge.terminateOwnedTree(50),
+			/owned process tree .* exit remained unverified after 50ms/,
+		);
+	});
+
 	it("rejects a pending prompt exactly once when the Pi child exits unexpectedly", async () => {
 		const bridge = new RpcBridge({});
 		attachFakeChild(bridge, makeCrashOnPromptChild());

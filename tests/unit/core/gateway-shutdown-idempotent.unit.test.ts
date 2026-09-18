@@ -229,18 +229,17 @@ describe("session-manager terminal owner shutdown", () => {
 
 	it("retains an unverified session runtime owner and blocks dependent root cleanup", async () => {
 		const events: string[] = [];
-		let stopCalls = 0;
+		let terminalCalls = 0;
 		let closeCalls = 0;
 		let untrackCalls = 0;
 		let removed = false;
 		const bridge = {
 			running: true,
 			async getState() { return { success: true, data: {} }; },
-			async stop() {
-				stopCalls++;
-				throw new Error(stopCalls === 1
-					? "termination failed token=super-secret-value"
-					: "exit barrier remained unresolved");
+			async stop() { assert.fail("terminal shutdown must not use ordinary stop"); },
+			async terminateOwnedTree() {
+				terminalCalls++;
+				throw new Error("tree proof failed token=super-secret-value");
 			},
 		};
 		const client = { close() { closeCalls++; } };
@@ -271,11 +270,11 @@ describe("session-manager terminal owner shutdown", () => {
 			},
 		);
 
-		assert.equal(stopCalls, 2, "terminal shutdown gets only one bounded verification retry");
+		assert.equal(terminalCalls, 1, "terminal shutdown requests exactly one bounded owned-tree proof");
 		assert.strictEqual(manager.sessions.get(session.id), session, "the exact runtime owner must remain tracked");
 		assert.equal(session.status, "streaming", "an unverified runtime must not be finalized as terminated");
 		assert.equal(session.terminalCleanupPending?.phase, "runtime");
-		assert.equal(session.terminalCleanupPending?.attempts, 2);
+		assert.equal(session.terminalCleanupPending?.attempts, 1);
 		assert.match(session.terminalCleanupPending?.errors[0] ?? "", /<redacted-token>/);
 		assert.equal(closeCalls, 0, "client finalization follows verified runtime exit");
 		assert.equal(untrackCalls, 0, "cleanup-pending owners must not be untracked");
@@ -286,17 +285,15 @@ describe("session-manager terminal owner shutdown", () => {
 	it("finalizes a retained session only after the bounded runtime barrier succeeds", async () => {
 		let releaseExit!: () => void;
 		const exitBarrier = new Promise<void>(resolve => { releaseExit = resolve; });
-		let stopCalls = 0;
+		let terminalCalls = 0;
 		let closeCalls = 0;
 		let untrackCalls = 0;
 		const bridge = {
 			running: true,
 			async getState() { return { success: true, data: {} }; },
-			async stop() {
-				stopCalls++;
-				if (stopCalls === 1) throw new Error("initial termination failed");
-			},
-			async waitForExit() {
+			async stop() { assert.fail("terminal shutdown must not use ordinary stop"); },
+			async terminateOwnedTree() {
+				terminalCalls++;
 				await exitBarrier;
 				bridge.running = false;
 			},
@@ -315,7 +312,7 @@ describe("session-manager terminal owner shutdown", () => {
 		manager._untrackConnectedSession = () => { untrackCalls++; };
 
 		const shutdown = manager.shutdown();
-		while (stopCalls < 2) await Promise.resolve();
+		while (terminalCalls < 1) await Promise.resolve();
 		assert.strictEqual(manager.sessions.get(session.id), session, "ownership remains live while exit is unverified");
 		assert.equal(closeCalls, 0);
 		assert.equal(untrackCalls, 0);
