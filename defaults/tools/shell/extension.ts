@@ -12,7 +12,7 @@
  */
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
@@ -28,18 +28,22 @@ const FOREGROUND_GROUP_DRAIN_MS = 2_000;
 const FOREGROUND_GROUP_POLL_MS = 25;
 
 type PosixGroupSignal = "SIGTERM" | "SIGKILL";
+type ForegroundGroupWitnessStatus = "pending" | "live" | "lost";
+export type ForegroundGroupWitness = { status: () => ForegroundGroupWitnessStatus };
 type ForegroundGroupOps = {
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
-	isAlive: (processGroupId: number) => boolean;
 	signal: (processGroupId: number, signal: PosixGroupSignal) => void;
 	report: (message: string) => void;
 };
 
 type ForegroundGroup = {
 	processGroupId: number;
+	witness: ForegroundGroupWitness;
 	termRequested: boolean;
 	killRequested: boolean;
+	pendingTermination: boolean;
+	ownershipFailureReported: boolean;
 };
 
 function isNoSuchProcess(error: unknown): boolean {
@@ -50,14 +54,6 @@ function defaultForegroundGroupOps(): ForegroundGroupOps {
 	return {
 		now: () => performance.now(),
 		sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-		isAlive: processGroupId => {
-			try {
-				process.kill(-processGroupId, 0);
-				return true;
-			} catch (error) {
-				return !isNoSuchProcess(error);
-			}
-		},
 		signal: (processGroupId, signal) => {
 			process.kill(-processGroupId, signal);
 		},
@@ -65,10 +61,118 @@ function defaultForegroundGroupOps(): ForegroundGroupOps {
 	};
 }
 
+type ForegroundSentinelIdentity = {
+	pid: number;
+	pgid: number;
+	kind: "linux-proc-stat-22" | "darwin-lstart-argv-nonce";
+	startToken: string;
+	nonce: string;
+};
+
+// The sentinel is born in the detached shell's process group, acknowledges its
+// installed signal dispositions and exact process identity over FD 3, then keeps
+// that group allocated after the command root exits. A bare numeric PGID is never
+// sufficient to probe or signal a group.
+const POSIX_FOREGROUND_SENTINEL_CHILD = "trap '' HUP INT TERM; case \"$(uname -s 2>/dev/null)\" in Linux) __kind=linux-proc-stat-22; __start=$(awk '{print $22}' \"/proc/$$/stat\" 2>/dev/null); __pgid=$(awk '{print $5}' \"/proc/$$/stat\" 2>/dev/null) ;; Darwin) __kind=darwin-lstart-argv-nonce; __start=$(LC_ALL=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); __pgid=$(ps -o pgid= -p \"$$\" 2>/dev/null | tr -d '[:space:]') ;; *) exit 125 ;; esac; [ -n \"$__start\" ] && [ -n \"$__pgid\" ] || exit 125; printf 'R\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$$\" \"$__pgid\" \"$__kind\" \"$__start\" \"$BOBBIT_FOREGROUND_SENTINEL_NONCE\" >&3; while :; do sleep 2147483647; done";
+const POSIX_FOREGROUND_SENTINEL_WRAPPER = "/bin/sh -c \"$BOBBIT_FOREGROUND_SENTINEL_CHILD\" \"bobbit-foreground-sentinel:$BOBBIT_FOREGROUND_SENTINEL_NONCE\" & unset BOBBIT_FOREGROUND_SENTINEL_CHILD BOBBIT_FOREGROUND_SENTINEL_NONCE; exec 3>&-; exec \"$@\"";
+
+export function foregroundShellSpawnSpec(shell: string, args: string[], command: string): {
+	file: string;
+	args: string[];
+	stdio: ["ignore", "pipe", "pipe", "pipe"];
+	env: NodeJS.ProcessEnv;
+	witnessNonce: string;
+} {
+	const witnessNonce = randomBytes(16).toString("hex");
+	return {
+		file: "/bin/sh",
+		args: ["-c", POSIX_FOREGROUND_SENTINEL_WRAPPER, "bobbit-foreground-wrapper", shell, ...args, command],
+		stdio: ["ignore", "pipe", "pipe", "pipe"],
+		env: {
+			...getShellEnv(),
+			BOBBIT_FOREGROUND_SENTINEL_CHILD: POSIX_FOREGROUND_SENTINEL_CHILD,
+			BOBBIT_FOREGROUND_SENTINEL_NONCE: witnessNonce,
+		},
+		witnessNonce,
+	};
+}
+
+function inspectForegroundSentinel(pid: number, platform: NodeJS.Platform): Omit<ForegroundSentinelIdentity, "nonce"> & { sentinelNonce?: string } | undefined {
+	try {
+		if (platform === "linux") {
+			const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+			const closeParen = stat.lastIndexOf(")");
+			const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
+			const pgid = Number(fields[2]);
+			const startToken = fields[19];
+			return Number.isSafeInteger(pgid) && pgid > 0 && !!startToken
+				? { pid, pgid, kind: "linux-proc-stat-22", startToken }
+				: undefined;
+		}
+		if (platform === "darwin") {
+			const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+			const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+			const command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+			const sentinelNonce = /bobbit-foreground-sentinel:([^\s]+)/.exec(command)?.[1];
+			return Number.isSafeInteger(pgid) && pgid > 0 && !!startToken
+				? { pid, pgid, kind: "darwin-lstart-argv-nonce", startToken, sentinelNonce }
+				: undefined;
+		}
+	} catch { /* a missing or reused sentinel is not ownership */ }
+	return undefined;
+}
+
+export function createForegroundGroupWitness(
+	readiness: NodeJS.ReadableStream | undefined,
+	processGroupId: number,
+	nonce: string,
+	platform: NodeJS.Platform = process.platform,
+	inspect: (pid: number, platform: NodeJS.Platform) => ReturnType<typeof inspectForegroundSentinel> = inspectForegroundSentinel,
+): ForegroundGroupWitness {
+	let state: ForegroundGroupWitnessStatus = readiness ? "pending" : "lost";
+	let handshake = "";
+	let identity: ForegroundSentinelIdentity | undefined;
+	if (readiness) {
+		readiness.on("data", chunk => {
+			if (state !== "pending") return;
+			handshake += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+			if (!handshake.includes("\n")) return;
+			const lines = handshake.split("\n");
+			const fields = lines[0].split("\t");
+			const pid = Number(fields[1]);
+			const pgid = Number(fields[2]);
+			const kind = fields[3];
+			if (lines.length !== 2 || lines[1] !== "" || fields.length !== 6 || fields[0] !== "R" ||
+				!Number.isSafeInteger(pid) || pid <= 0 || pgid !== processGroupId ||
+				(kind !== "linux-proc-stat-22" && kind !== "darwin-lstart-argv-nonce") ||
+				!fields[4] || fields[5] !== nonce) {
+				state = "lost";
+				return;
+			}
+			identity = { pid, pgid, kind, startToken: fields[4], nonce };
+			state = "live";
+		});
+		const lose = () => { state = "lost"; };
+		readiness.once("end", lose);
+		readiness.once("close", lose);
+		readiness.once("error", lose);
+	}
+	return {
+		status: () => {
+			if (state !== "live" || !identity) return state;
+			const current = inspect(identity.pid, platform);
+			const nonceMatches = identity.kind !== "darwin-lstart-argv-nonce" || current?.sentinelNonce === identity.nonce;
+			if (!current || current.pgid !== identity.pgid || current.kind !== identity.kind ||
+				current.startToken !== identity.startToken || !nonceMatches) state = "lost";
+			return state;
+		},
+	};
+}
+
 /**
- * Tracks only process groups created by this extension instance. The spawn-time
- * group id is never persisted or recovered, so shutdown cannot target another
- * session's processes.
+ * Tracks only process groups whose spawn-time sentinel remains live. Once that
+ * witness is lost, the numeric PGID is permanently retired and cannot become
+ * signal authority again even if the kernel reuses it.
  */
 export function createForegroundShellGroupTracker(options: {
 	platform?: NodeJS.Platform;
@@ -97,13 +201,30 @@ export function createForegroundShellGroupTracker(options: {
 		notifyActiveChange(wasActive);
 	};
 
-	const pruneExited = () => {
-		for (const processGroupId of groups.keys()) {
-			if (!ops.isAlive(processGroupId)) remove(processGroupId);
+	const retireUnverified = (group: ForegroundGroup) => {
+		if (!group.ownershipFailureReported) {
+			group.ownershipFailureReported = true;
+			ops.report(`[bash-tool] Foreground process-group ownership unverified; retired without signalling (pgid=${group.processGroupId})`);
+		}
+		remove(group.processGroupId);
+	};
+
+	const retireLostWitness = (group: ForegroundGroup) => {
+		if (group.killRequested) remove(group.processGroupId);
+		else retireUnverified(group);
+	};
+
+	const pruneLostWitnesses = () => {
+		for (const group of groups.values()) {
+			if (group.witness.status() === "lost") retireLostWitness(group);
 		}
 	};
 
 	const signalOnce = (group: ForegroundGroup, signal: PosixGroupSignal) => {
+		if (group.witness.status() !== "live") {
+			retireUnverified(group);
+			return;
+		}
 		const key = signal === "SIGTERM" ? "termRequested" : "killRequested";
 		if (group[key]) return;
 		group[key] = true;
@@ -116,7 +237,7 @@ export function createForegroundShellGroupTracker(options: {
 
 	const waitUntil = async (deadline: number) => {
 		while (groups.size > 0) {
-			pruneExited();
+			pruneLostWitnesses();
 			if (groups.size === 0) return;
 			const remaining = deadline - ops.now();
 			if (remaining <= 0) return;
@@ -124,23 +245,69 @@ export function createForegroundShellGroupTracker(options: {
 		}
 	};
 
+	const terminateWhenOwned = async (group: ForegroundGroup) => {
+		const deadline = ops.now() + deadlineMs;
+		while (groups.get(group.processGroupId) === group) {
+			const status = group.witness.status();
+			if (status === "live") {
+				signalOnce(group, "SIGTERM");
+				return;
+			}
+			if (status === "lost" || ops.now() >= deadline) {
+				retireUnverified(group);
+				return;
+			}
+			await ops.sleep(Math.min(pollMs, deadline - ops.now()));
+		}
+	};
+
+	const waitForOwnershipReady = async (deadline: number) => {
+		while ([...groups.values()].some(group => group.witness.status() === "pending")) {
+			pruneLostWitnesses();
+			const remaining = deadline - ops.now();
+			if (remaining <= 0) break;
+			await ops.sleep(Math.min(pollMs, remaining));
+		}
+		for (const group of [...groups.values()]) {
+			if (group.witness.status() !== "live") retireUnverified(group);
+		}
+	};
+
 	return {
-		track(processGroupId: number | undefined): void {
+		track(processGroupId: number | undefined, witness?: ForegroundGroupWitness): void {
 			if (!enabled || !processGroupId || drainPromise) return;
 			const wasActive = groups.size > 0;
 			if (!groups.has(processGroupId)) {
-				groups.set(processGroupId, { processGroupId, termRequested: false, killRequested: false });
+				groups.set(processGroupId, {
+					processGroupId,
+					witness: witness ?? { status: () => "lost" },
+					termRequested: false,
+					killRequested: false,
+					pendingTermination: false,
+					ownershipFailureReported: false,
+				});
 			}
 			notifyActiveChange(wasActive);
 		},
 		releaseIfExited(processGroupId: number | undefined): void {
-			if (!enabled || !processGroupId || !groups.has(processGroupId)) return;
-			if (!ops.isAlive(processGroupId)) remove(processGroupId);
+			if (!enabled || !processGroupId) return;
+			const group = groups.get(processGroupId);
+			if (group?.witness.status() === "lost") retireLostWitness(group);
 		},
 		terminate(processGroupId: number | undefined): void {
 			if (!enabled || !processGroupId) return;
 			const group = groups.get(processGroupId);
-			if (group) signalOnce(group, "SIGTERM");
+			if (!group) return;
+			if (group.witness.status() === "pending") {
+				if (!group.pendingTermination) {
+					group.pendingTermination = true;
+					void terminateWhenOwned(group).catch(() => {
+						if (groups.get(group.processGroupId) === group) retireUnverified(group);
+					});
+				}
+				return;
+			}
+			signalOnce(group, "SIGTERM");
 		},
 		drain(): Promise<void> {
 			if (!enabled || groups.size === 0) return Promise.resolve();
@@ -148,11 +315,12 @@ export function createForegroundShellGroupTracker(options: {
 			drainPromise = (async () => {
 				const startedAt = ops.now();
 				const deadline = startedAt + deadlineMs;
-				for (const group of groups.values()) signalOnce(group, "SIGTERM");
-				await waitUntil(Math.min(startedAt + graceMs, deadline));
-				for (const group of groups.values()) signalOnce(group, "SIGKILL");
+				await waitForOwnershipReady(deadline);
+				for (const group of [...groups.values()]) signalOnce(group, "SIGTERM");
+				await waitUntil(Math.min(ops.now() + graceMs, deadline));
+				for (const group of [...groups.values()]) signalOnce(group, "SIGKILL");
 				await waitUntil(deadline);
-				pruneExited();
+				pruneLostWitnesses();
 				if (groups.size > 0) {
 					const ids = [...groups.keys()].join(",");
 					ops.report(`[bash-tool] Foreground process-group drain reached its ${deadlineMs}ms deadline (pgids=${ids})`);
@@ -381,13 +549,21 @@ export default function (pi: ExtensionAPI) {
 
 				command = injectCoAuthorTrailer(command, sessionId);
 
-				const child = spawn(shell, [...args, command], {
+				const posixSpawn = process.platform === "win32" ? undefined : foregroundShellSpawnSpec(shell, args, command);
+				const child = spawn(posixSpawn?.file ?? shell, posixSpawn?.args ?? [...args, command], {
 					detached: true,
-					env: getShellEnv(),
+					env: posixSpawn?.env ?? getShellEnv(),
 					cwd: process.cwd(),
-					stdio: ["ignore", "pipe", "pipe"],
+					stdio: posixSpawn?.stdio ?? ["ignore", "pipe", "pipe"],
 				});
-				foregroundGroups.track(child.pid);
+				const foregroundWitness = process.platform === "win32" || !child.pid || !posixSpawn
+					? undefined
+					: createForegroundGroupWitness(
+						child.stdio[3] as NodeJS.ReadableStream | undefined,
+						child.pid,
+						posixSpawn.witnessNonce,
+					);
+				foregroundGroups.track(child.pid, foregroundWitness);
 
 				const outputChunks: string[] = [];
 				let outputBytes = 0;
