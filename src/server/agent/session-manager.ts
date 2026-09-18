@@ -18505,7 +18505,12 @@ export class SessionManager {
 		let bridgeStopError: unknown;
 		let stop: Promise<void>;
 		try {
-			stop = Promise.resolve(session.rpcClient.stop()).catch((error) => {
+			// Production RpcBridge exposes the stronger spawn-time-owned tree proof.
+			// Custom/in-process bridges retain their established stop seam.
+			const terminalStop = typeof session.rpcClient.terminateOwnedTree === "function"
+				? session.rpcClient.terminateOwnedTree.bind(session.rpcClient)
+				: session.rpcClient.stop.bind(session.rpcClient);
+			stop = Promise.resolve(terminalStop()).catch((error) => {
 				bridgeStopError = error;
 			});
 		} catch (error) {
@@ -18519,6 +18524,28 @@ export class SessionManager {
 			stop,
 		]);
 		return bridgeStopError;
+	}
+
+	/** Retain the exact SessionInfo owner with bounded, credential-safe diagnostics. */
+	private terminalRuntimeCleanupFailure(
+		session: SessionInfo,
+		error: unknown,
+		attempts = 1,
+	): AggregateError {
+		const errors = [error].map((reason) => redactSensitive(
+			reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
+		).slice(0, 500));
+		session.terminalCleanupPending = {
+			phase: "runtime",
+			failedAt: this.clock.now(),
+			attempts,
+			runtimeRunning: session.rpcClient.running,
+			errors,
+		};
+		return new AggregateError(
+			errors.map((message) => new Error(message)),
+			`Session ${session.id} runtime cleanup remains pending after ${attempts} bounded terminal attempt(s); owner retained (running=${String(session.rpcClient.running)})`,
+		);
 	}
 
 	/**
@@ -18558,6 +18585,8 @@ export class SessionManager {
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
 		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+		if (bridgeStopError) throw this.terminalRuntimeCleanupFailure(session, bridgeStopError);
+		session.terminalCleanupPending = undefined;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
 		}
@@ -18602,9 +18631,6 @@ export class SessionManager {
 		this._taskIdCache.delete(id);
 		try { await this.cleanupScopedMcpManagersForSessionScope(scope, id); } catch { /* runtime authority is already removed */ }
 		await this.dispatchSessionShutdownInterceptor(session, "quiesced");
-		if (bridgeStopError) {
-			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
-		}
 		return true;
 	}
 
@@ -18708,7 +18734,8 @@ export class SessionManager {
 		// cancellation behind an unresponsive metadata RPC. The snapshotted lane is
 		// joined before any archive or project-context removal can proceed.
 		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-		if (bridgeStopError) throw bridgeStopError;
+		if (bridgeStopError) throw this.terminalRuntimeCleanupFailure(session, bridgeStopError);
+		session.terminalCleanupPending = undefined;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} termination was superseded after bridge stop`);
 		}
@@ -21081,59 +21108,14 @@ export class SessionManager {
 			// closing in shutdown so suppress the cancellation broadcast.
 			await run(`session:${id}:auto-retry`, () => this.cancelPendingAutoRetry(session, "shutdown"));
 
-			// Start stop alongside the final state request so process exit cancels any
-			// unresponsive metadata RPC. Durable work is still joined before the store
-			// flush and project-context teardown below. A rejected stop is not proof that
-			// the runtime exited: retain its exact SessionInfo owner while one bounded
-			// second stop joins the bridge's concrete process-exit barrier.
-			const runtimeStopErrors: unknown[] = [];
-			let stopAttempts = 1;
-			const waitForOwnedExit = async (): Promise<void> => {
-				if (typeof session.rpcClient.waitForExit === "function") {
-					await session.rpcClient.waitForExit();
-				}
-			};
+			// Production bridges request one owned-tree kill and join its bounded
+			// completion proof. A failed proof retains the exact SessionInfo owner;
+			// unrelated shutdown phases continue through the all-settled collector.
 			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-			if (bridgeStopError) runtimeStopErrors.push(bridgeStopError);
-			let runtimeStopVerified = session.rpcClient.running === false;
-			if (!bridgeStopError && !runtimeStopVerified) {
-				try {
-					await waitForOwnedExit();
-					runtimeStopVerified = true;
-				} catch (error) {
-					runtimeStopErrors.push(error);
-					runtimeStopVerified = session.rpcClient.running === false;
-				}
-			} else if (bridgeStopError && !runtimeStopVerified) {
-				// A rejected stop is ambiguous. Make one terminal-only drain attempt;
-				// successful signal delivery is followed by the exact bridge exit barrier.
-				stopAttempts++;
-				try {
-					await session.rpcClient.stop();
-					await waitForOwnedExit();
-					runtimeStopVerified = true;
-				} catch (error) {
-					runtimeStopErrors.push(error);
-					runtimeStopVerified = session.rpcClient.running === false;
-				}
-			}
-			if (!runtimeStopVerified) {
-				const errors = runtimeStopErrors.map((error) => redactSensitive(
-					error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-				).slice(0, 500));
-				session.terminalCleanupPending = {
-					phase: "runtime",
-					failedAt: this.clock.now(),
-					attempts: stopAttempts,
-					runtimeRunning: session.rpcClient.running,
-					errors,
-				};
+			if (bridgeStopError) {
 				failures.push({
 					phase: `session:${id}:runtime`,
-					reason: new AggregateError(
-						errors.map((message) => new Error(message)),
-						`Session ${id} runtime cleanup remains pending after ${stopAttempts} bounded stop attempt(s); owner retained (running=${String(session.rpcClient.running)})`,
-					),
+					reason: this.terminalRuntimeCleanupFailure(session, bridgeStopError),
 				});
 				continue;
 			}

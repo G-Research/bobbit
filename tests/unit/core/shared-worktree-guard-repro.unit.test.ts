@@ -887,7 +887,7 @@ describe("shared worktree guard reproductions", () => {
 		}
 	});
 
-	it("quiesce detaches runtime after bridge-stop failure without archiving or deleting evidence", async () => {
+	it("quiesce retains the runtime owner after terminal tree-proof failure without archiving or deleting evidence", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "archived-team-quiesce-"));
 		try {
 			const repo = makeRepo(tmp);
@@ -939,23 +939,23 @@ describe("shared worktree guard reproductions", () => {
 
 			await assert.rejects(
 				() => manager.quiesceSessionRuntime(persisted.id),
-				/runtime was detached after its bridge stop failed: injected bridge stop failure/,
+				/runtime cleanup remains pending after 1 bounded terminal attempt.*owner retained/,
 			);
-			assert.equal(await manager.quiesceSessionRuntime(persisted.id), true, "second quiesce is an idempotent no-op after cleanup");
 
 			assert.equal(live.lifecycleFenced, true, "replacement dispatch is fenced before bridge stop");
 			assert.equal(live.dormant, true);
-			assert.equal(live.status, "terminated");
-			assert.equal(manager.getSession(persisted.id), undefined);
+			assert.equal(live.status, "idle", "unverified runtime must not publish terminated");
+			assert.strictEqual(manager.getSession(persisted.id), live, "exact cleanup-pending owner remains tracked");
+			assert.equal(live.terminalCleanupPending?.phase, "runtime");
 			assert.equal(stop.mock.calls.length, 1);
 			assert.equal(unsubscribe.mock.calls.length, 1);
-			assert.equal(close.mock.calls.length, 1);
-			assert.equal(abortAllWaits.mock.calls.length, 1);
-			assert.equal(cleanupBg.mock.calls.length, 1);
-			assert.deepEqual(removeToken.mock.calls[0], [persisted.projectId, persisted.id]);
-			assert.deepEqual(removeSecret.mock.calls[0], [persisted.id]);
-			assert.equal(closeExtensions.mock.calls.length, 1);
-			assert.equal(cleanupMcp.mock.calls.length, 1);
+			assert.equal(close.mock.calls.length, 0);
+			assert.equal(abortAllWaits.mock.calls.length, 0);
+			assert.equal(cleanupBg.mock.calls.length, 0);
+			assert.equal(removeToken.mock.calls.length, 0);
+			assert.equal(removeSecret.mock.calls.length, 0);
+			assert.equal(closeExtensions.mock.calls.length, 0, "dependent channels remain owned while tree proof is pending");
+			assert.equal(cleanupMcp.mock.calls.length, 0);
 			assert.equal(store.getGeneration(), generationBefore, "quiesce performs no archive or metadata save");
 			assert.equal(store.get(persisted.id)?.archived, false);
 			assert.deepEqual(store.get(persisted.id)?.messageQueue, persisted.messageQueue);
