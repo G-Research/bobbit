@@ -23,6 +23,151 @@ import { createWriteStream } from "node:fs";
 const MAX_BYTES = 50 * 1024; // 50KB output limit
 const MAX_LINES = 2000;
 const DEFAULT_TIMEOUT = 300; // 5 minutes
+const FOREGROUND_GROUP_GRACE_MS = 250;
+const FOREGROUND_GROUP_DRAIN_MS = 2_000;
+const FOREGROUND_GROUP_POLL_MS = 25;
+
+type PosixGroupSignal = "SIGTERM" | "SIGKILL";
+type ForegroundGroupOps = {
+	now: () => number;
+	sleep: (ms: number) => Promise<void>;
+	isAlive: (processGroupId: number) => boolean;
+	signal: (processGroupId: number, signal: PosixGroupSignal) => void;
+	report: (message: string) => void;
+};
+
+type ForegroundGroup = {
+	processGroupId: number;
+	termRequested: boolean;
+	killRequested: boolean;
+};
+
+function isNoSuchProcess(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
+}
+
+function defaultForegroundGroupOps(): ForegroundGroupOps {
+	return {
+		now: () => performance.now(),
+		sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+		isAlive: processGroupId => {
+			try {
+				process.kill(-processGroupId, 0);
+				return true;
+			} catch (error) {
+				return !isNoSuchProcess(error);
+			}
+		},
+		signal: (processGroupId, signal) => {
+			process.kill(-processGroupId, signal);
+		},
+		report: message => console.error(message),
+	};
+}
+
+/**
+ * Tracks only process groups created by this extension instance. The spawn-time
+ * group id is never persisted or recovered, so shutdown cannot target another
+ * session's processes.
+ */
+export function createForegroundShellGroupTracker(options: {
+	platform?: NodeJS.Platform;
+	graceMs?: number;
+	deadlineMs?: number;
+	pollMs?: number;
+	ops?: Partial<ForegroundGroupOps>;
+	onActiveChange?: (active: boolean) => void;
+} = {}) {
+	const enabled = (options.platform ?? process.platform) !== "win32";
+	const graceMs = options.graceMs ?? FOREGROUND_GROUP_GRACE_MS;
+	const deadlineMs = options.deadlineMs ?? FOREGROUND_GROUP_DRAIN_MS;
+	const pollMs = options.pollMs ?? FOREGROUND_GROUP_POLL_MS;
+	const ops = { ...defaultForegroundGroupOps(), ...options.ops };
+	const groups = new Map<number, ForegroundGroup>();
+	let drainPromise: Promise<void> | undefined;
+
+	const notifyActiveChange = (wasActive: boolean) => {
+		const isActive = groups.size > 0;
+		if (wasActive !== isActive) options.onActiveChange?.(isActive);
+	};
+
+	const remove = (processGroupId: number) => {
+		const wasActive = groups.size > 0;
+		groups.delete(processGroupId);
+		notifyActiveChange(wasActive);
+	};
+
+	const pruneExited = () => {
+		for (const processGroupId of groups.keys()) {
+			if (!ops.isAlive(processGroupId)) remove(processGroupId);
+		}
+	};
+
+	const signalOnce = (group: ForegroundGroup, signal: PosixGroupSignal) => {
+		const key = signal === "SIGTERM" ? "termRequested" : "killRequested";
+		if (group[key]) return;
+		group[key] = true;
+		try {
+			ops.signal(group.processGroupId, signal);
+		} catch (error) {
+			if (isNoSuchProcess(error)) remove(group.processGroupId);
+		}
+	};
+
+	const waitUntil = async (deadline: number) => {
+		while (groups.size > 0) {
+			pruneExited();
+			if (groups.size === 0) return;
+			const remaining = deadline - ops.now();
+			if (remaining <= 0) return;
+			await ops.sleep(Math.min(pollMs, remaining));
+		}
+	};
+
+	return {
+		track(processGroupId: number | undefined): void {
+			if (!enabled || !processGroupId || drainPromise) return;
+			const wasActive = groups.size > 0;
+			if (!groups.has(processGroupId)) {
+				groups.set(processGroupId, { processGroupId, termRequested: false, killRequested: false });
+			}
+			notifyActiveChange(wasActive);
+		},
+		releaseIfExited(processGroupId: number | undefined): void {
+			if (!enabled || !processGroupId || !groups.has(processGroupId)) return;
+			if (!ops.isAlive(processGroupId)) remove(processGroupId);
+		},
+		terminate(processGroupId: number | undefined): void {
+			if (!enabled || !processGroupId) return;
+			const group = groups.get(processGroupId);
+			if (group) signalOnce(group, "SIGTERM");
+		},
+		drain(): Promise<void> {
+			if (!enabled || groups.size === 0) return Promise.resolve();
+			if (drainPromise) return drainPromise;
+			drainPromise = (async () => {
+				const startedAt = ops.now();
+				const deadline = startedAt + deadlineMs;
+				for (const group of groups.values()) signalOnce(group, "SIGTERM");
+				await waitUntil(Math.min(startedAt + graceMs, deadline));
+				for (const group of groups.values()) signalOnce(group, "SIGKILL");
+				await waitUntil(deadline);
+				pruneExited();
+				if (groups.size > 0) {
+					const ids = [...groups.keys()].join(",");
+					ops.report(`[bash-tool] Foreground process-group drain reached its ${deadlineMs}ms deadline (pgids=${ids})`);
+				}
+				const wasActive = groups.size > 0;
+				groups.clear();
+				notifyActiveChange(wasActive);
+			})();
+			return drainPromise;
+		},
+		get activeCount(): number {
+			return groups.size;
+		},
+	};
+}
 
 function getShellConfig(): { shell: string; args: string[] } {
 	if (process.platform === "win32") {
@@ -126,6 +271,58 @@ function injectCoAuthorTrailer(command: string, sessionId: string | undefined): 
 }
 
 export default function (pi: ExtensionAPI) {
+	// Foreground commands are separate POSIX process groups. Pi's RPC signal
+	// handler owns the agent root but cannot see a group whose shell already
+	// exited, so keep the exact spawn-time identities until their groups empty.
+	let signalHandlersInstalled = false;
+	let sessionShuttingDown = false;
+	const signalHandlers = new Map<NodeJS.Signals, () => void>();
+	const removeSignalHandlers = () => {
+		if (!signalHandlersInstalled) return;
+		for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+		signalHandlers.clear();
+		signalHandlersInstalled = false;
+	};
+	const foregroundGroups = createForegroundShellGroupTracker({
+		onActiveChange: active => {
+			if (active) installSignalHandlers();
+			else removeSignalHandlers();
+		},
+	});
+	function installSignalHandlers(): void {
+		if (signalHandlersInstalled || sessionShuttingDown || process.platform === "win32") return;
+		signalHandlersInstalled = true;
+		for (const signal of ["SIGTERM", "SIGINT"] as const) {
+			const handler = () => {
+				const hasAnotherHandler = process.listenerCount(signal) > 1;
+				const drained = foregroundGroups.drain();
+				// RPC mode owns SIGTERM and awaits session_shutdown. For a signal Pi
+				// does not own, restore Node's default disposition only after the
+				// bounded drain so the agent cannot exit ahead of its shell groups.
+				if (!hasAnotherHandler) {
+					void drained.finally(() => {
+						removeSignalHandlers();
+						process.kill(process.pid, signal);
+					});
+				}
+			};
+			signalHandlers.set(signal, handler);
+			process.on(signal, handler);
+		}
+	}
+
+	const lifecyclePi = pi as ExtensionAPI & {
+		on?: (event: "session_shutdown", handler: () => Promise<void>) => void;
+	};
+	lifecyclePi.on?.("session_shutdown", async () => {
+		sessionShuttingDown = true;
+		try {
+			await foregroundGroups.drain();
+		} finally {
+			removeSignalHandlers();
+		}
+	});
+
 	// ── Gateway config ────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	let token: string;
@@ -184,12 +381,13 @@ export default function (pi: ExtensionAPI) {
 
 				command = injectCoAuthorTrailer(command, sessionId);
 
-			const child = spawn(shell, [...args, command], {
+				const child = spawn(shell, [...args, command], {
 					detached: true,
 					env: getShellEnv(),
 					cwd: process.cwd(),
 					stdio: ["ignore", "pipe", "pipe"],
 				});
+				foregroundGroups.track(child.pid);
 
 				const outputChunks: string[] = [];
 				let outputBytes = 0;
@@ -199,19 +397,29 @@ export default function (pi: ExtensionAPI) {
 				let timedOut = false;
 
 				// Timeout handler
+				const terminateChildTree = () => {
+					if (!child.pid) return;
+					if (process.platform === "win32") killProcessTree(child.pid);
+					else foregroundGroups.terminate(child.pid);
+				};
+
 				const timer = setTimeout(() => {
 					timedOut = true;
-					if (child.pid) killProcessTree(child.pid);
+					terminateChildTree();
 				}, timeoutSec * 1000);
 
 				// Abort handler
 				const abortHandler = () => {
-					if (child.pid) killProcessTree(child.pid);
+					terminateChildTree();
 				};
 				if (abortSignal) {
 					if (abortSignal.aborted) {
-						child.kill();
+						terminateChildTree();
 						clearTimeout(timer);
+						// The usual listeners below are intentionally not installed on this
+						// already-cancelled fast path, but group ownership must still retire.
+						child.once("exit", () => foregroundGroups.releaseIfExited(child.pid));
+						child.once("error", () => foregroundGroups.releaseIfExited(child.pid));
 						resolve({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } });
 						return;
 					}
@@ -249,6 +457,7 @@ export default function (pi: ExtensionAPI) {
 				// 'exit' fires when the shell process itself exits.
 				// 'close' waits for ALL FD holders (grandchild processes) to close pipes.
 				child.on("exit", (code) => {
+					foregroundGroups.releaseIfExited(child.pid);
 					clearTimeout(timer);
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
 
@@ -277,6 +486,7 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				child.on("error", (err) => {
+					foregroundGroups.releaseIfExited(child.pid);
 					clearTimeout(timer);
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
 					if (tempFileStream) tempFileStream.end();
