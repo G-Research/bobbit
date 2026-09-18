@@ -4,7 +4,13 @@
 // suites), and files over tiers.tier2.perSpecMaxMs are violations unless
 // grandfathered (then warn-only). Pure functions — no fs, no subprocesses.
 import { describe, expect, it } from "vitest";
-import { evaluatePerSpecBudget, perSpecWallFromReport, readBudgets } from "../../../scripts/testing-v2/assert-budget.mjs";
+import {
+	PLAYWRIGHT_SLOW_DURATION_LIMIT,
+	evaluatePerSpecBudget,
+	perSpecWallFromReport,
+	readBudgets,
+	summarizeSlowPlaywrightDurations,
+} from "../../../scripts/testing-v2/assert-budget.mjs";
 
 type SyntheticSuite = {
 	file?: string;
@@ -71,6 +77,53 @@ describe("perSpecWallFromReport", () => {
 		expect(perSpecWallFromReport({})).toEqual({});
 		expect(perSpecWallFromReport(null)).toEqual({});
 		expect(perSpecWallFromReport({ suites: [{ specs: [] }] })).toEqual({});
+	});
+});
+
+describe("summarizeSlowPlaywrightDurations", () => {
+	it("retains only the bounded slowest file and spec rows with retry-inclusive durations", () => {
+		const many = {
+			suites: Array.from({ length: PLAYWRIGHT_SLOW_DURATION_LIMIT + 2 }, (_, index) => {
+				const ordinal = index + 1;
+				const file = `e2e/file-${String(ordinal).padStart(2, "0")}.spec.ts`;
+				return {
+					file,
+					title: `suite ${ordinal}`,
+					specs: [{
+						file,
+						title: `case ${ordinal}`,
+						tests: [{ results: [{ duration: ordinal * 1_000 - 250 }, { duration: 250 }] }],
+					}],
+				};
+			}),
+		};
+
+		const summary = summarizeSlowPlaywrightDurations(many);
+		expect(summary).toMatchObject({
+			limit: 10,
+			fileCount: 12,
+			specCount: 12,
+		});
+		expect(summary.slowestFiles).toHaveLength(10);
+		expect(summary.slowestSpecs).toHaveLength(10);
+		expect(summary.slowestFiles[0]).toEqual({ file: "e2e/file-12.spec.ts", ms: 12_000 });
+		expect(summary.slowestFiles.at(-1)).toEqual({ file: "e2e/file-03.spec.ts", ms: 3_000 });
+		expect(summary.slowestSpecs[0]).toEqual({
+			file: "e2e/file-12.spec.ts",
+			title: "suite 12 › case 12",
+			ms: 12_000,
+		});
+		expect(summary.slowestFiles.some(({ file }: { file: string }) => file.endsWith("file-02.spec.ts"))).toBe(false);
+	});
+
+	it("handles an empty or malformed report without retaining report data", () => {
+		expect(summarizeSlowPlaywrightDurations(null)).toEqual({
+			limit: PLAYWRIGHT_SLOW_DURATION_LIMIT,
+			fileCount: 0,
+			specCount: 0,
+			slowestFiles: [],
+			slowestSpecs: [],
+		});
 	});
 });
 
