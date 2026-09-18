@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
+import fs from "node:fs";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 
@@ -13,6 +15,54 @@ import shellExtension, {
 } from "../../../defaults/tools/shell/extension.ts";
 
 type GroupSignal = "SIGTERM" | "SIGKILL";
+type ProcessIdentity = {
+	pid: number;
+	kind: "linux-proc-stat-22" | "darwin-lstart-argv-nonce";
+	startToken: string;
+	nonce?: string;
+};
+
+type ProcessSnapshot = ProcessIdentity & { state: string };
+
+function inspectProcess(pid: number): ProcessSnapshot | undefined {
+	try {
+		if (process.platform === "linux") {
+			const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+			const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+			return fields[0] && fields[19]
+				? { pid, kind: "linux-proc-stat-22", state: fields[0], startToken: fields[19] }
+				: undefined;
+		}
+		if (process.platform === "darwin") {
+			const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+			const state = execFileSync("ps", ["-o", "state=", "-p", String(pid)], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+			const command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			});
+			const nonce = /bobbit-shell-test-descendant:([^\s]+)/.exec(command)?.[1];
+			return startToken && state ? { pid, kind: "darwin-lstart-argv-nonce", state, startToken, nonce } : undefined;
+		}
+	} catch { /* a missing process is not executable */ }
+	return undefined;
+}
+
+// `kill(pid, 0)` treats both zombies and a reused PID as alive. This probe
+// instead follows the fixture's spawn-time identity and counts Z as terminal.
+function isExactProcessExecutable(identity: ProcessIdentity): boolean {
+	const current = inspectProcess(identity.pid);
+	const nonceMatches = identity.kind !== "darwin-lstart-argv-nonce" || current?.nonce === identity.nonce;
+	return current?.kind === identity.kind &&
+		current.startToken === identity.startToken &&
+		nonceMatches &&
+		!current.state.startsWith("Z");
+}
 
 function isAlive(pid: number): boolean {
 	try {
@@ -202,7 +252,7 @@ describe("foreground shell process-group lifecycle", () => {
 		assert.equal(fixture.tracker.activeCount, 0);
 	});
 
-	it("rejects and retains ownership when the sentinel readiness handshake never completes", async () => {
+	it("POSIX foreground success is withheld when post-exit ownership proof cannot complete", async () => {
 		const fixture = deterministicTracker({ deadlineMs: 25 });
 		fixture.tracker.track(92, mutableWitness("pending").witness);
 
@@ -281,12 +331,23 @@ describe("foreground shell process-group lifecycle", () => {
 		assert.deepEqual(signals, []);
 	});
 
-	it("kills and joins a TERM-ignoring descendant after its detached POSIX shell root exits", { skip: process.platform === "win32", timeout: 10_000 }, async () => {
+	it("POSIX foreground root exit finalizes a TERM-ignoring descendant before publishing", { skip: process.platform === "win32", timeout: 10_000 }, async () => {
+		const descendantNonce = randomBytes(16).toString("hex");
+		const descendant = [
+			"const fs=require('node:fs');",
+			"const {execFileSync}=require('node:child_process');",
+			"let identity;",
+			"if(process.platform==='linux'){const stat=fs.readFileSync('/proc/'+process.pid+'/stat','utf8');const fields=stat.slice(stat.lastIndexOf(')')+2).trim().split(/\\s+/);identity={pid:process.pid,kind:'linux-proc-stat-22',startToken:fields[19]};}",
+			"else if(process.platform==='darwin'){const startToken=execFileSync('ps',['-o','lstart=','-p',String(process.pid)],{encoding:'utf8'}).trim();identity={pid:process.pid,kind:'darwin-lstart-argv-nonce',startToken,nonce:process.argv[1].split(':')[1]};}",
+			"else{process.exit(125);}",
+			"process.stdout.write(JSON.stringify(identity)+'\\n');",
+			"process.on('SIGTERM',()=>{});setInterval(()=>{},1000);",
+		].join("");
 		const command = [
 			"const {spawn}=require('node:child_process');",
-			"const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});",
-			"process.stdout.write(String(child.pid));",
-			"setTimeout(()=>process.exit(0),20);",
+			`const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)},${JSON.stringify(`bobbit-shell-test-descendant:${descendantNonce}`)}],{stdio:['ignore','pipe','ignore']});`,
+			"let handshake='';child.stdout.setEncoding('utf8');",
+			"child.stdout.on('data',chunk=>{handshake+=chunk;if(handshake.includes('\\n')){process.stdout.write(handshake.slice(0,handshake.indexOf('\\n')+1));setTimeout(()=>process.exit(0),20);}});",
 		].join("");
 		const spec = foregroundShellSpawnSpec(process.execPath, ["-e"], command);
 		const root = spawn(spec.file, spec.args, {
@@ -295,13 +356,13 @@ describe("foreground shell process-group lifecycle", () => {
 			stdio: spec.stdio,
 		});
 		assert.ok(root.pid);
-		let pidText = "";
-		let resolvePidText!: () => void;
-		const pidTextReady = new Promise<void>(resolve => { resolvePidText = resolve; });
+		let identityText = "";
+		let resolveIdentity!: () => void;
+		const identityReady = new Promise<void>(resolve => { resolveIdentity = resolve; });
 		root.stdout!.setEncoding("utf8");
 		root.stdout!.on("data", chunk => {
-			pidText += chunk;
-			if (/^\d+$/.test(pidText)) resolvePidText();
+			identityText += chunk;
+			if (identityText.includes("\n")) resolveIdentity();
 		});
 		const tracker = createForegroundShellGroupTracker({ graceMs: 50, deadlineMs: 2_000, pollMs: 10 });
 		tracker.track(root.pid, createForegroundGroupWitness(
@@ -311,15 +372,15 @@ describe("foreground shell process-group lifecycle", () => {
 		));
 
 		try {
-			await Promise.all([once(root, "exit"), pidTextReady]);
-			const descendantPid = Number(pidText);
-			assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
-			assert.equal(isAlive(descendantPid), true, "fixture descendant must outlive its shell root");
+			await Promise.all([once(root, "exit"), identityReady]);
+			const descendantIdentity = JSON.parse(identityText.trim()) as ProcessIdentity;
+			assert.ok(Number.isSafeInteger(descendantIdentity.pid) && descendantIdentity.pid > 0);
+			assert.equal(isExactProcessExecutable(descendantIdentity), true, "fixture descendant must outlive its shell root");
 			assert.equal(tracker.activeCount, 1, "the live group remains owned until root-exit finalization");
 
 			await tracker.finalizeRootExit(root.pid);
 			assert.equal(tracker.activeCount, 0);
-			assert.equal(isAlive(descendantPid), false, "root-exit finalization must join the escaped descendant before resolving");
+			assert.equal(isExactProcessExecutable(descendantIdentity), false, "root-exit finalization must retire the exact executable descendant before resolving");
 		} finally {
 			try { process.kill(-root.pid, "SIGKILL"); } catch { /* already drained */ }
 		}
