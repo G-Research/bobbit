@@ -12,6 +12,7 @@ import {
 import {
 	SESSION_STARTUP_SHUTDOWN_CODE,
 	SessionManager,
+	SessionStartupShutdownError,
 } from "../../../src/server/agent/session-manager.ts";
 import type { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 import type { PoolRecordSink } from "../../../src/server/agent/worktree-pool-record.ts";
@@ -219,36 +220,57 @@ describe("session-manager terminal owner shutdown", () => {
 		assert.equal(events.includes("worktree:published"), false, "terminal setup must not publish after the latch");
 	});
 
-	it("fences create, delegate, restart, and restore continuations with one stable error", async () => {
-		let release!: () => void;
-		const gate = new Promise<void>(resolve => { release = resolve; });
+	it("rejects public startup admissions and fences a pre-admitted restart continuation", async () => {
+		let signalRestartEntered!: () => void;
+		let releaseRestart!: () => void;
+		const restartEntered = new Promise<void>(resolve => { signalRestartEntered = resolve; });
+		const restartGate = new Promise<void>(resolve => { releaseRestart = resolve; });
 		const manager: any = new SessionManager();
-		const resumed: string[] = [];
-		const operation = (name: string, value?: unknown) => async () => {
-			await gate;
-			manager.assertTerminalStartupAllowed();
-			resumed.push(name);
-			return value;
+		const session = {
+			id: "restart",
+			title: "restart fixture",
+			cwd: "C:/fixture",
+			status: "idle",
+			clients: new Set(),
+			unsubscribe() {},
 		};
-		manager.createSessionOwned = operation("create", { id: "create" });
-		manager.createDelegateSessionOwned = operation("delegate", { id: "delegate" });
-		manager.restartAgentOwned = operation("restart");
-		manager.restoreSessionsOwned = operation("restore");
+		manager.sessions.set(session.id, session);
+		manager.assertSessionGoalPromotionMutationAllowed = () => undefined;
+		manager._assertModelSelectionReady = () => undefined;
+		manager.resolveStoreForSession = () => ({ get: () => ({ id: session.id }) });
+		manager.recomputeAllowedToolsForRestart = async () => {
+			signalRestartEntered();
+			await restartGate;
+			return undefined;
+		};
+		manager._respawnAgentInPlace = async () => assert.fail("a latch-crossing restart must not respawn");
 
-		const startups = [
-			manager.createSession("C:/fixture"),
-			manager.createDelegateSession("parent", { instructions: "x", cwd: "C:/fixture" }),
-			manager.restartAgent("restart"),
+		const preAdmittedRestart = manager.restartAgent(session.id);
+		await restartEntered;
+		manager.beginTerminalShutdown();
+
+		const admissionLabels = ["create", "delegate", "restart", "restore"];
+		const lateAdmissions = await Promise.allSettled([
+			manager.createSession("C:/late"),
+			manager.createDelegateSession("parent", { instructions: "x", cwd: "C:/late" }),
+			manager.restartAgent(session.id),
 			manager.restoreSessions(),
-		];
-		await Promise.resolve();
-		const shutdown = manager.shutdown();
-		release();
-		const results = await Promise.allSettled(startups);
-		assert.ok(results.every(result => result.status === "rejected"
-			&& result.reason?.code === SESSION_STARTUP_SHUTDOWN_CODE));
-		await shutdown;
-		assert.deepEqual(resumed, []);
+		]);
+		for (let index = 0; index < lateAdmissions.length; index++) {
+			const result = lateAdmissions[index];
+			assert.equal(result.status, "rejected", `${admissionLabels[index]} must reject after admission closes`);
+			assert.ok(result.reason instanceof SessionStartupShutdownError);
+			assert.equal(result.reason.code, SESSION_STARTUP_SHUTDOWN_CODE);
+		}
+
+		releaseRestart();
+		await assert.rejects(
+			preAdmittedRestart,
+			(error: unknown) => error instanceof SessionStartupShutdownError
+				&& error.code === SESSION_STARTUP_SHUTDOWN_CODE,
+		);
+		manager.sessions.delete(session.id);
+		await manager.shutdown();
 	});
 
 	it("bounds a stuck admitted startup and retains the shutdown failure", async () => {
