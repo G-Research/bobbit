@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
 	createForegroundGroupWitness,
 	createForegroundShellGroupTracker,
+	ForegroundShellGroupDrainError,
 	foregroundShellSpawnSpec,
 	type ForegroundGroupWitness,
 } from "../../../defaults/tools/shell/extension.ts";
@@ -88,15 +89,32 @@ describe("foreground shell process-group lifecycle", () => {
 		assert.deepEqual(activeChanges, [true, false], "signal listeners can be installed and removed without duplication");
 	});
 
-	it("bounds a non-exiting group at the absolute deadline with credential-neutral diagnostics", async () => {
+	it("rejects a non-exiting group at the absolute deadline with structured credential-neutral diagnostics", async () => {
 		const fixture = deterministicTracker({ deadlineMs: 25, graceMs: 10 });
 		fixture.tracker.track(63, mutableWitness().witness);
-		await fixture.tracker.drain();
+		const firstDrain = fixture.tracker.drain();
+		assert.equal(fixture.tracker.drain(), firstDrain, "terminal drain failures remain coalesced");
+
+		let failure: unknown;
+		await assert.rejects(firstDrain, error => {
+			failure = error;
+			return error instanceof ForegroundShellGroupDrainError;
+		});
 
 		assert.equal(fixture.now(), 25);
 		assert.deepEqual(fixture.signals, [[63, "SIGTERM"], [63, "SIGKILL"]]);
-		assert.deepEqual(fixture.reports, ["[bash-tool] Foreground process-group drain reached its 25ms deadline (pgids=63)"]);
-		assert.equal(fixture.tracker.activeCount, 0);
+		assert.deepEqual((failure as ForegroundShellGroupDrainError).groups, [{
+			processGroupId: 63,
+			finalWitnessStatus: "live",
+			termAttempt: "sent",
+			killAttempt: "sent",
+			reason: "deadline-exceeded",
+			elapsedMs: 25,
+			deadlineMs: 25,
+		}]);
+		assert.equal(fixture.reports.length, 1, "the structured terminal failure is reported exactly once");
+		assert.match(fixture.reports[0], /pgid=63 status=live reason=deadline-exceeded TERM=sent KILL=sent/);
+		assert.equal(fixture.tracker.activeCount, 1, "an unresolved owner must not look like a successful empty drain");
 	});
 
 	it("never signals a reused PGID after its spawn-time witness identity is replaced", async () => {
@@ -117,15 +135,25 @@ describe("foreground shell process-group lifecycle", () => {
 		// incarnation. Apparent group liveness cannot restore old authority.
 		currentStartToken = "reused-incarnation";
 		fixture.tracker.releaseIfExited(91);
-		await fixture.tracker.drain();
+		await assert.rejects(fixture.tracker.drain(), (error: unknown) => {
+			assert.ok(error instanceof ForegroundShellGroupDrainError);
+			assert.deepEqual(error.groups, [{
+				processGroupId: 91,
+				finalWitnessStatus: "lost",
+				termAttempt: "not-attempted",
+				killAttempt: "not-attempted",
+				reason: "ownership-lost",
+				elapsedMs: 25,
+				deadlineMs: 25,
+			}]);
+			return true;
+		});
 		currentStartToken = "original-incarnation";
 
 		assert.equal(witness.status(), "lost", "witness loss is permanent even if old identity values reappear");
-		assert.deepEqual(fixture.signals, []);
-		assert.deepEqual(fixture.reports, [
-			"[bash-tool] Foreground process-group ownership unverified; retired without signalling (pgid=91)",
-		]);
-		assert.equal(fixture.tracker.activeCount, 0);
+		assert.deepEqual(fixture.signals, [], "a lost witness never regains numeric signal authority");
+		assert.equal(fixture.reports.length, 1);
+		assert.equal(fixture.tracker.activeCount, 1, "lost ownership remains visible to enclosing teardown");
 		readiness.destroy();
 	});
 
@@ -142,16 +170,70 @@ describe("foreground shell process-group lifecycle", () => {
 		fixture.tracker.releaseIfExited(93);
 	});
 
-	it("fails closed when the sentinel readiness handshake never completes", async () => {
+	it("rejects and retains ownership when the sentinel readiness handshake never completes", async () => {
 		const fixture = deterministicTracker({ deadlineMs: 25 });
 		fixture.tracker.track(92, mutableWitness("pending").witness);
-		await fixture.tracker.drain();
+
+		await assert.rejects(fixture.tracker.drain(), (error: unknown) => {
+			assert.ok(error instanceof ForegroundShellGroupDrainError);
+			assert.deepEqual(error.groups, [{
+				processGroupId: 92,
+				finalWitnessStatus: "pending",
+				termAttempt: "not-attempted",
+				killAttempt: "not-attempted",
+				reason: "ownership-never-established",
+				elapsedMs: 25,
+				deadlineMs: 25,
+			}]);
+			return true;
+		});
 
 		assert.equal(fixture.now(), 25);
 		assert.deepEqual(fixture.signals, []);
-		assert.deepEqual(fixture.reports, [
-			"[bash-tool] Foreground process-group ownership unverified; retired without signalling (pgid=92)",
-		]);
+		assert.equal(fixture.reports.length, 1);
+		assert.equal(fixture.tracker.activeCount, 1);
+	});
+
+	it("propagates a terminal drain failure before an enclosing cleanup can remove its root", async () => {
+		const fixture = deterministicTracker({ deadlineMs: 25, graceMs: 10 });
+		fixture.tracker.track(94, mutableWitness().witness);
+		let removed = false;
+		const sessionShutdownThenRemove = async () => {
+			await fixture.tracker.drain();
+			removed = true;
+		};
+
+		await assert.rejects(sessionShutdownThenRemove(), ForegroundShellGroupDrainError);
+		assert.equal(removed, false, "session_shutdown rejection must fence owned-root removal");
+		assert.equal(fixture.tracker.activeCount, 1);
+	});
+
+	it("rejects a signal failure without treating the numeric PGID as proof of exit", async () => {
+		const ownership = mutableWitness();
+		const fixture = deterministicTracker({
+			deadlineMs: 25,
+			graceMs: 10,
+			onSignal: (_processGroupId, signal) => {
+				if (signal === "SIGTERM") {
+					const error = new Error("credential-bearing operating-system detail") as NodeJS.ErrnoException;
+					error.code = "EPERM";
+					throw error;
+				}
+				ownership.set("lost");
+			},
+		});
+		fixture.tracker.track(95, ownership.witness);
+
+		await assert.rejects(fixture.tracker.drain(), (error: unknown) => {
+			assert.ok(error instanceof ForegroundShellGroupDrainError);
+			assert.equal(error.groups[0].reason, "signal-failed");
+			assert.equal(error.groups[0].termAttempt, "failed");
+			assert.equal(error.groups[0].killAttempt, "sent");
+			assert.doesNotMatch(error.message, /credential-bearing/);
+			return true;
+		});
+		assert.deepEqual(fixture.signals, [[95, "SIGTERM"], [95, "SIGKILL"]]);
+		assert.equal(fixture.tracker.activeCount, 1);
 	});
 
 	it("leaves Windows tree ownership to the outer Job without creating POSIX group state", async () => {
