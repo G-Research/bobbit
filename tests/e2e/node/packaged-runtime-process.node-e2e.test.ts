@@ -17,7 +17,16 @@ import { createRunChild, removeOwnedRunChild } from "../../support/harnesses/sha
 import { _trackedCount } from "../../../src/server/agent/spawn-tree.js";
 
 function childClose(child: ChildProcess): Promise<void> {
-	return once(child, "close").then(() => undefined);
+	return new Promise(resolve => child.once("close", () => resolve()));
+}
+
+async function forceCloseTestChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
+	// Production containment deliberately unrefs an unverified raw owner after
+	// destroying its streams. The fixture explicitly reclaims that real process
+	// handle so node:test stays live until its cleanup observes `close`.
+	child.ref();
+	if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	await closed;
 }
 
 describe("packaged runtime process ownership and teardown", () => {
@@ -67,6 +76,75 @@ describe("packaged runtime process ownership and teardown", () => {
 			await stopPackagedCli(runtime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 2_000 });
 		}
 		assert.equal(killRequests, 1, "tracked teardown must request one tree close");
+	});
+
+	it("rejects health readiness when the root exits before ownership is ready", { timeout: 10_000 }, async () => {
+		const ownershipReady = new Promise<void>(() => {});
+		const child = spawn(process.execPath, ["-e", "process.exit(23)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const closed = childClose(child);
+		const authority: PackagedProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => {},
+			waitForTreeExit: async () => {
+				await closed;
+				return true;
+			},
+		};
+		const runtime = capturePackagedCli(child, [], [], authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response(null, { status: 200 });
+		}) as typeof fetch;
+		try {
+			await assert.rejects(
+				waitForHealth("http://packaged.invalid", runtime, 5_000),
+				/failed before ownership readiness: Error: root process exited.*code=23/,
+			);
+			await closed;
+			assert.equal(fetchCalls, 0, "an exited root must not publish health readiness");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("rejects health readiness when the root errors before ownership is ready", { timeout: 10_000 }, async () => {
+		const ownershipReady = new Promise<void>(() => {});
+		const missingExecutable = join(process.cwd(), `missing-packaged-runtime-${process.pid}-${Date.now()}`);
+		const child = spawn(missingExecutable, [], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const closed = childClose(child);
+		const authority: PackagedProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => {},
+			waitForTreeExit: async () => {
+				await closed;
+				return true;
+			},
+		};
+		const runtime = capturePackagedCli(child, [], [], authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response(null, { status: 200 });
+		}) as typeof fetch;
+		try {
+			await assert.rejects(
+				waitForHealth("http://packaged.invalid", runtime, 5_000),
+				/failed before ownership readiness: Error: root process errored.*ENOENT/,
+			);
+			await closed;
+			assert.equal(fetchCalls, 0, "a spawn-error root must not publish health readiness");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	it("joins tree exit and ChildProcess close before reporting final diagnostics", { timeout: 10_000 }, async () => {
@@ -141,8 +219,7 @@ describe("packaged runtime process ownership and teardown", () => {
 			assert.equal(runtime.child.stdout?.destroyed, true);
 			assert.equal(runtime.child.stderr?.destroyed, true);
 		} finally {
-			child.kill("SIGKILL");
-			await closed;
+			await forceCloseTestChild(child, closed);
 		}
 	});
 
@@ -176,8 +253,7 @@ describe("packaged runtime process ownership and teardown", () => {
 			assert.equal(runtime.closed, false);
 		} finally {
 			Object.defineProperty(child, "pid", { value: originalPid, configurable: true });
-			child.kill("SIGKILL");
-			await closed;
+			await forceCloseTestChild(child, closed);
 		}
 	});
 

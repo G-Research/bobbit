@@ -34,6 +34,8 @@ export interface RunningCli {
 	trackedAuthority?: PackagedProcessTreeAuthority;
 	/** Coalesces repeated teardown onto one owned tree-close request and result. */
 	trackedStop?: Promise<void>;
+	/** Retains an asynchronous spawn failure for readiness diagnostics. */
+	spawnError?: Error;
 }
 
 export interface StopPackagedCliOptions {
@@ -356,6 +358,7 @@ export function capturePackagedCli(
 	};
 	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
 	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	child.once("error", error => { runtime.spawnError = error; });
 	// `exit` is the numeric PID/PGID ownership boundary. If graceful teardown
 	// began while the detached POSIX root was alive, finish reaping its still-live
 	// group immediately here; a delayed negative-PID signal could hit a reused ID.
@@ -376,16 +379,39 @@ async function joinPackagedOwnership(runtime: RunningCli, deadline: number): Pro
 	if (!ownershipReady) return;
 	const remainingMs = Math.max(0, deadline - Date.now());
 	let timeout: ReturnType<typeof setTimeout> | undefined;
+	let removeLifecycleListeners = () => {};
+	const rootFailure = new Promise<never>((_resolve, reject) => {
+		const failForExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			reject(new Error(`root process exited before ownership readiness (code=${code ?? "null"}; signal=${signal ?? "null"})`));
+		};
+		const failForError = (error: Error) => {
+			reject(new Error(`root process errored before ownership readiness: ${error.message}`, { cause: error }));
+		};
+		runtime.child.once("exit", failForExit);
+		runtime.child.once("error", failForError);
+		removeLifecycleListeners = () => {
+			runtime.child.removeListener("exit", failForExit);
+			runtime.child.removeListener("error", failForError);
+		};
+		// Close the registration race if the process settled immediately before the
+		// listeners above were installed.
+		if (runtime.spawnError) failForError(runtime.spawnError);
+		else if (rootExited(runtime)) failForExit(runtime.child.exitCode, runtime.child.signalCode);
+	});
 	try {
 		await Promise.race([
 			ownershipReady,
+			rootFailure,
 			new Promise<never>((_resolve, reject) => {
+				// Keep this timer referenced: a Promise is not an event-loop owner, so
+				// the readiness deadline must remain live even after an early root exit.
 				timeout = setTimeout(() => reject(new Error("ownership readiness timed out")), remainingMs);
 			}),
 		]);
 	} catch (error) {
 		throw processFailure(runtime, `failed before ownership readiness: ${String(error)}`);
 	} finally {
+		removeLifecycleListeners();
 		if (timeout) clearTimeout(timeout);
 	}
 }
