@@ -826,6 +826,87 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		expect(command.kills()).toBe(1);
 	});
 
+	it("fences a semaphore-paused command released after awaited shutdown", async () => {
+		let releaseAcquire!: () => void;
+		let acquired!: () => void;
+		const acquireObserved = new Promise<void>(resolve => { acquired = resolve; });
+		const acquireBlocked = new Promise<void>(resolve => { releaseAcquire = resolve; });
+		let spawnCalls = 0;
+		const updates: any[] = [];
+		const gateStore = {
+			updateSignalVerification: (_signalId: string, update: any) => updates.push(update),
+			updateGateStatus: () => {},
+			getGate: () => undefined,
+		} as any;
+		const harness = makeHarness({
+			commandRunner: { execFile: async () => ({ stdout: "main\n", stderr: "" }) },
+			commandStepRunner: {
+				nonDurable: true,
+				spawn: () => { spawnCalls++; throw new Error("spawn must remain fenced"); },
+			},
+		}, [], undefined, gateStore);
+		(harness as any).commandSemaphore = {
+			available: 0,
+			acquire: async () => { acquired(); await acquireBlocked; },
+			release: () => {},
+		};
+		const signal = {
+			id: "signal-shutdown-semaphore", goalId: "goal-shutdown-semaphore", gateId: "gate-shutdown-semaphore",
+			sessionId: "session", timestamp: Date.now(), commitSha: "HEAD", verification: { status: "running", steps: [] },
+		} as any;
+		const gate = {
+			id: signal.gateId, name: "Shutdown semaphore", dependsOn: [],
+			verify: [{ name: "held command", type: "command", run: "echo held" }],
+		} as any;
+
+		const verification = harness.verifyGateSignal(signal, gate, TEST_DIR);
+		await acquireObserved;
+		await harness.shutdown();
+		releaseAcquire();
+		await verification;
+
+		expect(spawnCalls).toBe(0);
+		expect((harness as any)._trackedCommandChildren.size).toBe(0);
+		const terminal = updates.at(-1);
+		expect(terminal.status).toBe("failed");
+		expect(terminal.steps[0]).toMatchObject({ passed: false, status: "failed" });
+		expect(terminal.steps[0].output).toContain("terminally cancelled because gateway shutdown started");
+	});
+
+	it("fences async command preparation released after awaited shutdown", async () => {
+		let releasePreparation!: () => void;
+		let preparationObserved!: () => void;
+		const preparationStarted = new Promise<void>(resolve => { preparationObserved = resolve; });
+		const preparationBlocked = new Promise<void>(resolve => { releasePreparation = resolve; });
+		let spawnCalls = 0;
+		const harness = makeHarness({
+			beforeCommandSpawn: async () => { preparationObserved(); await preparationBlocked; },
+			commandStepRunner: {
+				nonDurable: true,
+				spawn: () => { spawnCalls++; throw new Error("spawn must remain fenced"); },
+			},
+		});
+		const signalId = "signal-shutdown-pre-spawn";
+		setActiveCommandVerification(harness, "goal-shutdown-pre-spawn", "gate-shutdown-pre-spawn", signalId);
+		const step = (harness as any).runCommandStep("echo held", TEST_DIR, 60, false, {
+			goalId: "goal-shutdown-pre-spawn", gateId: "gate-shutdown-pre-spawn", signalId, stepIndex: 0,
+		}) as Promise<{ passed: boolean; output: string }>;
+		await preparationStarted;
+		await harness.shutdown();
+		releasePreparation();
+		const result = await step;
+
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("terminally cancelled because gateway shutdown started");
+		expect(spawnCalls).toBe(0);
+		expect((harness as any)._trackedCommandChildren.size).toBe(0);
+		const persisted = JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8"));
+		expect(persisted.verifications[0].steps[0]).toMatchObject({
+			status: "failed",
+			output: expect.stringContaining("terminally cancelled because gateway shutdown started"),
+		});
+	});
+
 	it("aggregates false and rejected tree barriers with command diagnostics", async () => {
 		const unverified = trackedCommand({ pid: 920_002, wait: async () => false });
 		const rejected = trackedCommand({ pid: 920_003, wait: async () => { throw new Error("job supervisor failed"); } });

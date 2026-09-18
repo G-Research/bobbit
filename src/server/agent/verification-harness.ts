@@ -3441,6 +3441,9 @@ export class VerificationHarness {
 	/** Commands with durable restart ownership intentionally outlive this gateway. */
 	private _restartSurvivalTrackedChildren = new WeakSet<TrackedChild>();
 
+	/** Monotonic admission fence set synchronously before terminal owner snapshotting. */
+	private _terminalShutdownStarted = false;
+
 	/** Every caller observes the same terminal owner-barrier outcome. */
 	private _shutdownPromise?: Promise<void>;
 
@@ -3485,6 +3488,8 @@ export class VerificationHarness {
 	/** Test seam for the bounded Engine snapshot used as post-signal completion evidence. */
 	private readonly containerProcessTopSnapshot: (containerId: string) => Promise<readonly DockerTopStateRow[]>;
 	private readonly skipLlmReview: boolean;
+	/** Deterministic test seam for work paused after admission but before command spawn. */
+	private readonly beforeCommandSpawn?: () => Promise<void>;
 	/** Required by server-generated child creation; optional only for harnesses that never spawn children. */
 	private readonly goalCandidateDeps?: GoalCandidateDeps;
 
@@ -3500,7 +3505,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]>; goalCandidateDeps?: GoalCandidateDeps } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; beforeCommandSpawn?: () => Promise<void>; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]>; goalCandidateDeps?: GoalCandidateDeps } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -3513,6 +3518,7 @@ export class VerificationHarness {
 		this.containerProcessIdentityInspector = deps.containerProcessIdentityInspector;
 		this.containerProcessTopSnapshot = deps.containerProcessTopSnapshot ?? readDockerTopStateSnapshot;
 		this.skipLlmReview = !!deps.skipLlmReview;
+		this.beforeCommandSpawn = deps.beforeCommandSpawn;
 		this.goalCandidateDeps = deps.goalCandidateDeps;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -4315,7 +4321,62 @@ export class VerificationHarness {
 	 * deliberately handed to restart recovery are not this gateway's teardown owners.
 	 */
 	shutdown(): Promise<void> {
-		return this._shutdownPromise ??= this._shutdownTrackedCommandTrees();
+		if (!this._shutdownPromise) {
+			// This latch is monotonic and must linearize before the one-time map
+			// snapshot. Work resuming from any earlier await then fails closed at its
+			// next owner boundary instead of escaping a completed shutdown barrier.
+			this._terminalShutdownStarted = true;
+			this._shutdownPromise = this._shutdownTrackedCommandTrees();
+		}
+		return this._shutdownPromise;
+	}
+
+	private _terminalShutdownDiagnostic(boundary: string): string {
+		return `Verification terminally cancelled because gateway shutdown started before ${boundary}; no new verification owner was created.`;
+	}
+
+	private _recordTerminalShutdownStep(
+		streamCtx: { signalId: string; stepIndex: number } | undefined,
+		boundary: string,
+	): { passed: false; output: string } | undefined {
+		if (!this._terminalShutdownStarted) return undefined;
+		const output = this._terminalShutdownDiagnostic(boundary);
+		if (streamCtx) {
+			const active = this.activeVerifications.get(streamCtx.signalId);
+			const step = active?.steps[streamCtx.stepIndex];
+			if (step) {
+				step.status = "failed";
+				step.output = output;
+				step.durationMs = 0;
+				this._persistActive();
+			}
+		}
+		return { passed: false, output };
+	}
+
+	private _completeTerminalShutdownVerification(signal: GateSignal, steps: readonly VerifyStep[], boundary: string): void {
+		const output = this._terminalShutdownDiagnostic(boundary);
+		const result: GateSignalStep = {
+			name: "Cancelled",
+			type: "command",
+			passed: false,
+			status: "failed",
+			phase: 0,
+			output,
+			duration_ms: 0,
+		};
+		this.activeVerifications.delete(signal.id);
+		this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "failed", steps: [result] });
+		this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
+		this._persistActive();
+		this.broadcastFn(signal.goalId, {
+			type: "gate_verification_complete",
+			goalId: signal.goalId,
+			gateId: signal.gateId,
+			signalId: signal.id,
+			status: "cancelled",
+		});
+		this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [result], workflowAligned: steps.length > 0 });
 	}
 
 	private async _shutdownTrackedCommandTrees(): Promise<void> {
@@ -4554,6 +4615,10 @@ export class VerificationHarness {
 			}
 		}
 		const steps = effectiveGate.verify;
+		if (this._terminalShutdownStarted) {
+			this._completeTerminalShutdownVerification(signal, steps ?? [], "verification execution admission");
+			return;
+		}
 		if (!steps || steps.length === 0) {
 			// No verification — auto-pass
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
@@ -4611,6 +4676,10 @@ export class VerificationHarness {
 				this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master"),
 				this.resolveLegacyMasterBranch(cwd),
 			]);
+			if (this._terminalShutdownStarted) {
+				this._completeTerminalShutdownVerification(signal, steps, "verification setup completion");
+				return;
+			}
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
 				baseBranch,
@@ -4835,6 +4904,10 @@ export class VerificationHarness {
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
+				if (this._terminalShutdownStarted) {
+					this._completeTerminalShutdownVerification(signal, steps, `phase ${phase} admission`);
+					return;
+				}
 				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
@@ -4893,6 +4966,20 @@ export class VerificationHarness {
 				const phaseResults = await runVerificationPhaseSteps(
 					phaseSteps,
 					async ({ step, index }) => {
+						const terminalAtStepAdmission = this._recordTerminalShutdownStep(
+							{ signalId: signal.id, stepIndex: index },
+							`step "${step.name}" admission`,
+						);
+						if (terminalAtStepAdmission) {
+							return {
+								index,
+								stepResult: {
+									name: step.name, type: step.type, status: "failed" as const,
+									phase, duration_ms: 0, expect: step.expect,
+									...terminalAtStepAdmission,
+								} as GateSignalStep,
+							};
+						}
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedStatus = terminalStatusForStep(cached);
@@ -5056,7 +5143,9 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+										const terminalAfterSemaphore = this._recordTerminalShutdownStep(streamCtx, `command step "${step.name}" semaphore acquisition`);
+										result = terminalAfterSemaphore
+											?? (await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId));
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -5927,6 +6016,11 @@ export class VerificationHarness {
 			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
 
 			const publishReviewer = async () => {
+				const terminalBeforeSession = this._recordTerminalShutdownStep(
+					verificationContext?.signalId ? { signalId: verificationContext.signalId, stepIndex: this.activeVerifications.get(verificationContext.signalId)?.steps.findIndex(item => item.name === step.name) ?? -1 } : undefined,
+					`reviewer session "${step.name}" creation`,
+				);
+				if (terminalBeforeSession) throw new Error(terminalBeforeSession.output);
 				const created = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 					rolePrompt: combinedPrompt,
 					roleName,
@@ -5939,6 +6033,14 @@ export class VerificationHarness {
 					initialModel: _preInitialModel,
 					initialThinkingLevel: _preInitialThinking,
 				});
+				const terminalAfterSession = this._recordTerminalShutdownStep(
+					verificationContext?.signalId ? { signalId: verificationContext.signalId, stepIndex: this.activeVerifications.get(verificationContext.signalId)?.steps.findIndex(item => item.name === step.name) ?? -1 } : undefined,
+					`reviewer session "${step.name}" publication`,
+				);
+				if (terminalAfterSession) {
+					await this.sessionManager!.terminateSession(created.id).catch(() => {});
+					throw new Error(terminalAfterSession.output);
+				}
 
 				// Publish ownership and initial sidebar metadata before releasing the
 				// shared terminal-admission turn. Reconciliation then either waits for
@@ -6386,6 +6488,11 @@ export class VerificationHarness {
 			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
 
 			const publishQaReviewer = async () => {
+				const terminalBeforeSession = this._recordTerminalShutdownStep(
+					verificationContext?.signalId ? { signalId: verificationContext.signalId, stepIndex: this.activeVerifications.get(verificationContext.signalId)?.steps.findIndex(item => item.name === step.name) ?? -1 } : undefined,
+					`QA reviewer session "${step.name}" creation`,
+				);
+				if (terminalBeforeSession) throw new Error(terminalBeforeSession.output);
 				const created = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 					rolePrompt: combinedPrompt,
 					roleName: qaRoleName,
@@ -6398,6 +6505,14 @@ export class VerificationHarness {
 					initialModel: _preQaInitialModel,
 					initialThinkingLevel: _preQaInitialThinking,
 				});
+				const terminalAfterSession = this._recordTerminalShutdownStep(
+					verificationContext?.signalId ? { signalId: verificationContext.signalId, stepIndex: this.activeVerifications.get(verificationContext.signalId)?.steps.findIndex(item => item.name === step.name) ?? -1 } : undefined,
+					`QA reviewer session "${step.name}" publication`,
+				);
+				if (terminalAfterSession) {
+					await this.sessionManager!.terminateSession(created.id).catch(() => {});
+					throw new Error(terminalAfterSession.output);
+				}
 				qaSessionId = created.id;
 
 				const qaFunName = await generateTeamName("verification");
@@ -6703,7 +6818,24 @@ export class VerificationHarness {
 	): string {
 		return _substituteVars(template, builtinVars, projectVars, agentVars, allGateStates);
 	}
-	private runCommandStep(
+	private async runCommandStep(
+		command: string,
+		cwd: string,
+		timeoutSec: number,
+		expectFailure: boolean,
+		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+		errorPattern?: string,
+		containerId?: string,
+	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
+		const terminalBeforePreparation = this._recordTerminalShutdownStep(streamCtx, "command preparation");
+		if (terminalBeforePreparation) return terminalBeforePreparation;
+		if (this.beforeCommandSpawn) await this.beforeCommandSpawn();
+		const terminalAfterPreparation = this._recordTerminalShutdownStep(streamCtx, "command pre-spawn preparation");
+		if (terminalAfterPreparation) return terminalAfterPreparation;
+		return this._runCommandStep(command, cwd, timeoutSec, expectFailure, streamCtx, errorPattern, containerId);
+	}
+
+	private _runCommandStep(
 		command: string,
 		cwd: string,
 		timeoutSec: number,
@@ -7050,12 +7182,23 @@ export class VerificationHarness {
 			let containerTimeoutTimer: TimerHandle | undefined;
 			void (async () => {
 			try {
+				const terminalBeforeOwnerSpawn = this._recordTerminalShutdownStep(streamCtx, "command owner spawn");
+				if (terminalBeforeOwnerSpawn) {
+					resolve(terminalBeforeOwnerSpawn);
+					return;
+				}
 				if (useContainerDurable && containerId && dockerExecCommandTag) {
 					dockerExecWatcher = new DockerExecEventWatcher(containerId, dockerExecCommandTag);
 					// Wait for the daemon's HTTP 200 subscription acknowledgement before
 					// creating the tagged exec. Starting `docker events` and immediately
 					// spawning misses the first event on a cold client connection.
 					await dockerExecWatcher.start();
+					const terminalAfterWatcherStart = this._recordTerminalShutdownStep(streamCtx, "container command spawn");
+					if (terminalAfterWatcherStart) {
+						await dockerExecWatcher.stop();
+						resolve(terminalAfterWatcherStart);
+						return;
+					}
 				}
 				if (containerId) {
 					// Container execution uses a daemon-bound sentinel; container-visible
@@ -7166,6 +7309,29 @@ export class VerificationHarness {
 					await dockerExecWatcher?.stop();
 					resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
 				})();
+				return;
+			}
+
+			// A custom runner can synchronously initiate shutdown from inside spawn().
+			// Fence registration too: kill and join that exact local owner instead of
+			// publishing it after the terminal map snapshot has completed.
+			const terminalBeforeRegistration = this._recordTerminalShutdownStep(streamCtx, "tracked command registration");
+			if (terminalBeforeRegistration) {
+				let exitVerified = false;
+				let cleanupError: unknown;
+				try {
+					tracked.killTree("SIGKILL", 0);
+					exitVerified = await this._waitForTrackedTreeExitDuringShutdown(tracked);
+				} catch (error) {
+					cleanupError = error;
+				}
+				await dockerExecWatcher?.stop();
+				resolve({
+					passed: false,
+					output: exitVerified
+						? terminalBeforeRegistration.output
+						: `${terminalBeforeRegistration.output} Late-spawn cleanup could not be verified${cleanupError ? `: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}` : "."}`,
+				});
 				return;
 			}
 
@@ -8600,6 +8766,11 @@ export class VerificationHarness {
 		// semaphore (cheap reject) AND again after acquisition immediately
 		// before createGoal (pause/cancel can race during the acquire await).
 		const _shouldAbortSpawn = (): { passed: boolean; output: string } | null => {
+			const terminalShutdown = this._recordTerminalShutdownStep(
+				{ signalId: signal.id, stepIndex },
+				`subgoal owner creation for plan "${planId}"`,
+			);
+			if (terminalShutdown) return terminalShutdown;
 			if (active.cancelled) {
 				return { passed: false, output: `runSubgoalStep: verification cancelled — not spawning child for plan "${planId}".` };
 			}
