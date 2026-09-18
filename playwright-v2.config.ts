@@ -124,24 +124,40 @@ process.env.BOBBIT_V2_BROWSER_LEASE = "1";
 // a solo isolated run measured ~3.8x faster with more browser workers — the
 // ledger's Σworkers≤cores reservation + the browser-render lease cap total
 // Chromium across runs). BOBBIT_V2_PLAYWRIGHT_WORKERS overrides for measurement/tuning.
-function resolvePlaywrightWorkers(): number {
+type PlaywrightWorkerResolution = {
+	workers: number;
+	source: "explicit override" | "inherited ledger grant" | "fresh ledger reservation" | "fallback";
+};
+
+function resolvePlaywrightWorkers(): PlaywrightWorkerResolution {
 	const override = Number(process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS);
-	if (Number.isFinite(override) && override >= 1) return Math.floor(override);
+	if (Number.isFinite(override) && override >= 1) {
+		return { workers: Math.floor(override), source: "explicit override" };
+	}
 	try {
 		const req = createRequire(import.meta.url);
 		const { reserveWorkerSlots } = req("./scripts/testing-v2/ledger.mjs") as {
-			reserveWorkerSlots: (kind: string) => { workerSlots: number; release: () => void };
+			reserveWorkerSlots: (kind: string) => {
+				workerSlots: number;
+				release: () => void;
+				managedByParent: boolean;
+			};
 		};
-		const { workerSlots, release } = reserveWorkerSlots("playwright");
-		process.once("exit", release);
-		return Math.min(4, Math.max(1, workerSlots));
+		const reservation = reserveWorkerSlots("playwright");
+		process.once("exit", reservation.release);
+		return {
+			workers: Math.min(4, Math.max(1, reservation.workerSlots)),
+			source: reservation.managedByParent ? "inherited ledger grant" : "fresh ledger reservation",
+		};
 	} catch {
 		// Ledger unavailable — use safe default.
-		return 2;
+		return { workers: 2, source: "fallback" };
 	}
 }
 
-const playwrightWorkers = resolvePlaywrightWorkers();
+const playwrightWorkerResolution = resolvePlaywrightWorkers();
+console.log(`[browser-v2] Playwright workers=${playwrightWorkerResolution.workers} source=${playwrightWorkerResolution.source}`);
+const playwrightWorkers = playwrightWorkerResolution.workers;
 const canonicalBrowserMatches = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
 	.filter(({ semantic }) => semantic === "browser-fixture" || semantic === "browser-journey")
 	.map(({ suffix }) => `**/*${suffix}`);
