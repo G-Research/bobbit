@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it, vi } from "vitest";
 
 import {
@@ -8,7 +9,10 @@ import {
 	runGatewayShutdownPhases,
 	stopWorktreePoolsForShutdown,
 } from "../../../src/server/server.ts";
-import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import {
+	SESSION_STARTUP_SHUTDOWN_CODE,
+	SessionManager,
+} from "../../../src/server/agent/session-manager.ts";
 import type { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 import type { PoolRecordSink } from "../../../src/server/agent/worktree-pool-record.ts";
 
@@ -76,6 +80,19 @@ describe("gateway shutdown is idempotent", () => {
 			},
 		);
 		assert.deepEqual(events, ["owner", "listeners", "after"]);
+	});
+
+	it("closes session admission before listeners while preserving WebSocket closure order", () => {
+		const source = readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf8");
+		const start = source.indexOf("sessionManager.beginTerminalShutdown();");
+		const listener = source.indexOf("observeDeferredShutdownPhase(closeBoundServer())", start);
+		const sessionPhase = source.indexOf('{ name: "session-manager"', listener);
+		const websocketPhase = source.indexOf('name: "websocket-clients"', sessionPhase);
+		const listenerPhase = source.indexOf('{ name: "listeners"', websocketPhase);
+		assert.ok(start >= 0 && listener > start, "terminal admission closes synchronously before listener close starts");
+		assert.ok(sessionPhase > listener, "session owners still drain in their established phase");
+		assert.ok(websocketPhase > sessionPhase, "WebSocket clients still close after session teardown");
+		assert.ok(listenerPhase > websocketPhase, "listener join remains the final network phase");
 	});
 
 	it("keeps run-root removal behind the verification command-tree barrier", async () => {
@@ -156,6 +173,165 @@ describe("gateway shutdown is idempotent", () => {
 });
 
 describe("session-manager terminal owner shutdown", () => {
+	it("closes startup admission synchronously and drains nested detached setup before snapshot", async () => {
+		let releaseParent!: () => void;
+		let releaseDetached!: () => void;
+		const parentGate = new Promise<void>(resolve => { releaseParent = resolve; });
+		const detachedGate = new Promise<void>(resolve => { releaseDetached = resolve; });
+		const events: string[] = [];
+		const manager: any = new SessionManager();
+		manager.createSessionOwned = async () => {
+			events.push("create:admitted");
+			await parentGate;
+			const detached = (async () => {
+				events.push("worktree:admitted");
+				await detachedGate;
+				manager.assertTerminalStartupAllowed();
+				events.push("worktree:published");
+			})();
+			manager.trackDetachedTerminalStartup("worktree:fixture", detached);
+			void detached.catch(() => undefined);
+			return { id: "preparing" };
+		};
+
+		const creating = manager.createSession("C:/fixture");
+		await Promise.resolve();
+		assert.deepEqual(events, ["create:admitted"]);
+
+		manager.beginTerminalShutdown();
+		const shutdown = manager.shutdown();
+		await assert.rejects(
+			manager.createSession("C:/late"),
+			(error: any) => error?.code === SESSION_STARTUP_SHUTDOWN_CODE,
+		);
+
+		releaseParent();
+		await creating;
+		await Promise.resolve();
+		assert.deepEqual(events, ["create:admitted", "worktree:admitted"]);
+		let shutdownSettled = false;
+		void shutdown.finally(() => { shutdownSettled = true; });
+		await Promise.resolve();
+		assert.equal(shutdownSettled, false, "detached setup registered by an admitted parent remains in the drain");
+
+		releaseDetached();
+		await shutdown;
+		assert.equal(events.includes("worktree:published"), false, "terminal setup must not publish after the latch");
+	});
+
+	it("fences create, delegate, restart, and restore continuations with one stable error", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const manager: any = new SessionManager();
+		const resumed: string[] = [];
+		const operation = (name: string, value?: unknown) => async () => {
+			await gate;
+			manager.assertTerminalStartupAllowed();
+			resumed.push(name);
+			return value;
+		};
+		manager.createSessionOwned = operation("create", { id: "create" });
+		manager.createDelegateSessionOwned = operation("delegate", { id: "delegate" });
+		manager.restartAgentOwned = operation("restart");
+		manager.restoreSessionsOwned = operation("restore");
+
+		const startups = [
+			manager.createSession("C:/fixture"),
+			manager.createDelegateSession("parent", { instructions: "x", cwd: "C:/fixture" }),
+			manager.restartAgent("restart"),
+			manager.restoreSessions(),
+		];
+		await Promise.resolve();
+		const shutdown = manager.shutdown();
+		release();
+		const results = await Promise.allSettled(startups);
+		assert.ok(results.every(result => result.status === "rejected"
+			&& result.reason?.code === SESSION_STARTUP_SHUTDOWN_CODE));
+		await shutdown;
+		assert.deepEqual(resumed, []);
+	});
+
+	it("bounds a stuck admitted startup and retains the shutdown failure", async () => {
+		let now = 0;
+		const clock: any = {
+			now: () => now,
+			setTimeout(handler: () => void, ms: number) {
+				now += ms;
+				queueMicrotask(handler);
+				return 1;
+			},
+			clearTimeout() {},
+			setInterval() { return 2; },
+			clearInterval() {},
+		};
+		const manager: any = new SessionManager({ clock });
+		manager.createSessionOwned = () => new Promise(() => {});
+		void manager.createSession("C:/stuck");
+
+		await assert.rejects(manager.shutdown(), (error: unknown) => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(String(error), /session-startup-drain/);
+			const startupFailure = error.errors.find((entry: Error) => /session-startup-drain/.test(entry.message));
+			assert.match(String(startupFailure?.cause), /timed out after 15000ms/);
+			assert.match(String(startupFailure?.cause), /create:new/);
+			return true;
+		});
+	});
+
+	it("retains a latch-crossing startup owner when exact cleanup proof fails", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		let terminalCalls = 0;
+		const events: string[] = [];
+		const manager: any = new SessionManager();
+		manager._testGoalStore = { async close() { events.push("store"); } };
+		manager._testTaskStore = null;
+		manager.createSessionOwned = async () => {
+			const session: any = {
+				id: "late-startup-owner",
+				title: "late startup",
+				cwd: "C:/owned/worktree",
+				status: "starting",
+				clients: new Set(),
+				unsubscribe() {},
+				rpcClient: {
+					async stop() { assert.fail("terminal cleanup must use exact-tree ownership"); },
+					async terminateOwnedTree() {
+						terminalCalls++;
+						throw new Error("tree proof failed token=startup-secret");
+					},
+				},
+			};
+			await gate;
+			try {
+				manager.assertTerminalStartupAllowed();
+			} catch (error) {
+				await manager.cleanupTerminalStartupOwner(session);
+				throw error;
+			}
+			return session;
+		};
+
+		const creating = manager.createSession("C:/fixture");
+		await Promise.resolve();
+		const shutdown = manager.shutdown();
+		release();
+		await assert.rejects(creating);
+		await assert.rejects(shutdown, (error: unknown) => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(String(error), /session-startup-drain|late-startup-owner/);
+			assert.doesNotMatch(String(error), /startup-secret/);
+			return true;
+		});
+
+		const retained = manager.sessions.get("late-startup-owner");
+		assert.ok(retained, "failed cleanup retains the exact startup owner");
+		assert.equal(retained.terminalCleanupPending?.phase, "runtime");
+		assert.match(retained.terminalCleanupPending?.errors[0] ?? "", /<redacted-token>/);
+		assert.equal(terminalCalls, 1, "the retained owner is not killed a second time by the snapshot");
+		assert.deepEqual(events, ["store"], "unrelated manager phases still drain");
+	});
+
 	it("joins an in-flight default MCP initialization and disconnects its late owner", async () => {
 		let connectStarted!: () => void;
 		let releaseConnect!: () => void;
