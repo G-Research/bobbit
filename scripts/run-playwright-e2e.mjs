@@ -10,7 +10,7 @@
  * each Playwright worker its own process-local cache directory.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -25,6 +25,11 @@ import {
   sanitizeTestEnvironment,
   setEnvironmentValue,
 } from "./testing-v2/environment-policy.mjs";
+import { removeOwnedPath } from "./testing-v2/owned-path-cleanup.mjs";
+import {
+  PACKED_CONSUMER_DESCRIPTOR_ENV,
+  preparePackedConsumerFixture,
+} from "./testing-v2/prewarm-packed-consumer-cache.mjs";
 
 export {
   isAmbientBobbitRuntimeEnvKey as isE2EAmbientRuntimeEnvKey,
@@ -36,6 +41,40 @@ const projectRoot = resolve(__dirname, "..");
 const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const PLAYWRIGHT_CLI = join(projectRoot, "node_modules", "playwright", "cli.js");
+const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
+const PACKAGED_CONSUMER_PROJECT = "browser-canonical";
+const PACKAGED_CONSUMER_TITLE_HIERARCHY = "packed Bobbit inline HTML runtime clean consumer serves dist UI and executes the bundled canonical theme bridge";
+const PACKAGED_CONSUMER_TEST_TITLES = Object.freeze([
+  `${PACKAGED_CONSUMER_PROJECT} ${basename(PACKAGED_CONSUMER_SPEC)} ${PACKAGED_CONSUMER_TITLE_HIERARCHY}`,
+  `${PACKAGED_CONSUMER_PROJECT} ${PACKAGED_CONSUMER_SPEC} ${PACKAGED_CONSUMER_TITLE_HIERARCHY}`,
+]);
+const PLAYWRIGHT_OPTIONS_WITH_VALUES = new Set([
+  "--browser",
+  "-c", "--config",
+  "--debug",
+  "--global-timeout",
+  "-g", "--grep",
+  "--grep-invert",
+  "-j", "--workers",
+  "--max-failures",
+  "--only-changed",
+  "--output",
+  "--project",
+  "--repeat-each",
+  "--reporter",
+  "--retries",
+  "--run-agents",
+  "--shard",
+  "--test-list",
+  "--test-list-invert",
+  "--timeout",
+  "--trace",
+  "--tsconfig",
+  "--ui-host",
+  "--ui-port",
+  "-u", "--update-snapshots",
+  "--update-source-method",
+]);
 
 /** Build a shell-free local Playwright invocation or fail before spawning. */
 export function createPlaywrightE2EInvocation(forwardedArgs = [], {
@@ -214,7 +253,164 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   return env;
 }
 
-export function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
+function optionValues(args, option) {
+  const values = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === option && args[index + 1] !== undefined) values.push(args[index + 1]);
+    else if (argument.startsWith(`${option}=`)) values.push(argument.slice(option.length + 1));
+  }
+  return values;
+}
+
+function positionalTestFilters(args) {
+  const filters = [];
+  let afterOptions = false;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (afterOptions) {
+      filters.push(argument);
+      continue;
+    }
+    if (argument === "--") {
+      afterOptions = true;
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      const option = argument.split("=", 1)[0];
+      if (!argument.includes("=") && PLAYWRIGHT_OPTIONS_WITH_VALUES.has(option)) index++;
+      continue;
+    }
+    filters.push(argument);
+  }
+  return filters;
+}
+
+function wildcardMatches(value, pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${escaped}$`, "i").test(value);
+}
+
+function filterMaySelectPackedConsumer(filter) {
+  const normalized = filter.replaceAll("\\", "/");
+  const basenameFilter = basename(normalized);
+  if (normalized === PACKAGED_CONSUMER_SPEC || basenameFilter === basename(PACKAGED_CONSUMER_SPEC)) return true;
+  try {
+    return new RegExp(normalized).test(PACKAGED_CONSUMER_SPEC);
+  } catch {
+    return PACKAGED_CONSUMER_SPEC.includes(normalized);
+  }
+}
+
+function compilePlaywrightTitleGrep(pattern) {
+  const literal = pattern.match(/^\/(.*)\/([gi]*)$/);
+  return literal ? new RegExp(literal[1], literal[2]) : new RegExp(pattern, "gi");
+}
+
+function titleGrepsMaySelectPackedConsumer(args) {
+  const patterns = [];
+  let supplied = false;
+  let ambiguous = false;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--grep" || argument === "-g") {
+      supplied = true;
+      const pattern = args[index + 1];
+      if (pattern === undefined || pattern.startsWith("-")) {
+        ambiguous = true;
+      } else {
+        patterns.push(pattern);
+        index++;
+      }
+      continue;
+    }
+    if (argument.startsWith("--grep=") || argument.startsWith("-g=")) {
+      supplied = true;
+      patterns.push(argument.slice(argument.indexOf("=") + 1));
+    }
+  }
+  if (!supplied) return Object.freeze({ supplied: false, maySelect: false });
+  if (ambiguous) return Object.freeze({ supplied: true, maySelect: true });
+  for (const pattern of patterns) {
+    try {
+      const matcher = compilePlaywrightTitleGrep(pattern);
+      if (PACKAGED_CONSUMER_TEST_TITLES.some(title => matcher.test(title))) {
+        return Object.freeze({ supplied: true, maySelect: true });
+      }
+    } catch {
+      // Playwright owns selector validation. Prepare conservatively so an
+      // invalid selector cannot accidentally suppress a selected fixture.
+      return Object.freeze({ supplied: true, maySelect: true });
+    }
+  }
+  return Object.freeze({ supplied: true, maySelect: false });
+}
+
+/**
+ * Resolve the only trusted descriptor location for a coordinator run. A
+ * pathname handed through the environment is evidence only: it must equal the
+ * fixed location below the already-authoritative fresh run root.
+ */
+export function resolvePackedConsumerDescriptorPath(
+  environment,
+  authoritativeRunRoot,
+  platform = process.platform,
+) {
+  if (!authoritativeRunRoot) throw new Error("Packed-consumer descriptor resolution requires the authoritative coordinator run root");
+  const expected = join(resolve(authoritativeRunRoot), "prepared-packed-consumer", "descriptor.json");
+  const handedOff = environmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, platform);
+  if (handedOff && resolve(handedOff) !== expected) {
+    throw new Error(`Packed-consumer descriptor handoff is outside the authoritative coordinator layout: ${handedOff}`);
+  }
+  return expected;
+}
+
+/** Decide whether this direct coordinator can discover the packaged-consumer spec. */
+export function directRunnerPackedConsumerDecision(forwardedArgs = []) {
+  const selectedProjects = optionValues(forwardedArgs, "--project");
+  if (selectedProjects.length > 0 && !selectedProjects.some(project => wildcardMatches(PACKAGED_CONSUMER_PROJECT, project))) {
+    return Object.freeze({ prepare: false, reason: "project-excludes-packaged-consumer", descriptorPath: null });
+  }
+
+  const filters = positionalTestFilters(forwardedArgs);
+  if (filters.length > 0 && !filters.some(filterMaySelectPackedConsumer)) {
+    return Object.freeze({ prepare: false, reason: "test-filter-excludes-packaged-consumer", descriptorPath: null });
+  }
+  const titleGreps = titleGrepsMaySelectPackedConsumer(forwardedArgs);
+  if (titleGreps.supplied && !titleGreps.maySelect) {
+    return Object.freeze({ prepare: false, reason: "title-filter-excludes-packaged-consumer", descriptorPath: null });
+  }
+  const explicitlySelected = filters.length > 0 || selectedProjects.length > 0 || titleGreps.supplied;
+  return Object.freeze({ prepare: true, reason: explicitlySelected ? "packaged-consumer-selected" : "unfiltered", descriptorPath: null });
+}
+
+/** Prepare once below the direct wrapper's root and publish into its child env. */
+export async function prepareDirectRunnerPackedConsumer(
+  forwardedArgs,
+  environment,
+  paths,
+  prepare = preparePackedConsumerFixture,
+) {
+  // The descriptor is coordinator output, never an ambient input. Scrub it
+  // again at this boundary so direct helper callers cannot bypass the shared
+  // environment sanitizer and suppress preparation with a forged pathname.
+  deleteEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV);
+  const decision = directRunnerPackedConsumerDecision(forwardedArgs);
+  if (!decision.prepare) return decision;
+  const descriptor = await prepare({
+    repoRoot: projectRoot,
+    runRoot: paths.root,
+    baseEnv: environment,
+  });
+  const descriptorPath = resolvePackedConsumerDescriptorPath(
+    { [PACKED_CONSUMER_DESCRIPTOR_ENV]: descriptor.descriptorPath },
+    paths.root,
+  );
+  setEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV, descriptorPath);
+  return Object.freeze({ prepare: true, reason: decision.reason, descriptorPath });
+}
+
+export async function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
 const invocation = createPlaywrightE2EInvocation(forwardedArgs);
 const paths = createE2ERunPaths(coordinatorTempDirectory());
 const cacheRoot = paths.cacheRoot;
@@ -240,6 +436,8 @@ setEnvironmentValue(env, "NODE_DISABLE_COMPILE_CACHE", "1");
 deleteEnvironmentValue(env, "NODE_COMPILE_CACHE");
 setEnvironmentValue(env, "NODE_OPTIONS", [`--require=${cacheBootstrap}`, environmentValue(env, "NODE_OPTIONS")].filter(Boolean).join(" "));
 
+await prepareDirectRunnerPackedConsumer(forwardedArgs, env, paths);
+
 if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
   console.error(`[e2e] BOBBIT_V2_RUN_ROOT=${paths.root}`);
   console.error(`[e2e] BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT=${cacheRoot}`);
@@ -252,12 +450,22 @@ const result = spawnSync(invocation.command, invocation.args, {
   shell: false,
 });
 
+let cleanupFailed = false;
 if (result.status === 0 && !result.signal && process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1") {
   try {
     // Never sweep a shared temp parent: this coordinator owns exactly paths.root.
-    rmSync(paths.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-  } catch {
-    console.error(`[e2e] could not remove successful run root: ${paths.root}`);
+    await removeOwnedPath(paths.root, {
+      ownerRoot: paths.root,
+      allowOwnerRoot: true,
+      owner: { kind: "coordinator", id: paths.runId },
+      lifecycle: {
+        playwright: { state: "closed", status: result.status, signal: result.signal },
+        reporters: "closed with Playwright process",
+      },
+    });
+  } catch (error) {
+    cleanupFailed = true;
+    console.error(`[e2e] could not remove successful run root: ${paths.root}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
   }
 } else {
   console.error(`[e2e] retained failure diagnostics: ${paths.root}`);
@@ -268,8 +476,17 @@ if (result.signal) {
   process.kill(process.pid, result.signal);
   return 1;
 }
+if (cleanupFailed) return 1;
 return result.status ?? 1;
 }
 
 const invokedAsScript = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedAsScript) process.exit(runPlaywrightE2E());
+if (invokedAsScript) {
+  runPlaywrightE2E().then(
+    code => { process.exitCode = code; },
+    error => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
+}

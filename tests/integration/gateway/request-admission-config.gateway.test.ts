@@ -266,11 +266,11 @@ describe.sequential("configured request-admission authorities", () => {
 	}, 60_000);
 
 	afterAll(async () => {
-		try { await gateway?.shutdown(); }
-		finally {
-			if (processState) restoreProcessState(processState);
-			if (root) removeOwnedRunChild(root);
-		}
+		let shutdownError: unknown;
+		try { await gateway?.shutdown(); } catch (error) { shutdownError = error; }
+		if (processState) restoreProcessState(processState);
+		if (shutdownError) throw shutdownError;
+		if (root) await removeOwnedRunChild(root, { gateway: "shutdown resolved", processState: "restored" });
 	}, 60_000);
 
 	it("uses the actual ephemeral TLS port for every loopback alias beneath the configured base path", async () => {
@@ -426,11 +426,11 @@ describe.sequential("public authority provenance on a loopback backend", () => {
 	}, 60_000);
 
 	afterAll(async () => {
-		try { await gateway?.shutdown(); }
-		finally {
-			if (processState) restoreProcessState(processState);
-			if (root) removeOwnedRunChild(root);
-		}
+		let shutdownError: unknown;
+		try { await gateway?.shutdown(); } catch (error) { shutdownError = error; }
+		if (processState) restoreProcessState(processState);
+		if (shutdownError) throw shutdownError;
+		if (root) await removeOwnedRunChild(root, { gateway: "shutdown resolved", processState: "restored" });
 	}, 60_000);
 
 	it("requires credentials for public Host API, preview, and WebSocket traffic", async () => {

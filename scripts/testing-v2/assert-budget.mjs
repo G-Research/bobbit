@@ -22,7 +22,7 @@
  * ─── Programmatic (imported by run-v2.mjs) ───
  *   createCpuSampler(rootPid, { intervalMs? }) -> { stop() -> {cpuMs, peakProcesses, samples} }
  *   assertBudget({ scope, wallMs, cpuMs, rawCpuMs?, cpuCeilingMs?, cpuOverCount?, pilot?,
- *                  underLoad?, argv?, reservations?, rootPid?, processCount?, perSpec? })
+ *                  underLoad?, argv?, reservations?, rootPid?, processCount?, perSpec?, slowDurations? })
  *       -> { pass, violations, caps, artifactPath, wallMs, cpuMs }
  *       WALL is the only hard gate; CPU is recorded for observability and NEVER gates.
  *   resolveCaps(scope, pilot?, underLoadOverride?) -> { tier, maxWallMs, maxCpuMs, underLoad?, pilot }
@@ -35,6 +35,8 @@
  *   perSpecWallFromReport(report) -> { 'path/spec.ts': totalMs, ... }
  *   evaluatePerSpecBudget(report, { perSpecMaxMs, perSpecGrandfather? })
  *       -> { perFileMs, warns, violations }   (pure; tier2 per-spec WALL budget)
+ *   summarizeSlowPlaywrightDurations(report)
+ *       -> bounded slowest-file and slowest-spec timing summary
  *
  * Artifacts: .profiles/testing-v2/budgets/<timestamp>-<scope>.json
  */
@@ -346,6 +348,55 @@ export function evaluatePerSpecBudget(report, { perSpecMaxMs, perSpecGrandfather
 	return { perFileMs, warns, violations };
 }
 
+// Keep successful-run observability useful after the owned Playwright report is
+// removed, without copying the full report into the persistent budget artifact.
+export const PLAYWRIGHT_SLOW_DURATION_LIMIT = 10;
+
+function slowestDurationRows(rows) {
+	return rows
+		.sort((a, b) => b.ms - a.ms || a.file.localeCompare(b.file) || (a.title || "").localeCompare(b.title || ""))
+		.slice(0, PLAYWRIGHT_SLOW_DURATION_LIMIT);
+}
+
+/** Pure: retain only the ten slowest file totals and individual spec totals. */
+export function summarizeSlowPlaywrightDurations(report, perFileMs = perSpecWallFromReport(report)) {
+	const fileRows = Object.entries(perFileMs).map(([file, ms]) => ({
+		file,
+		ms: Math.round(ms),
+	}));
+	const specRows = [];
+	const walkSuite = (suite, inheritedFile, inheritedTitles) => {
+		if (!suite || typeof suite !== "object") return;
+		const file = suite.file ? normSpecPath(suite.file) : inheritedFile;
+		const titles = suite.title ? [...inheritedTitles, String(suite.title)] : inheritedTitles;
+		for (const spec of suite.specs || []) {
+			const specFile = spec.file ? normSpecPath(spec.file) : file;
+			if (!specFile) continue;
+			let ms = 0;
+			for (const test of spec.tests || []) {
+				for (const result of test.results || []) {
+					if (Number.isFinite(result?.duration)) ms += result.duration;
+				}
+			}
+			const titleParts = spec.title ? [...titles, String(spec.title)] : titles;
+			specRows.push({
+				file: specFile,
+				title: titleParts.join(" › ") || "<untitled>",
+				ms: Math.round(ms),
+			});
+		}
+		for (const child of suite.suites || []) walkSuite(child, file, titles);
+	};
+	for (const suite of report?.suites || []) walkSuite(suite, null, []);
+	return {
+		limit: PLAYWRIGHT_SLOW_DURATION_LIMIT,
+		fileCount: fileRows.length,
+		specCount: specRows.length,
+		slowestFiles: slowestDurationRows(fileRows),
+		slowestSpecs: slowestDurationRows(specRows),
+	};
+}
+
 /** Latest CPU sample artifact for a scope, if run-v2 (or a prior run) left one. */
 function latestSampleCpu(scope) {
 	if (!existsSync(SAMPLE_DIR)) return null;
@@ -369,7 +420,7 @@ function timestamp() {
 
 // ─────────────────────────────── core assert ───────────────────────────────
 
-export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = null, cpuCeilingMs = null, cpuOverCount = false, pilot = false, underLoad = undefined, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null, perSpec = null }) {
+export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = null, cpuCeilingMs = null, cpuOverCount = false, pilot = false, underLoad = undefined, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null, perSpec = null, slowDurations = null }) {
 	const caps = resolveCaps(scope, pilot, underLoad);
 	const violations = [];
 
@@ -423,6 +474,7 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = nu
 		perSpec: perSpec
 			? { maxMs: perSpec.maxMs ?? null, warns: perSpec.warns ?? [], violations: perSpec.violations ?? [] }
 			: null,
+		slowDurations,
 		budget: { maxWallMs: caps.maxWallMs, maxCpuMs: caps.maxCpuMs, label: caps.label },
 		rootPid,
 		processCount,
@@ -500,6 +552,7 @@ function cli() {
 	// Per-spec wall budget: only for the tier2/browser scope with a Playwright
 	// JSON report and a configured tiers.tier2.perSpecMaxMs. WALL-only, no CPU.
 	let perSpec = null;
+	let slowDurations = null;
 	if (SCOPE_TIER[opts.scope] === "tier2" && opts.report) {
 		const reportAbs = isAbsolute(opts.report) ? opts.report : join(REPO_ROOT, opts.report);
 		const rep = readJsonSafe(reportAbs);
@@ -507,6 +560,7 @@ function cli() {
 		if (rep && Number.isFinite(tier2.perSpecMaxMs)) {
 			perSpec = { maxMs: tier2.perSpecMaxMs, ...evaluatePerSpecBudget(rep, tier2) };
 		}
+		if (rep) slowDurations = summarizeSlowPlaywrightDurations(rep, perSpec?.perFileMs);
 	}
 
 	const result = assertBudget({
@@ -520,6 +574,7 @@ function cli() {
 		wallSource,
 		cpuSource,
 		perSpec,
+		slowDurations,
 	});
 
 	const caps = result.caps;
@@ -536,6 +591,17 @@ function cli() {
 		}
 		for (const v of perSpec.violations) {
 			console.error(`  per-spec VIOLATION: ${v.file} — ${(v.ms / 1000).toFixed(1)}s > cap ${(perSpec.maxMs / 1000).toFixed(0)}s (not grandfathered)`);
+		}
+	}
+
+	if (slowDurations) {
+		console.log(`  slowest files (top ${slowDurations.limit} of ${slowDurations.fileCount}):`);
+		for (const row of slowDurations.slowestFiles) {
+			console.log(`    ${(row.ms / 1000).toFixed(1)}s  ${row.file}`);
+		}
+		console.log(`  slowest specs (top ${slowDurations.limit} of ${slowDurations.specCount}):`);
+		for (const row of slowDurations.slowestSpecs) {
+			console.log(`    ${(row.ms / 1000).toFixed(1)}s  ${row.file} — ${row.title}`);
 		}
 	}
 

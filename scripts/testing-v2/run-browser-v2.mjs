@@ -9,12 +9,13 @@
  * nothing is written into or shared through the checkout.
  */
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
 import { copyEnvironment } from "./environment-policy.mjs";
+import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -81,15 +82,13 @@ function run(command, args, env) {
 	});
 }
 
-function cleanup(root) {
-	try {
-		// Windows can briefly retain Playwright output handles after its child
-		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
-		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-		return true;
-	} catch {
-		return false;
-	}
+async function cleanup(paths, lifecycle) {
+	return removeOwnedPath(paths.root, {
+		ownerRoot: paths.root,
+		allowOwnerRoot: true,
+		owner: { kind: "coordinator", id: paths.runId },
+		lifecycle,
+	});
 }
 
 export async function runBrowserV2(forwardedArgs = process.argv.slice(2)) {
@@ -98,7 +97,7 @@ export async function runBrowserV2(forwardedArgs = process.argv.slice(2)) {
 	const playwrightCli = playwrightCommandArgs(forwardedArgs)[0];
 	if (!existsSync(playwrightCli)) {
 		console.error(`[browser-v2] Playwright CLI is unavailable at ${playwrightCli}`);
-		cleanup(paths.root);
+		console.error(`[browser-v2] retained failure diagnostics: ${paths.root}`);
 		return 1;
 	}
 
@@ -112,11 +111,17 @@ export async function runBrowserV2(forwardedArgs = process.argv.slice(2)) {
 	if (budget.error) console.error(`[browser-v2] ${budget.error.message}`);
 
 	if (playwright.code === 0 && budget.code === 0) {
-		if (!cleanup(paths.root)) {
-			console.error(`[browser-v2] could not remove successful run artifacts: ${paths.root}`);
+		try {
+			await cleanup(paths, {
+				playwright: { state: "closed", code: playwright.code },
+				reporter: "closed with Playwright process",
+				budget: { state: "closed", code: budget.code },
+			});
+			return 0;
+		} catch (error) {
+			console.error(`[browser-v2] could not remove successful run artifacts: ${paths.root}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
 			return 1;
 		}
-		return 0;
 	}
 
 	console.error(`[browser-v2] retained failure diagnostics: ${paths.root}`);

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { localApiFetch } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
+import { removeOwnedRunChild } from "../../../tests/support/harnesses/shared/run-isolation.js";
 
 export const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
 
@@ -110,4 +111,24 @@ export function transcriptFilesForSession(root: string, sessionId: string): stri
 		else if (entry.isFile() && entry.name.endsWith(`_${sessionId}.jsonl`)) matches.push(candidate);
 	}
 	return matches;
+}
+
+/** Remove every isolated history-fork root while retaining per-path cleanup diagnostics. */
+export async function removeHistoryForkFixtureRoots(
+	roots: string[],
+	lifecycle: Record<string, unknown>,
+): Promise<void> {
+	const uniqueRoots = [...new Set(roots.map(root => path.resolve(root)))];
+	const results = await Promise.allSettled(
+		uniqueRoots.map(root => removeOwnedRunChild(root, lifecycle)),
+	);
+	const failures = results.flatMap((result, index) => result.status === "rejected"
+		? [{ root: uniqueRoots[index], reason: result.reason }]
+		: []);
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures.map(failure => failure.reason),
+			`Failed to remove history-fork fixture roots; retained: ${failures.map(failure => failure.root).join(", ")}`,
+		);
+	}
 }

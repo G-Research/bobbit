@@ -49,17 +49,24 @@ import {
 	createE2ERunPaths,
 	createIsolatedE2EEnvironment,
 	createPlaywrightE2EInvocation,
+	resolvePackedConsumerDescriptorPath,
 } from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
 import { seedTransformCache } from "./pwtest-cache.ts";
 import { ensureE2EDistServerPrebundle } from "./server-prebundle.mjs";
+import {
+	PACKED_CONSUMER_DESCRIPTOR_ENV,
+	preparePackedConsumerFixture,
+} from "./prewarm-packed-consumer-cache.mjs";
+import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
 const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstrap.cjs");
 const CHILD_PROFILE_PRELOAD = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
+const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
 
 function currentGitSha() {
 	try {
@@ -196,14 +203,37 @@ export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.
 	}, platform);
 }
 
-function cleanup(root) {
+function formatFailure(error) {
+	return error instanceof Error ? error.stack ?? error.message : String(error);
+}
+
+/**
+ * Retain failed runs, but fail a green run if its owned root cannot be removed.
+ * The injected remover seam keeps coordinator policy independently testable;
+ * production always uses the shared bounded Windows cleanup implementation.
+ */
+export async function finalizeE2ERunCleanup({
+	paths,
+	anyFailed,
+	lifecycle,
+	remove = removeOwnedPath,
+	logError = (message) => console.error(message),
+}) {
+	if (anyFailed) {
+		logError(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
+		return 1;
+	}
 	try {
-		// Windows can briefly retain Playwright output handles after its child
-		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
-		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-		return true;
-	} catch {
-		return false;
+		await remove(paths.root, {
+			ownerRoot: paths.root,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: paths.runId },
+			lifecycle,
+		});
+		return 0;
+	} catch (error) {
+		logError(`[e2e-v2] could not remove successful run root: ${paths.root}\n${formatFailure(error)}`);
+		return 1;
 	}
 }
 
@@ -233,6 +263,9 @@ export function createNestedE2EEnvironment(coordinatorEnv, platform = process.pl
 		"BOBBIT_E2E_PWTEST_CACHE_OWNED",
 		"BOBBIT_PWTEST_CACHE_ROOT",
 		"BOBBIT_E2E_V8CACHE_ROOT",
+		// Focused Group C delegates preparation to the nested Playwright
+		// coordinator. Never hand it a parent- or host-supplied descriptor.
+		PACKED_CONSUMER_DESCRIPTOR_ENV,
 	]) deleteEnvironmentValue(nestedEnv, key, platform);
 	return nestedEnv;
 }
@@ -466,6 +499,32 @@ export async function prepareE2EDistServerPrebundle(paths, ensure = ensureE2EDis
 	}
 }
 
+/** Prepare the real packed consumer once, only when Group C selected its spec. */
+export async function prepareGroupCPackedConsumer(specs, environment, paths, prepare = preparePackedConsumerFixture) {
+	if (!specs.includes(PACKAGED_CONSUMER_SPEC)) {
+		deleteEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV);
+		return { selected: false, descriptorPath: null, wallMs: 0 };
+	}
+	const startedAt = performance.now();
+	const descriptor = await prepare({
+		repoRoot: REPO_ROOT,
+		runRoot: paths.root,
+		baseEnv: environment,
+	});
+	const descriptorPath = resolvePackedConsumerDescriptorPath(
+		{ [PACKED_CONSUMER_DESCRIPTOR_ENV]: descriptor.descriptorPath },
+		paths.root,
+	);
+	environment[PACKED_CONSUMER_DESCRIPTOR_ENV] = descriptorPath;
+	return {
+		selected: true,
+		descriptorPath,
+		tarballPath: descriptor.tarballPath,
+		templateDir: descriptor.templateDir,
+		wallMs: Math.round(performance.now() - startedAt),
+	};
+}
+
 function isRetryFreeQualification(env = process.env) {
 	return resolveE2ERetryCount(env) === 0;
 }
@@ -653,6 +712,7 @@ async function main() {
 	const results = [];
 	const profileRefs = [];
 	let serialTransformCache = null;
+	let packedConsumer = { selected: false, descriptorPath: null, wallMs: 0 };
 	let bundle = {
 		observed: true,
 		status: only ? "focused-raw" : "pending",
@@ -674,7 +734,17 @@ async function main() {
 		// Focused group runs retain their existing single-group behavior.
 		if (only === "A") { results.push(await runGroupA(A, coordinatorEnv)); captureLatestProfile("A"); }
 		if (only === "B") { results.push(await runGroupB(B, coordinatorEnv)); captureLatestProfile("B"); }
-		if (only === "C") { results.push(await runGroupC(C, coordinatorEnv)); captureLatestProfile("C"); }
+		if (only === "C") {
+			// The focused path launches the legacy Playwright wrapper, which owns a
+			// fresh nested run root and prepares exactly once below that root.
+			// Preparing here would either duplicate work or require trusting an
+			// environment pathname across coordinator ownership boundaries.
+			packedConsumer = C.includes(PACKAGED_CONSUMER_SPEC)
+				? { selected: true, delegated: true, descriptorPath: null, wallMs: 0 }
+				: packedConsumer;
+			results.push(await runGroupC(C, coordinatorEnv));
+			captureLatestProfile("C");
+		}
 		if (only === "D") { results.push(await runGroupD(D, { coordinatorEnv })); captureLatestProfile("D"); }
 	} else {
 		// Hosted runners cannot reliably absorb a second process-heavy coordinator
@@ -700,6 +770,7 @@ async function main() {
 		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
 		// C receives the same shared cache environment only after the runner removes
 		// Group B's bundle setting. No C worker can observe bundled server mode.
+		packedConsumer = await prepareGroupCPackedConsumer(C, sharedPlaywrightEnv, paths);
 		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
 		captureLatestProfile("C");
 		results.push(await runGroupD(D, { coordinatorEnv }));
@@ -735,6 +806,9 @@ async function main() {
 		docker,
 		dockerCapability,
 		bundle,
+		packedConsumer: packedConsumer.delegated
+			? { ...packedConsumer, state: "delegated-to-nested-coordinator" }
+			: packedConsumer,
 		serialTransformCache,
 		profiling: profile ? {
 			enabled: true,
@@ -770,15 +844,27 @@ async function main() {
 	console.log(`[e2e-v2] report: ${samplePath}`);
 
 	const anyFailed = results.some((r) => r.code !== 0);
-	if (anyFailed) {
-		console.error(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
-		process.exit(1);
-	}
-	if (!cleanup(paths.root)) {
-		console.error(`[e2e-v2] could not remove successful run root: ${paths.root}`);
-		process.exit(1);
-	}
-	process.exit(0);
+	const exitCode = await finalizeE2ERunCleanup({
+		paths,
+		anyFailed,
+		lifecycle: {
+			coordinator: { pid: process.pid, state: "groups-settled" },
+			groups: results.map((result) => ({ label: result.label, state: "closed", code: result.code })),
+			sampler: { state: "stopped", wallMs, cpuMs: sample.cpuMs },
+			reporting: {
+				state: "written",
+				samplePath,
+				jsonPath: args.json ?? null,
+				profiles: profileRefs.map((reference) => reference.path),
+			},
+			packedConsumer: packedConsumer.delegated
+				? { state: "delegated-to-nested-coordinator" }
+				: packedConsumer.selected
+					? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
+					: { state: "not-selected" },
+		},
+	});
+	process.exit(exitCode);
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

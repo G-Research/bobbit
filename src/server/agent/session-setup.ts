@@ -18,7 +18,7 @@ import type { CommandRunner } from "../gateway-deps.js";
 import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { SessionInfo } from "./session-manager.js";
-import { dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
+import { SESSION_STARTUP_SHUTDOWN_CODE, dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
 import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
@@ -477,6 +477,11 @@ export interface PipelineContext {
 
 	/** SessionManager-owned gateway-mode fence; production contexts always provide it. */
 	assertSandboxStartupAllowed?: () => void;
+	/** Monotonic terminal-shutdown fence checked at every async owner boundary. */
+	assertTerminalStartupAllowed?: () => void;
+	/** Exact-tree cleanup for a bridge that loses the race to terminal shutdown. */
+	cleanupTerminalStartupOwner?: (session: SessionInfo) => Promise<void>;
+	terminalStartupHasBegun?: () => boolean;
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
 	finalizeSpawnOptions?: (
@@ -1362,8 +1367,9 @@ async function withSessionToolGeneration(
  * Used by normal and delegate session creation.
  */
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
-	// Direct executor callers must hit the same fence as SessionManager entrypoints,
+	// Direct executor callers must hit the same fences as SessionManager entrypoints,
 	// before MCP/config resolution or any sandbox bootstrap can have effects.
+	ctx.assertTerminalStartupAllowed?.();
 	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
@@ -1421,6 +1427,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		projectId: plan.projectId,
 	});
 
+	// A setup admitted before shutdown may have crossed several async config and
+	// sandbox boundaries. Recheck before persistence or process construction.
+	ctx.assertTerminalStartupAllowed?.();
+
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
 	// the session metadata is still saved so the user doesn't lose the session.
 	// The agentSessionFile is empty until spawnAgent populates it.
@@ -1444,12 +1454,15 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
 	} catch (err) {
 		const setupError = err instanceof Error ? err : new Error(String(err));
-		handleSetupFailure(session, plan, setupError, ctx);
+		const cleanup = handleSetupFailure(session, plan, setupError, ctx);
+		if (ctx.terminalStartupHasBegun?.()) await cleanup;
+		else void cleanup.catch(() => undefined);
 		throw setupError;
 	}
 
 	// Normal/delegate sessions are not broadcast until createSession returns, but
 	// the returned object must be ready only after model enforcement succeeds.
+	ctx.assertTerminalStartupAllowed?.();
 	if (session.status !== "terminated") session.status = "idle";
 
 	return session;
@@ -1466,7 +1479,8 @@ export async function executeWorktreeAsync(
 	preBuiltWorktreePath?: string,
 ): Promise<void> {
 	// Worktree creation, setup hooks, and worktree-scoped MCP discovery all occur
-	// below, so reject an unsafe sandbox before crossing any of those boundaries.
+	// below, so reject terminal or unsafe sandbox startup before crossing them.
+	ctx.assertTerminalStartupAllowed?.();
 	if (plan.sandboxed) ctx.assertSandboxStartupAllowed?.();
 
 	// Test-only knob: deterministically extend the "preparing" window so the
@@ -1696,6 +1710,10 @@ export async function executeWorktreeAsync(
 		projectId: plan.projectId,
 	});
 
+	// Async worktree/sandbox setup may have lost admission while it awaited. Never
+	// construct a process owner after the terminal latch.
+	ctx.assertTerminalStartupAllowed?.();
+
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
@@ -1744,11 +1762,23 @@ export async function executeWorktreeAsync(
 		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
 	});
 
-	// Start agent with retry
+	// Start agent with retry. Fence both immediately before and after start so a
+	// latch-crossing exact owner is cleaned by SessionManager before setup settles.
+	ctx.assertTerminalStartupAllowed?.();
 	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		() => {
+			ctx.assertTerminalStartupAllowed?.();
+			return rpcClient.start();
+		},
+		{
+			retries: 2,
+			delays: [500, 1000],
+			label: "rpcClient.start",
+			sessionId: plan.id,
+			nonRetryable: error => (error as { code?: unknown } | null)?.code === SESSION_STARTUP_SHUTDOWN_CODE,
+		},
 	);
+	ctx.assertTerminalStartupAllowed?.();
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
@@ -1849,6 +1879,7 @@ export async function executeWorktreeAsync(
 	// prevents a failed selected model from silently continuing on provider or
 	// runtime defaults. Thinking-level application remains non-fatal below.
 	await postSpawn(session, plan, ctx);
+	ctx.assertTerminalStartupAllowed?.();
 
 	// Notify connected clients that the session is ready (single writer + version bump).
 	broadcastStatus(session, "idle");
@@ -1861,6 +1892,7 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	ctx.assertTerminalStartupAllowed?.();
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
@@ -1960,16 +1992,38 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
 	});
 
-	// Start agent with retry
+	// Start agent with retry. If terminal shutdown wins after construction, the
+	// exact process owner is joined before this admitted startup can settle.
 	const __t = performance.now();
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
+	try {
+		ctx.assertTerminalStartupAllowed?.();
+		await withRetry(
+			() => {
+				ctx.assertTerminalStartupAllowed?.();
+				return rpcClient.start();
+			},
+			{
+				retries: 2,
+				delays: [500, 1000],
+				label: "rpcClient.start",
+				sessionId: plan.id,
+				nonRetryable: error => (error as { code?: unknown } | null)?.code === SESSION_STARTUP_SHUTDOWN_CODE,
+			},
+		);
+		ctx.assertTerminalStartupAllowed?.();
+	} catch (error) {
+		if (ctx.terminalStartupHasBegun?.() && ctx.cleanupTerminalStartupOwner) {
+			await ctx.cleanupTerminalStartupOwner(session);
+		} else {
+			await rpcClient.stop().catch(() => {});
+		}
+		throw error;
+	}
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
+	try {
 	if (plan.preExistingAgentSessionFile) {
 		// See the worktree path above: this must precede switch_session replay.
 		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
@@ -1998,7 +2052,6 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			switchTimeout,
 		);
 		if (!switchResp.success) {
-			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
 		session.promptAuthorReplayBindings = undefined;
@@ -2006,6 +2059,16 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
+	// This is the owner-publication boundary: never publish after terminal latch.
+	ctx.assertTerminalStartupAllowed?.();
+	} catch (error) {
+		if (ctx.terminalStartupHasBegun?.() && ctx.cleanupTerminalStartupOwner) {
+			await ctx.cleanupTerminalStartupOwner(session);
+		} else {
+			await rpcClient.stop().catch(() => {});
+		}
+		throw error;
+	}
 	ctx.sessions.set(session.id, session);
 
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
@@ -2101,7 +2164,7 @@ export async function sendDelegatePrompt(
  * 5. Release sandbox pool slot if claimed
  * 6. Clean up sandbox token
  */
-export function handleSetupFailure(
+export async function handleSetupFailure(
 	session: SessionInfo,
 	plan: SessionSetupPlan,
 	error: Error,
@@ -2129,18 +2192,28 @@ export function handleSetupFailure(
 		});
 	}
 
-	// 2. Stop the spawned agent if setup failed after rpcClient.start(). Fire and
-	// forget: setup failure handling must not hang on a wedged provider process.
+	// 2. A terminal latch changes cleanup authority: exact-tree termination must
+	// be joined, and a failed proof retains the owner in the live map. Ordinary
+	// setup failures preserve the historical non-blocking root stop.
+	const retainedOwner = !!session.terminalCleanupPending;
+	const terminalOwnerAlreadyClean = session.terminalStartupCleanupComplete === true;
 	try { session.unsubscribe?.(); } catch { /* best-effort */ }
-	if ((session as any).rpcClient?.stop) {
+	if (ctx.terminalStartupHasBegun?.() && !retainedOwner && !terminalOwnerAlreadyClean && ctx.cleanupTerminalStartupOwner) {
+		await ctx.cleanupTerminalStartupOwner(session);
+	} else if (!retainedOwner && !terminalOwnerAlreadyClean && (session as any).rpcClient?.stop) {
 		session.rpcClient.stop().catch((stopErr: unknown) => {
 			console.warn(`[session-setup] Failed to stop setup-failed session ${session.id}:`, stopErr);
 		});
 	}
 
+	const mcpCleanup = ctx.releaseMcpManager?.(session.id).catch(() => undefined) ?? Promise.resolve();
+	if (retainedOwner) {
+		await mcpCleanup;
+		return;
+	}
+
 	// 3. Remove from in-memory map
 	ctx.sessions.delete(session.id);
-	const mcpCleanup = ctx.releaseMcpManager?.(session.id).catch(() => undefined) ?? Promise.resolve();
 
 	// 4. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);
@@ -2176,5 +2249,5 @@ export function handleSetupFailure(
 
 	// 8. S1: drop the per-session capability secret.
 	ctx.sessionSecretStore.remove(session.id);
-	return Promise.all([cleanupPromise, mcpCleanup]).then(() => undefined);
+	await Promise.all([cleanupPromise, mcpCleanup]);
 }

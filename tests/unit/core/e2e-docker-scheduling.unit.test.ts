@@ -71,10 +71,13 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths)");
 		const reportAt = source.indexOf("const report = {");
 		const bundleFieldAt = source.indexOf("\n\t\tbundle,", reportAt);
-		const cleanupAt = source.indexOf("cleanup(paths.root)", reportAt);
+		const cleanupAt = source.indexOf("await finalizeE2ERunCleanup({", reportAt);
 		expect(bundleFieldAt).toBeGreaterThan(reportAt);
 		expect(cleanupAt).toBeGreaterThan(bundleFieldAt);
-		expect(source.slice(cleanupAt - 200, cleanupAt + 200)).toContain("could not remove successful run root");
+		const cleanupCall = source.slice(cleanupAt, cleanupAt + 1_200);
+		expect(cleanupCall).toContain('coordinator: { pid: process.pid, state: "groups-settled" }');
+		expect(cleanupCall).toContain('sampler: { state: "stopped"');
+		expect(cleanupCall).toContain('state: "written"');
 	});
 
 	it("reports pre-spawn build/reuse details and degrades only preparation failures to raw B", async () => {

@@ -101,8 +101,6 @@ jobs:
     name: E2E (${{ matrix.os }}, Node 22.19.0)
     if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
-    # Hosted Windows can spend over nine minutes preparing the lock-free packed
-    # consumer before the authoritative suite begins.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -122,12 +120,6 @@ jobs:
 
       - name: Install
         run: npm ci
-
-      # npm ci caches locked content, but not every packument/artifact selected by
-      # a fresh lock-free consumer. Registry access stays in dependency preparation;
-      # the authoritative packed-consumer E2E remains strict offline.
-      - name: Warm packed-consumer npm cache
-        run: node scripts/testing-v2/prewarm-packed-consumer-cache.mjs
 
       - name: Install Chromium with dependencies
         if: runner.os == 'Linux'

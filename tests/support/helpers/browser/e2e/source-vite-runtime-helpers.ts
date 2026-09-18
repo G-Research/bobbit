@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import { type ChildProcess, type StdioOptions } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawnTracked, type TrackedChild } from "../../../../../src/server/agent/spawn-tree.js";
@@ -39,6 +39,10 @@ export interface SourceRuntimeFinalizationOptions {
 	gateway?: RunningSourceProcess;
 	stopOptions?: StopSourceProcessOptions;
 	bodyFailure?: { reason: unknown };
+	callerClose: {
+		label: string;
+		result: PromiseSettledResult<void>;
+	};
 	report: () => Promise<void>;
 	removeTemp: () => Promise<void>;
 }
@@ -235,12 +239,11 @@ function startOwnedSourceProcess(
 	options: { cwd: string; env: NodeJS.ProcessEnv; stdio: StdioOptions; windowsHide: boolean },
 	label: string,
 ): RunningSourceProcess {
-	if (process.platform === "win32") {
-		const tracked = spawnTracked(file, args, options);
-		return captureSourceProcess(tracked.child, label, tracked);
-	}
-	const child = spawn(file, args, { ...options, detached: true });
-	return captureSourceProcess(child, label);
+	// The real gateway and Vite processes always start behind spawn-time tree
+	// authority. On POSIX this is the sentinel-owned process group; on Windows it
+	// is the pre-resume Job. Raw ChildProcess capture remains only as a test seam.
+	const tracked = spawnTracked(file, args, options);
+	return captureSourceProcess(tracked.child, label, tracked);
 }
 
 export function startIsolatedSourceGateway(options: SourceGatewayOptions): RunningSourceProcess {
@@ -469,24 +472,31 @@ function stopTrackedSourceProcess(
 	forceStopTimeoutMs: number,
 ): Promise<void> {
 	if (runtime.trackedStop) return runtime.trackedStop;
-	if (runtime.closed) return Promise.resolve();
 	const authority = runtime.trackedAuthority!;
 	const completionTimeoutMs = gracefulStopTimeoutMs + forceStopTimeoutMs;
 	runtime.trackedStop = Promise.resolve().then(async () => {
 		runtime.shutdownStarted = true;
-		authority.killTree("SIGKILL");
-		let completed: boolean;
-		try {
-			completed = await waitForTrackedTreeExit(authority, completionTimeoutMs);
-		} catch (error) {
+		// Once the root exit boundary has passed there is nothing left to request.
+		// The tracked authority remains safe to join, but no numeric identity is
+		// retargeted by this helper.
+		if (!rootExited(runtime)) authority.killTree("SIGKILL");
+
+		let treeCompletion: boolean | Error;
+		let closed: boolean;
+		[treeCompletion, closed] = await Promise.all([
+			waitForTrackedTreeExit(authority, completionTimeoutMs).catch(error =>
+				error instanceof Error ? error : new Error(String(error))),
+			waitForProcessClose(runtime, completionTimeoutMs),
+		]);
+		if (treeCompletion instanceof Error) {
 			releaseProcessStdio(runtime.child);
-			throw processFailure(runtime, `tree completion failed: ${String(error)}`);
+			throw processFailure(runtime, `tree completion failed: ${treeCompletion.message}; treeVerified=false`);
 		}
-		if (!completed || !runtime.closed) {
+		if (!treeCompletion || !closed || !runtime.closed) {
 			releaseProcessStdio(runtime.child);
-			throw processFailure(runtime, completed
-				? "tree completion was reported before process close"
-				: `tree completion was not verified within ${completionTimeoutMs}ms`);
+			throw processFailure(runtime,
+				`shutdown proof failed within ${completionTimeoutMs}ms; treeVerified=${treeCompletion}; closeVerified=${closed && runtime.closed}`,
+			);
 		}
 	});
 	return runtime.trackedStop;
@@ -504,10 +514,13 @@ export async function stopSourceProcess(
 	if (runtime.closed) return;
 
 	// Root exit is a hard PID/PGID ownership boundary. Do not send a late
-	// numeric signal that could hit a reused process identity.
+	// numeric signal that could hit a reused process identity. Releasing inherited
+	// streams contains the fixture, but cannot prove that its raw tree terminated.
 	if (rootExited(runtime)) {
 		releaseProcessStdio(runtime.child);
-		return;
+		throw processFailure(runtime,
+			"root exited before process close; treeVerified=false; inherited stdio released without a late PID/PGID signal",
+		);
 	}
 
 	// Initiate tree cleanup while the root remains the ownership witness. If it
@@ -538,6 +551,9 @@ export async function stopSourceProcess(
 	if (await waitForProcessClose(runtime, forceStopTimeoutMs)) return;
 
 	releaseProcessStdio(runtime.child);
+	throw processFailure(runtime,
+		`process close was not observed within ${forceStopTimeoutMs}ms after forced shutdown; treeVerified=false; inherited stdio released`,
+	);
 }
 
 function cleanupStageFailure(label: string, reason: unknown): Error {
@@ -547,10 +563,16 @@ function cleanupStageFailure(label: string, reason: unknown): Error {
 
 /**
  * Stop every owned source runtime before diagnostics and temporary files are
- * finalized. No stage may prevent the next one from being attempted.
+ * finalized. Every stop and the report are attempted; removal requires every
+ * caller and source-process owner to prove shutdown.
  */
 export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationOptions): Promise<void> {
 	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	let ownersReleased = options.callerClose.result.status === "fulfilled";
+	if (options.callerClose.result.status === "rejected") {
+		failures.push(cleanupStageFailure(options.callerClose.label, options.callerClose.result.reason));
+	}
+
 	const runtimes = [
 		options.vite ? { label: `${options.vite.label} stop`, runtime: options.vite } : undefined,
 		options.gateway ? { label: `${options.gateway.label} stop`, runtime: options.gateway } : undefined,
@@ -559,14 +581,21 @@ export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationO
 		runtimes.map(({ runtime }) => stopSourceProcess(runtime, options.stopOptions)),
 	);
 	for (const [index, result] of stopResults.entries()) {
-		if (result.status === "rejected") failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+		if (result.status === "rejected") {
+			ownersReleased = false;
+			failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+		}
 	}
 
 	try {
 		await options.report();
 	} catch (error) {
 		failures.push(cleanupStageFailure("source runtime report", error));
-	} finally {
+	}
+
+	// Diagnostic roots stay intact whenever a caller or source-process owner did
+	// not prove shutdown. Reporting is still attempted, but deletion is not.
+	if (ownersReleased) {
 		try {
 			await options.removeTemp();
 		} catch (error) {
@@ -579,5 +608,14 @@ export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationO
 }
 
 export function processFailure(runtime: RunningSourceProcess, message: string): Error {
-	return new Error(`${runtime.label} ${message}\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`);
+	const lifecycle = [
+		`rootExited=${rootExited(runtime)}`,
+		`exitEvent=${runtime.exited}`,
+		`exitCode=${runtime.child.exitCode ?? "null"}`,
+		`signalCode=${runtime.child.signalCode ?? "null"}`,
+		`closed=${runtime.closed}`,
+		`shutdownStarted=${runtime.shutdownStarted}`,
+		`tracked=${runtime.trackedAuthority !== undefined}`,
+	].join(" ");
+	return new Error(`${runtime.label} ${message}\nlifecycle: ${lifecycle}\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`);
 }

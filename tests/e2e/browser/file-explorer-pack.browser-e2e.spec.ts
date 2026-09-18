@@ -1,12 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import {
 	apiFetch,
 	createSession,
-	deleteSession,
 	expect,
 	navigateToHash,
 	openApp,
@@ -15,6 +13,10 @@ import {
 	test,
 	waitForSessionStatus,
 } from "../../../tests/support/helpers/browser/journeys/journey-fixture.js";
+import {
+	createRunChild,
+	removeOwnedRunChild,
+} from "../../../tests/support/harnesses/shared/run-isolation.js";
 
 test.describe.configure({ mode: "serial" });
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });
@@ -41,7 +43,7 @@ function write(cwd: string, relativePath: string, contents: string | Buffer): vo
 }
 
 function createGitFixture(): string {
-	const root = mkdtempSync(join(tmpdir(), `bobbit-file-explorer-git-${process.env.E2E_PORT ?? "0"}-`));
+	const root = createRunChild(`file-explorer-git-${process.env.E2E_PORT ?? "0"}`);
 	git(root, "init", "-q");
 	git(root, "config", "user.email", "file-explorer@example.test");
 	git(root, "config", "user.name", "File Explorer Test");
@@ -105,11 +107,42 @@ async function createFixtureProject(root: string, label: string): Promise<Fixtur
 	return { root, projectId: project.id, sessionId };
 }
 
-async function removeFixtureProject(fixture: FixtureProject | undefined): Promise<void> {
+async function deleteFixtureOwner(path: string, label: string): Promise<void> {
+	const response = await apiFetch(path, { method: "DELETE" });
+	if (response.ok || response.status === 404) return;
+	const body = await response.text().catch(() => "<unreadable response>");
+	throw new Error(`${label} shutdown failed: ${response.status} ${body}`);
+}
+
+async function removeFixtureProject(
+	fixture: FixtureProject | undefined,
+	browserReleased: boolean,
+): Promise<void> {
 	if (!fixture) return;
-	await deleteSession(fixture.sessionId).catch(() => {});
-	await apiFetch(`/api/projects/${fixture.projectId}`, { method: "DELETE" }).catch(() => {});
-	rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+	const failures: unknown[] = [];
+	for (const owner of [
+		{ path: `/api/sessions/${fixture.sessionId}`, label: "session" },
+		{ path: `/api/projects/${fixture.projectId}`, label: "project" },
+	]) {
+		try {
+			await deleteFixtureOwner(owner.path, owner.label);
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (browserReleased && failures.length === 0) {
+		try {
+			await removeOwnedRunChild(fixture.root, {
+				browser: "page close resolved",
+				session: "delete acknowledged",
+				project: "delete acknowledged",
+			});
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, `file explorer fixture cleanup failed: ${fixture.root}`);
 }
 
 function treeItem(page: Page, relativePath: string): Locator {
@@ -198,11 +231,26 @@ test.describe("Journey: built-in file explorer pack", () => {
 	let gitFixture: FixtureProject | undefined;
 	let nonGitFixture: FixtureProject | undefined;
 
-	test.afterEach(async () => {
-		await removeFixtureProject(nonGitFixture);
-		await removeFixtureProject(gitFixture);
+	test.afterEach(async ({ page }) => {
+		const failures: unknown[] = [];
+		let browserReleased = false;
+		try {
+			await page.close();
+			browserReleased = true;
+		} catch (error) {
+			failures.push(new Error("file explorer page shutdown failed", { cause: error }));
+		}
+		for (const fixture of [nonGitFixture, gitFixture]) {
+			try {
+				await removeFixtureProject(fixture, browserReleased);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
 		nonGitFixture = undefined;
 		gitFixture = undefined;
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, "file explorer fixture finalization failed");
 	});
 
 	// These locators intentionally pin the public role/name contract from the approved
@@ -550,7 +598,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(restoredDiff, "reload restores the selected view even when the responsive preview pane is hidden").toHaveAttribute("aria-selected", "true");
 		await expect(restored.locator('[role="region"][aria-label="Working tree compared with HEAD"]')).toContainText("export const working = true;");
 
-		const nonGitRoot = mkdtempSync(join(tmpdir(), `bobbit-file-explorer-plain-${process.env.E2E_PORT ?? "0"}-`));
+		const nonGitRoot = createRunChild(`file-explorer-plain-${process.env.E2E_PORT ?? "0"}`);
 		write(nonGitRoot, "folder/plain.txt", "ordinary non-git file\n");
 		nonGitFixture = await createFixtureProject(nonGitRoot, "plain");
 		await navigateToHash(page, `#/session/${nonGitFixture.sessionId}`);

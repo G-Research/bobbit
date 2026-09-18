@@ -5,14 +5,13 @@
  *   - Chromium only (no Firefox/WebKit)
  *   - retries: 3 for normal developer workflow; retry-free qualification uses
  *     BOBBIT_V2_RETRY_FREE=1 without changing the default safety net
- *   - Worker count from the shared ledger (cap 4)
+ *   - Worker count from the shared ledger (cap 3)
  *   - Canonical browser fixtures and journeys only
  *   - Per-coordinator result artifacts under the owned run root
  *   - One stable ignored JSON summary for the budget gate
  *   - Global setup: build dist if missing
  */
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -124,24 +123,54 @@ process.env.BOBBIT_V2_BROWSER_LEASE = "1";
 // a solo isolated run measured ~3.8x faster with more browser workers — the
 // ledger's Σworkers≤cores reservation + the browser-render lease cap total
 // Chromium across runs). BOBBIT_V2_PLAYWRIGHT_WORKERS overrides for measurement/tuning.
-function resolvePlaywrightWorkers(): number {
+type PlaywrightWorkerResolution = {
+	workers: number;
+	source: "explicit override" | "inherited ledger grant" | "fresh ledger reservation" | "fallback";
+	failure?: string;
+};
+
+/**
+ * Keep fallback diagnostics useful without printing an exception message, which
+ * can contain the machine-global ledger path. Known lock exhaustion is reported
+ * separately because ledger.mjs deliberately throws it without a Node error code.
+ */
+function safeLedgerFailure(error: unknown): string {
+	if (error instanceof Error && error.message.startsWith("ledger: could not acquire lock")) return "lock-timeout";
+	const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+	if (typeof code === "string" && /^[A-Z0-9_-]{1,40}$/i.test(code)) return code;
+	if (error instanceof Error && /^[A-Z][A-Za-z0-9_-]{0,39}$/.test(error.name)) return error.name;
+	return "unknown";
+}
+
+async function resolvePlaywrightWorkers(): Promise<PlaywrightWorkerResolution> {
 	const override = Number(process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS);
-	if (Number.isFinite(override) && override >= 1) return Math.floor(override);
+	if (Number.isFinite(override) && override >= 1) {
+		return { workers: Math.floor(override), source: "explicit override" };
+	}
+	let stage = "load";
 	try {
-		const req = createRequire(import.meta.url);
-		const { reserveWorkerSlots } = req("./scripts/testing-v2/ledger.mjs") as {
-			reserveWorkerSlots: (kind: string) => { workerSlots: number; release: () => void };
+		// ledger.mjs is native ESM. Load it as ESM: createRequire() cannot load it
+		// and previously sent every direct browser run to the swallowed fallback.
+		const { reserveWorkerSlots } = await import("./scripts/testing-v2/ledger.mjs");
+		stage = "reservation";
+		const reservation = reserveWorkerSlots("playwright");
+		process.once("exit", reservation.release);
+		return {
+			workers: Math.min(4, Math.max(1, reservation.workerSlots)),
+			source: reservation.managedByParent ? "inherited ledger grant" : "fresh ledger reservation",
 		};
-		const { workerSlots, release } = reserveWorkerSlots("playwright");
-		process.once("exit", release);
-		return Math.min(4, Math.max(1, workerSlots));
-	} catch {
-		// Ledger unavailable — use safe default.
-		return 2;
+	} catch (error) {
+		// A load or reservation failure must not make a browser run unbounded.
+		return { workers: 2, source: "fallback", failure: `ledger-${stage}:${safeLedgerFailure(error)}` };
 	}
 }
 
-const playwrightWorkers = resolvePlaywrightWorkers();
+const playwrightWorkerResolution = await resolvePlaywrightWorkers();
+console.log(
+	`[browser-v2] Playwright workers=${playwrightWorkerResolution.workers} source=${playwrightWorkerResolution.source}`
+		+ (playwrightWorkerResolution.failure ? ` failure=${playwrightWorkerResolution.failure}` : ""),
+);
+const playwrightWorkers = playwrightWorkerResolution.workers;
 const canonicalBrowserMatches = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
 	.filter(({ semantic }) => semantic === "browser-fixture" || semantic === "browser-journey")
 	.map(({ suffix }) => `**/*${suffix}`);

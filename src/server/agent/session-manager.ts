@@ -1202,6 +1202,20 @@ export interface SessionInfo {
 	lifecycleFenced?: boolean;
 	/** Terminal teardown has closed metadata admission and cancelled RPC retry authority. */
 	terminalMetadataFenced?: boolean;
+	/**
+	 * Bounded, redacted diagnostics for a runtime whose terminal stop could not be
+	 * verified. While present, this SessionInfo remains the authoritative owner and
+	 * must not be untracked or removed from `sessions`.
+	 */
+	terminalCleanupPending?: {
+		phase: "runtime";
+		failedAt: number;
+		attempts: number;
+		runtimeRunning: boolean | undefined;
+		errors: string[];
+	};
+	/** Exact startup owner already proved stopped while crossing terminal admission. */
+	terminalStartupCleanupComplete?: boolean;
 	/** Existing metadata retry delays cancelled by the terminal admission fence. */
 	pendingMetadataRetryCancellations?: Set<() => void>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -3561,6 +3575,29 @@ type PendingVerifierPromptReceipt = {
 	mode: "direct" | "queued" | "busy-recovered";
 };
 
+export const SESSION_STARTUP_SHUTDOWN_CODE = "SESSION_MANAGER_SHUTTING_DOWN";
+
+export class SessionStartupShutdownError extends Error {
+	readonly code = SESSION_STARTUP_SHUTDOWN_CODE;
+
+	constructor() {
+		super("Session manager is shutting down; new session startup is not allowed");
+		this.name = "SessionStartupShutdownError";
+	}
+}
+
+function isSessionStartupShutdownError(error: unknown): error is SessionStartupShutdownError {
+	return error instanceof SessionStartupShutdownError
+		|| (typeof error === "object" && error !== null && (error as { code?: unknown }).code === SESSION_STARTUP_SHUTDOWN_CODE);
+}
+
+type TerminalStartupAttempt = {
+	label: string;
+	settled: Promise<void>;
+};
+
+const TERMINAL_STARTUP_DRAIN_TIMEOUT_MS = 15_000;
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Opaque claims keep lifecycle authority out of route-visible values. */
@@ -3610,6 +3647,11 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private readonly mcpManagerInitializations = new Map<string, Promise<unknown>>();
+	private defaultMcpInitialization: Promise<void> | null = null;
+	private terminalShutdownStarted = false;
+	private shutdownPromise: Promise<void> | null = null;
+	/** Startups admitted before the monotonic terminal latch, including detached worktree setup. */
+	private terminalStartupAttempts = new Set<TerminalStartupAttempt>();
 	/** Exact host discovery coordinate selected after a session worktree is provisioned. */
 	private readonly mcpSessionScopes = new Map<string, { projectId: string; cwd: string; scopeKey: string }>();
 	/** Project sources temporarily withheld while their registered root changes. */
@@ -3744,6 +3786,184 @@ export class SessionManager {
 	/** Clear auto-selection discovery state after configure, refresh, or removal. */
 	invalidateAigwModelCache(): void {
 		this._aigwModelCache = null;
+	}
+
+	/**
+	 * Close session-startup admission synchronously. Gateway shutdown calls this
+	 * before beginning any awaited phase; shutdown() repeats it idempotently.
+	 */
+	beginTerminalShutdown(): void {
+		this.terminalShutdownStarted = true;
+	}
+
+	private assertTerminalStartupAllowed(): void {
+		if (this.terminalShutdownStarted) throw new SessionStartupShutdownError();
+	}
+
+	/**
+	 * Some focused lifecycle fixtures deliberately instantiate the prototype
+	 * without running the constructor. Keep that supported without weakening the
+	 * production latch: the registry is still per-manager and is created before
+	 * an operation can be admitted.
+	 */
+	private terminalStartupRegistry(): Set<TerminalStartupAttempt> {
+		return this.terminalStartupAttempts ??= new Set<TerminalStartupAttempt>();
+	}
+
+	/** Register before invoking operation so even its synchronous prefix is owned. */
+	private trackTerminalStartup<T>(label: string, operation: () => T | Promise<T>): Promise<T> {
+		try {
+			this.assertTerminalStartupAllowed();
+		} catch (error) {
+			return Promise.reject(error);
+		}
+
+		let resolveSettled!: () => void;
+		let rejectSettled!: (error: unknown) => void;
+		const settled = new Promise<void>((resolve, reject) => {
+			resolveSettled = resolve;
+			rejectSettled = reject;
+		});
+		// The barrier is the observer of this promise. Attach an eager rejection
+		// observer as well so a caller-abandoned startup never becomes unhandled.
+		void settled.catch(() => undefined);
+		const attempt: TerminalStartupAttempt = { label, settled };
+		const attempts = this.terminalStartupRegistry();
+		attempts.add(attempt);
+
+		let result: Promise<T>;
+		try {
+			result = Promise.resolve(operation());
+		} catch (error) {
+			result = Promise.reject(error);
+		}
+		void result.then(
+			() => { attempts.delete(attempt); resolveSettled(); },
+			(error) => { attempts.delete(attempt); rejectSettled(error); },
+		);
+		return result;
+	}
+
+	/** Worktree setup deliberately outlives createSession's preparing response. */
+	private trackDetachedTerminalStartup(label: string, operation: Promise<void>): void {
+		let resolveSettled!: () => void;
+		let rejectSettled!: (error: unknown) => void;
+		const settled = new Promise<void>((resolve, reject) => {
+			resolveSettled = resolve;
+			rejectSettled = reject;
+		});
+		void settled.catch(() => undefined);
+		const attempt: TerminalStartupAttempt = { label, settled };
+		const attempts = this.terminalStartupRegistry();
+		attempts.add(attempt);
+		void operation.then(
+			() => { attempts.delete(attempt); resolveSettled(); },
+			(error) => { attempts.delete(attempt); rejectSettled(error); },
+		);
+	}
+
+	private async joinTerminalStartups(): Promise<void> {
+		const failures: Error[] = [];
+		const deadline = this.clock.now() + TERMINAL_STARTUP_DRAIN_TIMEOUT_MS;
+		const attempts = this.terminalStartupRegistry();
+		// An admitted parent (notably createSession's preparing response) may publish
+		// its detached setup owner while this join is already waiting. Admission is
+		// closed, so drain dynamically without polling; an absolute deadline retains
+		// the run root rather than making gateway shutdown wait without bound.
+		while (attempts.size > 0) {
+			const admitted = [...attempts];
+			const remainingMs = Math.max(0, deadline - this.clock.now());
+			if (remainingMs === 0) {
+				throw new Error(
+					`Terminal session startup drain timed out after ${TERMINAL_STARTUP_DRAIN_TIMEOUT_MS}ms; `
+					+ `still admitted: ${admitted.map(attempt => attempt.label).join(", ")}`,
+				);
+			}
+			const results = await new Promise<PromiseSettledResult<void>[]>((resolve, reject) => {
+				let complete = false;
+				let timeout: ReturnType<Clock["setTimeout"]> | undefined;
+				const finish = (outcome: { results?: PromiseSettledResult<void>[]; error?: Error }) => {
+					if (complete) return;
+					complete = true;
+					if (timeout !== undefined) this.clock.clearTimeout(timeout);
+					if (outcome.error) reject(outcome.error);
+					else resolve(outcome.results ?? []);
+				};
+				timeout = this.clock.setTimeout(() => finish({
+					error: new Error(
+						`Terminal session startup drain timed out after ${TERMINAL_STARTUP_DRAIN_TIMEOUT_MS}ms; `
+						+ `still admitted: ${admitted.map(attempt => attempt.label).join(", ")}`,
+					),
+				}), remainingMs);
+				void Promise.allSettled(admitted.map(attempt => attempt.settled))
+					.then(batchResults => finish({ results: batchResults }));
+			});
+			for (let index = 0; index < results.length; index++) {
+				const result = results[index];
+				if (result.status === "fulfilled" || isSessionStartupShutdownError(result.reason)) continue;
+				failures.push(new Error(`Admitted session startup "${admitted[index].label}" failed during terminal drain`, {
+					cause: result.reason,
+				}));
+			}
+		}
+		if (failures.length > 0) {
+			throw new AggregateError(failures, `Terminal session startup drain failed for ${failures.length} admitted operation(s)`);
+		}
+	}
+
+	/**
+	 * A latch-crossing bridge is terminal, not an ordinary restart. Kill and join
+	 * its exact spawn-time owner before allowing the startup attempt to settle.
+	 */
+	private async cleanupTerminalStartupOwner(session: SessionInfo): Promise<void> {
+		try { session.unsubscribe?.(); } catch { /* best-effort listener cleanup */ }
+		try {
+			const cleanup = Promise.resolve(
+				typeof session.rpcClient.terminateOwnedTree === "function"
+					? session.rpcClient.terminateOwnedTree(5_000)
+					: session.rpcClient.stop(),
+			);
+			// A custom bridge can violate the RpcBridge timeout contract. Keep the
+			// gateway barrier bounded anyway; its unresolved owner remains retained.
+			await new Promise<void>((resolve, reject) => {
+				let complete = false;
+				let timeout: ReturnType<Clock["setTimeout"]> | undefined;
+				const finish = (error?: unknown) => {
+					if (complete) return;
+					complete = true;
+					if (timeout !== undefined) this.clock.clearTimeout(timeout);
+					if (error !== undefined) reject(error);
+					else resolve();
+				};
+				timeout = this.clock.setTimeout(
+					() => finish(new Error(`Terminal startup owner ${session.id} cleanup timed out after 5000ms`)),
+					5_000,
+				);
+				void cleanup.then(() => finish(), error => finish(error));
+			});
+		} catch (error) {
+			// Keep exact owner authority reachable for diagnostics and prevent the
+			// ordinary shutdown snapshot from treating it as successfully cleaned.
+			this.sessions.set(session.id, session);
+			throw this.terminalRuntimeCleanupFailure(session, error);
+		}
+		session.terminalStartupCleanupComplete = true;
+		if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+	}
+
+	private async stopSetupOwner(session: SessionInfo): Promise<void> {
+		if (this.terminalShutdownStarted) {
+			if (session.terminalCleanupPending) {
+				throw new AggregateError(
+					session.terminalCleanupPending.errors.map(message => new Error(message)),
+					`Terminal startup owner ${session.id} remains cleanup-pending`,
+				);
+			}
+			await this.cleanupTerminalStartupOwner(session);
+			return;
+		}
+		try { session.unsubscribe?.(); } catch { /* best-effort listener cleanup */ }
+		await session.rpcClient?.stop?.().catch(() => {});
 	}
 
 	private retainSetupInitialThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
@@ -4510,10 +4730,11 @@ export class SessionManager {
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(ps.id, "restore", async () => {
-			await this.restoreSession(ps);
-			return this.sessions.get(ps.id);
-		}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined });
+		return this.trackTerminalStartup(`restore:${ps.id}`, () =>
+			this._coordinateSessionReplacement(ps.id, "restore", async () => {
+				await this.restoreSession(ps);
+				return this.sessions.get(ps.id);
+			}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined }));
 	}
 
 	/**
@@ -6317,6 +6538,9 @@ export class SessionManager {
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts, projectId),
 
 			assertSandboxStartupAllowed: () => this.assertSandboxStartupAllowed(),
+			assertTerminalStartupAllowed: () => this.assertTerminalStartupAllowed(),
+			cleanupTerminalStartupOwner: (session) => this.cleanupTerminalStartupOwner(session),
+			terminalStartupHasBegun: () => this.terminalShutdownStarted,
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
@@ -7083,6 +7307,7 @@ export class SessionManager {
 	}
 
 	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		if (this.terminalShutdownStarted) return null;
 		if (scope?.projectId && this.suspendedMcpProjects.has(scope.projectId)) return null;
 		let cwd = scope?.cwd ? canonicalExecutionCwd(scope.cwd) : undefined;
 		const projectId = scope?.projectId;
@@ -7719,21 +7944,35 @@ export class SessionManager {
 	}
 
 	async initMcp(cwd: string): Promise<void> {
+		if (this.terminalShutdownStarted) return;
+		if (this.defaultMcpInitialization) return this.defaultMcpInitialization;
+		const initialization = this.initMcpOwned(cwd);
+		this.defaultMcpInitialization = initialization;
+		try {
+			await initialization;
+		} finally {
+			if (this.defaultMcpInitialization === initialization) this.defaultMcpInitialization = null;
+		}
+	}
+
+	private async initMcpOwned(cwd: string): Promise<void> {
 		try {
 			const mgr = this.createMcpManager(cwd);
 
 			await mgr.connectAll();
+			if (this.terminalShutdownStarted) {
+				await mgr.disconnectAll();
+				return;
+			}
 			this.mcpManager = mgr;
 
 			if (this.projectContextManager) {
 				for (const ctx of this.projectContextManager.all()) {
-					const key = this.mcpScopeKey({ projectId: ctx.project.id });
-					if (this.scopedMcpManagers.has(key)) continue;
-					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
-					this.scopedMcpManagers.set(key, scoped);
-					await scoped.connectAll();
+					if (this.terminalShutdownStarted) break;
+					await this.ensureMcpManager({ projectId: ctx.project.id, cwd: ctx.project.rootPath });
 				}
 			}
+			if (this.terminalShutdownStarted) return;
 
 			// Register MCP tools with ToolManager across default and scoped managers.
 			this.refreshExternalMcpToolRegistrations();
@@ -7741,6 +7980,7 @@ export class SessionManager {
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
+			if (this.terminalShutdownStarted) throw err;
 		}
 	}
 
@@ -12824,15 +13064,16 @@ export class SessionManager {
 			useRequestedPersistedSnapshot?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
-			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
-				// Owner-sensitive recovery must reach its own serialized admission
-				// check; joining a generic rehydrate would inherit another operation's
-				// replacement without ever proving ownership of its stopped bridge.
-				coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
-				drainOnRelease: opts?.deferQueueDrain !== true,
-				cancelOnTerminal: () => undefined,
-			});
+		return this.trackTerminalStartup(`respawn:${session.id}`, () =>
+			this._coordinateSessionReplacement(session.id, "respawn", (token) =>
+				this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
+					// Owner-sensitive recovery must reach its own serialized admission
+					// check; joining a generic rehydrate would inherit another operation's
+					// replacement without ever proving ownership of its stopped bridge.
+					coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
+					drainOnRelease: opts?.deferQueueDrain !== true,
+					cancelOnTerminal: () => undefined,
+				}));
 	}
 
 	private async _respawnAgentInPlaceOwned(
@@ -12850,6 +13091,7 @@ export class SessionManager {
 		} | undefined,
 		token: SessionReplacementToken,
 	): Promise<SessionInfo | undefined> {
+		this.assertTerminalStartupAllowed();
 		// A role/restart queued ahead of us may already have replaced the object.
 		// Ownership-sensitive recovery must reject at serialized admission instead
 		// of re-resolving and stopping that newer canonical bridge.
@@ -12906,13 +13148,16 @@ export class SessionManager {
 				throw new Error(`Session ${id} respawn replacement was superseded during restore`);
 			}
 		} catch (err) {
-			this.sessions.set(id, session);
-			session.restoreError = err instanceof Error ? err.message : String(err);
-			for (const ws of savedClients) {
-				if ((ws as any).readyState === 1) session.clients.add(ws);
+			const retainedTerminalOwner = this.sessions.get(id);
+			if (!retainedTerminalOwner?.terminalCleanupPending) {
+				this.sessions.set(id, session);
+				session.restoreError = err instanceof Error ? err.message : String(err);
+				for (const ws of savedClients) {
+					if ((ws as any).readyState === 1) session.clients.add(ws);
+				}
+				broadcastStatus(session, "terminated");
+				this._trackConnectedSession(session);
 			}
-			broadcastStatus(session, "terminated");
-			this._trackConnectedSession(session);
 			throw err;
 		} finally {
 			delete (ps as any)._restartFrameOfReference;
@@ -12967,36 +13212,40 @@ export class SessionManager {
 	 * Re-attaches existing WS clients so the user can keep working.
 	 */
 	async restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
-		this.assertSessionGoalPromotionMutationAllowed(sessionId);
-		this._assertModelSelectionReady(sessionId);
-		const session = this.sessions.get(sessionId);
-		if (!session) throw new Error("Session not found");
+		return this.trackTerminalStartup(`restart:${sessionId}`, async () => {
+			this.assertTerminalStartupAllowed();
+			this.assertSessionGoalPromotionMutationAllowed(sessionId);
+			this._assertModelSelectionReady(sessionId);
+			const session = this.sessions.get(sessionId);
+			if (!session) throw new Error("Session not found");
 
-		const ps = this.resolveStoreForSession(session.id).get(session.id);
-		if (!ps) throw new Error("No persisted session data");
+			const ps = this.resolveStoreForSession(session.id).get(session.id);
+			if (!ps) throw new Error("No persisted session data");
 
-		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
-		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
-		// One-time grants authorize only the currently blocked invocation; do not
-		// pre-populate the guard's process-local cache across respawn/refresh.
-		const overrideGrantedTools = savedSessionOnlyGrantedTools;
+			const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
+			const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+			const overrideAllowedTools = await this.recomputeAllowedToolsForRestart(session, ps);
+			// One-time grants authorize only the currently blocked invocation; do not
+			// pre-populate the guard's process-local cache across respawn/refresh.
+			const overrideGrantedTools = savedSessionOnlyGrantedTools;
+			this.assertTerminalStartupAllowed();
 
-		const restored = await this._respawnAgentInPlace(session, ps, {
-			mutatePs: p => {
-				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
-				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
-			},
-			expectedOwner,
-			restartZombieGuard: true,
+			const restored = await this._respawnAgentInPlace(session, ps, {
+				mutatePs: p => {
+					if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+					if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
+				},
+				expectedOwner,
+				restartZombieGuard: true,
+			});
+
+			if (restored) {
+				if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
+				if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
+			} else {
+				throw new Error("Failed to restore session after restart");
+			}
 		});
-
-		if (restored) {
-			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
-			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-		} else {
-			throw new Error("Failed to restore session after restart");
-		}
 	}
 
 	/**
@@ -13190,6 +13439,11 @@ export class SessionManager {
 	async restoreSessions(): Promise<void>;
 	async restoreSessions(suppressedSessionIds: ReadonlySet<string>): Promise<void>;
 	async restoreSessions(suppressedSessionIds: ReadonlySet<string> = new Set()): Promise<void> {
+		return this.trackTerminalStartup("restore-all", () => this.restoreSessionsOwned(suppressedSessionIds));
+	}
+
+	private async restoreSessionsOwned(suppressedSessionIds: ReadonlySet<string>): Promise<void> {
+		this.assertTerminalStartupAllowed();
 		// Initialize search service (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the service and wires callbacks)
 		if (!this.projectContextManager && this._testSearchIndex && this._testStore && this._testGoalManager) {
@@ -13612,6 +13866,9 @@ export class SessionManager {
 			// summary above covers the routine boot case; failures still log loudly.
 			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
 		} catch (err) {
+			// Terminal cancellation and cleanup-proof failures belong to the manager
+			// barrier. Never publish a dormant fallback after admission has closed.
+			if (this.terminalShutdownStarted) throw err;
 			const msg = err instanceof Error ? (err.stack || err.message) : String(err);
 			console.error(`[session-manager] Failed to restore "${ps.title}" (${ps.id}), will retry next restart:`, err);
 			if (err instanceof PromotedSessionLifecycleConflictError) {
@@ -13908,6 +14165,7 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		this.assertTerminalStartupAllowed();
 		// Verifier-owned work is re-driven by VerificationHarness. Reliable user
 		// occurrences are reconciled against their terminal sidecar before install.
 		const preparedRestore = this.preparePersistedIntentRestore(ps);
@@ -14275,6 +14533,7 @@ export class SessionManager {
 			role: ps.role,
 			projectId: ps.projectId,
 		});
+		this.assertTerminalStartupAllowed();
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -14399,11 +14658,14 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 
 		try {
+			this.assertTerminalStartupAllowed();
 			await rpcClient.start();
+			this.assertTerminalStartupAllowed();
 		} catch (err) {
 			// A partially started replacement must never survive a failed restore.
-			// The in-place caller will reinstall only its fenced dormant rollback.
-			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
+			// Terminal shutdown requires exact-tree proof rather than ordinary stop.
+			if (this.terminalShutdownStarted) await this.cleanupTerminalStartupOwner(session);
+			else try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
 			throw err;
 		}
 
@@ -14443,7 +14705,8 @@ export class SessionManager {
 			restoring = false;
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
-			try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
+			if (this.terminalShutdownStarted) await this.cleanupTerminalStartupOwner(session);
+			else try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
 			throw err;
 		}
 
@@ -14451,7 +14714,8 @@ export class SessionManager {
 			await this.tryAutoSelectModel(session);
 		} catch (err) {
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
-			await rpcClient.stop();
+			if (this.terminalShutdownStarted) await this.cleanupTerminalStartupOwner(session);
+			else await rpcClient.stop();
 			throw err;
 		}
 		try {
@@ -14464,7 +14728,8 @@ export class SessionManager {
 				console.warn(`[session-manager] Legacy session ${ps.id} could not verify effective thinking during restore:`, err);
 			} else {
 				try { unsub(); } catch { /* best-effort listener cleanup */ }
-				await rpcClient.stop();
+				if (this.terminalShutdownStarted) await this.cleanupTerminalStartupOwner(session);
+				else await rpcClient.stop();
 				throw err;
 			}
 		}
@@ -14483,7 +14748,8 @@ export class SessionManager {
 			} catch (err) {
 				try { unsub(); } catch { /* best-effort listener cleanup */ }
 				this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
-				await rpcClient.stop().catch(() => {});
+				if (this.terminalShutdownStarted) await this.cleanupTerminalStartupOwner(session);
+				else await rpcClient.stop().catch(() => {});
 				throw err;
 			}
 		}
@@ -14520,6 +14786,12 @@ export class SessionManager {
 
 		// Install the replacement before enabling lifecycle side effects. A replayed
 		// agent_end must never dequeue durable intent against a provisional bridge.
+		try {
+			this.assertTerminalStartupAllowed();
+		} catch (error) {
+			await this.cleanupTerminalStartupOwner(session);
+			throw error;
+		}
 		this.sessions.set(ps.id, session);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
 		// Replay-only keyless guards must not shadow a genuine future prompt once
@@ -14649,7 +14921,7 @@ export class SessionManager {
 			let candidateRestoreStarted = false;
 			try {
 				candidateRestoreStarted = true;
-				await this.restoreSession(replacementPs);
+				await this.trackTerminalStartup(`model-recovery:${sessionId}`, () => this.restoreSession(replacementPs));
 				candidate = this.sessions.get(sessionId);
 				const verifiedModel = `${selectedProvider}/${selectedModelId}`;
 				if (
@@ -14762,6 +15034,12 @@ export class SessionManager {
 	}
 
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+		return this.trackTerminalStartup(`create:${opts?.sessionId ?? "new"}`, () =>
+			this.createSessionOwned(cwd, agentArgs, goalId, assistantType, opts));
+	}
+
+	private async createSessionOwned(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+		this.assertTerminalStartupAllowed();
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -15042,7 +15320,9 @@ export class SessionManager {
 				await this.notifySessionCreated(session, ctx.store);
 			} catch (err) {
 				const persistenceError = err instanceof Error ? err : new Error(String(err));
-				handleSetupFailure(session, plan, persistenceError, ctx);
+				const cleanup = handleSetupFailure(session, plan, persistenceError, ctx);
+				if (this.terminalShutdownStarted) await cleanup;
+				else void cleanup.catch(() => undefined);
 				throw persistenceError;
 			}
 
@@ -15069,26 +15349,26 @@ export class SessionManager {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}));
 			}).catch(async (error) => {
-				try { session.unsubscribe?.(); } catch { /* best-effort */ }
-				await session.rpcClient?.stop?.().catch(() => {});
+				await this.stopSetupOwner(session);
 				try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
-				await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+				const releaseRuntime = this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId);
+				if (this.terminalShutdownStarted) await releaseRuntime;
+				else await releaseRuntime.catch(() => false);
 				throw error;
 			}).finally(releaseSetupThinkingAuthority);
+			const setupCompletion = setupPromise.catch(async (err) => {
+				const setupError = err instanceof Error ? err : new Error(String(err));
+				const cleanup = handleSetupFailure(session, plan, setupError, ctx);
+				if (this.terminalShutdownStarted) await cleanup;
+				else void cleanup.catch(() => undefined);
+				throw setupError;
+			});
+			this.trackDetachedTerminalStartup(`worktree:${id}`, setupCompletion);
 
 			if (opts?.awaitWorktreeSetup) {
-				try {
-					await setupPromise;
-				} catch (err) {
-					const setupError = err instanceof Error ? err : new Error(String(err));
-					handleSetupFailure(session, plan, setupError, ctx);
-					throw setupError;
-				}
+				await setupCompletion;
 			} else {
-				setupPromise.catch((err) => {
-					const setupError = err instanceof Error ? err : new Error(String(err));
-					handleSetupFailure(session, plan, setupError, ctx);
-				});
+				void setupCompletion.catch(() => undefined);
 			}
 
 			return session;
@@ -15167,7 +15447,9 @@ export class SessionManager {
 				await this.notifySessionCreated(session, ctx.store);
 			} catch (err) {
 				const persistenceError = err instanceof Error ? err : new Error(String(err));
-				handleSetupFailure(session, plan, persistenceError, ctx);
+				const cleanup = handleSetupFailure(session, plan, persistenceError, ctx);
+				if (this.terminalShutdownStarted) await cleanup;
+				else void cleanup.catch(() => undefined);
 				throw persistenceError;
 			}
 
@@ -15183,10 +15465,11 @@ export class SessionManager {
 			return session;
 		} catch (error) {
 			const failedSession = this.sessions.get(id);
-			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
-			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			if (failedSession) await this.stopSetupOwner(failedSession);
 			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
-			await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			const releaseRuntime = this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId);
+			if (this.terminalShutdownStarted) await releaseRuntime;
+			else await releaseRuntime.catch(() => false);
 			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
@@ -15199,7 +15482,11 @@ export class SessionManager {
 	 * After creation, the instructions are automatically sent as the first prompt.
 	 * Returns the session info immediately (the prompt runs asynchronously).
 	 */
-	async createDelegateSession(parentSessionId: string, opts: {
+	async createDelegateSession(parentSessionId: string, opts: Parameters<SessionManager["createDelegateSessionOwned"]>[1]): Promise<SessionInfo> {
+		return this.trackTerminalStartup(`delegate:${parentSessionId}`, () => this.createDelegateSessionOwned(parentSessionId, opts));
+	}
+
+	private async createDelegateSessionOwned(parentSessionId: string, opts: {
 		instructions: string;
 		cwd: string;
 		title?: string;
@@ -15255,6 +15542,7 @@ export class SessionManager {
 		source?: PromptSource;
 		author?: MessageAuthor;
 	}): Promise<SessionInfo> {
+		this.assertTerminalStartupAllowed();
 		const id = randomUUID();
 		// Resolve projectId from parent session
 		const parentStore = this.resolveStoreForId(parentSessionId);
@@ -15418,10 +15706,11 @@ export class SessionManager {
 			}
 		} catch (error) {
 			const failedSession = this.sessions.get(id);
-			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
-			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			if (failedSession) await this.stopSetupOwner(failedSession);
 			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
-			await this.releaseSessionExecutionRuntime(parentProjectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			const releaseRuntime = this.releaseSessionExecutionRuntime(parentProjectId, id, plan.bridgeOptions.containerId);
+			if (this.terminalShutdownStarted) await releaseRuntime;
+			else await releaseRuntime.catch(() => false);
 			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
@@ -15456,6 +15745,7 @@ export class SessionManager {
 		// Preserve an authenticated owner's identity for orchestration-created
 		// delegates. Direct/server-created delegates omit provenance and remain
 		// system-authored; sendDelegatePrompt validates the pair fail-closed.
+		this.assertTerminalStartupAllowed();
 		try {
 			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
 				source: opts.source,
@@ -18474,7 +18764,12 @@ export class SessionManager {
 		let bridgeStopError: unknown;
 		let stop: Promise<void>;
 		try {
-			stop = Promise.resolve(session.rpcClient.stop()).catch((error) => {
+			// Production RpcBridge exposes the stronger spawn-time-owned tree proof.
+			// Custom/in-process bridges retain their established stop seam.
+			const terminalStop = typeof session.rpcClient.terminateOwnedTree === "function"
+				? session.rpcClient.terminateOwnedTree.bind(session.rpcClient)
+				: session.rpcClient.stop.bind(session.rpcClient);
+			stop = Promise.resolve(terminalStop()).catch((error) => {
 				bridgeStopError = error;
 			});
 		} catch (error) {
@@ -18488,6 +18783,28 @@ export class SessionManager {
 			stop,
 		]);
 		return bridgeStopError;
+	}
+
+	/** Retain the exact SessionInfo owner with bounded, credential-safe diagnostics. */
+	private terminalRuntimeCleanupFailure(
+		session: SessionInfo,
+		error: unknown,
+		attempts = 1,
+	): AggregateError {
+		const errors = [error].map((reason) => redactSensitive(
+			reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
+		).slice(0, 500));
+		session.terminalCleanupPending = {
+			phase: "runtime",
+			failedAt: this.clock.now(),
+			attempts,
+			runtimeRunning: session.rpcClient.running,
+			errors,
+		};
+		return new AggregateError(
+			errors.map((message) => new Error(message)),
+			`Session ${session.id} runtime cleanup remains pending after ${attempts} bounded terminal attempt(s); owner retained (running=${String(session.rpcClient.running)})`,
+		);
 	}
 
 	/**
@@ -18527,6 +18844,8 @@ export class SessionManager {
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
 		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+		if (bridgeStopError) throw this.terminalRuntimeCleanupFailure(session, bridgeStopError);
+		session.terminalCleanupPending = undefined;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
 		}
@@ -18571,9 +18890,6 @@ export class SessionManager {
 		this._taskIdCache.delete(id);
 		try { await this.cleanupScopedMcpManagersForSessionScope(scope, id); } catch { /* runtime authority is already removed */ }
 		await this.dispatchSessionShutdownInterceptor(session, "quiesced");
-		if (bridgeStopError) {
-			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
-		}
 		return true;
 	}
 
@@ -18677,7 +18993,8 @@ export class SessionManager {
 		// cancellation behind an unresponsive metadata RPC. The snapshotted lane is
 		// joined before any archive or project-context removal can proceed.
 		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-		if (bridgeStopError) throw bridgeStopError;
+		if (bridgeStopError) throw this.terminalRuntimeCleanupFailure(session, bridgeStopError);
+		session.terminalCleanupPending = undefined;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} termination was superseded after bridge stop`);
 		}
@@ -20985,7 +21302,21 @@ export class SessionManager {
 	}
 
 	async shutdown(): Promise<void> {
-		await this.stopPurgeSchedule();
+		this.beginTerminalShutdown();
+		if (!this.shutdownPromise) {
+			this.shutdownPromise = this.shutdownOwned();
+		}
+		return this.shutdownPromise;
+	}
+
+	private async shutdownOwned(): Promise<void> {
+		const failures: Array<{ phase: string; reason: unknown }> = [];
+		const run = async (phase: string, operation: () => void | Promise<void>): Promise<void> => {
+			try { await operation(); }
+			catch (reason) { failures.push({ phase, reason }); }
+		};
+
+		await run("purge-schedule", () => this.stopPurgeSchedule());
 		if (this.mcpReconcileTimer) {
 			this.clock.clearInterval(this.mcpReconcileTimer);
 			this.mcpReconcileTimer = null;
@@ -20997,6 +21328,10 @@ export class SessionManager {
 			this._statusHeartbeatTimer = null;
 		}
 
+		// Admission was closed synchronously before this async teardown began. Join
+		// every operation admitted on the open side before taking the owner snapshot.
+		await run("session-startup-drain", () => this.joinTerminalStartups());
+
 		// Don't remove from store on shutdown — sessions should survive restart.
 		// Persist the active/busy state for each session so interrupted agents
 		// can be re-driven on the next startup. The durable field is still named
@@ -21007,11 +21342,14 @@ export class SessionManager {
 			const session = this.sessions.get(id);
 			if (!session) continue;
 
-			this.clearToolCallProvenance(session);
+			await run(`session:${id}:tool-provenance`, () => this.clearToolCallProvenance(session));
 			// Fence lifecycle admission before the first per-session await, then retain
 			// the complete already-admitted metadata lane for the stop barrier below.
-			const metadataOwner = this.fenceTerminalMetadataAdmission(session);
-			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
+			let metadataOwner: Promise<void> | undefined;
+			await run(`session:${id}:metadata-fence`, () => {
+				metadataOwner = this.fenceTerminalMetadataAdmission(session);
+			});
+			await run(`session:${id}:extension-channels`, () => this.closeExtensionChannelsForSession(id, "gateway-shutdown"));
 
 			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
@@ -21020,35 +21358,87 @@ export class SessionManager {
 			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
 			const store = this.resolveExistingStoreForShutdown(session);
 			if (store) {
-				store.update(id, {
+				await run(`session:${id}:persist-restart-state`, () => store.update(id, {
 					wasStreaming: needsRestartRedrive,
 					streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
-				});
+				}));
 			}
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are
 			// closing in shutdown so suppress the cancellation broadcast.
-			this.cancelPendingAutoRetry(session, "shutdown");
+			await run(`session:${id}:auto-retry`, () => this.cancelPendingAutoRetry(session, "shutdown"));
 
-			// Start stop alongside the final state request so process exit cancels any
-			// unresponsive metadata RPC. Durable work is still joined before the store
-			// flush and project-context teardown below.
+			// A startup cleanup proof may already have failed while the admission drain
+			// ran. Retain that exact owner and diagnostic; never issue a second kill.
+			if (session.terminalCleanupPending) {
+				failures.push({
+					phase: `session:${id}:runtime`,
+					reason: new AggregateError(
+						session.terminalCleanupPending.errors.map(message => new Error(message)),
+						`Session ${id} terminal cleanup remains unverified`,
+					),
+				});
+				continue;
+			}
+
+			// Production bridges request one owned-tree kill and join its bounded
+			// completion proof. A failed proof retains the exact SessionInfo owner;
+			// unrelated shutdown phases continue through the all-settled collector.
 			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-			if (bridgeStopError) throw bridgeStopError;
+			if (bridgeStopError) {
+				failures.push({
+					phase: `session:${id}:runtime`,
+					reason: this.terminalRuntimeCleanupFailure(session, bridgeStopError),
+				});
+				continue;
+			}
+			session.terminalCleanupPending = undefined;
+
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
 
 			for (const client of session.clients) {
-				client.close(1000, "Server shutting down");
+				await run(`session:${id}:client`, () => client.close(1000, "Server shutting down"));
 			}
 			session.clients.clear();
-			this._untrackConnectedSession(session);
+			await run(`session:${id}:untrack`, () => this._untrackConnectedSession(session));
 			this.sessions.delete(id);
 			this._taskIdCache.delete(id);
 		}
-		this._taskIdCache.clear();
+		// Do not globally clear task ownership while a cleanup-pending session is
+		// retained. Successfully finalized sessions were removed individually above.
+		if (this.sessions.size === 0) this._taskIdCache.clear();
+
+		// A manager can be shared by more than one scope. Join every already-started
+		// initialization, then disconnect each unique owner exactly once before any
+		// store is closed. This is terminal-only; ordinary gateway restarts still
+		// preserve durable sessions and worktree ownership above.
+		const initializations = [
+			...(this.defaultMcpInitialization ? [this.defaultMcpInitialization] : []),
+			...(this.mcpManagerInitializations?.values() ?? []),
+		];
+		const initializationResults = await Promise.allSettled(initializations);
+		for (const result of initializationResults) {
+			if (result.status === "rejected") failures.push({ phase: "mcp-initialization", reason: result.reason });
+		}
+		this.defaultMcpInitialization = null;
+		// Shutdown may be asked to drain a partially initialized instance. Only
+		// disconnect-capable values represent MCP process ownership.
+		const mcpManagers = new Set<McpManager>(
+			[this.mcpManager, ...(this.scopedMcpManagers?.values() ?? [])]
+				.filter((manager): manager is McpManager => typeof manager?.disconnectAll === "function"),
+		);
+		this.mcpManager = null;
+		this.scopedMcpManagers?.clear();
+		this.mcpManagerInitializations?.clear();
+		this.mcpSessionScopes?.clear();
+		const mcpResults = await Promise.allSettled([...mcpManagers].map((manager) => manager.disconnectAll()));
+		for (const result of mcpResults) {
+			if (result.status === "rejected") failures.push({ phase: "mcp-disconnect", reason: result.reason });
+		}
+		await run("mcp-tool-registrations", () => this.refreshExternalMcpToolRegistrations());
 
 		// Persist the trailing debounced cost window before contexts are closed.
 		// `flush()` is idempotent, so ProjectContext.close() may safely repeat it.
@@ -21098,9 +21488,16 @@ export class SessionManager {
 			const results = await Promise.allSettled(stores.map((store) => store.close()));
 			for (const result of results) {
 				if (result.status === "rejected") {
-					console.error("[session-manager] Failed to close test fallback store:", result.reason);
+					failures.push({ phase: "test-fallback-store", reason: result.reason });
 				}
 			}
+		}
+
+		if (failures.length > 0) {
+			throw new AggregateError(
+				failures.map(({ phase, reason }) => new Error(`Session manager shutdown phase "${phase}" failed`, { cause: reason })),
+				`Session manager shutdown failed in ${failures.length} phase(s): ${failures.map(({ phase }) => phase).join(", ")}`,
+			);
 		}
 	}
 }

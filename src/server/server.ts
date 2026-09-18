@@ -2315,6 +2315,68 @@ export function createGatewayShutdownOnce(): (shutdown: () => Promise<void>) => 
 	return shutdown => (once ??= shutdown());
 }
 
+export interface GatewayShutdownPhase {
+	name: string;
+	run(): void | Promise<void>;
+}
+
+/** Observe an eagerly started phase now while retaining its outcome for the ordered shutdown join. */
+export function observeDeferredShutdownPhase(operation: Promise<void>): Promise<void> {
+	void operation.catch(() => {});
+	return operation;
+}
+
+/** Run every teardown phase in order, then surface all failures together. */
+export async function runGatewayShutdownPhases(phases: readonly GatewayShutdownPhase[]): Promise<void> {
+	const failures: Array<{ name: string; reason: unknown }> = [];
+	for (const phase of phases) {
+		try {
+			await phase.run();
+		} catch (reason) {
+			failures.push({ name: phase.name, reason });
+		}
+	}
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures.map(({ name, reason }) => new Error(`Gateway shutdown phase "${name}" failed`, { cause: reason })),
+			`Gateway shutdown failed in ${failures.length} phase(s): ${failures.map(({ name }) => name).join(", ")}`,
+		);
+	}
+}
+
+interface CallbackCloseable {
+	close(callback: (error?: Error) => void): void;
+}
+
+function awaitCloseCallback(owner: string, closeable: CallbackCloseable): Promise<void> {
+	return new Promise((resolve, reject) => {
+		try {
+			closeable.close((error?: Error) => {
+				if (error) reject(new Error(`${owner} listener close failed`, { cause: error }));
+				else resolve();
+			});
+		} catch (error) {
+			reject(new Error(`${owner} listener close failed`, { cause: error }));
+		}
+	});
+}
+
+/** Start both listener closes immediately and settle only after both callbacks fire. */
+export async function closeGatewayListeners(
+	httpListener: CallbackCloseable,
+	webSocketListener: CallbackCloseable,
+): Promise<void> {
+	const results = await Promise.allSettled([
+		awaitCloseCallback("HTTP", httpListener),
+		awaitCloseCallback("WebSocket", webSocketListener),
+	]);
+	const errors = results
+		.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+		.map(result => result.reason);
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "HTTP and WebSocket listener close failed");
+}
+
 const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
 
 type ShutdownOperationResult =
@@ -5294,7 +5356,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		gatewayReady = false;
 		requestAdmissionPolicy = undefined;
 		if (!server.listening) return;
-		await new Promise<void>((resolve) => server.close(() => resolve()));
+		await closeGatewayListeners(server, wss);
 	};
 
 	const bindGatewayServer = async (): Promise<number> => {
@@ -5874,60 +5936,67 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		shutdown() {
 			return shutdownOnce(async () => {
+				// Close session-startup admission before listener closure or any awaited
+				// teardown phase. Existing WebSocket clients retain their established
+				// closure order, but can no longer publish a late runtime owner.
+				sessionManager.beginTerminalShutdown();
 				const shutdownStart = Date.now();
 				bootMark(`SHUTDOWN ${new Date().toISOString()}`);
 				// Phase timer: log each teardown phase so a slow shutdown is diagnosable
 				// from the logs without a profiler. Cheap (Date.now + one appended line).
 				const phase = makePhaseTimer("[shutdown]");
-				try {
-					// Stop accepting NEW connections AND forcibly terminate existing
-					// keep-alive connections BEFORE we tear down the state stores.
-					// Without this, an HTTP/1.1 keep-alive connection from the client
-					// can still deliver a request to handleApiRoute mid-shutdown (e.g.
-					// during the awaits below), after projectContextManager.closeAll()
-					// has emptied the contexts map — producing spurious `Goal "X" not
-					// found in any project` errors. It also matters for the test
-					// crash/restart path: a stale keep-alive connection on the OLD
-					// server's accept() fd survives port reuse and routes new requests
-					// to the OLD (already torn down) handler closure. Forcibly closing
-					// connections forces clients to reconnect to the NEW server.
-					try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
-					server.close();
-					gatewayDeps.clock.clearInterval(cleanupInterval);
-					triggerEngine.stop();
-					inboxNudger.stop();
-					notificationStaffDispatcher.stop();
-					wss.close();
+				// Stop accepting NEW connections immediately, but do not await WebSocket
+				// closure until session teardown has closed the tracked clients. Observe a
+				// fast close failure now so it cannot escape before the listeners phase.
+				const listenerClose = observeDeferredShutdownPhase(closeBoundServer());
+				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
+				const phases: GatewayShutdownPhase[] = [
+					{ name: "cleanup-schedule", run: () => gatewayDeps.clock.clearInterval(cleanupInterval) },
+					{ name: "trigger-engine", run: () => triggerEngine.stop() },
+					{ name: "inbox-nudger", run: () => inboxNudger.stop() },
+					{ name: "notification-staff", run: () => notificationStaffDispatcher.stop() },
 					// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
 					// and await them before tearing down stores or allowing restart.
-					await phase("oauth-flows", () => shutdownOAuthFlows());
-					if (bootBackgroundTask) {
-						await phase("boot-background", () => bootBackgroundTask!);
-					}
+					{ name: "oauth-flows", run: () => phase("oauth-flows", () => shutdownOAuthFlows()) },
+					...(bootBackgroundTask
+						? [{ name: "boot-background", run: () => phase("boot-background", () => bootBackgroundTask!) }]
+						: []),
 					// Retain ready entries and durably publish their exact ownership so a
 					// later gateway can revalidate and reuse them. Explicit project removal
 					// remains the destructive drain path.
-					await phase("worktree-pools", () => stopWorktreePoolsForShutdown(
-						sessionManager.getAllWorktreePools(),
-						sessionManager.getWorktreePoolRecordStore(),
-					));
-					await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
-					await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
-					shutdownEventLoopLagMonitor();
-					try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-					await phase("session-manager", () => sessionManager.shutdown());
-					const ownedTaskStore = standaloneTaskStore;
-					if (ownedTaskStore) {
-						await phase("standalone-task-store", () => ownedTaskStore.close());
-					}
-					await phase("project-contexts", () => projectContextManager.closeAll());
-					if (sandboxManager) {
-						await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
-					}
-					await phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork());
+					{
+						name: "worktree-pools",
+						run: () => phase("worktree-pools", () => stopWorktreePoolsForShutdown(
+							sessionManager.getAllWorktreePools(),
+							sessionManager.getWorktreePoolRecordStore(),
+						)),
+					},
+					{ name: "extension-channels", run: () => phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown")) },
+					{ name: "cpu-diagnostics", run: () => phase("cpu-diagnostics", () => shutdownCpuDiagnostics()) },
+					{ name: "event-loop-monitor", run: () => shutdownEventLoopLagMonitor() },
+					{ name: "verification-harness", run: () => verificationHarness?.shutdown() },
+					{ name: "session-manager", run: () => phase("session-manager", () => sessionManager.shutdown()) },
+					...(standaloneTaskStore
+						? [{ name: "standalone-task-store", run: () => phase("standalone-task-store", () => standaloneTaskStore!.close()) }]
+						: []),
+					{ name: "project-contexts", run: () => phase("project-contexts", () => projectContextManager.closeAll()) },
+					...(sandboxManager
+						? [{ name: "sandbox-manager", run: () => phase("sandbox-manager", () => sandboxManager!.shutdownAll()) }]
+						: []),
+					{ name: "sandbox-network", run: () => phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork()) },
+					{
+						name: "websocket-clients",
+						run: () => {
+							for (const client of wss.clients) client.terminate();
+						},
+					},
+					{ name: "listeners", run: () => phase("listeners", () => listenerClose) },
+				];
+				try {
+					await runGatewayShutdownPhases(phases);
 					bootLog(`[shutdown] complete in ${Date.now() - shutdownStart}ms`);
 				} catch (err) {
-					bootLog(`[shutdown] aborted after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
+					bootLog(`[shutdown] failed after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
 					throw err;
 				} finally {
 					restoreExplicitRpcBridgeFactory();

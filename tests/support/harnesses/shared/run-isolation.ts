@@ -19,6 +19,7 @@ import {
   sanitizeTestEnvironment,
   setEnvironmentValue,
 } from "../../../../scripts/testing-v2/environment-policy.mjs";
+import { removeOwnedPath } from "../../../../scripts/testing-v2/owned-path-cleanup.mjs";
 
 export {
   CREDENTIAL_ENV_EXACT_NAMES,
@@ -191,11 +192,16 @@ export function createRunArtifactDirectory(name: string): string {
   return canonicalDirectory(artifactDir);
 }
 
-export function removeOwnedRunChild(candidate: string): void {
+export async function removeOwnedRunChild(
+  candidate: string,
+  lifecycle: Record<string, unknown> = {},
+): Promise<void> {
   const root = getRunRoot();
-  if (!isOwnedRunChild(root, candidate))
-    throw new Error(`refusing to remove non-owned test path: ${candidate}`);
-  rmSync(candidate, { recursive: true, force: true });
+  await removeOwnedPath(candidate, {
+    ownerRoot: root,
+    owner: { kind: "worker", id: String(process.pid) },
+    lifecycle,
+  });
 }
 
 /** The Playwright browser registry derived from an unredirected user environment. */

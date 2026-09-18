@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import WebSocket from "ws";
+import { spawnTracked, type TrackedChild } from "../../../../../src/server/agent/spawn-tree.js";
 
 export interface CommandResult {
 	command: string;
@@ -12,6 +13,8 @@ export interface CommandResult {
 	stdout: string;
 	stderr: string;
 }
+
+export type PackagedProcessTreeAuthority = Pick<TrackedChild, "killTree" | "ownershipReady" | "waitForTreeExit">;
 
 export interface RunningCli {
 	child: ChildProcess;
@@ -27,6 +30,26 @@ export interface RunningCli {
 	posixGroupOwned: boolean;
 	/** A final POSIX group signal was dispatched at the root-exit boundary. */
 	finalTreeSignalSent: boolean;
+	/** Spawn-time process-tree authority. Absent only for raw lifecycle fixtures. */
+	trackedAuthority?: PackagedProcessTreeAuthority;
+	/** Coalesces repeated teardown onto one owned tree-close request and result. */
+	trackedStop?: Promise<void>;
+	/** Retains an asynchronous spawn failure for readiness diagnostics. */
+	spawnError?: Error;
+}
+
+export interface StopPackagedCliOptions {
+	/** Test seam: production teardown retains the existing graceful window. */
+	gracefulStopTimeoutMs?: number;
+	/** Test seam: bounds tree-exit and ChildProcess.close proof after escalation. */
+	forceStopTimeoutMs?: number;
+}
+
+export interface PackagedRuntimeFinalizationOptions {
+	runtime?: RunningCli;
+	bodyFailure?: { reason: unknown };
+	report: () => Promise<void>;
+	stopOptions?: StopPackagedCliOptions;
 }
 
 const PACKED_THEME_HTML = `<!doctype html>
@@ -287,7 +310,7 @@ export function startPackagedCli(options: {
 	const stdout: string[] = [];
 	const stderr: string[] = [];
 	const home = join(options.consumerDir, "home");
-	const child = spawn(process.execPath, [
+	const tracked = spawnTracked(process.execPath, [
 		options.cliPath,
 		"--cwd", options.workspaceDir,
 		"--host", "127.0.0.1",
@@ -311,16 +334,16 @@ export function startPackagedCli(options: {
 			USERPROFILE: home,
 		},
 		windowsHide: true,
-		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	return capturePackagedCli(child, stdout, stderr);
+	return capturePackagedCli(tracked.child, stdout, stderr, tracked);
 }
 
 export function capturePackagedCli(
 	child: ChildProcess,
 	stdout: string[] = [],
 	stderr: string[] = [],
+	trackedAuthority?: PackagedProcessTreeAuthority,
 ): RunningCli {
 	const runtime: RunningCli = {
 		child,
@@ -331,9 +354,11 @@ export function capturePackagedCli(
 		shutdownStarted: false,
 		posixGroupOwned: false,
 		finalTreeSignalSent: false,
+		trackedAuthority,
 	};
 	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
 	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	child.once("error", error => { runtime.spawnError = error; });
 	// `exit` is the numeric PID/PGID ownership boundary. If graceful teardown
 	// began while the detached POSIX root was alive, finish reaping its still-live
 	// group immediately here; a delayed negative-PID signal could hit a reused ID.
@@ -349,8 +374,51 @@ export function capturePackagedCli(
 	return runtime;
 }
 
+async function joinPackagedOwnership(runtime: RunningCli, deadline: number): Promise<void> {
+	const ownershipReady = runtime.trackedAuthority?.ownershipReady;
+	if (!ownershipReady) return;
+	const remainingMs = Math.max(0, deadline - Date.now());
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	let removeLifecycleListeners = () => {};
+	const rootFailure = new Promise<never>((_resolve, reject) => {
+		const failForExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			reject(new Error(`root process exited before ownership readiness (code=${code ?? "null"}; signal=${signal ?? "null"})`));
+		};
+		const failForError = (error: Error) => {
+			reject(new Error(`root process errored before ownership readiness: ${error.message}`, { cause: error }));
+		};
+		runtime.child.once("exit", failForExit);
+		runtime.child.once("error", failForError);
+		removeLifecycleListeners = () => {
+			runtime.child.removeListener("exit", failForExit);
+			runtime.child.removeListener("error", failForError);
+		};
+		// Close the registration race if the process settled immediately before the
+		// listeners above were installed.
+		if (runtime.spawnError) failForError(runtime.spawnError);
+		else if (rootExited(runtime)) failForExit(runtime.child.exitCode, runtime.child.signalCode);
+	});
+	try {
+		await Promise.race([
+			ownershipReady,
+			rootFailure,
+			new Promise<never>((_resolve, reject) => {
+				// Keep this timer referenced: a Promise is not an event-loop owner, so
+				// the readiness deadline must remain live even after an early root exit.
+				timeout = setTimeout(() => reject(new Error("ownership readiness timed out")), remainingMs);
+			}),
+		]);
+	} catch (error) {
+		throw processFailure(runtime, `failed before ownership readiness: ${String(error)}`);
+	} finally {
+		removeLifecycleListeners();
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
 export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeoutMs = 60_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
+	await joinPackagedOwnership(runtime, deadline);
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) {
@@ -380,7 +448,9 @@ function signalOwnedTree(runtime: RunningCli, signal: NodeJS.Signals): boolean {
 	const child = runtime.child;
 	if (!child.pid) return false;
 	if (process.platform === "win32") {
-		killTree(child, signal);
+		// Raw fixtures have no spawn-time Job authority. Target only the still-live
+		// ChildProcess handle; actual packaged launches use spawnTracked above.
+		try { child.kill(signal); } catch { /* root exited between observations */ }
 		return true;
 	}
 	try {
@@ -435,31 +505,125 @@ function releaseChildStdio(child: ChildProcess): void {
 	try { child.unref(); } catch { /* child may have exited between checks */ }
 }
 
-export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
+function waitForTrackedTreeExit(authority: PackagedProcessTreeAuthority, timeoutMs: number): Promise<boolean> {
+	return new Promise((resolveCompletion, rejectCompletion) => {
+		let settled = false;
+		const finish = (result: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			resolveCompletion(result);
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			rejectCompletion(error);
+		};
+		const timeout = setTimeout(() => finish(false), timeoutMs);
+		void Promise.resolve().then(() => authority.waitForTreeExit(timeoutMs)).then(finish, fail);
+	});
+}
+
+function stopTrackedPackagedCli(
+	runtime: RunningCli,
+	gracefulStopTimeoutMs: number,
+	forceStopTimeoutMs: number,
+): Promise<void> {
+	if (runtime.trackedStop) return runtime.trackedStop;
+	const authority = runtime.trackedAuthority!;
+	const completionTimeoutMs = gracefulStopTimeoutMs + forceStopTimeoutMs;
+	runtime.trackedStop = Promise.resolve().then(async () => {
+		await joinPackagedOwnership(runtime, Date.now() + completionTimeoutMs);
+		runtime.shutdownStarted = true;
+		authority.killTree("SIGTERM", gracefulStopTimeoutMs);
+		let treeExited: boolean;
+		let closed: boolean;
+		try {
+			[treeExited, closed] = await Promise.all([
+				waitForTrackedTreeExit(authority, completionTimeoutMs),
+				waitForChildClose(runtime, completionTimeoutMs),
+			]);
+		} catch (error) {
+			releaseChildStdio(runtime.child);
+			throw processFailure(runtime, `tree completion failed: ${String(error)}`);
+		}
+		if (!treeExited || !closed || !runtime.closed) {
+			releaseChildStdio(runtime.child);
+			throw processFailure(runtime, !treeExited
+				? `tree completion was not verified within ${completionTimeoutMs}ms`
+				: `tree completion was reported without ChildProcess close within ${completionTimeoutMs}ms`);
+		}
+	});
+	return runtime.trackedStop;
+}
+
+export async function stopPackagedCli(
+	runtime: RunningCli,
+	options: StopPackagedCliOptions = {},
+): Promise<void> {
+	const gracefulStopTimeoutMs = options.gracefulStopTimeoutMs ?? PACKAGED_CLI_TERM_GRACE_MS;
+	const forceStopTimeoutMs = options.forceStopTimeoutMs ?? PACKAGED_CLI_FORCED_CLOSE_WAIT_MS;
+	if (runtime.trackedAuthority) {
+		return stopTrackedPackagedCli(runtime, gracefulStopTimeoutMs, forceStopTimeoutMs);
+	}
 	if (runtime.closed) return;
 	const child = runtime.child;
-	// Root exit is a hard identity boundary. Windows cannot safely retarget a
-	// departed root PID, and a late POSIX PGID action can reach an unrelated group.
+	// Root exit is a hard identity boundary. Release inherited streams only for
+	// containment, then fail closed: neither PID/PGID reuse nor pipe destruction
+	// is proof that the raw fixture's process tree terminated.
 	if (rootExited(runtime)) {
 		releaseChildStdio(child);
-		return;
+		throw processFailure(runtime, "root exited before ChildProcess close; process-tree completion is unverified");
 	}
 
-	// POSIX children are detached process-group leaders. Start graceful cleanup
-	// while the root identity is owned. If it exits before pipes close, the exit
-	// handler completes the one allowed final group signal at that boundary.
-	// On Windows taskkill /T /F is likewise initiated only while the root is live.
+	// Raw fixture children retain the legacy owned-root signal path. Actual packed
+	// CLI launches always use spawnTracked and never depend on this weaker seam.
 	runtime.shutdownStarted = signalOwnedTree(runtime, "SIGTERM");
-	if (await waitForChildClose(runtime, PACKAGED_CLI_TERM_GRACE_MS)) return;
+	if (await waitForChildClose(runtime, gracefulStopTimeoutMs)) return;
 	if (!rootExited(runtime) && process.platform !== "win32") {
 		signalOwnedTree(runtime, "SIGKILL");
 		runtime.finalTreeSignalSent = true;
 	}
-	if (await waitForChildClose(runtime, PACKAGED_CLI_FORCED_CLOSE_WAIT_MS)) return;
+	if (await waitForChildClose(runtime, forceStopTimeoutMs)) return;
 
 	// Pipe release is containment only, not proof of process termination. Never
 	// issue a numeric PID/PGID action after the root exit identity boundary.
 	releaseChildStdio(child);
+	throw processFailure(runtime, `ChildProcess close was not observed within ${gracefulStopTimeoutMs + forceStopTimeoutMs}ms`);
+}
+
+function cleanupStageFailure(label: string, reason: unknown): Error {
+	const detail = reason instanceof Error ? reason.message : String(reason);
+	return new Error(`${label} failed: ${detail}`, { cause: reason });
+}
+
+/** Stop the packaged owner, then attach diagnostics before surfacing failures. */
+export async function finalizePackagedRuntime(options: PackagedRuntimeFinalizationOptions): Promise<void> {
+	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	if (options.runtime) {
+		const [stopResult] = await Promise.allSettled([
+			stopPackagedCli(options.runtime, options.stopOptions),
+		]);
+		if (stopResult.status === "rejected") {
+			failures.push(cleanupStageFailure("packaged CLI stop", stopResult.reason));
+		}
+	}
+	try {
+		await options.report();
+	} catch (error) {
+		failures.push(cleanupStageFailure("packaged runtime report", error));
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "packaged runtime finalization failed");
+}
+
+export function processFailure(runtime: RunningCli, message: string): Error {
+	return new Error(
+		`packaged CLI ${message}; exited=${runtime.exited}; closed=${runtime.closed}; shutdownStarted=${runtime.shutdownStarted}`
+		+ `; posixGroupOwned=${runtime.posixGroupOwned}; finalTreeSignalSent=${runtime.finalTreeSignalSent}`
+		+ `\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`,
+	);
 }
 
 export async function readToken(secretsDir: string): Promise<string> {

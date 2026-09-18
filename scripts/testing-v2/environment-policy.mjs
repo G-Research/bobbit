@@ -61,6 +61,9 @@ export const AMBIENT_BOBBIT_RUNTIME_ENV_NAMES = new Set([
   "BOBBIT_SESSION_ID",
   "BOBBIT_SESSION_SECRET",
   "BOBBIT_GH_COMMAND",
+  // Published only by an E2E coordinator after it has prepared the real packed
+  // artifact below its own run root. A host value is never a valid handoff.
+  "BOBBIT_PACKED_CONSUMER_DESCRIPTOR",
 ]);
 
 /**

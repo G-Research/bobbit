@@ -23,7 +23,7 @@ import { test as base } from "@playwright/test";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { awaitableRm } from "./test-utils/cleanup.js";
+import { awaitableRm, throwIfCleanupRejected } from "./test-utils/cleanup.js";
 import { withDistServerImportWarmup } from "../support/harnesses/browser/dist-import-warmup.js";
 import { loadE2EDistServerRuntime } from "../support/harnesses/e2e/dist-server-runtime.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
@@ -383,19 +383,14 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			registerTeamLeadSecretSource(undefined);
 		} catch { /* best-effort */ }
 		await gw.shutdown();
-		// Bounded-retry cleanup — see gateway-harness.ts for rationale.
-		await awaitableRm(bobbitDir, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[in-process-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
-			},
-		});
-		await awaitableRm(defaultProjectRoot, {
-			onFinalFailure: (err) => {
-				const msg = (err as Error)?.message ?? String(err);
-				console.warn(`[in-process-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
-			},
-		});
+		const lifecycle = { browserFixture: "settled", gateway: "shutdown resolved", secretStores: "unregistered" };
+		const cleanupResults = await Promise.allSettled([bobbitDir, defaultProjectRoot].map(target => awaitableRm(target, {
+			ownerRoot: getRunRoot(),
+			owner: { kind: "worker", id: String(process.pid) },
+			lifecycle,
+			throwOnFailure: true,
+		})));
+		throwIfCleanupRejected(cleanupResults, "in-process harness path cleanup failed");
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

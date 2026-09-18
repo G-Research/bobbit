@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
@@ -16,7 +17,7 @@ import { describe, it } from "vitest";
 import YAML from "yaml";
 import {
 	lockedTarballsMissingFromRepository,
-	prewarmPackedConsumerCache,
+	preparePackedConsumerFixture,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
 
@@ -110,7 +111,7 @@ describe("packed-consumer offline install contract", () => {
 			"repository test support must remain excluded from the published package");
 	});
 
-	it("prewarms the restored cache on every E2E OS before the normal gate", () => {
+	it("prepares the packed consumer inside the E2E run instead of a redundant CI prewarm", () => {
 		const workflow = YAML.parse(WORKFLOW_SOURCE) as Workflow;
 		const e2e = workflow.jobs.e2e;
 		const steps = e2e.steps;
@@ -122,41 +123,37 @@ describe("packed-consumer offline install contract", () => {
 		assert.deepEqual(e2e.strategy.matrix.os, ["ubuntu-latest", "windows-latest", "macos-latest"]);
 		assert.ok(setupIndex >= 0, "E2E must configure Node and the npm cache");
 		assert.deepEqual(steps[setupIndex]?.with, { "node-version": "22.19.0", cache: "npm" });
-		assert.ok(installIndex > setupIndex, "npm ci must populate the restored cache after setup-node");
+		assert.ok(installIndex > setupIndex, "npm ci must follow setup-node");
 		assert.equal(steps[installIndex]?.run, "npm ci");
-		assert.ok(prewarmIndex > installIndex, "prewarm must follow the lock-driven npm ci");
-		assert.equal(steps[prewarmIndex]?.run, "node scripts/testing-v2/prewarm-packed-consumer-cache.mjs");
-		assert.equal(steps[prewarmIndex]?.if, undefined, "prewarm must run on every E2E matrix OS");
-		assert.ok(gateIndex > prewarmIndex, "the offline E2E must run only after cache preparation");
+		assert.equal(prewarmIndex, -1, "CI must not duplicate run-scoped packed-consumer preparation");
+		assert.ok(gateIndex > installIndex, "the E2E runner owns packed-consumer preparation");
 		assert.equal(steps[gateIndex]?.run, "npm run test:e2e", "the workflow must retain the normal retry-enabled suite command");
 	});
 
-	it("builds and resolves the exact real tarball without materializing a preparatory node_modules tree", () => {
+	it("builds one exact tarball and one strict-offline template in the run root", () => {
 		const source = PREWARM_SOURCE;
-		assert.ok(source.indexOf('measured("build"') < source.indexOf("await mkdtemp("),
-			"the joined build must precede the one disposable root");
-		assert.match(source, /const packDir = join\(tempRoot, "pack"\);\s*const consumerDir = join\(tempRoot, "consumer"\);/s);
-		assert.match(source, /"pack",\s*"--ignore-scripts",\s*"--json",\s*"--pack-destination",\s*packDir/s);
+		assert.match(source, /const fixtureRoot = join\(absoluteRunRoot, FIXTURE_DIRECTORY\)/);
+		assert.match(source, /"pack", "--ignore-scripts", "--json", "--pack-destination", packDir/);
 		assert.match(source, /!Array\.isArray\(parsed\) \|\| parsed\.length !== 1/);
 		assert.match(source, /basename\(entry\.filename\) !== entry\.filename/,
 			"npm pack's filename must identify one file directly inside the owned pack directory");
 		assert.match(source, /const tarball = await stat\(tarballPath\)/,
 			"the exact emitted tarball must exist before dependency resolution");
-		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*tarballPath/s);
-		assert.match(source, /"cache", "add", \.\.\.batch/,
-			"tarballs selected beyond the repository lock must be added without installing them");
-		assert.doesNotMatch(source, /copyFile|symlink|npm-shrinkwrap\.json|bundleDependencies/,
-			"prewarm must not seed or copy an installed dependency graph");
-		assert.match(source, /const PACK_TIMEOUT_MS = 3 \* 60_000;/);
-		assert.match(source, /const LOCK_RESOLUTION_TIMEOUT_MS = 5 \* 60_000;/);
-		assert.match(source, /const CACHE_BATCH_SIZE = 32;/);
+		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
+		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
+		assert.match(source, /"ci",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir/s);
+		assert.doesNotMatch(source, /"ci",[\s\S]{0,200}tarballPath/,
+			"offline npm ci must materialize the generated lock without a second package operand");
+		assert.match(source, /await copy\(validated\.templateDir, consumerDir/,
+			"materialization must copy the prepared installed dependency graph");
+		assert.match(source, /const OFFLINE_INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
 		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
 			"spawn-time ownership must have a separate setup deadline before execution timing");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
 		assert.match(source, /await tracked\.waitForTreeExit\(treeExitTimeoutMs\)/);
-		assert.match(source, /measured\("cleanup", \(\) => rm\(tempRoot, \{ recursive: true, force: true, maxRetries: 6, retryDelay: 250 \}\)\)/,
-			"the one owned root must always be removed and timed in finally");
+		assert.match(source, /await rename\(temporaryDescriptor, descriptorPath\)/,
+			"the descriptor must publish atomically after validation");
 	});
 
 	it("resolves a fresh empty consumer and caches only newly selected tarballs", async () => {
@@ -165,9 +162,9 @@ describe("packed-consumer offline install contract", () => {
 		const order: string[] = [];
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		try {
-			await prewarmPackedConsumerCache({
+			await preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
-				tempParent,
+				runRoot: tempParent,
 				baseEnv: {
 					PATH: process.env.PATH,
 					npm_config_cache: "inherited-cache",
@@ -193,19 +190,26 @@ describe("packed-consumer offline install contract", () => {
 					if (args.includes("--package-lock-only")) {
 						order.push("resolve");
 						const manifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
-						assert.deepEqual(manifest, {
-							name: "bobbit-packed-cache-prewarm",
-							version: "1.0.0",
-							private: true,
-						});
+						assert.equal(manifest.name, "bobbit-inline-theme-clean-consumer");
+						assert.equal(manifest.private, true);
 						assert.deepEqual(readdirSync(options.cwd), ["package.json"],
 							"dependency resolution must begin without a lock or installed tree");
+						manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-1.0.0.tgz" };
+						writeFileSync(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
 						writeFileSync(join(options.cwd, "package-lock.json"), JSON.stringify({
-							name: "bobbit-packed-cache-prewarm",
+							name: "bobbit-inline-theme-clean-consumer",
 							version: "1.0.0",
 							lockfileVersion: 3,
 							packages: {
-								"": { name: "bobbit-packed-cache-prewarm", version: "1.0.0" },
+								"": {
+									name: "bobbit-inline-theme-clean-consumer",
+									version: "1.0.0",
+									dependencies: manifest.dependencies,
+								},
+								"node_modules/@gresearch/bobbit": {
+									version: "1.0.0",
+									resolved: "file:../../pack/bobbit-1.0.0.tgz",
+								},
 								"node_modules/new-dependency": {
 									version: "1.2.3",
 									resolved: selectedUrl,
@@ -215,24 +219,42 @@ describe("packed-consumer offline install contract", () => {
 						}));
 						return commandResult(command, args);
 					}
+					if (args.includes("--offline")) {
+						order.push("install");
+						const stagedManifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
+						const stagedLock = JSON.parse(readFileSync(join(options.cwd, "package-lock.json"), "utf8"));
+						assert.deepEqual(stagedManifest.dependencies, {
+							"@gresearch/bobbit": "file:../../pack/bobbit-1.0.0.tgz",
+						}, "the offline install must reuse the resolver's exact packed-artifact manifest");
+						assert.deepEqual(stagedLock.packages[""].dependencies, stagedManifest.dependencies,
+							"the offline install must start from the generated lock instead of resolving the graph again");
+						mkdirSync(join(options.cwd, "node_modules"), { recursive: true });
+						return commandResult(command, args);
+					}
 					order.push("cache");
 					return commandResult(command, args);
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "cache"]);
-			assert.equal(calls.length, 3);
+			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "cache", "install"]);
+			assert.equal(calls.length, 4);
 			assert.deepEqual(calls[0]?.args.slice(1), [
 				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
 			]);
-			assert.deepEqual(calls[1]?.args.slice(1, -1), [
+			assert.deepEqual(calls[1]?.args.slice(1, 6), [
 				"install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
 			]);
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
-			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "cache", "add", selectedUrl]);
+			assert.deepEqual(calls[2]?.args.slice(0, 4), ["npm-cli.js", "cache", "add", "--cache"]);
+			assert.equal(calls[2]?.args.at(-1), selectedUrl);
+			assert.equal(calls[3]?.args[1], "ci");
+			assert.ok(calls[3]?.args.includes("--offline"));
+			assert.ok(!calls[3]?.args.includes(calls[1]!.args.at(-1)!),
+				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
 			assert.equal(calls[1]?.timeoutMs, 5 * 60_000);
 			assert.equal(calls[2]?.timeoutMs, 3 * 60_000);
+			assert.equal(calls[3]?.timeoutMs, 10 * 60_000);
 			const inherited: Record<string, string> = {
 				npm_config_cache: "inherited-cache",
 				npm_config_registry: "https://registry.example.test/",
@@ -240,13 +262,15 @@ describe("packed-consumer offline install contract", () => {
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
 			for (const call of calls.slice(1)) {
-				for (const [key, value] of Object.entries(inherited)) assert.equal(call.env[key], value);
+				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
+				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
+				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));
 				assert.equal(call.env.npm_config_package_lock, undefined);
 				assert.equal(call.env.npm_lifecycle_event, undefined);
 				assert.equal(call.env.npm_package_name, undefined);
 				assert.equal(call.env.INIT_CWD, call.cwd);
 			}
-			assert.deepEqual(readdirSync(tempParent), [], "successful prewarm must remove its disposable root");
+			assert.ok(readdirSync(tempParent).includes("prepared-packed-consumer"), "successful preparation must retain its descriptor and template");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });
 		}
@@ -285,18 +309,22 @@ describe("packed-consumer offline install contract", () => {
 			label: "malformed pack output",
 			pack: { stdout: "[]" },
 			expected: /npm pack must report exactly one result/,
+			expectedCommands: 1,
+			expectedLastCode: 0,
 		},
 		{
 			label: "lock resolution failure",
 			pack: { stdout: JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-1.0.0.tgz" }]) },
 			expected: /exited 17/,
+			expectedCommands: 2,
+			expectedLastCode: 17,
 		},
-	])("propagates $label and still removes the owned root", async ({ pack, expected }) => {
+	])("propagates $label and retains partial fixture command evidence", async ({ pack, expected, expectedCommands, expectedLastCode }) => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-failure-pin-"));
 		try {
-			await assert.rejects(prewarmPackedConsumerCache({
+			await assert.rejects(preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
-				tempParent,
+				runRoot: tempParent,
 				ensureDist: () => {},
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 				runCommand: async (command: string, args: string[]) => {
@@ -309,8 +337,21 @@ describe("packed-consumer offline install contract", () => {
 					}
 					return commandResult(command, args, { code: 17, stderr: "injected lock resolution failure" });
 				},
-			}), expected);
-			assert.deepEqual(readdirSync(tempParent), [], "failed prewarm must remove its disposable root");
+			}), (error: Error) => {
+				assert.match(error.message, expected);
+				assert.match(error.message, /retained partial fixture and command evidence/);
+				return true;
+			});
+			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
+			const evidencePath = join(fixtureRoot, "preparation-failure.json");
+			assert.ok(readdirSync(tempParent).includes("prepared-packed-consumer"), "failed preparation must remain in the coordinator-owned run root");
+			const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+			assert.equal(evidence.status, "failed");
+			assert.equal(evidence.fixtureRoot, fixtureRoot);
+			assert.match(evidence.error.message, expected);
+			assert.equal(evidence.commands.length, expectedCommands);
+			assert.equal(evidence.commands.at(-1)?.code, expectedLastCode,
+				"failure evidence must include the last completed command result, including nonzero exits");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });
 		}
@@ -565,46 +606,48 @@ describe("packed-consumer offline install contract", () => {
 		await assert.rejects(running, /closed without verified process-tree completion/);
 	});
 
-	it("installs the actual local tarball strictly offline with the existing safety timeout", () => {
+	it("hands the actual packed tarball and strict-offline install evidence to the browser", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
-		assert.match(
-			packedConsumer,
-			/const packed = await runPiPackedConsumerNpm\(\s*\["pack", "--json", "--ignore-scripts", "--pack-destination", packDir\],\s*\{ cwd: REPO_ROOT, timeoutMs: 3 \* 60_000 \},\s*\);/s,
-			"the retained browser journey must create the real publishable tarball",
-		);
-		assert.match(
-			packedConsumer,
-			/const tarballPath = resolve\(packDir, pack\.filename!\);\s*expect\(existsSync\(tarballPath\), `npm pack did not create \$\{tarballPath\}`\)\.toBe\(true\);/s,
-			"the install target must be npm pack's actual emitted tarball",
-		);
-
-		const installCall = packedConsumer.match(
-			/const install = await runPiPackedConsumerNpm\(\s*(\["install", "--offline", tarballPath\]),\s*\{ cwd: consumerDir, env: consumerEnv, timeoutMs: (10 \* 60_000) \},\s*\);/s,
-		);
-		assert.ok(installCall, "packed consumer must retain one explicit npm install call");
-		assert.equal(installCall[1], '["install", "--offline", tarballPath]',
-			"npm must fail closed on cache misses instead of consulting the registry");
-		assert.equal(installCall[2], "10 * 60_000", "the unchanged ten-minute timeout remains only a hard safety bound");
-		assert.doesNotMatch(installCall[0], /prefer-offline|registry|cache|force/,
-			"the install must not add a best-effort or registry fallback");
+		assert.match(packedConsumer, /const descriptorPath = resolvePackedConsumerDescriptorPath\(process\.env, coordinatorRunRoot!\)/,
+			"the browser journey must resolve the canonical coordinator-owned descriptor path");
+		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath, coordinatorRunRoot!\)/,
+			"the browser journey must bind the canonical descriptor to the authoritative coordinator root");
+		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor, \{\s*coordinatorRunRoot: coordinatorRunRoot!/s,
+			"the browser journey must use an authoritative-root-bound private template copy");
+		assert.match(packedConsumer, /const tarballPath = resolve\(descriptor\.tarballPath\)/,
+			"the browser must validate npm pack's actual emitted tarball");
+		assert.match(packedConsumer, /packed tarball must be owned by the authoritative coordinator root/,
+			"the packed tarball must remain bound to the coordinator root");
+		assert.match(packedConsumer, /executed packed CLI must be owned by the authoritative coordinator root/,
+			"the executed CLI must come from the coordinator-owned consumer copy");
+		assert.match(packedConsumer, /command\.args\.includes\("ci"\) && command\.args\.includes\("--offline"\)/,
+			"the browser must verify strict-offline npm ci evidence");
+		assert.match(packedConsumer, /\["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"\]/,
+			"deterministic npm ci flags must remain asserted");
+		assert.match(packedConsumer, /prepared npm ci must use the descriptor's isolated cache/,
+			"the browser must bind npm ci to the prepared fixture's isolated cache");
+		assert.match(packedConsumer, /offline npm ci must not receive a package operand/,
+			"the browser must reject a second packed-artifact operand during lock-driven npm ci");
+		assert.match(packedConsumer, /installedPackages\[`node_modules\/\$\{PACKAGE_NAME\}`\]\?\.resolved/,
+			"the copied consumer lock must prove the installed package resolves from the packed artifact");
+		assert.match(packedConsumer, /consumer lock \$\{label\} must resolve to the actual packed tarball/,
+			"the browser must bind the copied lock reference to the coordinator's actual tarball");
 		assert.match(packedConsumer, /test\.describe\.configure\(\{ retries: 0 \}\)/,
 			"the retained clean-consumer browser journey must remain first-attempt only");
 		assert.doesNotMatch(packedConsumer, /testInfo\.retry/,
 			"the journey must not branch on or hide a retry");
 
 		const helper = COMMAND_HELPER_SOURCE;
-		assert.match(helper, /const env: NodeJS\.ProcessEnv = \{ \.\.\.process\.env \};/,
-			"the clean consumer must inherit the prewarmed setup-node cache");
-		assert.doesNotMatch(helper, /["']npm_config_cache["']|env\.(?:npm_config_cache|NPM_CONFIG_CACHE)\s*=/,
-			"the helper must not redirect offline resolution to an empty per-test cache");
+		assert.match(helper, /runOwnedCommand\(command, args/,
+			"all remaining consumer package commands must use tracked tree ownership");
 	});
 
 	it("retains a clean consumer and the published security assertions", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
-		assert.match(packedConsumer, /const packDir = join\(tempRoot, "pack"\);\s*const consumerDir = join\(tempRoot, "consumer"\);/s,
-			"packing and consumer installation must stay in separate directories");
-		assert.match(packedConsumer, /name: "bobbit-inline-theme-clean-consumer",\s*version: "1\.0\.0",\s*private: true,/s,
-			"the combined consumer must begin as an empty package rather than a seeded dependency graph");
+		assert.match(PREWARM_SOURCE, /const resolverDir = join\(preparationDir, "resolver"\);\s*const templateDir = join\(preparationDir, "template"\);/s,
+			"lock-free resolution and the installed template must stay separate");
+		assert.match(PREWARM_SOURCE, /name: "bobbit-inline-theme-clean-consumer",\s*version: "1\.0\.0",\s*private: true,/s,
+			"the prepared consumer must begin as an empty external package");
 		assert.match(packedConsumer, /"clean consumer must use npm's normal package-lock=true default"/);
 		assert.match(packedConsumer, /"consumer install must create its own lockfile"/);
 		assert.match(packedConsumer, /"published pi-coding-agent must include its dependency-owned shrinkwrap"/);

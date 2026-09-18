@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Clock } from "../gateway-deps.js";
+import { spawnTracked, type TrackedChild } from "./spawn-tree.js";
 import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -191,8 +192,10 @@ export interface RpcBridgeOptions {
 export interface RpcBridgeStartDeps {
 	/** `import.meta.resolve`-compatible package resolver used by direct starts. */
 	resolvePackage?: (specifier: string, parent?: string | URL) => string;
-	/** Direct child spawn seam. */
+	/** Direct child spawn seam. Production still routes this through spawnTracked. */
 	spawnDirect?: typeof spawn;
+	/** Tracked direct-child spawn seam for lifecycle tests. */
+	spawnDirectTracked?: typeof spawnTracked;
 	/** Docker child spawn seam for verifying the baked-in Pi entrypoint. */
 	spawnDocker?: typeof spawn;
 }
@@ -229,6 +232,11 @@ export interface PiNewSessionRpcResponse {
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/**
+	 * Terminal teardown only: kill and prove exit of the exact spawn-time-owned
+	 * direct process tree. Custom/in-process bridges may omit this seam.
+	 */
+	terminateOwnedTree?(timeoutMs?: number): Promise<void>;
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number, streamingBehavior?: PromptStreamingBehavior): Promise<any>;
 	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior }): Promise<any>;
 	steer(text: string): Promise<any>;
@@ -572,6 +580,8 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 
 export class RpcBridge {
 	private process: ChildProcess | null = null;
+	/** Direct-host spawn-time authority retained after root exit until tree proof. */
+	private ownedProcessTree: TrackedChild | null = null;
 	private requestId = 0;
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]> }>();
 	private eventListeners: RpcEventListener[] = [];
@@ -668,8 +678,11 @@ export class RpcBridge {
 		const MAX_SPAWN_RETRIES = 2;
 		for (let attempt = 0; attempt <= MAX_SPAWN_RETRIES; attempt++) {
 			try {
-				this._spawnProcess(cliPath, args);
+				const ownershipReady = this._spawnProcess(cliPath, args);
 				this._attachProcessHandlers();
+				// Direct agents may create descendants immediately. Do not publish a
+				// successful start until the POSIX sentinel / Windows Job owns that tree.
+				await ownershipReady;
 				// Brief pause to let async socket initialization errors surface.
 				// If ENOTCONN occurs during socket read setup, the process 'error'
 				// event fires within the next microtask. We wait for that.
@@ -705,8 +718,20 @@ export class RpcBridge {
 				// Spawn succeeded and stabilized
 				return;
 			} catch (err: any) {
-				// Clean up the failed process
-				this.process?.kill().toString(); // best-effort kill
+				// A failed direct start can already have descendants. Reuse its exact
+				// spawn-time authority and never retry until the prior tree is proven gone.
+				const failedTree = this.ownedProcessTree;
+				if (failedTree) {
+					try { failedTree.killTree("SIGKILL"); } catch { /* proof below remains authoritative */ }
+					let reaped = false;
+					try { reaped = await failedTree.waitForTreeExit(3_000); } catch { /* fail closed */ }
+					if (!reaped) {
+						throw new Error("Direct agent start failed and its owned process tree remained unverified", { cause: err });
+					}
+					if (this.ownedProcessTree === failedTree) this.ownedProcessTree = null;
+				} else {
+					this.process?.kill(); // Docker/injected legacy spawn cleanup
+				}
 				this.process = null;
 				this.pending.clear();
 
@@ -733,9 +758,11 @@ export class RpcBridge {
 	 * Spawn the child process (docker exec or direct node).
 	 * Factored out of start() so retry logic can re-attempt.
 	 */
-	private _spawnProcess(cliPath: string, args: string[]): void {
+	private _spawnProcess(cliPath: string, args: string[]): Promise<void> {
 		if (this.options.containerId) {
+			this.ownedProcessTree = null;
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
+			return Promise.resolve();
 		} else {
 			// Only a refreshed copy of the public CA certificate may cross the agent
 			// boundary. The source TLS directory shares the private server root with
@@ -765,12 +792,24 @@ export class RpcBridge {
 				// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
 				PI_CODING_AGENT_DIR: globalAgentDir(),
 			}, { privateRoot, trustedCaPath: publicCaCert });
-			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
-			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
+			const spawnDirectTracked = this.startDeps.spawnDirectTracked ?? spawnTracked;
+			const injectedSpawn = this.startDeps.spawnDirect;
+			const tracked = spawnDirectTracked(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: directEnv,
+				// Existing raw-spawn tests use in-memory children. Route them through the
+				// tracked abstraction without invoking a real platform supervisor.
+				...(injectedSpawn ? {
+					spawnImpl: injectedSpawn,
+					platform: "linux" as NodeJS.Platform,
+					posixTreeSentinel: false,
+					isProcessGroupAlive: () => false,
+				} : {}),
 			});
+			this.ownedProcessTree = tracked;
+			this.process = tracked.child;
+			return tracked.ownershipReady;
 		}
 	}
 
@@ -1050,6 +1089,35 @@ export class RpcBridge {
 
 			this.process!.kill("SIGTERM");
 		});
+	}
+
+	/**
+	 * Terminal-only owned-tree barrier. Normal stop/restart/replacement deliberately
+	 * retains root-process semantics; archive/quiesce/gateway shutdown call this
+	 * stronger operation exactly once before releasing SessionInfo ownership.
+	 */
+	async terminateOwnedTree(timeoutMs = 5_000): Promise<void> {
+		const ownedTree = this.ownedProcessTree;
+		if (!ownedTree) {
+			// Docker exec and legacy custom seams do not yet expose spawn-tree
+			// authority. Preserve their existing bounded root shutdown contract.
+			await this.stop();
+			if (this.process) {
+				throw new Error(`Agent process ${this.process.pid ?? "unknown"} remained live after terminal stop`);
+			}
+			return;
+		}
+
+		// start() already joined this promise. Re-awaiting preserves the exact
+		// authority on a terminal call racing startup and rejects fail-closed.
+		await ownedTree.ownershipReady;
+		const boundedTimeoutMs = Math.max(0, timeoutMs);
+		ownedTree.killTree("SIGTERM", Math.min(3_000, boundedTimeoutMs));
+		const exited = await ownedTree.waitForTreeExit(boundedTimeoutMs);
+		if (!exited) {
+			throw new Error(`Direct agent owned process tree ${ownedTree.child.pid ?? "unknown"} exit remained unverified after ${boundedTimeoutMs}ms`);
+		}
+		if (this.ownedProcessTree === ownedTree) this.ownedProcessTree = null;
 	}
 
 	get running(): boolean {

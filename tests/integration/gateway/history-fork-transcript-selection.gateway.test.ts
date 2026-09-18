@@ -6,12 +6,14 @@ import { test, expect } from "../../../tests/support/harnesses/integration/gatew
 import { apiFetch, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { createSessionTracker } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
+import { shutdownResourcesThenRemove } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
 import {
 	FIXTURE_TIME,
 	filesystemIdentity,
 	historyFork,
 	messageEntry,
 	ordinaryHistory,
+	removeHistoryForkFixtureRoots,
 	responseJson,
 	seedTranscript,
 	setPersistedTranscriptPath,
@@ -57,15 +59,19 @@ test.describe("history fork transcript selection", () => {
 	});
 
 	test.afterEach(async ({ gateway }) => {
-		try {
-			await sessions.cleanup(gateway);
-		} finally {
-			for (const root of fixtureRoots.splice(0)) {
-				try {
-					fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
-				} catch { /* the isolated run-root owner performs the final safety sweep */ }
-			}
-		}
+		const roots = fixtureRoots.splice(0);
+		await shutdownResourcesThenRemove({
+			phases: [
+				{
+					name: "history-fork-sessions",
+					owners: [() => sessions.cleanup(gateway)],
+				},
+			],
+			remove: () => removeHistoryForkFixtureRoots(roots, {
+				gateway: "shared fork gateway active; fixture-owned sessions settled",
+				sessions: "termination and purge resolved",
+			}),
+		});
 	});
 
 	test("resolves only authoritative persisted or trusted-root transcript paths", async ({ gateway }) => {

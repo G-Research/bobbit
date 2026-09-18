@@ -2,20 +2,27 @@ import { test, expect, type Page, type TestInfo } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { mkdir, readFile, readdir } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 import {
 	piPackedConsumerNpmEnv,
 	runPiPackedConsumerCommand,
 	runPiPackedConsumerNpm,
 } from "../test-utils/pi-packed-consumer-command.js";
 import {
+	materializePackedConsumerFixture,
+	readPreparedPackedConsumerDescriptor,
+} from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
+import { resolvePackedConsumerDescriptorPath } from "../../../scripts/run-playwright-e2e.mjs";
+import {
 	capturePackagedCli,
 	commandFailure,
 	createProjectAndSession,
+	finalizePackagedRuntime,
 	getFreePort,
+	processFailure,
 	promptSession,
 	readToken,
 	startPackagedCli,
@@ -110,6 +117,11 @@ function asRecord(value: unknown, label: string): JsonRecord {
 	expect(typeof value, `${label} must be an object`).toBe("object");
 	expect(Array.isArray(value), `${label} must not be an array`).toBe(false);
 	return value as JsonRecord;
+}
+
+function isStrictChild(root: string, candidate: string): boolean {
+	const child = relative(resolve(root), resolve(candidate));
+	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }
 
 function parseJson(stdout: string, label: string): unknown {
@@ -375,19 +387,20 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
 		test.setTimeout(5_000);
-		const child = spawn(process.execPath, ["-e", [
+		const tracked = spawnTracked(process.execPath, ["-e", [
 			'const { spawn } = require("node:child_process");',
 			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
 			'process.stdout.write("ready\\n");',
 			'process.on("SIGTERM", () => process.exit(0));',
 		].join("")], {
-			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		const runtime = capturePackagedCli(child);
+		const child = tracked.child;
+		const runtime = capturePackagedCli(child, [], [], tracked);
 		const actualExit = once(child, "exit");
 		const actualClose = once(child, "close");
+		await tracked.ownershipReady;
 		await once(child.stdout!, "data");
 
 		try {
@@ -396,9 +409,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			await actualClose;
 			expect(runtime.exited, "root exit must be recorded before inherited stdio closes").toBe(true);
 			expect(runtime.closed, "the owned process tree must close after teardown").toBe(true);
-			if (process.platform !== "win32") {
-				expect(runtime.finalTreeSignalSent, "the original POSIX group must be finalized at root exit").toBe(true);
-			}
+			expect(runtime.trackedAuthority, "the inherited tree must retain its spawn-time authority").toBe(tracked);
 		} finally {
 			if (!runtime.closed) await stopPackagedCli(runtime);
 		}
@@ -406,45 +417,48 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
-		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-inline-theme-"));
-		const packDir = join(tempRoot, "pack");
-		const consumerDir = join(tempRoot, "consumer");
+		// Browser-v2 global setup produces a content-addressed fresh dist first.
+		// The E2E coordinator packs that exact artifact once before Group C starts.
+		const coordinatorRunRoot = process.env.BOBBIT_V2_RUN_ROOT;
+		expect(coordinatorRunRoot, "BOBBIT_V2_RUN_ROOT must identify the authoritative E2E coordinator root").toBeTruthy();
+		// Config isolation deliberately strips ambient runtime pathnames before
+		// workers start. Discover the descriptor only at its fixed location below
+		// the authoritative fresh root; if a coordinator handoff survived, the
+		// resolver requires it to name that exact same path.
+		const descriptorPath = resolvePackedConsumerDescriptorPath(process.env, coordinatorRunRoot!);
+		expect(isStrictChild(coordinatorRunRoot!, descriptorPath), "descriptor must be owned by the authoritative coordinator root").toBe(true);
+		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath, coordinatorRunRoot!);
+		const materialized = await materializePackedConsumerFixture(descriptor, {
+			coordinatorRunRoot: coordinatorRunRoot!,
+			name: `inline-theme-${testInfo.workerIndex}`,
+		});
+		const consumerDir = materialized.consumerDir;
 		const workspaceDir = join(consumerDir, "workspace");
 		const secretsDir = join(consumerDir, "secrets");
 		const agentDir = join(consumerDir, "agent-state");
 		const agentPath = join(consumerDir, "packed-write-agent.mjs");
-		const report: RuntimeReport = { commands: [], packFiles: [], bridgeAssets: [], requests: [] };
+		const report: RuntimeReport = {
+			commands: [...descriptor.commands],
+			packFiles: [],
+			bridgeAssets: [],
+			requests: [],
+		};
 		let runtime: RunningCli | undefined;
+		let bodyFailure: { reason: unknown } | undefined;
 
 		try {
 			await Promise.all([
-				mkdir(packDir, { recursive: true }),
 				mkdir(workspaceDir, { recursive: true }),
 				mkdir(secretsDir, { recursive: true }),
 				mkdir(agentDir, { recursive: true }),
 			]);
-			await writeFile(join(consumerDir, "package.json"), `${JSON.stringify({
-				name: "bobbit-inline-theme-clean-consumer",
-				version: "1.0.0",
-				private: true,
-				// protobufjs accepts every @types/node release. Offline npm otherwise
-				// selects the newest cached packument entry even when its tarball is
-				// absent. Anchor that broad edge to npm ci's repository-cached artifact.
-				overrides: { "@types/node": LOCKED_NODE_TYPES_VERSION },
-			}, null, 2)}\n`);
 			await writePackedAgent(agentPath);
 
-			// Browser-v2 global setup produces a content-addressed fresh dist first.
-			// npm pack therefore tests the same built artifact published to npx users
-			// without running an expensive build inside this E2E spec.
-			const packed = await runPiPackedConsumerNpm(
-				["pack", "--json", "--ignore-scripts", "--pack-destination", packDir],
-				{ cwd: REPO_ROOT, timeoutMs: 3 * 60_000 },
-			);
-			report.commands.push(packed);
-			expect(packed.code, commandFailure(packed)).toBe(0);
-			const { entry: pack, report: packReport } = parsePackResult(packed.stdout);
+			// The coordinator ran one real npm pack and one strict-offline install.
+			// This worker consumes their immutable descriptor and a private real copy.
+			const { entry: pack, report: packReport } = parsePackResult(JSON.stringify(descriptor.packReport));
 			report.pack = packReport;
+			expect(pack).toEqual(descriptor.packEntry);
 			expect(pack.name).toBe(PACKAGE_NAME);
 			expect(typeof pack.filename).toBe("string");
 			report.packFiles = normalizedPackagePaths(pack);
@@ -468,8 +482,28 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				"tarball must contain compiled dist/ui CSS assets",
 			).toBe(true);
 
-			const tarballPath = resolve(packDir, pack.filename!);
-			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
+			const tarballPath = resolve(descriptor.tarballPath);
+			expect(isStrictChild(coordinatorRunRoot!, tarballPath), "packed tarball must be owned by the authoritative coordinator root").toBe(true);
+			expect(existsSync(tarballPath), `prepared npm pack tarball is missing at ${tarballPath}`).toBe(true);
+			const packCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("pack"));
+			const offlineCiCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("ci") && command.args.includes("--offline"));
+			expect(packCommands, "coordinator must execute npm pack exactly once").toHaveLength(1);
+			expect(offlineCiCommands, "coordinator must execute one strict-offline npm ci").toHaveLength(1);
+			const offlineCi = offlineCiCommands[0]!;
+			for (const required of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"]) {
+				expect(offlineCi.args, `prepared npm ci must pass ${required}`).toContain(required);
+			}
+			const cacheFlagIndex = offlineCi.args.indexOf("--cache");
+			expect(resolve(offlineCi.args[cacheFlagIndex + 1]!), "prepared npm ci must use the descriptor's isolated cache")
+				.toBe(resolve(descriptor.cacheDir));
+			const ciIndex = offlineCi.args.indexOf("ci");
+			const ciArgs = offlineCi.args.slice(ciIndex + 1);
+			const packageOperands = ciArgs.filter((argument: string, index: number) =>
+				!argument.startsWith("-") && ciArgs[index - 1] !== "--cache");
+			expect(packageOperands, "offline npm ci must not receive a package operand").toEqual([]);
+			expect(offlineCi.args.map((argument: string) => resolve(argument)), "offline npm ci must consume the lock instead of the tarball operand")
+				.not.toContain(tarballPath);
+
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runPiPackedConsumerNpm(
 				["config", "get", "package-lock"],
@@ -478,15 +512,6 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(lockConfig);
 			expect(lockConfig.code, commandFailure(lockConfig)).toBe(0);
 			expect(lockConfig.stdout.trim(), "clean consumer must use npm's normal package-lock=true default").toBe("true");
-
-			// CI prewarms every tarball selected by this clean consumer. Offline mode
-			// fails closed instead of letting this deterministic E2E consult a registry.
-			const install = await runPiPackedConsumerNpm(
-				["install", "--offline", tarballPath],
-				{ cwd: consumerDir, env: consumerEnv, timeoutMs: 10 * 60_000 },
-			);
-			report.commands.push(install);
-			expect(install.code, commandFailure(install)).toBe(0);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
 			const installedPiRoot = join(consumerDir, "node_modules", "@earendil-works", "pi-coding-agent");
 			expect(
@@ -519,9 +544,20 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				expect(installedManifest.dependencies?.[name], `${name} must not ship as a production dependency`).toBeUndefined();
 			}
 			const installedLock = JSON.parse(await readFile(join(consumerDir, "package-lock.json"), "utf8")) as {
-				packages?: Record<string, { dependencies?: Record<string, string>; version?: string }>;
+				packages?: Record<string, { dependencies?: Record<string, string>; resolved?: string; version?: string }>;
 			};
 			const installedPackages = installedLock.packages ?? {};
+			const packedArtifactLockReferences = [
+				["root dependency", installedPackages[""]?.dependencies?.[PACKAGE_NAME]],
+				["installed package", installedPackages[`node_modules/${PACKAGE_NAME}`]?.resolved],
+			] as const;
+			for (const [label, reference] of packedArtifactLockReferences) {
+				expect(reference, `consumer lock ${label} must be a file: reference`).toMatch(/^file:/);
+				expect(
+					resolve(consumerDir, decodeURIComponent(reference!.slice("file:".length))),
+					`consumer lock ${label} must resolve to the actual packed tarball`,
+				).toBe(tarballPath);
+			}
 			const installedPackagePaths = Object.keys(installedPackages)
 				.filter(path => path !== "" && /(?:^|\/)node_modules\//.test(path));
 			const nodeTypesVersions = Object.entries(installedPackages)
@@ -653,8 +689,10 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			const port = await getFreePort();
 			const baseUrl = `http://127.0.0.1:${port}`;
 			const wsBaseUrl = `ws://127.0.0.1:${port}`;
+			const packagedCliPath = join(installedRoot, "dist", "server", "cli.js");
+			expect(isStrictChild(coordinatorRunRoot!, packagedCliPath), "executed packed CLI must be owned by the authoritative coordinator root").toBe(true);
 			runtime = startPackagedCli({
-				cliPath: join(installedRoot, "dist", "server", "cli.js"),
+				cliPath: packagedCliPath,
 				consumerDir,
 				workspaceDir,
 				agentPath,
@@ -825,14 +863,24 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			for (const tokenName of THEME_TOKENS) {
 				expect(await page.evaluate(name => getComputedStyle(document.documentElement).getPropertyValue(name).trim(), tokenName)).not.toBe("");
 			}
+		} catch (error) {
+			bodyFailure = { reason: runtime && (runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null)
+				? processFailure(runtime, `failed during test: ${String(error)}`)
+				: error };
 		} finally {
-			if (runtime) {
-				await stopPackagedCli(runtime);
-				report.cliStdout = runtime.stdout.join("");
-				report.cliStderr = runtime.stderr.join("");
-			}
-			await attachReport(testInfo, report);
-			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+			await finalizePackagedRuntime({
+				runtime,
+				bodyFailure,
+				report: async () => {
+					if (runtime) {
+						report.cliStdout = runtime.stdout.join("");
+						report.cliStderr = runtime.stderr.join("");
+					}
+					await attachReport(testInfo, report);
+				},
+			});
+			// A failed owner proof rejects the test after attaching diagnostics. The
+			// coordinator therefore retains its run root instead of deleting evidence.
 		}
 	});
 });
