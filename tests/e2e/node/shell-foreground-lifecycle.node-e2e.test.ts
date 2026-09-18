@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 
-import {
+import shellExtension, {
 	createForegroundGroupWitness,
 	createForegroundShellGroupTracker,
 	ForegroundShellGroupDrainError,
@@ -64,7 +64,7 @@ function mutableWitness(initial: "pending" | "live" | "lost" = "live"): {
 }
 
 describe("foreground shell process-group lifecycle", () => {
-	it("retains an escaped spawn-time group and drains it exactly once before shutdown continues", async () => {
+	it("finalizes a normally exited root with one exact final kill before tool completion", async () => {
 		const ownership = mutableWitness();
 		const activeChanges: boolean[] = [];
 		const fixture = deterministicTracker({
@@ -76,16 +76,13 @@ describe("foreground shell process-group lifecycle", () => {
 
 		fixture.tracker.track(41, ownership.witness);
 		fixture.tracker.track(41, ownership.witness);
-		fixture.tracker.releaseIfExited(41);
-		assert.equal(fixture.tracker.activeCount, 1, "a descendant keeps the shell's spawn-time group owned after root exit");
+		const firstFinalization = fixture.tracker.finalizeRootExit(41);
+		const repeatedFinalization = fixture.tracker.finalizeRootExit(41);
+		assert.equal(repeatedFinalization, firstFinalization, "concurrent completion paths share one bounded finalizer");
+		await firstFinalization;
 
-		const firstDrain = fixture.tracker.drain();
-		const repeatedDrain = fixture.tracker.drain();
-		assert.equal(repeatedDrain, firstDrain, "concurrent terminal paths share one bounded drain");
-		await firstDrain;
-
-		assert.deepEqual(fixture.signals, [[41, "SIGTERM"], [41, "SIGKILL"]]);
-		assert.equal(fixture.tracker.activeCount, 0);
+		assert.deepEqual(fixture.signals, [[41, "SIGKILL"]]);
+		assert.equal(fixture.tracker.activeCount, 0, "normal completion must not depend on session drain");
 		assert.deepEqual(activeChanges, [true, false], "signal listeners can be installed and removed without duplication");
 	});
 
@@ -134,8 +131,7 @@ describe("foreground shell process-group lifecycle", () => {
 		// The same sentinel PID and numeric PGID now describe another process
 		// incarnation. Apparent group liveness cannot restore old authority.
 		currentStartToken = "reused-incarnation";
-		fixture.tracker.releaseIfExited(91);
-		await assert.rejects(fixture.tracker.drain(), (error: unknown) => {
+		await assert.rejects(fixture.tracker.finalizeRootExit(91), (error: unknown) => {
 			assert.ok(error instanceof ForegroundShellGroupDrainError);
 			assert.deepEqual(error.groups, [{
 				processGroupId: 91,
@@ -143,7 +139,7 @@ describe("foreground shell process-group lifecycle", () => {
 				termAttempt: "not-attempted",
 				killAttempt: "not-attempted",
 				reason: "ownership-lost",
-				elapsedMs: 25,
+				elapsedMs: 0,
 				deadlineMs: 25,
 			}]);
 			return true;
@@ -157,24 +153,60 @@ describe("foreground shell process-group lifecycle", () => {
 		readiness.destroy();
 	});
 
-	it("queues timeout termination until the spawn-time witness is ready", async () => {
+	it("queues timeout termination until readiness, then escalates and joins within the invocation", async () => {
 		const ownership = mutableWitness("pending");
-		const fixture = deterministicTracker({ onSleep: () => ownership.set("live") });
+		const fixture = deterministicTracker({
+			onSleep: () => ownership.set("live"),
+			onSignal: (_processGroupId, signal) => {
+				if (signal === "SIGKILL") ownership.set("lost");
+			},
+		});
 		fixture.tracker.track(93, ownership.witness);
-		fixture.tracker.terminate(93);
-		await new Promise(resolve => setImmediate(resolve));
+		await fixture.tracker.terminate(93);
 
-		assert.deepEqual(fixture.signals, [[93, "SIGTERM"]]);
+		assert.deepEqual(fixture.signals, [[93, "SIGTERM"], [93, "SIGKILL"]]);
 		assert.deepEqual(fixture.reports, []);
-		ownership.set("lost");
-		fixture.tracker.releaseIfExited(93);
+		assert.equal(fixture.tracker.activeCount, 0);
+	});
+
+	it("coalesces abort escalation with root-exit finalization", async () => {
+		const ownership = mutableWitness();
+		const fixture = deterministicTracker({
+			onSignal: (_processGroupId, signal) => {
+				if (signal === "SIGKILL") ownership.set("lost");
+			},
+		});
+		fixture.tracker.track(96, ownership.witness);
+
+		const aborted = fixture.tracker.terminate(96);
+		const rootExit = fixture.tracker.finalizeRootExit(96);
+		assert.equal(rootExit, aborted);
+		await aborted;
+
+		assert.deepEqual(fixture.signals, [[96, "SIGTERM"], [96, "SIGKILL"]]);
+		assert.equal(fixture.tracker.activeCount, 0);
+	});
+
+	it("waits for a root-exit readiness race before issuing the exact final kill", async () => {
+		const ownership = mutableWitness("pending");
+		const fixture = deterministicTracker({
+			onSleep: () => ownership.set("live"),
+			onSignal: (_processGroupId, signal) => {
+				if (signal === "SIGKILL") ownership.set("lost");
+			},
+		});
+		fixture.tracker.track(97, ownership.witness);
+		await fixture.tracker.finalizeRootExit(97);
+
+		assert.deepEqual(fixture.signals, [[97, "SIGKILL"]]);
+		assert.equal(fixture.tracker.activeCount, 0);
 	});
 
 	it("rejects and retains ownership when the sentinel readiness handshake never completes", async () => {
 		const fixture = deterministicTracker({ deadlineMs: 25 });
 		fixture.tracker.track(92, mutableWitness("pending").witness);
 
-		await assert.rejects(fixture.tracker.drain(), (error: unknown) => {
+		await assert.rejects(fixture.tracker.finalizeRootExit(92), (error: unknown) => {
 			assert.ok(error instanceof ForegroundShellGroupDrainError);
 			assert.deepEqual(error.groups, [{
 				processGroupId: 92,
@@ -283,14 +315,67 @@ describe("foreground shell process-group lifecycle", () => {
 			const descendantPid = Number(pidText);
 			assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
 			assert.equal(isAlive(descendantPid), true, "fixture descendant must outlive its shell root");
-			tracker.releaseIfExited(root.pid);
-			assert.equal(tracker.activeCount, 1, "the live group remains owned after root exit");
+			assert.equal(tracker.activeCount, 1, "the live group remains owned until root-exit finalization");
 
-			await tracker.drain();
+			await tracker.finalizeRootExit(root.pid);
 			assert.equal(tracker.activeCount, 0);
-			assert.equal(isAlive(descendantPid), false, "drain must join the escaped descendant before resolving");
+			assert.equal(isAlive(descendantPid), false, "root-exit finalization must join the escaped descendant before resolving");
 		} finally {
 			try { process.kill(-root.pid, "SIGKILL"); } catch { /* already drained */ }
+		}
+	});
+
+	it("routes normal exit, timeout, and already-aborted Bash calls through bounded finalization", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+		const tools: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		shellExtension({ registerTool: (tool: any) => tools.push(tool) } as any);
+		const bash = tools.find(tool => tool.name === "bash");
+		assert.ok(bash);
+
+		const normal = await bash.execute("normal", { command: "printf READY", timeout: 2 });
+		assert.match(normal.content[0].text, /Exit code: 0\s+READY/);
+
+		const stubbornCommand = `${JSON.stringify(process.execPath)} -e "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"`;
+		const timeoutStartedAt = Date.now();
+		const timedOut = await bash.execute("timeout", { command: stubbornCommand, timeout: 0.05 });
+		assert.ok(Date.now() - timeoutStartedAt < 2_500, "timeout escalation must finish within the invocation deadline");
+		assert.match(timedOut.content[0].text, /timed out after 0\.05s and was killed/);
+
+		const controller = new AbortController();
+		controller.abort();
+		const abortStartedAt = Date.now();
+		const aborted = await bash.execute("abort", { command: stubbornCommand, timeout: 10 }, controller.signal);
+		assert.ok(Date.now() - abortStartedAt < 2_500, "already-aborted cleanup must finish within the invocation deadline");
+		assert.equal(aborted.content[0].text, "");
+	});
+
+	it("TERM-escalates and joins a live foreground root within the per-command deadline", { skip: process.platform === "win32", timeout: 10_000 }, async () => {
+		const command = "process.on('SIGTERM',()=>{});process.stdout.write('READY');setInterval(()=>{},1000)";
+		const spec = foregroundShellSpawnSpec(process.execPath, ["-e"], command);
+		const root = spawn(spec.file, spec.args, {
+			detached: true,
+			env: spec.env,
+			stdio: spec.stdio,
+		});
+		assert.ok(root.pid);
+		const tracker = createForegroundShellGroupTracker({ graceMs: 50, deadlineMs: 2_000, pollMs: 10 });
+		tracker.track(root.pid, createForegroundGroupWitness(
+			root.stdio[3] as NodeJS.ReadableStream,
+			root.pid,
+			spec.witnessNonce,
+		));
+		const rootExit = once(root, "exit");
+
+		try {
+			await once(root.stdout!, "data");
+			const startedAt = Date.now();
+			await tracker.terminate(root.pid);
+			await rootExit;
+
+			assert.ok(Date.now() - startedAt < 2_000, "termination must not wait for session shutdown");
+			assert.equal(tracker.activeCount, 0);
+			assert.equal(isAlive(root.pid), false);
+		} finally {
+			try { process.kill(-root.pid, "SIGKILL"); } catch { /* already finalized */ }
 		}
 	});
 });

@@ -76,7 +76,7 @@ type ForegroundGroup = {
 	witness: ForegroundGroupWitness;
 	termAttempt: ForegroundSignalAttempt;
 	killAttempt: ForegroundSignalAttempt;
-	pendingTermination: boolean;
+	finalizePromise?: Promise<void>;
 	failureReason?: ForegroundGroupDrainFailureReason;
 };
 
@@ -248,12 +248,6 @@ export function createForegroundShellGroupTracker(options: {
 		else markFailure(group, "ownership-lost");
 	};
 
-	const pruneLostWitnesses = () => {
-		for (const group of groups.values()) {
-			if (group.witness.status() === "lost") observeLostWitness(group);
-		}
-	};
-
 	const signalOnce = (group: ForegroundGroup, signal: PosixGroupSignal) => {
 		const status = group.witness.status();
 		if (status !== "live") {
@@ -276,43 +270,76 @@ export function createForegroundShellGroupTracker(options: {
 		}
 	};
 
-	const waitUntil = async (deadline: number) => {
-		while (groups.size > 0) {
-			pruneLostWitnesses();
-			if (groups.size === 0) return;
+	const waitForGroupUntil = async (group: ForegroundGroup, deadline: number) => {
+		while (groups.get(group.processGroupId) === group) {
+			if (group.witness.status() === "lost") {
+				observeLostWitness(group);
+				return;
+			}
 			const remaining = deadline - ops.now();
 			if (remaining <= 0) return;
 			await ops.sleep(Math.min(pollMs, remaining));
 		}
 	};
 
-	const terminateWhenOwned = async (group: ForegroundGroup) => {
-		const deadline = ops.now() + deadlineMs;
-		while (groups.get(group.processGroupId) === group) {
-			const status = group.witness.status();
-			if (status === "live") {
-				signalOnce(group, "SIGTERM");
-				return;
-			}
-			if (status === "lost" || ops.now() >= deadline) {
-				markFailure(group, status === "lost" ? "ownership-lost" : "ownership-never-established");
-				return;
-			}
-			await ops.sleep(Math.min(pollMs, deadline - ops.now()));
-		}
+	const diagnosticFor = (group: ForegroundGroup, startedAt: number): ForegroundGroupDrainDiagnostic => {
+		const finalWitnessStatus = group.witness.status();
+		return {
+			processGroupId: group.processGroupId,
+			finalWitnessStatus,
+			termAttempt: group.termAttempt,
+			killAttempt: group.killAttempt,
+			reason: group.failureReason ?? (finalWitnessStatus === "live"
+				? "deadline-exceeded"
+				: finalWitnessStatus === "pending"
+					? "ownership-never-established"
+					: "ownership-lost"),
+			elapsedMs: Math.max(0, ops.now() - startedAt),
+			deadlineMs,
+		};
 	};
 
-	const waitForOwnershipReady = async (deadline: number) => {
-		while ([...groups.values()].some(group => group.witness.status() === "pending")) {
-			pruneLostWitnesses();
-			const remaining = deadline - ops.now();
-			if (remaining <= 0) break;
-			await ops.sleep(Math.min(pollMs, remaining));
-		}
-		for (const group of groups.values()) {
-			const status = group.witness.status();
-			if (status !== "live") markFailure(group, status === "pending" ? "ownership-never-established" : "ownership-lost");
-		}
+	const finalizeGroup = (group: ForegroundGroup, terminateFirst: boolean): Promise<void> => {
+		if (group.finalizePromise) return group.finalizePromise;
+		// Defer the body one microtask so every competing exit/error/timeout/abort
+		// path observes the stored promise before signaling can remove the record.
+		group.finalizePromise = Promise.resolve().then(async () => {
+			const startedAt = ops.now();
+			const deadline = startedAt + deadlineMs;
+
+			while (groups.get(group.processGroupId) === group && group.witness.status() === "pending") {
+				const remaining = deadline - ops.now();
+				if (remaining <= 0) break;
+				await ops.sleep(Math.min(pollMs, remaining));
+			}
+
+			if (groups.get(group.processGroupId) !== group) return;
+			const readyStatus = group.witness.status();
+			if (readyStatus !== "live") {
+				markFailure(group, readyStatus === "pending" ? "ownership-never-established" : "ownership-lost");
+			} else if (terminateFirst) {
+				signalOnce(group, "SIGTERM");
+				if (groups.get(group.processGroupId) === group) {
+					await waitForGroupUntil(group, Math.min(ops.now() + graceMs, deadline));
+				}
+			}
+
+			if (groups.get(group.processGroupId) === group) signalOnce(group, "SIGKILL");
+			if (groups.get(group.processGroupId) === group) await waitForGroupUntil(group, deadline);
+			if (groups.get(group.processGroupId) === group) {
+				const finalStatus = group.witness.status();
+				if (finalStatus === "lost") observeLostWitness(group);
+				else if (!group.failureReason) markFailure(group, finalStatus === "pending" ? "ownership-never-established" : "deadline-exceeded");
+			}
+
+			if (groups.get(group.processGroupId) === group || group.failureReason) {
+				const diagnostic = diagnosticFor(group, startedAt);
+				const error = new ForegroundShellGroupDrainError(diagnostic.elapsedMs, deadlineMs, [diagnostic]);
+				try { ops.report(error.message); } catch { /* diagnostics must not replace the owner failure */ }
+				throw error;
+			}
+		});
+		return group.finalizePromise;
 	};
 
 	return {
@@ -325,68 +352,40 @@ export function createForegroundShellGroupTracker(options: {
 					witness: witness ?? { status: () => "lost" },
 					termAttempt: "not-attempted",
 					killAttempt: "not-attempted",
-					pendingTermination: false,
 				});
 			}
 			notifyActiveChange(wasActive);
 		},
-		releaseIfExited(processGroupId: number | undefined): void {
-			if (!enabled || !processGroupId) return;
+		finalizeRootExit(processGroupId: number | undefined): Promise<void> {
+			if (!enabled || !processGroupId) return Promise.resolve();
 			const group = groups.get(processGroupId);
-			if (group?.witness.status() === "lost") observeLostWitness(group);
+			return group ? finalizeGroup(group, false) : Promise.resolve();
 		},
-		terminate(processGroupId: number | undefined): void {
-			if (!enabled || !processGroupId) return;
+		terminate(processGroupId: number | undefined): Promise<void> {
+			if (!enabled || !processGroupId) return Promise.resolve();
 			const group = groups.get(processGroupId);
-			if (!group) return;
-			if (group.witness.status() === "pending") {
-				if (!group.pendingTermination) {
-					group.pendingTermination = true;
-					void terminateWhenOwned(group).catch(() => {
-						if (groups.get(group.processGroupId) === group) markFailure(group, "ownership-never-established");
-					});
-				}
-				return;
-			}
-			signalOnce(group, "SIGTERM");
+			return group ? finalizeGroup(group, true) : Promise.resolve();
 		},
 		drain(): Promise<void> {
 			if (!enabled || groups.size === 0) return Promise.resolve();
 			if (drainPromise) return drainPromise;
 			drainPromise = (async () => {
-				const startedAt = ops.now();
-				const deadline = startedAt + deadlineMs;
-				await waitForOwnershipReady(deadline);
-				for (const group of [...groups.values()]) signalOnce(group, "SIGTERM");
-				await waitUntil(Math.min(ops.now() + graceMs, deadline));
-				for (const group of [...groups.values()]) signalOnce(group, "SIGKILL");
-				await waitUntil(deadline);
-				pruneLostWitnesses();
-				if (groups.size > 0) {
-					const elapsedMs = Math.max(0, ops.now() - startedAt);
-					const diagnostics: ForegroundGroupDrainDiagnostic[] = [];
-					for (const group of [...groups.values()]) {
-						const finalWitnessStatus = group.witness.status();
-						if (finalWitnessStatus === "lost" && group.killAttempt === "sent" && !group.failureReason) {
-							remove(group.processGroupId);
-							continue;
-						}
-						diagnostics.push({
-							processGroupId: group.processGroupId,
-							finalWitnessStatus,
-							termAttempt: group.termAttempt,
-							killAttempt: group.killAttempt,
-							reason: group.failureReason ?? (finalWitnessStatus === "live" ? "deadline-exceeded" : finalWitnessStatus === "pending" ? "ownership-never-established" : "ownership-lost"),
-							elapsedMs,
-							deadlineMs,
-						});
-					}
-					if (diagnostics.length > 0) {
-						const error = new ForegroundShellGroupDrainError(elapsedMs, deadlineMs, diagnostics);
-						try { ops.report(error.message); } catch { /* diagnostics must not replace the owner failure */ }
-						throw error;
-					}
+				const results = await Promise.allSettled([...groups.values()].map(group => finalizeGroup(group, true)));
+				const failures = results
+					.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+					.map(result => result.reason);
+				if (failures.length === 0) return;
+				if (failures.length === 1) throw failures[0];
+				const diagnostics = failures.flatMap(failure =>
+					failure instanceof ForegroundShellGroupDrainError ? failure.groups : []);
+				if (diagnostics.length > 0) {
+					throw new ForegroundShellGroupDrainError(
+						Math.max(...diagnostics.map(diagnostic => diagnostic.elapsedMs)),
+						deadlineMs,
+						diagnostics,
+					);
 				}
+				throw new AggregateError(failures, "Foreground process-group drain failed");
 			})();
 			return drainPromise;
 		},
@@ -606,7 +605,7 @@ export default function (pi: ExtensionAPI) {
 			description: Type.Optional(Type.String({ description: "Short label (3-6 words); recommended for multi-line or non-obvious commands." })),
 		}),
 		async execute(_toolCallId, { command, timeout }, abortSignal, onUpdate) {
-			return new Promise((resolve) => {
+			return new Promise((resolve, reject) => {
 				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
 				const { shell, args } = getShellConfig();
 
@@ -634,36 +633,8 @@ export default function (pi: ExtensionAPI) {
 				let tempFileStream: fs.WriteStream | undefined;
 				let totalBytes = 0;
 				let timedOut = false;
-
-				// Timeout handler
-				const terminateChildTree = () => {
-					if (!child.pid) return;
-					if (process.platform === "win32") killProcessTree(child.pid);
-					else foregroundGroups.terminate(child.pid);
-				};
-
-				const timer = setTimeout(() => {
-					timedOut = true;
-					terminateChildTree();
-				}, timeoutSec * 1000);
-
-				// Abort handler
-				const abortHandler = () => {
-					terminateChildTree();
-				};
-				if (abortSignal) {
-					if (abortSignal.aborted) {
-						terminateChildTree();
-						clearTimeout(timer);
-						// The usual listeners below are intentionally not installed on this
-						// already-cancelled fast path, but group ownership must still retire.
-						child.once("exit", () => foregroundGroups.releaseIfExited(child.pid));
-						child.once("error", () => foregroundGroups.releaseIfExited(child.pid));
-						resolve({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } });
-						return;
-					}
-					abortSignal.addEventListener("abort", abortHandler, { once: true });
-				}
+				let completionStarted = false;
+				const abortedAtStart = abortSignal?.aborted === true;
 
 				const handleData = (data: Buffer) => {
 					totalBytes += data.length;
@@ -692,48 +663,106 @@ export default function (pi: ExtensionAPI) {
 				child.stdout?.on("data", handleData);
 				child.stderr?.on("data", handleData);
 
-				// KEY FIX: Listen for 'exit' instead of 'close'.
-				// 'exit' fires when the shell process itself exits.
-				// 'close' waits for ALL FD holders (grandchild processes) to close pipes.
-				child.on("exit", (code) => {
-					foregroundGroups.releaseIfExited(child.pid);
+				let timer: NodeJS.Timeout;
+				const stopIo = () => {
 					clearTimeout(timer);
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
-
-					// Forcefully destroy pipes so grandchild FDs don't block
+					// Destroy inherited pipes after the root event; group finalization is the
+					// independent authority that proves escaped descendants are gone.
 					child.stdout?.destroy();
 					child.stderr?.destroy();
-
 					if (tempFileStream) tempFileStream.end();
+				};
 
+				const failFinalization = (error: unknown) => {
+					if (completionStarted) return;
+					completionStarted = true;
+					stopIo();
+					reject(error);
+				};
+
+				const terminateChildTree = () => {
+					if (!child.pid) return;
+					if (process.platform === "win32") {
+						killProcessTree(child.pid);
+					} else {
+						void foregroundGroups.terminate(child.pid).catch(failFinalization);
+					}
+				};
+
+				const abortHandler = () => {
+					clearTimeout(timer);
+					terminateChildTree();
+				};
+
+				const completeExit = async (code: number | null) => {
+					if (completionStarted) return;
+					completionStarted = true;
+					stopIo();
+					try {
+						await foregroundGroups.finalizeRootExit(child.pid);
+					} catch (error) {
+						reject(error);
+						return;
+					}
+
+					if (abortedAtStart) {
+						resolve({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } });
+						return;
+					}
 					const fullOutput = outputChunks.join("");
 					const { content, truncated } = truncateTail(fullOutput);
 					const cancelled = code === null;
 
 					let output = truncated ? content : fullOutput;
-					if (timedOut) {
-						output += `\n[Command timed out after ${timeoutSec}s and was killed]`;
-					}
-					if (truncated && tempFilePath) {
-						output += `\n[Output truncated. Full output saved to ${tempFilePath}]`;
-					}
+					if (timedOut) output += `\n[Command timed out after ${timeoutSec}s and was killed]`;
+					if (truncated && tempFilePath) output += `\n[Output truncated. Full output saved to ${tempFilePath}]`;
 
 					resolve({
 						content: [{ type: "text" as const, text: `Exit code: ${cancelled ? "killed" : code}\n${output}` }],
 						details: { truncated, fullOutputPath: tempFilePath },
 					});
-				});
+				};
 
-				child.on("error", (err) => {
-					foregroundGroups.releaseIfExited(child.pid);
-					clearTimeout(timer);
-					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
-					if (tempFileStream) tempFileStream.end();
+				const completeSpawnError = async (err: Error) => {
+					if (completionStarted) return;
+					completionStarted = true;
+					stopIo();
+					try {
+						await foregroundGroups.finalizeRootExit(child.pid);
+					} catch (error) {
+						reject(error);
+						return;
+					}
 					resolve({
 						content: [{ type: "text" as const, text: `Error spawning command: ${err.message}` }],
 						details: {},
 					});
-				});
+				};
+
+				// Use the root event for command output, but never publish it until the
+				// exact POSIX group witness has been reaped (Windows remains Job-owned).
+				child.on("exit", code => { void completeExit(code); });
+				child.on("error", err => { void completeSpawnError(err); });
+
+				timer = setTimeout(() => {
+					timedOut = true;
+					terminateChildTree();
+				}, timeoutSec * 1000);
+
+				if (abortSignal) {
+					abortSignal.addEventListener("abort", abortHandler, { once: true });
+					if (abortedAtStart) {
+						abortHandler();
+						// Preserve the pre-existing Windows fast path; its outer Job/task-tree
+						// owner remains authoritative rather than the POSIX witness finalizer.
+						if (process.platform === "win32") {
+							completionStarted = true;
+							stopIo();
+							resolve({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } });
+						}
+					}
+				}
 			});
 		},
 	});
