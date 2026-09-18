@@ -1202,6 +1202,18 @@ export interface SessionInfo {
 	lifecycleFenced?: boolean;
 	/** Terminal teardown has closed metadata admission and cancelled RPC retry authority. */
 	terminalMetadataFenced?: boolean;
+	/**
+	 * Bounded, redacted diagnostics for a runtime whose terminal stop could not be
+	 * verified. While present, this SessionInfo remains the authoritative owner and
+	 * must not be untracked or removed from `sessions`.
+	 */
+	terminalCleanupPending?: {
+		phase: "runtime";
+		failedAt: number;
+		attempts: number;
+		runtimeRunning: boolean | undefined;
+		errors: string[];
+	};
 	/** Existing metadata retry delays cancelled by the terminal admission fence. */
 	pendingMetadataRetryCancellations?: Set<() => void>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -21071,11 +21083,62 @@ export class SessionManager {
 
 			// Start stop alongside the final state request so process exit cancels any
 			// unresponsive metadata RPC. Durable work is still joined before the store
-			// flush and project-context teardown below.
-			await run(`session:${id}:runtime`, async () => {
-				const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
-				if (bridgeStopError) throw bridgeStopError;
-			});
+			// flush and project-context teardown below. A rejected stop is not proof that
+			// the runtime exited: retain its exact SessionInfo owner while one bounded
+			// second stop joins the bridge's concrete process-exit barrier.
+			const runtimeStopErrors: unknown[] = [];
+			let stopAttempts = 1;
+			const waitForOwnedExit = async (): Promise<void> => {
+				if (typeof session.rpcClient.waitForExit === "function") {
+					await session.rpcClient.waitForExit();
+				}
+			};
+			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+			if (bridgeStopError) runtimeStopErrors.push(bridgeStopError);
+			let runtimeStopVerified = session.rpcClient.running === false;
+			if (!bridgeStopError && !runtimeStopVerified) {
+				try {
+					await waitForOwnedExit();
+					runtimeStopVerified = true;
+				} catch (error) {
+					runtimeStopErrors.push(error);
+					runtimeStopVerified = session.rpcClient.running === false;
+				}
+			} else if (bridgeStopError && !runtimeStopVerified) {
+				// A rejected stop is ambiguous. Make one terminal-only drain attempt;
+				// successful signal delivery is followed by the exact bridge exit barrier.
+				stopAttempts++;
+				try {
+					await session.rpcClient.stop();
+					await waitForOwnedExit();
+					runtimeStopVerified = true;
+				} catch (error) {
+					runtimeStopErrors.push(error);
+					runtimeStopVerified = session.rpcClient.running === false;
+				}
+			}
+			if (!runtimeStopVerified) {
+				const errors = runtimeStopErrors.map((error) => redactSensitive(
+					error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+				).slice(0, 500));
+				session.terminalCleanupPending = {
+					phase: "runtime",
+					failedAt: this.clock.now(),
+					attempts: stopAttempts,
+					runtimeRunning: session.rpcClient.running,
+					errors,
+				};
+				failures.push({
+					phase: `session:${id}:runtime`,
+					reason: new AggregateError(
+						errors.map((message) => new Error(message)),
+						`Session ${id} runtime cleanup remains pending after ${stopAttempts} bounded stop attempt(s); owner retained (running=${String(session.rpcClient.running)})`,
+					),
+				});
+				continue;
+			}
+			session.terminalCleanupPending = undefined;
+
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
@@ -21088,7 +21151,9 @@ export class SessionManager {
 			this.sessions.delete(id);
 			this._taskIdCache.delete(id);
 		}
-		this._taskIdCache.clear();
+		// Do not globally clear task ownership while a cleanup-pending session is
+		// retained. Successfully finalized sessions were removed individually above.
+		if (this.sessions.size === 0) this._taskIdCache.clear();
 
 		// A manager can be shared by more than one scope. Join every already-started
 		// initialization, then disconnect each unique owner exactly once before any

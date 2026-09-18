@@ -229,6 +229,8 @@ export interface PiNewSessionRpcResponse {
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/** Terminal teardown only: await the exact owned process's exit event. */
+	waitForExit?(timeoutMs?: number): Promise<void>;
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number, streamingBehavior?: PromptStreamingBehavior): Promise<any>;
 	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior }): Promise<any>;
 	steer(text: string): Promise<any>;
@@ -1049,6 +1051,40 @@ export class RpcBridge {
 			});
 
 			this.process!.kill("SIGTERM");
+		});
+	}
+
+	/**
+	 * Terminal-only completion barrier for the exact child currently owned by the
+	 * bridge. Unlike stop(), forced-signal delivery does not satisfy this barrier.
+	 * Normal restart/replacement behavior deliberately continues to use stop().
+	 */
+	async waitForExit(timeoutMs = 3000): Promise<void> {
+		const ownedProcess = this.process;
+		if (!ownedProcess) return;
+
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let deadline: ReturnType<Clock["setTimeout"]> | undefined;
+			const finish = (error?: Error) => {
+				if (settled) return;
+				settled = true;
+				if (deadline) this.clock.clearTimeout(deadline);
+				ownedProcess.removeListener("exit", onExit);
+				ownedProcess.removeListener("error", onError);
+				if (error) reject(error);
+				else resolve();
+			};
+			const onExit = () => finish();
+			// The bridge's primary process-error handler clears `this.process`; a
+			// spawn-level error therefore also proves this exact child is no owner.
+			const onError = () => finish();
+			ownedProcess.once("exit", onExit);
+			ownedProcess.once("error", onError);
+			deadline = this.clock.setTimeout(() => {
+				if (this.process !== ownedProcess) finish();
+				else finish(new Error(`Agent process ${ownedProcess.pid ?? "unknown"} exit remained unverified after ${timeoutMs}ms`));
+			}, timeoutMs);
 		});
 	}
 

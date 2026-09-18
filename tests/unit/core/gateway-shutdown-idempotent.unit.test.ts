@@ -226,6 +226,108 @@ describe("session-manager terminal owner shutdown", () => {
 		await assert.rejects(manager.shutdown());
 		assert.equal(events.filter(event => event === "store").length, 1, "failed shutdown is still exact-once");
 	});
+
+	it("retains an unverified session runtime owner and blocks dependent root cleanup", async () => {
+		const events: string[] = [];
+		let stopCalls = 0;
+		let closeCalls = 0;
+		let untrackCalls = 0;
+		let removed = false;
+		const bridge = {
+			running: true,
+			async getState() { return { success: true, data: {} }; },
+			async stop() {
+				stopCalls++;
+				throw new Error(stopCalls === 1
+					? "termination failed token=super-secret-value"
+					: "exit barrier remained unresolved");
+			},
+		};
+		const client = { close() { closeCalls++; } };
+		const session: any = {
+			id: "cleanup-pending-session",
+			title: "cleanup pending",
+			cwd: "C:/owned/worktree",
+			status: "streaming",
+			clients: new Set([client]),
+			rpcClient: bridge,
+			unsubscribe() { events.push("unsubscribe"); },
+		};
+		const manager: any = new SessionManager();
+		manager.sessions.set(session.id, session);
+		manager.sessionsWithConnectedClients.add(session);
+		manager._untrackConnectedSession = () => { untrackCalls++; };
+		manager.mcpManager = { async disconnectAll() { events.push("mcp"); } };
+		manager._testGoalStore = { async close() { events.push("store"); } };
+		manager._testTaskStore = null;
+
+		await assert.rejects(
+			manager.shutdown().then(() => { removed = true; }),
+			(error: unknown) => {
+				assert.ok(error instanceof AggregateError);
+				assert.match(error.message, /session:cleanup-pending-session:runtime/);
+				assert.doesNotMatch(String(error), /super-secret-value/);
+				return true;
+			},
+		);
+
+		assert.equal(stopCalls, 2, "terminal shutdown gets only one bounded verification retry");
+		assert.strictEqual(manager.sessions.get(session.id), session, "the exact runtime owner must remain tracked");
+		assert.equal(session.status, "streaming", "an unverified runtime must not be finalized as terminated");
+		assert.equal(session.terminalCleanupPending?.phase, "runtime");
+		assert.equal(session.terminalCleanupPending?.attempts, 2);
+		assert.match(session.terminalCleanupPending?.errors[0] ?? "", /<redacted-token>/);
+		assert.equal(closeCalls, 0, "client finalization follows verified runtime exit");
+		assert.equal(untrackCalls, 0, "cleanup-pending owners must not be untracked");
+		assert.equal(removed, false, "a rejected gateway owner barrier must block root removal");
+		assert.deepEqual(events, ["unsubscribe", "mcp", "store"], "unrelated shutdown phases still drain");
+	});
+
+	it("finalizes a retained session only after the bounded runtime barrier succeeds", async () => {
+		let releaseExit!: () => void;
+		const exitBarrier = new Promise<void>(resolve => { releaseExit = resolve; });
+		let stopCalls = 0;
+		let closeCalls = 0;
+		let untrackCalls = 0;
+		const bridge = {
+			running: true,
+			async getState() { return { success: true, data: {} }; },
+			async stop() {
+				stopCalls++;
+				if (stopCalls === 1) throw new Error("initial termination failed");
+			},
+			async waitForExit() {
+				await exitBarrier;
+				bridge.running = false;
+			},
+		};
+		const session: any = {
+			id: "eventually-stopped-session",
+			title: "eventually stopped",
+			cwd: "C:/owned/worktree",
+			status: "streaming",
+			clients: new Set([{ close() { closeCalls++; } }]),
+			rpcClient: bridge,
+			unsubscribe() {},
+		};
+		const manager: any = new SessionManager();
+		manager.sessions.set(session.id, session);
+		manager._untrackConnectedSession = () => { untrackCalls++; };
+
+		const shutdown = manager.shutdown();
+		while (stopCalls < 2) await Promise.resolve();
+		assert.strictEqual(manager.sessions.get(session.id), session, "ownership remains live while exit is unverified");
+		assert.equal(closeCalls, 0);
+		assert.equal(untrackCalls, 0);
+
+		releaseExit();
+		await shutdown;
+		assert.equal(manager.sessions.has(session.id), false);
+		assert.equal(session.status, "terminated");
+		assert.equal(closeCalls, 1);
+		assert.equal(untrackCalls, 1);
+		assert.equal(session.terminalCleanupPending, undefined);
+	});
 });
 
 describe("graceful worktree-pool shutdown", () => {
