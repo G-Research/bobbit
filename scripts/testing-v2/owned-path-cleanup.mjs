@@ -7,6 +7,7 @@ const DEFAULT_MAX_ATTEMPTS = 32;
 const DEFAULT_DEADLINE_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 25;
 const DEFAULT_MAX_DELAY_MS = 500;
+const DEFAULT_TRAVERSAL_CONCURRENCY = 8;
 
 function isOwnedChild(ownerRoot, target) {
 	const relative = path.relative(ownerRoot, target);
@@ -90,20 +91,6 @@ async function lstatIfPresent(candidate, fsImpl, traversal) {
 	}
 }
 
-async function assertClaimsCurrent(claims, fsImpl, platform, traversal) {
-	for (const claim of claims) {
-		const current = await lstatIfPresent(claim.path, fsImpl, traversal);
-		if (!current) throw unsafePathError(claim.path, "an ancestor disappeared during removal");
-		const entry = await classifyEntry(claim.path, current, fsImpl, platform, traversal);
-		if (entry.type !== "directory") {
-			throw unsafePathError(claim.path, "an ancestor stopped being a genuine directory");
-		}
-		if (entry.identity !== claim.identity) {
-			throw unsafePathError(claim.path, "an ancestor directory identity changed during removal");
-		}
-	}
-}
-
 async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
 	const identity = stableIdentity(stats);
 	if (identity === undefined) {
@@ -140,86 +127,232 @@ async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
 	return { type: "leaf", identity };
 }
 
-async function assertEntryCurrent(candidate, expected, fsImpl, platform, traversal) {
-	const current = await lstatIfPresent(candidate, fsImpl, traversal);
-	if (!current) throw unsafePathError(candidate, "entry disappeared before its identity could be revalidated");
-	const entry = await classifyEntry(candidate, current, fsImpl, platform, traversal);
-	if (entry.identity !== expected.identity || entry.type !== expected.type) {
-		throw unsafePathError(candidate, "entry identity or type changed during removal");
-	}
-	if (expected.target !== undefined && entry.target !== expected.target) {
-		throw unsafePathError(candidate, "link or reparse target changed during removal");
-	}
-	return current;
+function entryMatchesClaim(entry, claim) {
+	return entry.identity === claim.identity
+		&& entry.type === claim.type
+		&& (claim.target === undefined || entry.target === claim.target);
 }
 
-async function removeEntryNoFollow(candidate, claims, fsImpl, platform, traversal) {
-	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
-	const stats = await lstatIfPresent(candidate, fsImpl, traversal);
-	if (!stats) return;
-	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
-	const entry = await classifyEntry(candidate, stats, fsImpl, platform, traversal);
-
-	if (entry.type === "junction-or-symbolic-link" || entry.type === "symbolic-link" || entry.type === "directory-reparse-point") {
-		const evidence = {
-			type: entry.type,
-			path: candidate,
-			target: entry.target,
-			action: entry.type === "directory-reparse-point" ? "rmdir" : "unlink",
-		};
-		traversal.push(evidence);
-		await assertClaimsCurrent(claims, fsImpl, platform, traversal);
-		await assertEntryCurrent(candidate, entry, fsImpl, platform, traversal);
-		if (entry.type === "directory-reparse-point") await fsImpl.rmdir(candidate);
-		else await fsImpl.unlink(candidate);
-		const residual = await lstatIfPresent(candidate, fsImpl, traversal);
-		if (residual) throw unsafePathError(candidate, "link or reparse point remained or was replaced after non-recursive removal");
-		evidence.outcome = "removed";
-		return;
-	}
-
-	if (entry.type === "directory") {
-		const nextClaims = [...claims, { path: candidate, identity: entry.identity }];
-		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
-		const entries = await fsImpl.readdir(candidate, { withFileTypes: true });
-		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
-		for (const child of entries) {
-			await removeEntryNoFollow(path.join(candidate, child.name), nextClaims, fsImpl, platform, traversal);
+/**
+ * Revalidate only the operation root, immediate producer, and current entry.
+ * Rechecking every ancestor for every leaf is quadratic in deep package trees.
+ * Reaching the same immediate producer inode through a changed intermediate
+ * pathname still reaches the exact authorized directory; the root claim fences
+ * replacement of the operation tree itself.
+ */
+async function assertClaimCurrent(claim, fsImpl, platform, traversal) {
+	if (!claim) return;
+	const claims = new Set([claim.rootClaim, claim.parent, claim]);
+	claims.delete(undefined);
+	for (const currentClaim of claims) {
+		const current = await lstatIfPresent(currentClaim.path, fsImpl, traversal);
+		if (!current) throw unsafePathError(currentClaim.path, "an entry disappeared during removal");
+		const entry = await classifyEntry(currentClaim.path, current, fsImpl, platform, traversal);
+		if (!entryMatchesClaim(entry, currentClaim)) {
+			throw unsafePathError(currentClaim.path, "entry identity, type, or link target changed during removal");
 		}
-		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
-		await fsImpl.rmdir(candidate);
-		return;
 	}
-
-	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
-	await assertEntryCurrent(candidate, entry, fsImpl, platform, traversal);
-	await fsImpl.unlink(candidate);
 }
 
-async function captureParentClaims(ownerRoot, target, fsImpl, platform, traversal) {
-	if (ownerRoot === target) return [];
+async function withCurrentClaim(claim, fsImpl, platform, traversal, operation) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+	let result;
+	try {
+		result = await operation();
+	} catch (operationError) {
+		// Prefer an identity error when namespace replacement caused the I/O
+		// failure; otherwise preserve the original filesystem error for retry.
+		await assertClaimCurrent(claim, fsImpl, platform, traversal);
+		throw operationError;
+	}
+	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+	return result;
+}
+
+function makeClaim(candidate, entry, parent, operationRoot) {
+	const claim = {
+		path: candidate,
+		identity: entry.identity,
+		type: entry.type,
+		...(entry.target === undefined ? {} : { target: entry.target }),
+		parent,
+		rootClaim: operationRoot,
+	};
+	if (!operationRoot) claim.rootClaim = claim;
+	return claim;
+}
+
+async function removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+	if (claim.type === "directory-reparse-point") await fsImpl.rmdir(claim.path);
+	else await fsImpl.unlink(claim.path);
+	const residual = await lstatIfPresent(claim.path, fsImpl, traversal);
+	if (residual) throw unsafePathError(claim.path, "entry remained or was replaced after non-recursive removal");
+	await assertClaimCurrent(claim.parent, fsImpl, platform, traversal);
+	if (evidence) evidence.outcome = "removed";
+}
+
+async function removeClaimedDirectory(claim, fsImpl, platform, traversal) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+	await fsImpl.rmdir(claim.path);
+	const residual = await lstatIfPresent(claim.path, fsImpl, traversal);
+	if (residual) throw unsafePathError(claim.path, "directory remained or was replaced after removal");
+	await assertClaimCurrent(claim.parent, fsImpl, platform, traversal);
+}
+
+/** Run dynamically discovered entry work with one operation-level ceiling. */
+async function processRemovalQueue(initialJob, concurrency) {
+	await new Promise((resolve, reject) => {
+		let queue = [];
+		let cursor = 0;
+		let active = 0;
+		let outstanding = 0;
+		let stopped = false;
+		let firstError;
+
+		const queuedCount = () => queue.length - cursor;
+		const compactQueue = () => {
+			if (cursor >= 256 && cursor * 2 >= queue.length) {
+				queue = queue.slice(cursor);
+				cursor = 0;
+			}
+		};
+		const settle = () => {
+			if (active !== 0 || outstanding !== 0) return;
+			if (firstError !== undefined) reject(firstError);
+			else resolve();
+		};
+		const finish = error => {
+			active--;
+			outstanding--;
+			if (error !== undefined && !stopped) {
+				stopped = true;
+				firstError = error;
+				outstanding -= queuedCount();
+				queue = [];
+				cursor = 0;
+			}
+			schedule();
+			settle();
+		};
+		const schedule = () => {
+			if (stopped) return;
+			while (active < concurrency && cursor < queue.length) {
+				const job = queue[cursor++];
+				compactQueue();
+				active++;
+				void Promise.resolve().then(job).then(() => finish(), finish);
+			}
+		};
+		const enqueue = job => {
+			if (stopped) return false;
+			queue.push(job);
+			outstanding++;
+			schedule();
+			return true;
+		};
+
+		enqueue(() => initialJob(enqueue));
+	});
+}
+
+async function captureParentClaim(ownerRoot, target, fsImpl, platform, traversal) {
+	if (ownerRoot === target) return { missing: false, claim: undefined };
 	const relative = path.relative(ownerRoot, path.dirname(target));
 	const segments = relative === "" ? [] : relative.split(path.sep);
-	const claims = [];
+	let claim;
+	let rootClaim;
 	let current = ownerRoot;
 	for (const segment of ["", ...segments]) {
 		if (segment) current = path.join(current, segment);
 		const stats = await lstatIfPresent(current, fsImpl, traversal);
-		if (!stats) return undefined;
+		if (!stats) return { missing: true, claim: undefined };
 		const entry = await classifyEntry(current, stats, fsImpl, platform, traversal);
 		if (entry.type !== "directory") {
 			traversal.push({ type: "unsafe-ancestor", path: current, entryType: entry.type, target: entry.target });
 			throw unsafePathError(current, "target traversal would cross a link, reparse point, or non-directory");
 		}
-		claims.push({ path: current, identity: entry.identity });
+		claim = makeClaim(current, entry, claim, rootClaim);
+		if (!rootClaim) {
+			rootClaim = claim;
+			claim.rootClaim = claim;
+		}
 	}
-	return claims;
+	return { missing: false, claim };
 }
 
-async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal) {
-	const claims = await captureParentClaims(ownerRoot, target, fsImpl, platform, traversal);
-	if (claims === undefined) return;
-	await removeEntryNoFollow(target, claims, fsImpl, platform, traversal);
+async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal, concurrency) {
+	const captured = await captureParentClaim(ownerRoot, target, fsImpl, platform, traversal);
+	if (captured.missing) return;
+
+	let operationRoot;
+	const processEntry = async (candidate, parentClaim, complete, enqueue) => {
+		await assertClaimCurrent(parentClaim, fsImpl, platform, traversal);
+		const stats = await lstatIfPresent(candidate, fsImpl, traversal);
+		if (!stats) {
+			complete();
+			return;
+		}
+		await assertClaimCurrent(parentClaim, fsImpl, platform, traversal);
+		const entry = await classifyEntry(candidate, stats, fsImpl, platform, traversal);
+		const claim = makeClaim(candidate, entry, parentClaim, operationRoot);
+		if (!operationRoot) {
+			operationRoot = claim;
+			claim.rootClaim = claim;
+		}
+
+		if (entry.type !== "directory") {
+			let evidence;
+			if (entry.type !== "leaf") {
+				evidence = {
+					type: entry.type,
+					path: candidate,
+					target: entry.target,
+					action: entry.type === "directory-reparse-point" ? "rmdir" : "unlink",
+				};
+				traversal.push(evidence);
+			}
+			await removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence);
+			complete();
+			return;
+		}
+
+		const entries = await withCurrentClaim(
+			claim,
+			fsImpl,
+			platform,
+			traversal,
+			() => fsImpl.readdir(candidate, { withFileTypes: true }),
+		);
+		if (entries.length === 0) {
+			await removeClaimedDirectory(claim, fsImpl, platform, traversal);
+			complete();
+			return;
+		}
+
+		let remaining = entries.length;
+		const childComplete = () => {
+			remaining--;
+			if (remaining !== 0) return;
+			enqueue(async () => {
+				await removeClaimedDirectory(claim, fsImpl, platform, traversal);
+				complete();
+			});
+		};
+		for (const child of entries) {
+			enqueue(() => processEntry(
+				path.join(candidate, child.name),
+				claim,
+				childComplete,
+				enqueue,
+			));
+		}
+	};
+
+	await processRemovalQueue(
+		enqueue => processEntry(target, captured.claim, () => {}, enqueue),
+		concurrency,
+	);
 }
 
 function diagnosticJson(value) {
@@ -268,8 +401,9 @@ export class OwnedPathCleanupError extends Error {
 /**
  * Remove a path owned by a test run without following links or reparse points.
  *
- * Every entry and ancestor claim is identity-checked before descent. Links are
- * removed non-recursively; uncertain identities retain the root and fail loud.
+ * The operation root, immediate producer, and current entry are identity-
+ * checked around pathname I/O. Links are removed non-recursively; uncertain
+ * identities retain the root and fail loud.
  * Transient lock and directory-removal errors receive bounded exponential
  * backoff on every platform. Removing the owner root itself requires explicit
  * coordinator permission.
@@ -297,6 +431,11 @@ export async function removeOwnedPath(target, options = {}) {
 	const deadlineMs = nonNegativeNumber(options.deadlineMs, DEFAULT_DEADLINE_MS, "deadlineMs");
 	const initialDelayMs = nonNegativeNumber(options.initialDelayMs, DEFAULT_INITIAL_DELAY_MS, "initialDelayMs");
 	const maxDelayMs = nonNegativeNumber(options.maxDelayMs, DEFAULT_MAX_DELAY_MS, "maxDelayMs");
+	const traversalConcurrency = positiveInteger(
+		options.traversalConcurrency,
+		DEFAULT_TRAVERSAL_CONCURRENCY,
+		"traversalConcurrency",
+	);
 	const platform = options.platform ?? process.platform;
 	const fsImpl = {
 		lstat,
@@ -309,7 +448,14 @@ export async function removeOwnedPath(target, options = {}) {
 	// The whole-attempt override exists only for deterministic retry-policy tests.
 	// Production callers always use the no-follow traversal above.
 	const remove = options.seams?.remove
-		?? ((candidate, traversal) => removePathNoFollow(candidate, ownerRoot, fsImpl, platform, traversal));
+		?? ((candidate, traversal) => removePathNoFollow(
+			candidate,
+			ownerRoot,
+			fsImpl,
+			platform,
+			traversal,
+			traversalConcurrency,
+		));
 	const sleep = options.seams?.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
 	const now = options.seams?.now ?? (() => performance.now());
 	const history = [];

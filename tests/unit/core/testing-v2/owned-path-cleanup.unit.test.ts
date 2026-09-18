@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -44,6 +44,7 @@ type RemoveOptions = {
 	deadlineMs?: number;
 	initialDelayMs?: number;
 	maxDelayMs?: number;
+	traversalConcurrency?: number;
 	seams?: {
 		remove?: (target: string, traversal: TraversalEvidence[]) => Promise<void>;
 		fs?: Partial<{
@@ -472,6 +473,131 @@ describe("owned path cleanup contract", () => {
 			}
 			await rm(fixtureBase, { recursive: true, force: true });
 			await rm(external, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps deep-tree metadata work linear and uses only the configured traversal concurrency", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("linear-cleanup-owner");
+		const target = path.join(ownerRoot, "node_modules");
+		type FakeNode = { kind: "directory" | "leaf"; ino: number; children: string[] };
+		const nodes = new Map<string, FakeNode>();
+		let nextIno = 1;
+		const directory = (candidate: string, children: string[]) => {
+			nodes.set(candidate, { kind: "directory", ino: nextIno++, children });
+		};
+		const leaf = (candidate: string) => {
+			nodes.set(candidate, { kind: "leaf", ino: nextIno++, children: [] });
+		};
+
+		const depth = 80;
+		directory(ownerRoot, [path.basename(target)]);
+		let current = target;
+		for (let index = 0; index < depth; index++) {
+			const childDirectoryName = `d${index}`;
+			const children = index === depth - 1 ? [`f${index}.js`] : [`f${index}.js`, childDirectoryName];
+			directory(current, children);
+			leaf(path.join(current, `f${index}.js`));
+			if (index < depth - 1) current = path.join(current, childDirectoryName);
+		}
+		const entryCount = depth * 2;
+		let lstatCalls = 0;
+		let active = 0;
+		let maxActive = 0;
+		const fakeStats = (node: FakeNode) => ({
+			dev: 1,
+			ino: node.ino,
+			isDirectory: () => node.kind === "directory",
+			isSymbolicLink: () => false,
+		});
+		const missing = (candidate: string) => Object.assign(new Error(`missing: ${candidate}`), { code: "ENOENT", path: candidate });
+
+		const result = await removeOwnedPath(target, {
+			ownerRoot,
+			platform: "linux",
+			traversalConcurrency: 4,
+			seams: {
+				fs: {
+					lstat: async candidate => {
+						lstatCalls++;
+						active++;
+						maxActive = Math.max(maxActive, active);
+						await new Promise<void>(resolve => setImmediate(resolve));
+						active--;
+						const node = nodes.get(candidate);
+						if (!node) throw missing(candidate);
+						return fakeStats(node);
+					},
+					readdir: async candidate => {
+						const node = nodes.get(candidate);
+						if (!node) throw missing(candidate);
+						return node.children.map(name => ({ name }));
+					},
+					unlink: async candidate => {
+						if (!nodes.delete(candidate)) throw missing(candidate);
+					},
+					rmdir: async candidate => {
+						if (!nodes.delete(candidate)) throw missing(candidate);
+					},
+				},
+			},
+		});
+
+		expect(result).toMatchObject({ removed: true, attempts: 1 });
+		expect(nodes.has(target)).toBe(false);
+		expect(maxActive).toBeGreaterThan(1);
+		expect(maxActive).toBeLessThanOrEqual(4);
+		expect(
+			lstatCalls,
+			`${CONTRACT_PREFIX}_LINEAR_TRAVERSAL: metadata work must stay O(entries), not O(entries × depth)`,
+		).toBeLessThan(entryCount * 20);
+	});
+
+	it("fails closed before deleting through a replaced parent path", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-replacement-"));
+		const target = path.join(ownerRoot, "tree");
+		const nested = path.join(target, "nested");
+		const detached = path.join(ownerRoot, "detached-original");
+		const replacement = path.join(ownerRoot, "replacement");
+		const victim = path.join(nested, "victim.txt");
+		await mkdir(nested, { recursive: true });
+		await writeFile(victim, "owned");
+		await mkdir(replacement);
+		await writeFile(path.join(replacement, "victim.txt"), "external sentinel");
+		let swapped = false;
+		const unlinkEntry = vi.fn(unlink);
+
+		try {
+			const failure = await removeOwnedPath(target, {
+				ownerRoot,
+				traversalConcurrency: 1,
+				seams: {
+					fs: {
+						lstat: async candidate => {
+							const stats = await lstat(candidate);
+							if (!swapped && path.resolve(candidate) === path.resolve(victim)) {
+								swapped = true;
+								await rename(nested, detached);
+								await rename(replacement, nested);
+							}
+							return stats;
+						},
+						unlink: unlinkEntry,
+					},
+				},
+			}).then(() => undefined, (error: unknown) => error);
+
+			expect(swapped).toBe(true);
+			expect(failure).toMatchObject({
+				name: "OwnedPathCleanupError",
+				history: [expect.objectContaining({ code: "EUNSAFEPATH" })],
+			});
+			expect(unlinkEntry, "replacement content must fail identity validation before unlink").not.toHaveBeenCalled();
+			expect(await readFile(path.join(nested, "victim.txt"), "utf8")).toBe("external sentinel");
+			expect(await readFile(path.join(detached, "victim.txt"), "utf8")).toBe("owned");
+		} finally {
+			await rm(ownerRoot, { recursive: true, force: true });
 		}
 	});
 
