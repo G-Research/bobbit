@@ -37,13 +37,47 @@ type ForegroundGroupOps = {
 	report: (message: string) => void;
 };
 
+type ForegroundSignalAttempt = "not-attempted" | "sent" | "esrch" | "failed";
+export type ForegroundGroupDrainFailureReason =
+	| "ownership-never-established"
+	| "ownership-lost"
+	| "signal-failed"
+	| "deadline-exceeded";
+export type ForegroundGroupDrainDiagnostic = {
+	processGroupId: number;
+	finalWitnessStatus: ForegroundGroupWitnessStatus;
+	termAttempt: ForegroundSignalAttempt;
+	killAttempt: ForegroundSignalAttempt;
+	reason: ForegroundGroupDrainFailureReason;
+	elapsedMs: number;
+	deadlineMs: number;
+};
+
+export class ForegroundShellGroupDrainError extends Error {
+	readonly code = "FOREGROUND_SHELL_GROUP_DRAIN_FAILED";
+	readonly elapsedMs: number;
+	readonly deadlineMs: number;
+	readonly groups: readonly ForegroundGroupDrainDiagnostic[];
+
+	constructor(elapsedMs: number, deadlineMs: number, groups: ForegroundGroupDrainDiagnostic[]) {
+		const summary = groups.map(group =>
+			`pgid=${group.processGroupId} status=${group.finalWitnessStatus} reason=${group.reason} TERM=${group.termAttempt} KILL=${group.killAttempt}`
+		).join("; ");
+		super(`[bash-tool] Foreground process-group drain failed after ${elapsedMs}ms (deadline=${deadlineMs}ms; ${summary})`);
+		this.name = "ForegroundShellGroupDrainError";
+		this.elapsedMs = elapsedMs;
+		this.deadlineMs = deadlineMs;
+		this.groups = groups;
+	}
+}
+
 type ForegroundGroup = {
 	processGroupId: number;
 	witness: ForegroundGroupWitness;
-	termRequested: boolean;
-	killRequested: boolean;
+	termAttempt: ForegroundSignalAttempt;
+	killAttempt: ForegroundSignalAttempt;
 	pendingTermination: boolean;
-	ownershipFailureReported: boolean;
+	failureReason?: ForegroundGroupDrainFailureReason;
 };
 
 function isNoSuchProcess(error: unknown): boolean {
@@ -170,9 +204,10 @@ export function createForegroundGroupWitness(
 }
 
 /**
- * Tracks only process groups whose spawn-time sentinel remains live. Once that
- * witness is lost, the numeric PGID is permanently retired and cannot become
- * signal authority again even if the kernel reuses it.
+ * Tracks process groups through an exact spawn-time sentinel. Once that witness
+ * is lost, the numeric PGID is permanently retired and cannot become signal
+ * authority again even if the kernel reuses it; the unresolved owner record is
+ * retained so terminal shutdown fails closed.
  */
 export function createForegroundShellGroupTracker(options: {
 	platform?: NodeJS.Platform;
@@ -201,37 +236,43 @@ export function createForegroundShellGroupTracker(options: {
 		notifyActiveChange(wasActive);
 	};
 
-	const retireUnverified = (group: ForegroundGroup) => {
-		if (!group.ownershipFailureReported) {
-			group.ownershipFailureReported = true;
-			ops.report(`[bash-tool] Foreground process-group ownership unverified; retired without signalling (pgid=${group.processGroupId})`);
-		}
-		remove(group.processGroupId);
+	const markFailure = (group: ForegroundGroup, reason: ForegroundGroupDrainFailureReason) => {
+		group.failureReason ??= reason;
 	};
 
-	const retireLostWitness = (group: ForegroundGroup) => {
-		if (group.killRequested) remove(group.processGroupId);
-		else retireUnverified(group);
+	const observeLostWitness = (group: ForegroundGroup) => {
+		// A successful group-wide SIGKILL followed by loss of the exact sentinel is
+		// verified termination. In every other case witness loss destroys signal
+		// authority but cannot prove that descendants released the group.
+		if (group.killAttempt === "sent" && !group.failureReason) remove(group.processGroupId);
+		else markFailure(group, "ownership-lost");
 	};
 
 	const pruneLostWitnesses = () => {
 		for (const group of groups.values()) {
-			if (group.witness.status() === "lost") retireLostWitness(group);
+			if (group.witness.status() === "lost") observeLostWitness(group);
 		}
 	};
 
 	const signalOnce = (group: ForegroundGroup, signal: PosixGroupSignal) => {
-		if (group.witness.status() !== "live") {
-			retireUnverified(group);
+		const status = group.witness.status();
+		if (status !== "live") {
+			markFailure(group, status === "pending" ? "ownership-never-established" : "ownership-lost");
 			return;
 		}
-		const key = signal === "SIGTERM" ? "termRequested" : "killRequested";
-		if (group[key]) return;
-		group[key] = true;
+		const key = signal === "SIGTERM" ? "termAttempt" : "killAttempt";
+		if (group[key] !== "not-attempted") return;
 		try {
 			ops.signal(group.processGroupId, signal);
+			group[key] = "sent";
 		} catch (error) {
-			if (isNoSuchProcess(error)) remove(group.processGroupId);
+			if (isNoSuchProcess(error)) {
+				group[key] = "esrch";
+				remove(group.processGroupId);
+			} else {
+				group[key] = "failed";
+				markFailure(group, "signal-failed");
+			}
 		}
 	};
 
@@ -254,7 +295,7 @@ export function createForegroundShellGroupTracker(options: {
 				return;
 			}
 			if (status === "lost" || ops.now() >= deadline) {
-				retireUnverified(group);
+				markFailure(group, status === "lost" ? "ownership-lost" : "ownership-never-established");
 				return;
 			}
 			await ops.sleep(Math.min(pollMs, deadline - ops.now()));
@@ -268,8 +309,9 @@ export function createForegroundShellGroupTracker(options: {
 			if (remaining <= 0) break;
 			await ops.sleep(Math.min(pollMs, remaining));
 		}
-		for (const group of [...groups.values()]) {
-			if (group.witness.status() !== "live") retireUnverified(group);
+		for (const group of groups.values()) {
+			const status = group.witness.status();
+			if (status !== "live") markFailure(group, status === "pending" ? "ownership-never-established" : "ownership-lost");
 		}
 	};
 
@@ -281,10 +323,9 @@ export function createForegroundShellGroupTracker(options: {
 				groups.set(processGroupId, {
 					processGroupId,
 					witness: witness ?? { status: () => "lost" },
-					termRequested: false,
-					killRequested: false,
+					termAttempt: "not-attempted",
+					killAttempt: "not-attempted",
 					pendingTermination: false,
-					ownershipFailureReported: false,
 				});
 			}
 			notifyActiveChange(wasActive);
@@ -292,7 +333,7 @@ export function createForegroundShellGroupTracker(options: {
 		releaseIfExited(processGroupId: number | undefined): void {
 			if (!enabled || !processGroupId) return;
 			const group = groups.get(processGroupId);
-			if (group?.witness.status() === "lost") retireLostWitness(group);
+			if (group?.witness.status() === "lost") observeLostWitness(group);
 		},
 		terminate(processGroupId: number | undefined): void {
 			if (!enabled || !processGroupId) return;
@@ -302,7 +343,7 @@ export function createForegroundShellGroupTracker(options: {
 				if (!group.pendingTermination) {
 					group.pendingTermination = true;
 					void terminateWhenOwned(group).catch(() => {
-						if (groups.get(group.processGroupId) === group) retireUnverified(group);
+						if (groups.get(group.processGroupId) === group) markFailure(group, "ownership-never-established");
 					});
 				}
 				return;
@@ -322,12 +363,30 @@ export function createForegroundShellGroupTracker(options: {
 				await waitUntil(deadline);
 				pruneLostWitnesses();
 				if (groups.size > 0) {
-					const ids = [...groups.keys()].join(",");
-					ops.report(`[bash-tool] Foreground process-group drain reached its ${deadlineMs}ms deadline (pgids=${ids})`);
+					const elapsedMs = Math.max(0, ops.now() - startedAt);
+					const diagnostics: ForegroundGroupDrainDiagnostic[] = [];
+					for (const group of [...groups.values()]) {
+						const finalWitnessStatus = group.witness.status();
+						if (finalWitnessStatus === "lost" && group.killAttempt === "sent" && !group.failureReason) {
+							remove(group.processGroupId);
+							continue;
+						}
+						diagnostics.push({
+							processGroupId: group.processGroupId,
+							finalWitnessStatus,
+							termAttempt: group.termAttempt,
+							killAttempt: group.killAttempt,
+							reason: group.failureReason ?? (finalWitnessStatus === "live" ? "deadline-exceeded" : finalWitnessStatus === "pending" ? "ownership-never-established" : "ownership-lost"),
+							elapsedMs,
+							deadlineMs,
+						});
+					}
+					if (diagnostics.length > 0) {
+						const error = new ForegroundShellGroupDrainError(elapsedMs, deadlineMs, diagnostics);
+						try { ops.report(error.message); } catch { /* diagnostics must not replace the owner failure */ }
+						throw error;
+					}
 				}
-				const wasActive = groups.size > 0;
-				groups.clear();
-				notifyActiveChange(wasActive);
 			})();
 			return drainPromise;
 		},
@@ -471,7 +530,11 @@ export default function (pi: ExtensionAPI) {
 					void drained.finally(() => {
 						removeSignalHandlers();
 						process.kill(process.pid, signal);
-					});
+					}).catch(() => { /* the terminal signal owns process exit */ });
+				} else {
+					// Pi's RPC lifecycle awaits the same coalesced promise from
+					// session_shutdown, where a drain failure must remain observable.
+					void drained.catch(() => {});
 				}
 			};
 			signalHandlers.set(signal, handler);
