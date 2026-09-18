@@ -125,19 +125,31 @@ async function prepareFixture() {
 				return result;
 			}
 			if (args.includes("--package-lock-only")) {
+				const manifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
+				manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-fixture.tgz" };
+				await writeFile(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
 				await writeFile(join(options.cwd, "package-lock.json"), JSON.stringify({
 					name: "prepared-consumer",
 					version: "1.0.0",
 					lockfileVersion: 3,
-					packages: { "": { name: "prepared-consumer", version: "1.0.0" } },
+					packages: {
+						"": { name: "prepared-consumer", version: "1.0.0", dependencies: manifest.dependencies },
+						"node_modules/@gresearch/bobbit": {
+							version: "1.0.0",
+							resolved: "file:../../pack/bobbit-fixture.tgz",
+						},
+					},
 				}));
 				return result;
 			}
-			if (args.includes("install") && args.includes("--offline")) {
+			if (args.includes("ci") && args.includes("--offline")) {
+				const stagedManifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
+				const stagedLock = JSON.parse(await readFile(join(options.cwd, "package-lock.json"), "utf8"));
+				assert.deepEqual(stagedLock.packages[""].dependencies, stagedManifest.dependencies,
+					`${FAILURE_PREFIX}: offline install must consume the already-resolved packed-artifact lock`);
 				const fixtureModule = join(options.cwd, "node_modules", "fixture-dependency");
 				await mkdir(fixtureModule, { recursive: true });
 				await writeFile(join(fixtureModule, "marker.txt"), "installed-template");
-				await writeFile(join(options.cwd, "package-lock.json"), "{\"lockfileVersion\":3}\n");
 			}
 			return result;
 		},
@@ -153,22 +165,24 @@ describe("prepared packed consumer", () => {
 	it("packs and installs the actual tarball once with a run-owned cache and deterministic offline flags", async () => {
 		const { runRoot, calls, descriptor } = await prepareFixture();
 		const packCalls = calls.filter(call => call.args.includes("pack"));
-		const offlineInstalls = calls.filter(call => call.args.includes("install") && call.args.includes("--offline"));
+		const lockOnlyInstalls = calls.filter(call => call.args.includes("install") && call.args.includes("--package-lock-only"));
+		const offlineMaterializations = calls.filter(call => call.args.includes("ci") && call.args.includes("--offline"));
 
 		assert.equal(packCalls.length, 1, `${FAILURE_PREFIX}: preparation must run npm pack exactly once`);
-		assert.equal(offlineInstalls.length, 1, `${FAILURE_PREFIX}: preparation must run one offline template install`);
+		assert.equal(lockOnlyInstalls.length, 1, `${FAILURE_PREFIX}: preparation must resolve the packed artifact exactly once`);
+		assert.equal(offlineMaterializations.length, 1, `${FAILURE_PREFIX}: preparation must run one offline npm ci`);
 		assert.ok(isStrictChild(runRoot, descriptor.tarballPath), `${FAILURE_PREFIX}: tarball must stay below the run root`);
 		assert.ok(isStrictChild(runRoot, descriptor.templateDir), `${FAILURE_PREFIX}: template must stay below the run root`);
 		assert.ok(isStrictChild(runRoot, descriptor.cacheDir), `${FAILURE_PREFIX}: npm cache must stay below the run root`);
 		assert.equal(await readFile(descriptor.tarballPath, "utf8"), "actual packed bytes");
 
-		const install = offlineInstalls[0]!;
+		const install = offlineMaterializations[0]!;
 		for (const flag of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund"]) {
 			assert.ok(install.args.includes(flag), `${FAILURE_PREFIX}: prepared install must pass ${flag}`);
 		}
 		assert.ok(
-			install.args.some(argument => resolve(argument) === resolve(descriptor.tarballPath)),
-			`${FAILURE_PREFIX}: offline install must consume npm pack's actual emitted tarball`,
+			!install.args.some(argument => resolve(argument) === resolve(descriptor.tarballPath)),
+			`${FAILURE_PREFIX}: offline npm ci must consume the validated lock without a second package operand`,
 		);
 		assert.equal(
 			resolve(cachePath(install) ?? ""),
