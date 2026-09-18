@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { lstat, readlink, readdir, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -34,15 +34,192 @@ function positiveInteger(value, fallback, name) {
 	return resolved;
 }
 
-function errorAttempt(error, attempt, elapsedMs) {
+function errorAttempt(error, attempt, elapsedMs, traversal) {
 	const record = { attempt, elapsedMs };
 	if (error && typeof error === "object") {
 		for (const key of ["code", "syscall", "path", "dest"]) {
 			if (typeof error[key] === "string") record[key] = error[key];
 		}
 	}
+	if (traversal.length > 0) record.traversal = traversal;
 	record.message = error instanceof Error ? error.message : String(error);
 	return record;
+}
+
+function errorFields(error) {
+	const fields = {};
+	if (error && typeof error === "object") {
+		for (const key of ["code", "syscall", "path", "dest"]) {
+			if (typeof error[key] === "string") fields[key] = error[key];
+		}
+	}
+	return fields;
+}
+
+function stableIdentity(stats) {
+	if (stats?.dev === undefined || stats?.ino === undefined || String(stats.ino) === "0") return undefined;
+	return `${String(stats.dev)}:${String(stats.ino)}`;
+}
+
+function unsafePathError(candidate, reason, cause) {
+	const error = new Error(`Refusing unsafe owned-path removal at "${candidate}": ${reason}`, cause ? { cause } : undefined);
+	// A transient metadata failure may become provable on retry; every other
+	// uncertain identity fails immediately without any destructive fallback.
+	error.code = TRANSIENT_REMOVAL_CODES.has(cause?.code) ? cause.code : "EUNSAFEPATH";
+	error.path = candidate;
+	return error;
+}
+
+function recordDetectionFailure(traversal, candidate, operation, error) {
+	traversal.push({
+		type: "reparse-detection-failure",
+		path: candidate,
+		operation,
+		...errorFields(error),
+		message: error instanceof Error ? error.message : String(error),
+	});
+}
+
+async function lstatIfPresent(candidate, fsImpl, traversal) {
+	try {
+		return await fsImpl.lstat(candidate);
+	} catch (error) {
+		if (error?.code === "ENOENT") return undefined;
+		recordDetectionFailure(traversal, candidate, "lstat", error);
+		throw error;
+	}
+}
+
+async function assertClaimsCurrent(claims, fsImpl, platform, traversal) {
+	for (const claim of claims) {
+		const current = await lstatIfPresent(claim.path, fsImpl, traversal);
+		if (!current) throw unsafePathError(claim.path, "an ancestor disappeared during removal");
+		const entry = await classifyEntry(claim.path, current, fsImpl, platform, traversal);
+		if (entry.type !== "directory") {
+			throw unsafePathError(claim.path, "an ancestor stopped being a genuine directory");
+		}
+		if (entry.identity !== claim.identity) {
+			throw unsafePathError(claim.path, "an ancestor directory identity changed during removal");
+		}
+	}
+}
+
+async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
+	const identity = stableIdentity(stats);
+	if (identity === undefined) {
+		recordDetectionFailure(traversal, candidate, "stable-identity", unsafePathError(candidate, "filesystem identity is unavailable"));
+		throw unsafePathError(candidate, "filesystem identity is unavailable");
+	}
+
+	if (stats.isSymbolicLink()) {
+		try {
+			return { type: platform === "win32" ? "junction-or-symbolic-link" : "symbolic-link", identity, target: await fsImpl.readlink(candidate) };
+		} catch (error) {
+			recordDetectionFailure(traversal, candidate, "readlink", error);
+			throw unsafePathError(candidate, "link target could not be identified", error);
+		}
+	}
+
+	if (stats.isDirectory() && platform === "win32") {
+		try {
+			const target = await fsImpl.readlink(candidate);
+			return { type: "directory-reparse-point", identity, target };
+		} catch (error) {
+			// Current Node releases identify junctions as symbolic links. The probe
+			// also protects older/runtime-specific representations where lstat
+			// reports a directory. EINVAL is the sole expected answer for a genuine
+			// Windows directory; every other answer is an uncertain reparse state.
+			if (error?.code !== "EINVAL") {
+				recordDetectionFailure(traversal, candidate, "readlink-directory-probe", error);
+				throw unsafePathError(candidate, "directory reparse status could not be established", error);
+			}
+		}
+	}
+
+	if (stats.isDirectory()) return { type: "directory", identity };
+	return { type: "leaf", identity };
+}
+
+async function assertEntryCurrent(candidate, expected, fsImpl, platform, traversal) {
+	const current = await lstatIfPresent(candidate, fsImpl, traversal);
+	if (!current) throw unsafePathError(candidate, "entry disappeared before its identity could be revalidated");
+	const entry = await classifyEntry(candidate, current, fsImpl, platform, traversal);
+	if (entry.identity !== expected.identity || entry.type !== expected.type) {
+		throw unsafePathError(candidate, "entry identity or type changed during removal");
+	}
+	if (expected.target !== undefined && entry.target !== expected.target) {
+		throw unsafePathError(candidate, "link or reparse target changed during removal");
+	}
+	return current;
+}
+
+async function removeEntryNoFollow(candidate, claims, fsImpl, platform, traversal) {
+	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
+	const stats = await lstatIfPresent(candidate, fsImpl, traversal);
+	if (!stats) return;
+	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
+	const entry = await classifyEntry(candidate, stats, fsImpl, platform, traversal);
+
+	if (entry.type === "junction-or-symbolic-link" || entry.type === "symbolic-link" || entry.type === "directory-reparse-point") {
+		const evidence = {
+			type: entry.type,
+			path: candidate,
+			target: entry.target,
+			action: entry.type === "directory-reparse-point" ? "rmdir" : "unlink",
+		};
+		traversal.push(evidence);
+		await assertClaimsCurrent(claims, fsImpl, platform, traversal);
+		await assertEntryCurrent(candidate, entry, fsImpl, platform, traversal);
+		if (entry.type === "directory-reparse-point") await fsImpl.rmdir(candidate);
+		else await fsImpl.unlink(candidate);
+		const residual = await lstatIfPresent(candidate, fsImpl, traversal);
+		if (residual) throw unsafePathError(candidate, "link or reparse point remained or was replaced after non-recursive removal");
+		evidence.outcome = "removed";
+		return;
+	}
+
+	if (entry.type === "directory") {
+		const nextClaims = [...claims, { path: candidate, identity: entry.identity }];
+		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
+		const entries = await fsImpl.readdir(candidate, { withFileTypes: true });
+		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
+		for (const child of entries) {
+			await removeEntryNoFollow(path.join(candidate, child.name), nextClaims, fsImpl, platform, traversal);
+		}
+		await assertClaimsCurrent(nextClaims, fsImpl, platform, traversal);
+		await fsImpl.rmdir(candidate);
+		return;
+	}
+
+	await assertClaimsCurrent(claims, fsImpl, platform, traversal);
+	await assertEntryCurrent(candidate, entry, fsImpl, platform, traversal);
+	await fsImpl.unlink(candidate);
+}
+
+async function captureParentClaims(ownerRoot, target, fsImpl, platform, traversal) {
+	if (ownerRoot === target) return [];
+	const relative = path.relative(ownerRoot, path.dirname(target));
+	const segments = relative === "" ? [] : relative.split(path.sep);
+	const claims = [];
+	let current = ownerRoot;
+	for (const segment of ["", ...segments]) {
+		if (segment) current = path.join(current, segment);
+		const stats = await lstatIfPresent(current, fsImpl, traversal);
+		if (!stats) return undefined;
+		const entry = await classifyEntry(current, stats, fsImpl, platform, traversal);
+		if (entry.type !== "directory") {
+			traversal.push({ type: "unsafe-ancestor", path: current, entryType: entry.type, target: entry.target });
+			throw unsafePathError(current, "target traversal would cross a link, reparse point, or non-directory");
+		}
+		claims.push({ path: current, identity: entry.identity });
+	}
+	return claims;
+}
+
+async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal) {
+	const claims = await captureParentClaims(ownerRoot, target, fsImpl, platform, traversal);
+	if (claims === undefined) return;
+	await removeEntryNoFollow(target, claims, fsImpl, platform, traversal);
 }
 
 function diagnosticJson(value) {
@@ -89,11 +266,13 @@ export class OwnedPathCleanupError extends Error {
 }
 
 /**
- * Recursively remove a path owned by a test run.
+ * Remove a path owned by a test run without following links or reparse points.
  *
+ * Every entry and ancestor claim is identity-checked before descent. Links are
+ * removed non-recursively; uncertain identities retain the root and fail loud.
  * Transient lock and directory-removal errors receive bounded exponential
- * backoff on every platform. Other errors fail immediately, and removing the
- * owner root itself requires explicit coordinator permission.
+ * backoff on every platform. Removing the owner root itself requires explicit
+ * coordinator permission.
  */
 export async function removeOwnedPath(target, options = {}) {
 	if (typeof target !== "string" || target.length === 0) {
@@ -118,7 +297,19 @@ export async function removeOwnedPath(target, options = {}) {
 	const deadlineMs = nonNegativeNumber(options.deadlineMs, DEFAULT_DEADLINE_MS, "deadlineMs");
 	const initialDelayMs = nonNegativeNumber(options.initialDelayMs, DEFAULT_INITIAL_DELAY_MS, "initialDelayMs");
 	const maxDelayMs = nonNegativeNumber(options.maxDelayMs, DEFAULT_MAX_DELAY_MS, "maxDelayMs");
-	const remove = options.seams?.remove ?? ((candidate, removeOptions) => rm(candidate, removeOptions));
+	const platform = options.platform ?? process.platform;
+	const fsImpl = {
+		lstat,
+		readlink,
+		readdir,
+		rmdir,
+		unlink,
+		...options.seams?.fs,
+	};
+	// The whole-attempt override exists only for deterministic retry-policy tests.
+	// Production callers always use the no-follow traversal above.
+	const remove = options.seams?.remove
+		?? ((candidate, traversal) => removePathNoFollow(candidate, ownerRoot, fsImpl, platform, traversal));
 	const sleep = options.seams?.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
 	const now = options.seams?.now ?? (() => performance.now());
 	const history = [];
@@ -138,13 +329,14 @@ export async function removeOwnedPath(target, options = {}) {
 				cause: lastError,
 			});
 		}
+		const traversal = [];
 		try {
-			await remove(resolvedTarget, { recursive: true, force: true });
-			history.push({ attempt, elapsedMs });
+			await remove(resolvedTarget, traversal);
+			history.push({ attempt, elapsedMs, ...(traversal.length > 0 ? { traversal } : {}) });
 			return { removed: true, attempts: attempt, history };
 		} catch (error) {
 			lastError = error;
-			const record = errorAttempt(error, attempt, elapsedMs);
+			const record = errorAttempt(error, attempt, elapsedMs, traversal);
 			history.push(record);
 			if (record.code === "ENOENT") {
 				return { removed: true, attempts: attempt, history };
