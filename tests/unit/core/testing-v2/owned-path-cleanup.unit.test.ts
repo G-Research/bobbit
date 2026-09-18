@@ -1,9 +1,21 @@
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { throwIfCleanupRejected } from "../../../e2e/test-utils/cleanup.js";
 
 const CONTRACT_PREFIX = "WINDOWS_CLEANUP_CONTRACT";
 const CLEANUP_MODULE_URL = new URL("../../../../scripts/testing-v2/owned-path-cleanup.mjs", import.meta.url).href;
+
+type TraversalEvidence = {
+	type: string;
+	path: string;
+	target?: string;
+	action?: string;
+	outcome?: string;
+	operation?: string;
+	code?: string;
+};
 
 type CleanupAttempt = {
 	attempt: number;
@@ -13,6 +25,7 @@ type CleanupAttempt = {
 	path?: string;
 	dest?: string;
 	message?: string;
+	traversal?: TraversalEvidence[];
 };
 
 type RemoveResult = {
@@ -32,7 +45,15 @@ type RemoveOptions = {
 	initialDelayMs?: number;
 	maxDelayMs?: number;
 	seams?: {
-		remove?: (target: string, options: { recursive: true; force: true }) => Promise<void>;
+		remove?: (target: string, traversal: TraversalEvidence[]) => Promise<void>;
+		fs?: Partial<{
+			lstat: (target: string) => Promise<unknown>;
+			readlink: (target: string) => Promise<string>;
+			readdir: (target: string, options: { withFileTypes: true }) => Promise<unknown[]>;
+			rmdir: (target: string) => Promise<void>;
+			unlink: (target: string) => Promise<void>;
+			rm: (target: string, options: { recursive: true; force: true }) => Promise<void>;
+		}>;
 		sleep?: (delayMs: number) => Promise<void>;
 		now?: () => number;
 	};
@@ -398,7 +419,117 @@ describe("owned path cleanup contract", () => {
 			seams: { remove },
 		})).resolves.toMatchObject({ removed: true, attempts: 1 });
 		expect(remove).toHaveBeenCalledOnce();
-		expect(remove).toHaveBeenCalledWith(ownerRoot, { recursive: true, force: true });
+		expect(remove).toHaveBeenCalledWith(ownerRoot, []);
+	});
+
+	it.each([
+		{ platform: "win32" as const, linkType: "junction" as const, enabled: process.platform === "win32" },
+		{ platform: process.platform, linkType: "dir" as const, enabled: process.platform !== "win32" },
+	].filter(testCase => testCase.enabled))("removes a real $linkType without traversing its external sentinel", async ({ platform, linkType }) => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const fixtureBase = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-"));
+		const external = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-sentinel-"));
+		const sentinel = path.join(external, "keep.txt");
+		await writeFile(sentinel, "external sentinel");
+
+		try {
+			for (const targetKind of ["child", "coordinator-root"] as const) {
+				const ownerRoot = path.join(fixtureBase, targetKind);
+				const target = targetKind === "child" ? path.join(ownerRoot, "worker") : ownerRoot;
+				const link = path.join(target, "node_modules");
+				await mkdir(target, { recursive: true });
+				await writeFile(path.join(target, "ordinary.txt"), "owned");
+				await symlink(external, link, linkType);
+
+				const result = await removeOwnedPath(target, {
+					ownerRoot,
+					platform,
+					...(targetKind === "coordinator-root"
+						? { allowOwnerRoot: true, owner: { kind: "coordinator", id: "sentinel-test" } }
+						: {}),
+				});
+
+				expect(await readFile(sentinel, "utf8")).toBe("external sentinel");
+				await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+				const evidence = result.history.flatMap(attempt => attempt.traversal ?? []);
+				expect(evidence).toEqual(expect.arrayContaining([
+					expect.objectContaining({
+						path: link,
+						target: expect.any(String),
+						action: "unlink",
+						outcome: "removed",
+					}),
+				]));
+			}
+		} finally {
+			// If an assertion interrupts the tested cleanup, unlink the view before
+			// recursively removing fixture storage so the sentinel remains external.
+			for (const link of [
+				path.join(fixtureBase, "child", "worker", "node_modules"),
+				path.join(fixtureBase, "coordinator-root", "node_modules"),
+			]) {
+				await unlink(link).catch(() => {});
+			}
+			await rm(fixtureBase, { recursive: true, force: true });
+			await rm(external, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed when a directory reparse identity cannot be established", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("uncertain-reparse-run-root");
+		const readlinkFailure = Object.assign(new Error("reparse query denied"), {
+			code: "EIO",
+			syscall: "readlink",
+			path: ownerRoot,
+		});
+		const recursiveRemove = vi.fn(async () => {});
+		const readdir = vi.fn(async () => []);
+		const unlinkEntry = vi.fn(async () => {});
+		const rmdirEntry = vi.fn(async () => {});
+		const fakeDirectoryStats = {
+			dev: 7,
+			ino: 42,
+			isDirectory: () => true,
+			isSymbolicLink: () => false,
+		};
+
+		const failure = await removeOwnedPath(ownerRoot, {
+			ownerRoot,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: "uncertain-reparse" },
+			platform: "win32",
+			seams: {
+				fs: {
+					lstat: async () => fakeDirectoryStats,
+					readlink: async () => { throw readlinkFailure; },
+					readdir,
+					unlink: unlinkEntry,
+					rmdir: rmdirEntry,
+					rm: recursiveRemove,
+				},
+			},
+		}).then(() => undefined, (error: unknown) => error);
+
+		expect(failure).toMatchObject({
+			name: "OwnedPathCleanupError",
+			attempts: 1,
+			history: [expect.objectContaining({
+				code: "EUNSAFEPATH",
+				traversal: [expect.objectContaining({
+					type: "reparse-detection-failure",
+					path: ownerRoot,
+					operation: "readlink-directory-probe",
+					code: "EIO",
+				})],
+			})],
+		});
+		expect((failure as Error).message).toContain("reparse-detection-failure");
+		expect((failure as Error).message).toContain("reparse query denied");
+		expect(readdir).not.toHaveBeenCalled();
+		expect(unlinkEntry).not.toHaveBeenCalled();
+		expect(rmdirEntry).not.toHaveBeenCalled();
+		expect(recursiveRemove, "an unresolved reparse point must never reach a recursive remover").not.toHaveBeenCalled();
 	});
 
 	it("preserves concurrent cleanup causes and exposes every child diagnostic", async () => {
