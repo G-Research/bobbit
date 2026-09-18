@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 import {
 	piPackedConsumerNpmEnv,
 	runPiPackedConsumerCommand,
@@ -19,7 +20,9 @@ import {
 	capturePackagedCli,
 	commandFailure,
 	createProjectAndSession,
+	finalizePackagedRuntime,
 	getFreePort,
+	processFailure,
 	promptSession,
 	readToken,
 	startPackagedCli,
@@ -384,19 +387,20 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
 		test.setTimeout(5_000);
-		const child = spawn(process.execPath, ["-e", [
+		const tracked = spawnTracked(process.execPath, ["-e", [
 			'const { spawn } = require("node:child_process");',
 			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
 			'process.stdout.write("ready\\n");',
 			'process.on("SIGTERM", () => process.exit(0));',
 		].join("")], {
-			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		const runtime = capturePackagedCli(child);
+		const child = tracked.child;
+		const runtime = capturePackagedCli(child, [], [], tracked);
 		const actualExit = once(child, "exit");
 		const actualClose = once(child, "close");
+		await tracked.ownershipReady;
 		await once(child.stdout!, "data");
 
 		try {
@@ -405,9 +409,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			await actualClose;
 			expect(runtime.exited, "root exit must be recorded before inherited stdio closes").toBe(true);
 			expect(runtime.closed, "the owned process tree must close after teardown").toBe(true);
-			if (process.platform !== "win32") {
-				expect(runtime.finalTreeSignalSent, "the original POSIX group must be finalized at root exit").toBe(true);
-			}
+			expect(runtime.trackedAuthority, "the inherited tree must retain its spawn-time authority").toBe(tracked);
 		} finally {
 			if (!runtime.closed) await stopPackagedCli(runtime);
 		}
@@ -442,6 +444,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			requests: [],
 		};
 		let runtime: RunningCli | undefined;
+		let bodyFailure: { reason: unknown } | undefined;
 
 		try {
 			await Promise.all([
@@ -860,15 +863,24 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			for (const tokenName of THEME_TOKENS) {
 				expect(await page.evaluate(name => getComputedStyle(document.documentElement).getPropertyValue(name).trim(), tokenName)).not.toBe("");
 			}
+		} catch (error) {
+			bodyFailure = { reason: runtime && (runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null)
+				? processFailure(runtime, `failed during test: ${String(error)}`)
+				: error };
 		} finally {
-			if (runtime) {
-				await stopPackagedCli(runtime);
-				report.cliStdout = runtime.stdout.join("");
-				report.cliStderr = runtime.stderr.join("");
-			}
-			await attachReport(testInfo, report);
-			// The coordinator owns this materialized copy and removes it only after
-			// Playwright (and therefore every browser/runtime handle) has closed.
+			await finalizePackagedRuntime({
+				runtime,
+				bodyFailure,
+				report: async () => {
+					if (runtime) {
+						report.cliStdout = runtime.stdout.join("");
+						report.cliStderr = runtime.stderr.join("");
+					}
+					await attachReport(testInfo, report);
+				},
+			});
+			// A failed owner proof rejects the test after attaching diagnostics. The
+			// coordinator therefore retains its run root instead of deleting evidence.
 		}
 	});
 });
