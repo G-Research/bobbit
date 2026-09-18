@@ -380,25 +380,31 @@ async function joinPackagedOwnership(runtime: RunningCli, deadline: number): Pro
 	const remainingMs = Math.max(0, deadline - Date.now());
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	let removeLifecycleListeners = () => {};
-	const rootFailure = new Promise<never>((_resolve, reject) => {
-		const failForExit = (code: number | null, signal: NodeJS.Signals | null) => {
-			reject(new Error(`root process exited before ownership readiness (code=${code ?? "null"}; signal=${signal ?? "null"})`));
-		};
-		const failForError = (error: Error) => {
-			reject(new Error(`root process errored before ownership readiness: ${error.message}`, { cause: error }));
-		};
-		runtime.child.once("exit", failForExit);
-		runtime.child.once("error", failForError);
-		removeLifecycleListeners = () => {
-			runtime.child.removeListener("exit", failForExit);
-			runtime.child.removeListener("error", failForError);
-		};
-		// Close the registration race if the process settled immediately before the
-		// listeners above were installed.
-		if (runtime.spawnError) failForError(runtime.spawnError);
-		else if (rootExited(runtime)) failForExit(runtime.child.exitCode, runtime.child.signalCode);
-	});
 	try {
+		if (runtime.spawnError) {
+			throw new Error(`root process errored before ownership readiness: ${runtime.spawnError.message}`, { cause: runtime.spawnError });
+		}
+		if (rootExited(runtime)) {
+			throw new Error(`root process exited before ownership readiness (code=${runtime.child.exitCode ?? "null"}; signal=${runtime.child.signalCode ?? "null"})`);
+		}
+		const rootFailure = new Promise<never>((_resolve, reject) => {
+			const failForExit = (code: number | null, signal: NodeJS.Signals | null) => {
+				reject(new Error(`root process exited before ownership readiness (code=${code ?? "null"}; signal=${signal ?? "null"})`));
+			};
+			const failForError = (error: Error) => {
+				reject(new Error(`root process errored before ownership readiness: ${error.message}`, { cause: error }));
+			};
+			runtime.child.once("exit", failForExit);
+			runtime.child.once("error", failForError);
+			removeLifecycleListeners = () => {
+				runtime.child.removeListener("exit", failForExit);
+				runtime.child.removeListener("error", failForError);
+			};
+			// Close the registration race if the process settled immediately before the
+			// listeners above were installed.
+			if (runtime.spawnError) failForError(runtime.spawnError);
+			else if (rootExited(runtime)) failForExit(runtime.child.exitCode, runtime.child.signalCode);
+		});
 		await Promise.race([
 			ownershipReady,
 			rootFailure,
@@ -421,8 +427,8 @@ export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeou
 	await joinPackagedOwnership(runtime, deadline);
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
-		if (runtime.child.exitCode !== null) {
-			throw new Error(`packaged CLI exited ${runtime.child.exitCode} before health check\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`);
+		if (rootExited(runtime)) {
+			throw processFailure(runtime, `exited before health check (code=${runtime.child.exitCode ?? "null"}; signal=${runtime.child.signalCode ?? "null"})`);
 		}
 		try {
 			const response = await fetch(`${baseUrl}/health`);

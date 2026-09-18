@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -76,6 +76,61 @@ describe("packaged runtime process ownership and teardown", () => {
 			await stopPackagedCli(runtime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 2_000 });
 		}
 		assert.equal(killRequests, 1, "tracked teardown must request one tree close");
+	});
+
+	it("rejects an already signal-exited root even when ownership is already ready", { timeout: 1_000 }, async () => {
+		const child = Object.assign(new EventEmitter(), {
+			exitCode: null,
+			signalCode: "SIGTERM" as NodeJS.Signals,
+			stdout: undefined,
+			stderr: undefined,
+		}) as unknown as ChildProcess;
+		const authority: PackagedProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: () => {},
+			waitForTreeExit: async () => true,
+		};
+		const runtime = capturePackagedCli(child, [], [], authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response(null, { status: 200 });
+		}) as typeof fetch;
+		try {
+			await assert.rejects(
+				waitForHealth("http://packaged.invalid", runtime, 30_000),
+				/failed before ownership readiness: Error: root process exited.*code=null; signal=SIGTERM/,
+			);
+			assert.equal(fetchCalls, 0, "an already-exited root must fail before any health request");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("recognizes a signal-exited root in health polling without tracked ownership", { timeout: 1_000 }, async () => {
+		const child = Object.assign(new EventEmitter(), {
+			exitCode: null,
+			signalCode: "SIGTERM" as NodeJS.Signals,
+			stdout: undefined,
+			stderr: undefined,
+		}) as unknown as ChildProcess;
+		const runtime = capturePackagedCli(child);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response(null, { status: 200 });
+		}) as typeof fetch;
+		try {
+			await assert.rejects(
+				waitForHealth("http://packaged.invalid", runtime, 30_000),
+				/exited before health check.*code=null; signal=SIGTERM/,
+			);
+			assert.equal(fetchCalls, 0, "health polling must check every root-exit representation before fetching");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	it("rejects health readiness when the root exits before ownership is ready", { timeout: 10_000 }, async () => {
