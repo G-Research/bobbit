@@ -78,6 +78,46 @@ describe("gateway shutdown is idempotent", () => {
 		assert.deepEqual(events, ["owner", "listeners", "after"]);
 	});
 
+	it("keeps run-root removal behind the verification command-tree barrier", async () => {
+		let releaseVerification!: () => void;
+		const verificationBarrier = new Promise<void>(resolve => { releaseVerification = resolve; });
+		const events: string[] = [];
+
+		const gatewayShutdown = runGatewayShutdownPhases([
+			{ name: "verification-harness", run: async () => { events.push("verification:start"); await verificationBarrier; events.push("verification:done"); } },
+			{ name: "session-manager", run: () => { events.push("sessions"); } },
+			{ name: "listeners", run: () => { events.push("listeners"); } },
+		]);
+		const shutdownThenRemove = gatewayShutdown.then(() => { events.push("remove-run-root"); });
+		await Promise.resolve();
+		assert.deepEqual(events, ["verification:start"]);
+
+		releaseVerification();
+		await shutdownThenRemove;
+		assert.deepEqual(events, ["verification:start", "verification:done", "sessions", "listeners", "remove-run-root"]);
+	});
+
+	it("retains the run root but drains later gateway phases after verification cleanup fails", async () => {
+		const events: string[] = [];
+		let removed = false;
+		const gatewayShutdown = runGatewayShutdownPhases([
+			{ name: "verification-harness", run: async () => { events.push("verification"); throw new Error("tree exit unverified"); } },
+			{ name: "session-manager", run: () => { events.push("sessions"); } },
+			{ name: "listeners", run: () => { events.push("listeners"); } },
+		]);
+
+		await assert.rejects(
+			gatewayShutdown.then(() => { removed = true; }),
+			(error: unknown) => {
+				assert.ok(error instanceof AggregateError);
+				assert.match(error.message, /verification-harness/);
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["verification", "sessions", "listeners"]);
+		assert.equal(removed, false, "failed owner cleanup must prevent run-root removal");
+	});
+
 	it("shares one production teardown across concurrent and late callers", async () => {
 		let release!: () => void;
 		const blocked = new Promise<void>(resolve => { release = resolve; });

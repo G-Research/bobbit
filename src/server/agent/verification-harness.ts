@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
+import { spawnTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
@@ -1188,6 +1188,8 @@ export function resolveStep(
 
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
+/** Terminal gateway shutdown must never wait indefinitely for an owned command tree. */
+const VERIFICATION_SHUTDOWN_TREE_EXIT_TIMEOUT_MS = 10_000;
 
 /** Review-agent active-turn allowance. Command/build defaults are intentionally separate. */
 export const DEFAULT_LLM_REVIEW_TIMEOUT_S = 1200;
@@ -3436,6 +3438,12 @@ export class VerificationHarness {
 	 */
 	private _trackedCommandChildren = new Map<string, TrackedChild>();
 
+	/** Commands with durable restart ownership intentionally outlive this gateway. */
+	private _restartSurvivalTrackedChildren = new WeakSet<TrackedChild>();
+
+	/** Every caller observes the same terminal owner-barrier outcome. */
+	private _shutdownPromise?: Promise<void>;
+
 	/**
 	 * A live tree whose exact close barrier succeeded but whose corresponding
 	 * durable completion transition has not committed yet. Retaining the child
@@ -4303,11 +4311,92 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
-	 * orphan chromium / playwright descendants don't survive the gateway exit.
+	 * Terminal owner barrier for live verification command trees. Durable commands
+	 * deliberately handed to restart recovery are not this gateway's teardown owners.
 	 */
-	shutdown(): void {
-		try { killAllTracked("SIGKILL"); } catch { /* best-effort */ }
+	shutdown(): Promise<void> {
+		return this._shutdownPromise ??= this._shutdownTrackedCommandTrees();
+	}
+
+	private async _shutdownTrackedCommandTrees(): Promise<void> {
+		const owned = new Map<TrackedChild, string[]>();
+		for (const [key, tracked] of this._trackedCommandChildren) {
+			if (this._restartSurvivalTrackedChildren.has(tracked)) continue;
+			const keys = owned.get(tracked);
+			if (keys) keys.push(key);
+			else owned.set(tracked, [key]);
+		}
+
+		const killErrors = new Map<TrackedChild, unknown>();
+		for (const tracked of owned.keys()) {
+			try { tracked.killTree("SIGKILL", 0); }
+			catch (error) { killErrors.set(tracked, error); }
+		}
+
+		const failures = (await Promise.all(Array.from(owned, async ([tracked, keys]) => {
+			const diagnostic = this._trackedCommandShutdownDiagnostic(keys, tracked);
+			try {
+				const exited = await this._waitForTrackedTreeExitDuringShutdown(tracked);
+				if (exited) return undefined;
+				return new Error(`Verification command tree did not exit within ${VERIFICATION_SHUTDOWN_TREE_EXIT_TIMEOUT_MS}ms (${diagnostic})`, {
+					cause: killErrors.get(tracked),
+				});
+			} catch (error) {
+				return new Error(`Verification command tree exit barrier failed (${diagnostic}): ${error instanceof Error ? error.message : String(error)}`, {
+					cause: error,
+				});
+			}
+		}))).filter((failure): failure is Error => failure != null);
+
+		if (failures.length > 0) {
+			throw new AggregateError(
+				failures,
+				`Verification harness shutdown could not verify ${failures.length} command tree(s) exited: ${failures.map(failure => failure.message).join(" | ")}`,
+			);
+		}
+	}
+
+	private _waitForTrackedTreeExitDuringShutdown(tracked: TrackedChild): Promise<boolean> {
+		return new Promise<boolean>((resolve, reject) => {
+			let settled = false;
+			const finish = (outcome: { value?: boolean; error?: unknown }) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timeout);
+				if (outcome.error !== undefined) reject(outcome.error);
+				else resolve(outcome.value ?? false);
+			};
+			const timeout = this.clock.setTimeout(
+				() => finish({ error: new Error(`timed out after ${VERIFICATION_SHUTDOWN_TREE_EXIT_TIMEOUT_MS}ms`) }),
+				VERIFICATION_SHUTDOWN_TREE_EXIT_TIMEOUT_MS,
+			);
+			void Promise.resolve()
+				.then(() => tracked.waitForTreeExit(VERIFICATION_SHUTDOWN_TREE_EXIT_TIMEOUT_MS))
+				.then(value => finish({ value }), error => finish({ error }));
+		});
+	}
+
+	private _markTrackedCommandForRestartSurvival(tracked: TrackedChild): void {
+		tracked.markSurvival();
+		// Match TrackedChild's survival contract: a request becomes skippable only
+		// after the spawn-time ownership barrier proves restart recovery is durable.
+		void tracked.ownershipReady.then(
+			() => this._restartSurvivalTrackedChildren.add(tracked),
+			() => this._restartSurvivalTrackedChildren.delete(tracked),
+		);
+	}
+
+	private _trackedCommandShutdownDiagnostic(keys: readonly string[], tracked: TrackedChild): string {
+		const details = keys.map(key => {
+			const separator = key.lastIndexOf(":");
+			const signalId = separator > 0 ? key.slice(0, separator) : undefined;
+			const stepIndex = separator > 0 ? Number(key.slice(separator + 1)) : undefined;
+			const step = signalId && Number.isInteger(stepIndex)
+				? this.activeVerifications.get(signalId)?.steps[stepIndex!]
+				: undefined;
+			return `commandKey=${JSON.stringify(key)}, signalId=${JSON.stringify(signalId ?? "unknown")}, step=${JSON.stringify(step?.name ?? "unknown")}`;
+		}).join("; ");
+		return `${details}, childPid=${tracked.child.pid ?? "unknown"}, killed=${tracked.killed()}, timedOut=${tracked.timedOut()}`;
 	}
 
 	/**
@@ -7119,10 +7208,9 @@ export class VerificationHarness {
 				// unref so the child does not keep the gateway alive during a
 				// graceful shutdown — we want it to survive past our exit.
 				try { child.unref(); } catch { /* ignore */ }
-				// Mark for restart-survival so killAllTracked (called from
-				// shutdown()) skips this entry. The next boot resumes via
-				// _resumeCommandStep using durable identity + exit files.
-				tracked!.markSurvival();
+				// Hand this durable owner to restart recovery before terminal shutdown
+				// can snapshot ordinary verification command trees.
+				this._markTrackedCommandForRestartSurvival(tracked!);
 			} else if (useContainerDurable && streamCtx) {
 				// Preserve host result/transport records before readiness; the daemon-bound
 				// attestation later supplies the only in-container cleanup authority.
@@ -7152,7 +7240,7 @@ export class VerificationHarness {
 					restartRecoveryUnsupportedReason: undefined,
 				});
 				try { child.unref(); } catch { /* ignore */ }
-				tracked!.markSurvival();
+				this._markTrackedCommandForRestartSurvival(tracked!);
 			}
 
 			// A payload is same-UID hostile. Do not derive a verdict from any marker,

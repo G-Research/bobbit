@@ -770,6 +770,132 @@ describe("runCommandStep tree-kill", () => {
 	});
 });
 
+describe("VerificationHarness terminal command-tree barrier", () => {
+	function trackedCommand(options: {
+		pid: number;
+		wait: (timeoutMs?: number) => Promise<boolean>;
+		killError?: Error;
+		ownershipReady?: Promise<void>;
+	}) {
+		let kills = 0;
+		let survivalMarks = 0;
+		return {
+			tracked: {
+				child: createFakeChild(options.pid, false),
+				ownershipReady: options.ownershipReady ?? Promise.resolve(),
+				killed: () => kills > 0,
+				timedOut: () => false,
+				markSurvival: () => { survivalMarks++; },
+				killTree: () => {
+					kills++;
+					if (options.killError) throw options.killError;
+				},
+				waitForTreeExit: options.wait,
+			} as any,
+			kills: () => kills,
+			survivalMarks: () => survivalMarks,
+		};
+	}
+
+	it("shares one shutdown and waits for each owned command tree to exit", async () => {
+		let release!: (exited: boolean) => void;
+		const exit = new Promise<boolean>(resolve => { release = resolve; });
+		const waitBudgets: number[] = [];
+		const command = trackedCommand({
+			pid: 920_001,
+			wait: async timeoutMs => { waitBudgets.push(timeoutMs ?? -1); return exit; },
+		});
+		const harness = makeHarness();
+		(harness as any)._trackedCommandChildren.set("signal-deferred:0", command.tracked);
+
+		let settled = false;
+		const first = harness.shutdown();
+		const second = harness.shutdown();
+		void first.then(() => { settled = true; });
+		assert.strictEqual(second, first, "concurrent callers must share the owner barrier");
+		await Promise.resolve();
+		expect(command.kills()).toBe(1);
+		expect(waitBudgets).toEqual([10_000]);
+		expect(settled).toBe(false);
+
+		release(true);
+		await first;
+		expect(settled).toBe(true);
+		expect(command.kills()).toBe(1);
+		await harness.shutdown();
+		expect(command.kills()).toBe(1);
+	});
+
+	it("aggregates false and rejected tree barriers with command diagnostics", async () => {
+		const unverified = trackedCommand({ pid: 920_002, wait: async () => false });
+		const rejected = trackedCommand({ pid: 920_003, wait: async () => { throw new Error("job supervisor failed"); } });
+		const harness = makeHarness();
+		setActiveCommandVerification(harness, "goal-shutdown", "gate-shutdown", "signal-false", ["compile"]);
+		setActiveCommandVerification(harness, "goal-shutdown", "gate-shutdown", "signal-reject", ["browser"]);
+		(harness as any)._trackedCommandChildren.set("signal-false:0", unverified.tracked);
+		(harness as any)._trackedCommandChildren.set("signal-reject:0", rejected.tracked);
+
+		await expect(harness.shutdown()).rejects.toSatisfy((error: unknown) => {
+			assert.ok(error instanceof AggregateError);
+			expect(error.errors).toHaveLength(2);
+			const output = error.errors.map(item => String((item as Error).message)).join("\n");
+			expect(output).toContain('commandKey="signal-false:0"');
+			expect(output).toContain('signalId="signal-false"');
+			expect(output).toContain('step="compile"');
+			expect(output).toContain("childPid=920002");
+			expect(output).toContain("job supervisor failed");
+			return true;
+		});
+		expect(unverified.kills()).toBe(1);
+		expect(rejected.kills()).toBe(1);
+	});
+
+	it("bounds a non-settling tree barrier", async () => {
+		const clock = createManualClock(0);
+		const command = trackedCommand({ pid: 920_004, wait: () => new Promise<boolean>(() => {}) });
+		const harness = makeHarness({ clock });
+		(harness as any)._trackedCommandChildren.set("signal-timeout:2", command.tracked);
+
+		const shutdown = harness.shutdown();
+		await Promise.resolve();
+		clock.advance(9_999);
+		let settled = false;
+		void shutdown.catch(() => { settled = true; });
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		clock.advance(1);
+		await expect(shutdown).rejects.toThrow(/timed out after 10000ms/);
+		expect(command.kills()).toBe(1);
+	});
+
+	it("leaves restart-survival commands untouched while draining ordinary owners", async () => {
+		const surviving = trackedCommand({ pid: 920_005, wait: async () => { throw new Error("must not wait"); } });
+		const ordinary = trackedCommand({ pid: 920_006, wait: async () => true });
+		const harness = makeHarness();
+		(harness as any)._trackedCommandChildren.set("signal-survival:0", surviving.tracked);
+		(harness as any)._trackedCommandChildren.set("signal-ordinary:0", ordinary.tracked);
+		(harness as any)._markTrackedCommandForRestartSurvival(surviving.tracked);
+		await Promise.resolve();
+
+		await harness.shutdown();
+		expect(surviving.survivalMarks()).toBe(1);
+		expect(surviving.kills()).toBe(0);
+		expect(ordinary.kills()).toBe(1);
+	});
+
+	it("drains a survival request whose ownership barrier is not established", async () => {
+		const ownershipReady = new Promise<void>(() => {});
+		const command = trackedCommand({ pid: 920_007, ownershipReady, wait: async () => true });
+		const harness = makeHarness();
+		(harness as any)._trackedCommandChildren.set("signal-not-ready:0", command.tracked);
+		(harness as any)._markTrackedCommandForRestartSurvival(command.tracked);
+
+		await harness.shutdown();
+		expect(command.survivalMarks()).toBe(1);
+		expect(command.kills()).toBe(1);
+	});
+});
+
 afterAll(() => {
 	try { fs.rmSync(TEST_DIR, { recursive: true, force: true }); } catch {}
 });
