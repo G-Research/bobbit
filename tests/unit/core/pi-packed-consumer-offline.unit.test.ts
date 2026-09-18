@@ -141,7 +141,9 @@ describe("packed-consumer offline install contract", () => {
 			"the exact emitted tarball must exist before dependency resolution");
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
-		assert.match(source, /"install",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
+		assert.match(source, /"ci",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir/s);
+		assert.doesNotMatch(source, /"ci",[\s\S]{0,200}tarballPath/,
+			"offline npm ci must materialize the generated lock without a second package operand");
 		assert.match(source, /await copy\(validated\.templateDir, consumerDir/,
 			"materialization must copy the prepared installed dependency graph");
 		assert.match(source, /const OFFLINE_INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
@@ -192,12 +194,22 @@ describe("packed-consumer offline install contract", () => {
 						assert.equal(manifest.private, true);
 						assert.deepEqual(readdirSync(options.cwd), ["package.json"],
 							"dependency resolution must begin without a lock or installed tree");
+						manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-1.0.0.tgz" };
+						writeFileSync(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
 						writeFileSync(join(options.cwd, "package-lock.json"), JSON.stringify({
 							name: "bobbit-inline-theme-clean-consumer",
 							version: "1.0.0",
 							lockfileVersion: 3,
 							packages: {
-								"": { name: "bobbit-inline-theme-clean-consumer", version: "1.0.0" },
+								"": {
+									name: "bobbit-inline-theme-clean-consumer",
+									version: "1.0.0",
+									dependencies: manifest.dependencies,
+								},
+								"node_modules/@gresearch/bobbit": {
+									version: "1.0.0",
+									resolved: "file:../../pack/bobbit-1.0.0.tgz",
+								},
 								"node_modules/new-dependency": {
 									version: "1.2.3",
 									resolved: selectedUrl,
@@ -209,8 +221,14 @@ describe("packed-consumer offline install contract", () => {
 					}
 					if (args.includes("--offline")) {
 						order.push("install");
+						const stagedManifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
+						const stagedLock = JSON.parse(readFileSync(join(options.cwd, "package-lock.json"), "utf8"));
+						assert.deepEqual(stagedManifest.dependencies, {
+							"@gresearch/bobbit": "file:../../pack/bobbit-1.0.0.tgz",
+						}, "the offline install must reuse the resolver's exact packed-artifact manifest");
+						assert.deepEqual(stagedLock.packages[""].dependencies, stagedManifest.dependencies,
+							"the offline install must start from the generated lock instead of resolving the graph again");
 						mkdirSync(join(options.cwd, "node_modules"), { recursive: true });
-						writeFileSync(join(options.cwd, "package-lock.json"), "{\"lockfileVersion\":3}\n");
 						return commandResult(command, args);
 					}
 					order.push("cache");
@@ -229,8 +247,10 @@ describe("packed-consumer offline install contract", () => {
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
 			assert.deepEqual(calls[2]?.args.slice(0, 4), ["npm-cli.js", "cache", "add", "--cache"]);
 			assert.equal(calls[2]?.args.at(-1), selectedUrl);
+			assert.equal(calls[3]?.args[1], "ci");
 			assert.ok(calls[3]?.args.includes("--offline"));
-			assert.equal(calls[3]?.args.at(-1), calls[1]?.args.at(-1));
+			assert.ok(!calls[3]?.args.includes(calls[1]!.args.at(-1)!),
+				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
 			assert.equal(calls[1]?.timeoutMs, 5 * 60_000);
 			assert.equal(calls[2]?.timeoutMs, 3 * 60_000);

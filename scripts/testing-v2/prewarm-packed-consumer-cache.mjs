@@ -9,7 +9,7 @@
  * only copy that template; they never run npm pack/install themselves.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -358,6 +358,23 @@ function readPackageLock(path, label) {
 	return parsed;
 }
 
+function assertPackedArtifactLock(lock, packageName, resolverDir, tarballPath) {
+	const rootSpec = lock.packages?.[""]?.dependencies?.[packageName];
+	const installedSpec = lock.packages?.[`node_modules/${packageName}`]?.resolved;
+	for (const [label, spec] of [["root dependency", rootSpec], ["installed package", installedSpec]]) {
+		if (typeof spec !== "string" || !spec.startsWith("file:")) {
+			throw new Error(`Generated consumer lock ${label} for ${packageName} must be a file: reference`);
+		}
+		let lockedPath;
+		try { lockedPath = resolve(resolverDir, decodeURIComponent(spec.slice("file:".length))); } catch (error) {
+			throw new Error(`Generated consumer lock ${label} for ${packageName} has an invalid file: reference`, { cause: error });
+		}
+		if (lockedPath !== resolve(tarballPath)) {
+			throw new Error(`Generated consumer lock ${label} for ${packageName} does not resolve to the emitted tarball`);
+		}
+	}
+}
+
 function allowsRuntime(values, actual, field, location) {
 	if (values === undefined) return true;
 	const list = typeof values === "string" ? [values] : values;
@@ -575,7 +592,19 @@ export async function preparePackedConsumerFixture({
 			requireSuccess(result);
 			return result;
 		});
-		const consumerLock = readPackageLock(join(resolverDir, "package-lock.json"), "generated consumer package-lock.json");
+		const resolverManifestPath = join(resolverDir, "package.json");
+		const resolverLockPath = join(resolverDir, "package-lock.json");
+		const consumerLock = readPackageLock(resolverLockPath, "generated consumer package-lock.json");
+		assertPackedArtifactLock(consumerLock, packageName, resolverDir, tarballPath);
+		// `npm install --package-lock-only <tarball>` records the exact local
+		// tarball spec in both package.json and package-lock.json. Stage those
+		// outputs into the same-depth template so `npm ci` only materializes that
+		// resolved graph. Leaving the template manifest empty makes npm 11 solve
+		// the full dependency graph a second time and caused the 600-second Windows hang.
+		await Promise.all([
+			copyFile(resolverManifestPath, join(templateDir, "package.json")),
+			copyFile(resolverLockPath, join(templateDir, "package-lock.json")),
+		]);
 		const selectedTarballs = [...compatibleRegistryTarballs(consumerLock, runtime)].sort();
 		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs`);
 		for (let offset = 0; offset < selectedTarballs.length; offset += CACHE_BATCH_SIZE) {
@@ -595,13 +624,12 @@ export async function preparePackedConsumerFixture({
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
 		const installArgs = [
 			...npm.argsPrefix,
-			"install",
+			"ci",
 			"--offline",
 			"--ignore-scripts",
 			"--no-audit",
 			"--no-fund",
 			"--cache", cacheDir,
-			tarballPath,
 		];
 		const installCommand = await measured("offline template install", async () => {
 			const result = await runCommand(npm.command, installArgs, {
