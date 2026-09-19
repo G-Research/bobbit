@@ -593,9 +593,9 @@ export async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationO
 		failures.push(cleanupStageFailure("source runtime report", error));
 	}
 
-	// Diagnostic roots stay intact whenever a caller or source-process owner did
-	// not prove shutdown. Reporting is still attempted, but deletion is not.
-	if (ownersReleased) {
+	// Diagnostic roots stay intact whenever finalization has anything to report,
+	// including a test-body or report failure after every owner shuts down cleanly.
+	if (ownersReleased && failures.length === 0) {
 		try {
 			await options.removeTemp();
 		} catch (error) {
