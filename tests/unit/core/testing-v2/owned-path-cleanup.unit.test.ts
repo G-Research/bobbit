@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -47,6 +48,7 @@ type RemoveOptions = {
 	initialDelayMs?: number;
 	maxDelayMs?: number;
 	traversalConcurrency?: number;
+	subprocessThreadPoolSize?: number;
 	seams?: {
 		remove?: (target: string, traversal: TraversalEvidence[]) => Promise<void>;
 		fs?: Partial<{
@@ -69,6 +71,12 @@ type ShutdownPhase = {
 
 type CleanupContract = {
 	removeOwnedPath(target: string, options: RemoveOptions): Promise<RemoveResult>;
+	removeOwnedPathInSubprocess(target: string, options: RemoveOptions, seams?: {
+		forkProcess?: (...args: unknown[]) => EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(): void;
+		};
+	}): Promise<RemoveResult>;
 	shutdownResourcesThenRemove(options: {
 		phases: ShutdownPhase[];
 		remove: () => void | Promise<void>;
@@ -84,7 +92,7 @@ async function loadCleanupContract(): Promise<CleanupContract> {
 			`${CONTRACT_PREFIX}_MISSING: expected shared cleanup module scripts/testing-v2/owned-path-cleanup.mjs (${error instanceof Error ? error.message : String(error)})`,
 		);
 	}
-	for (const name of ["removeOwnedPath", "shutdownResourcesThenRemove"] as const) {
+	for (const name of ["removeOwnedPath", "removeOwnedPathInSubprocess", "shutdownResourcesThenRemove"] as const) {
 		if (typeof imported[name] !== "function") {
 			throw new Error(`${CONTRACT_PREFIX}_MISSING: shared cleanup module must export ${name}`);
 		}
@@ -124,6 +132,69 @@ function controlledOwner(name: string, events: string[]) {
 }
 
 describe("owned path cleanup contract", () => {
+	it("isolates the filesystem pool and waits for the cleanup child to exit", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("subprocess-cleanup-owner");
+		const child = new EventEmitter() as EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(): void;
+		};
+		let request: unknown;
+		child.send = (message, callback) => {
+			request = message;
+			callback();
+		};
+		child.kill = vi.fn();
+		const forkProcess = vi.fn(() => child);
+		let settled = false;
+		const running = removeOwnedPathInSubprocess(ownerRoot, {
+			ownerRoot,
+			allowOwnerRoot: true,
+			subprocessThreadPoolSize: 32,
+		}, { forkProcess });
+		void running.then(() => { settled = true; });
+
+		await Promise.resolve();
+		expect(forkProcess).toHaveBeenCalledWith(
+			expect.stringContaining("owned-path-cleanup.mjs"),
+			["--owned-path-cleanup-child"],
+			expect.objectContaining({
+				env: expect.objectContaining({ UV_THREADPOOL_SIZE: "32" }),
+				execArgv: [],
+				stdio: ["ignore", "inherit", "inherit", "ipc"],
+			}),
+		);
+		expect(request).toEqual({
+			target: ownerRoot,
+			options: { ownerRoot, allowOwnerRoot: true },
+		});
+		child.emit("message", { ok: true, result: { removed: true, attempts: 1, history: [] } });
+		await Promise.resolve();
+		expect(settled, "the parent must not settle while the cleanup process can still own filesystem work").toBe(false);
+		child.emit("close", 0, null);
+		await expect(running).resolves.toEqual({ removed: true, attempts: 1, history: [] });
+		expect(settled).toBe(true);
+	});
+
+	it("removes an owned root through the real isolated cleanup process", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-child-"));
+		await writeFile(path.join(ownerRoot, "entry.txt"), "owned");
+		try {
+			await expect(removeOwnedPathInSubprocess(ownerRoot, {
+				ownerRoot,
+				allowOwnerRoot: true,
+				owner: { kind: "coordinator", id: "subprocess-integration" },
+				deadlineMs: 5_000,
+				traversalConcurrency: 8,
+				subprocessThreadPoolSize: 8,
+			})).resolves.toMatchObject({ removed: true, attempts: 1 });
+			await expect(lstat(ownerRoot)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			await rm(ownerRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("retries transient Windows removal failures with capped exponential delays", async () => {
 		const { removeOwnedPath } = await loadCleanupContract();
 		const ownerRoot = path.resolve("fixture-run-root");
