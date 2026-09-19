@@ -98,6 +98,15 @@ async function defaultSpawnOwned(command, args, options) {
 	});
 }
 
+export function isCompleteOwnedCommandShutdown(shutdown) {
+	return shutdown?.ownershipState === "established"
+		&& shutdown.rootCloseObserved === true
+		&& shutdown.treeExitAttempted === true
+		&& shutdown.treeExitSettled === true
+		&& shutdown.treeExitVerified === true
+		&& shutdown.completionTimedOut === false;
+}
+
 export class OwnedCommandError extends Error {
 	constructor(message, { cause, command, args, cwd, shutdown } = {}) {
 		super(message, cause === undefined ? undefined : { cause });
@@ -106,7 +115,6 @@ export class OwnedCommandError extends Error {
 		this.args = args ? [...args] : [];
 		this.cwd = cwd;
 		this.shutdown = Object.freeze({ ...shutdown });
-		this.treeExitVerified = shutdown?.treeExitVerified === true;
 	}
 }
 

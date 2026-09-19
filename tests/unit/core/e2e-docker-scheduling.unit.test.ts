@@ -90,7 +90,14 @@ describe("E2E Docker capability and scheduling", () => {
 			code: 0,
 			stdout: JSON.stringify({ ok: true, cacheHit, path: "ignored-foreign-path" }),
 			stderr: "",
-			shutdown: { treeExitVerified: true },
+			shutdown: {
+				ownershipState: "established",
+				rootCloseObserved: true,
+				treeExitAttempted: true,
+				treeExitSettled: true,
+				treeExitVerified: true,
+				completionTimedOut: false,
+			},
 		});
 		const built = await prepareE2EDistServerPrebundle(paths, {}, {
 			runCommand: command(false),
