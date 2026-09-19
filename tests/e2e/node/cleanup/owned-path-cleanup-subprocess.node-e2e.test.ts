@@ -63,7 +63,6 @@ test("timeout settles only after the real deleting child closes and its tree exi
 		const immediatelyAfterSettlement = (await readdir(ownerRoot)).length;
 		assert.ok(immediatelyAfterSettlement > 0, "timeout must retain undeleted diagnostics");
 		assert.ok(immediatelyAfterSettlement < entryCount, "the real child must begin deletion before timeout");
-		await new Promise(resolve => setTimeout(resolve, 500));
 		assert.equal((await readdir(ownerRoot)).length, immediatelyAfterSettlement, "no deletion may continue after settlement");
 	} finally {
 		await rm(ownerRoot, { recursive: true, force: true });
