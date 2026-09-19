@@ -966,7 +966,7 @@ describe("spawnTracked timeout cleanup", () => {
 			goalId: "terminal-goal", gateId: "implementation", signalId, overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
 			steps: [{ name: "Recovered", type: "command", status: "running", startedAt: Date.now(), exitFile, sentinelCleanupPending: true }],
 		}] }));
-		let retry: (() => Promise<void>) | undefined;
+		let retry: (() => void) | undefined;
 		let reapCalls = 0;
 		const calls: Array<{ kind: string; status: string }> = [];
 		try {
@@ -983,7 +983,10 @@ describe("spawnTracked timeout cleanup", () => {
 			const pending = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8")).verifications[0];
 			expect(pending).toMatchObject({ signalId, cancelled: true, overallStatus: "cancelled" });
 			expect(retry).toBeTypeOf("function");
-			await retry!();
+			retry!();
+			// Timer callbacks intentionally return void; join the cleanup promise that
+			// production shutdown also tracks instead of racing its final persist.
+			await Promise.all([...(harness as any)._commandKillRetryCallbacks]);
 			expect(harness.getActiveVerifications()).toEqual([]);
 			expect(fs.existsSync(path.join(stateDir, "active-verifications.json"))).toBe(false);
 			expect(calls).toEqual([]);
