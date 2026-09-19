@@ -826,8 +826,12 @@ async function loadSpawnTracked() {
 	return spawnTrackedLoader;
 }
 
-async function defaultSpawnOwnedCleanup(modulePath, env, onSpawned) {
+async function defaultSpawnOwnedCleanup(modulePath, env, onSpawned, { signal } = {}) {
+	signal?.throwIfAborted();
 	const spawnTracked = await loadSpawnTracked();
+	// Bootstrap/import is asynchronous. Recheck the immutable parent lifecycle
+	// boundary in the same turn as spawn so an expired cleanup cannot start late.
+	signal?.throwIfAborted();
 	const tracked = spawnTracked(process.execPath, [modulePath, CLEANUP_CHILD_ARGUMENT], {
 		env,
 		stdio: ["pipe", "pipe", "inherit"],
@@ -911,8 +915,8 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 		let closeSignal;
 		let resolveClose;
 		const closePromise = new Promise(resolveClosePromise => { resolveClose = resolveClosePromise; });
-		let resolveSpawnSettled;
-		const spawnSettledPromise = new Promise(resolve => { resolveSpawnSettled = resolve; });
+		const spawnAbortController = new AbortController();
+		let spawnAdmissionOpen = true;
 
 		const elapsed = () => Math.max(0, now() - startedAt);
 		const childLifecycle = () => ({
@@ -938,9 +942,14 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 			lifecycleDeadlineMs,
 			childLifecycle: childLifecycle(),
 		});
+		const closeSpawnAdmission = () => {
+			spawnAdmissionOpen = false;
+			if (!spawnAbortController.signal.aborted) spawnAbortController.abort();
+		};
 		const finishReject = failure => {
 			if (settled) return;
 			settled = true;
+			closeSpawnAdmission();
 			clearTimer(lifecycleTimer);
 			reject(lifecycleFailure(failure));
 		};
@@ -965,7 +974,6 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 			terminationReason = reason;
 			stage = `terminate-after-${reason}`;
 			terminationPromise = (async () => {
-				if (!control) await spawnSettledPromise;
 				if (!control) return true;
 				requestKill("SIGTERM", "graceful");
 				treeExitAttempts++;
@@ -1007,10 +1015,21 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 		let lifecycleTimer;
 		lifecycleTimer = setTimer(() => {
 			if (settled || (closed && treeExitVerified)) return;
+			const failureStage = stage;
+			if (!control) {
+				terminationRequested = true;
+				terminationReason = failureStage;
+				finishReject({
+					code: "ECLEANUPSUBPROCESSTIMEOUT",
+					summary: "Owned-path cleanup subprocess exceeded its parent lifecycle deadline before exposing a child",
+					stage: failureStage,
+				});
+				return;
+			}
 			failAndTerminate(
 				"ECLEANUPSUBPROCESSTIMEOUT",
 				"Owned-path cleanup subprocess exceeded its parent lifecycle deadline",
-				stage,
+				failureStage,
 			);
 		}, remainingLifecycleMs);
 		lifecycleTimer?.unref?.();
@@ -1026,13 +1045,36 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 			}
 			failAndTerminate("ECLEANUPSUBPROCESSPROTOCOL", "Owned-path cleanup subprocess sent a malformed result", "receive-result");
 		};
+		const retireUnadmittedControl = tracked => {
+			// A custom factory may violate the abort contract and settle with a late
+			// handle. Never admit it as cleanup work; consume and contain that exact
+			// owned tree without naming a PID or broadening the ownership primitive.
+			void (async () => {
+				try { tracked?.killTree?.("SIGKILL", 0); } catch { /* diagnostic seam violated admission */ }
+				try { await tracked?.waitForTreeExit?.(SUBPROCESS_TREE_EXIT_TIMEOUT_MS); } catch { /* best effort for a rejected admission */ }
+			})();
+		};
 		const exposeSpawned = tracked => {
+			if (!spawnAdmissionOpen || settled) {
+				retireUnadmittedControl(tracked);
+				return false;
+			}
 			if (control) throw new Error("Owned cleanup spawn exposed more than one process tree");
 			control = tracked;
 			child = tracked.child;
 			stage = "ownership-ready";
+			const stdin = child.stdin;
+			const stdout = child.stdout;
+			const onStdinError = cause => {
+				failAndTerminate("ECLEANUPSUBPROCESSSEND", "Owned-path cleanup subprocess request stream emitted an error", "send-request-stream", cause);
+			};
+			const onStdoutError = cause => {
+				failAndTerminate("ECLEANUPSUBPROCESSPROTOCOL", "Owned-path cleanup subprocess response stream emitted an error", "receive-result-stream", cause);
+			};
+			stdin?.on("error", onStdinError);
+			stdout?.on("error", onStdoutError);
 			child.once("message", acceptResponse);
-			child.stdout?.on("data", chunk => {
+			stdout?.on("data", chunk => {
 				if (settled || terminalFailure !== undefined) return;
 				responseBytes += chunk.length;
 				if (responseBytes > MAX_SUBPROCESS_MESSAGE_BYTES) {
@@ -1041,7 +1083,7 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 				}
 				responseText += chunk.toString("utf8");
 			});
-			child.stdout?.once("end", () => {
+			stdout?.once("end", () => {
 				if (settled || terminalFailure !== undefined || receivedMessage || responseText.length === 0) return;
 				try { acceptResponse(JSON.parse(responseText)); }
 				catch (cause) { failAndTerminate("ECLEANUPSUBPROCESSPROTOCOL", "Owned-path cleanup subprocess sent invalid JSON", "receive-result", cause); }
@@ -1053,6 +1095,8 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 				closed = true;
 				closeCode = code;
 				closeSignal = signal;
+				stdin?.removeListener("error", onStdinError);
+				stdout?.removeListener("error", onStdoutError);
 				resolveClose();
 				void (async () => {
 					if (settled || terminationRequested) return;
@@ -1065,11 +1109,13 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 					clearTimer(lifecycleTimer);
 					if (response?.ok === true && response?.result?.removed === true && code === 0) {
 						settled = true;
+						closeSpawnAdmission();
 						resolve(response.result);
 						return;
 					}
 					if (response?.ok === false && typeof response?.error?.message === "string") {
 						settled = true;
+						closeSpawnAdmission();
 						reject(cleanupErrorFromPayload(response.error));
 						return;
 					}
@@ -1103,10 +1149,12 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 					});
 				} else {
 					const spawnOwned = seams.spawnOwned ?? defaultSpawnOwnedCleanup;
-					const spawned = await spawnOwned(modulePath, environment, exposeSpawned);
-					if (!control) exposeSpawned(spawned);
+					const spawned = await spawnOwned(modulePath, environment, exposeSpawned, {
+						signal: spawnAbortController.signal,
+					});
+					if (!control && spawned !== undefined) exposeSpawned(spawned);
 				}
-				resolveSpawnSettled();
+				if (settled || !control) return;
 				await control.ownershipReady;
 				ownershipReady = true;
 				if (terminalFailure !== undefined) {
@@ -1130,7 +1178,7 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 					throw new Error("Owned cleanup subprocess has no request transport");
 				}
 			} catch (cause) {
-				resolveSpawnSettled();
+				if (settled) return;
 				if (!child) {
 					finishReject({ code: "ECLEANUPSUBPROCESSSPAWN", summary: "Failed to spawn owned-path cleanup subprocess", stage: "spawn", cause });
 					return;
