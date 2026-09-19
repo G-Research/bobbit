@@ -98,6 +98,18 @@ async function defaultSpawnOwned(command, args, options) {
 	});
 }
 
+export class OwnedCommandError extends Error {
+	constructor(message, { cause, command, args, cwd, shutdown } = {}) {
+		super(message, cause === undefined ? undefined : { cause });
+		this.name = "OwnedCommandError";
+		this.command = command;
+		this.args = args ? [...args] : [];
+		this.cwd = cwd;
+		this.shutdown = Object.freeze({ ...shutdown });
+		this.treeExitVerified = shutdown?.treeExitVerified === true;
+	}
+}
+
 function commandDiagnostic({ rendered, cwd, child, ownershipState, killRequested, killError, closed, treeExit, treeExitTimeoutMs, stdout, stderr }) {
 	const rootClose = closed.observed
 		? `code=${closed.code ?? "null"}, signal=${closed.signal ?? "none"}`
@@ -312,17 +324,48 @@ export async function runOwnedCommand(command, args, {
 		stderr: stderrText,
 	});
 
+	const shutdown = {
+		ownershipState,
+		killRequested,
+		rootCloseObserved: closed.observed,
+		rootExitCode: closed.code,
+		rootSignal: closed.signal,
+		treeExitAttempted: treeExit.attempted,
+		treeExitSettled: treeExit.settled,
+		treeExitVerified: treeExit.verified === true,
+		completionTimedOut,
+	};
+	const ownedCommandError = (message, cause) => new OwnedCommandError(message, {
+		cause,
+		command,
+		args,
+		cwd,
+		shutdown,
+	});
 	if (completionTimedOut || !closed.observed) {
 		const terminalContext = terminalError ? `${terminalError.message}\n` : "";
-		throw new Error(`${terminalContext}${rendered} did not complete its process-tree shutdown within ${treeExitTimeoutMs}ms\n${diagnostic}`, { cause: terminalError });
+		throw ownedCommandError(
+			`${terminalContext}${rendered} did not complete its process-tree shutdown within ${treeExitTimeoutMs}ms\n${diagnostic}`,
+			terminalError,
+		);
 	}
 	if (!treeExit.verified) {
-		throw new Error(`${rendered} closed without verified process-tree completion\n${diagnostic}`, { cause: treeExit.error ?? terminalError });
+		throw ownedCommandError(
+			`${rendered} closed without verified process-tree completion\n${diagnostic}`,
+			treeExit.error ?? terminalError,
+		);
 	}
-	if (terminalError) throw new Error(`${terminalError.message}\n${diagnostic}`, { cause: terminalError });
-	if (closed.spawnError) throw new Error(`Failed to spawn ${rendered}: ${closed.spawnError.message}\n${diagnostic}`, { cause: closed.spawnError });
-	if (closed.signal || closed.code === null) throw new Error(`${rendered} terminated without an exit code\n${diagnostic}`);
-	return { command, args: [...args], code: closed.code, stdout: stdoutText, stderr: stderrText };
+	if (terminalError) throw ownedCommandError(`${terminalError.message}\n${diagnostic}`, terminalError);
+	if (closed.spawnError) throw ownedCommandError(`Failed to spawn ${rendered}: ${closed.spawnError.message}\n${diagnostic}`, closed.spawnError);
+	if (closed.signal || closed.code === null) throw ownedCommandError(`${rendered} terminated without an exit code\n${diagnostic}`);
+	return {
+		command,
+		args: [...args],
+		code: closed.code,
+		stdout: stdoutText,
+		stderr: stderrText,
+		shutdown: Object.freeze(shutdown),
+	};
 }
 
 function requireSuccess(result) {

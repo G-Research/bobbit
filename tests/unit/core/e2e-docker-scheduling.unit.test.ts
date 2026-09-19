@@ -46,7 +46,7 @@ describe("E2E Docker capability and scheduling", () => {
 
 		const steps = [
 			"await runGroupA(A, coordinatorEnv)",
-			"await prepareE2EDistServerPrebundle(paths)",
+			"await prepareE2EDistServerPrebundle(paths, coordinatorEnv)",
 			"sharedPlaywrightEnv.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle.bundlePath",
 			"await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries)",
 			'deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE")',
@@ -68,7 +68,7 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "4" })).toBe(4);
 		expect(defaultSchedule).toContain("const groupBWorkers = process.platform === \"win32\"");
 		expect(defaultSchedule).toContain("const groupCWorkers = resolveE2ePlaywrightWorkers()");
-		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths)");
+		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
 		const reportAt = source.indexOf("const report = {");
 		const bundleFieldAt = source.indexOf("\n\t\tbundle,", reportAt);
 		const cleanupAt = source.indexOf("await finalizeE2ERunCleanup({", reportAt);
@@ -80,17 +80,21 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(cleanupCall).toContain('state: "written"');
 	});
 
-	it("reports pre-spawn build/reuse details and degrades only preparation failures to raw B", async () => {
+	it("reports child build/reuse details after parent-side validation", async () => {
 		const paths = { root: "owned-run-root" };
-		const built = await prepareE2EDistServerPrebundle(paths, async (options: { repoRoot: string; runRoot: string }) => {
+		const resolvePrebundle = (options: { repoRoot: string; runRoot: string }) => {
 			expect(options.runRoot).toBe(paths.root);
-			return {
-				key: "compiled-key",
-				bundlePath: "owned-run-root/bundle.mjs",
-				manifestPath: "owned-run-root/manifest.json",
-				cacheDir: "owned-run-root/cache",
-				cacheHit: false,
-			};
+			return { key: "compiled-key", bundlePath: "owned-run-root/bundle.mjs" };
+		};
+		const command = (cacheHit: boolean) => async () => ({
+			code: 0,
+			stdout: JSON.stringify({ ok: true, cacheHit, path: "ignored-foreign-path" }),
+			stderr: "",
+			shutdown: { treeExitVerified: true },
+		});
+		const built = await prepareE2EDistServerPrebundle(paths, {}, {
+			runCommand: command(false),
+			resolvePrebundle,
 		});
 		expect(built).toMatchObject({
 			observed: true,
@@ -101,26 +105,11 @@ describe("E2E Docker capability and scheduling", () => {
 		});
 		expect(built.buildWallMs).toBeGreaterThanOrEqual(0);
 
-		const reused = await prepareE2EDistServerPrebundle(paths, async () => ({
-			key: "compiled-key",
-			bundlePath: "owned-run-root/bundle.mjs",
-			manifestPath: "owned-run-root/manifest.json",
-			cacheDir: "owned-run-root/cache",
-			cacheHit: true,
-		}));
+		const reused = await prepareE2EDistServerPrebundle(paths, {}, {
+			runCommand: command(true),
+			resolvePrebundle,
+		});
 		expect(reused.status).toBe("reused");
-
-		const fallback = await prepareE2EDistServerPrebundle(paths, async () => {
-			throw new Error("corrupt manifest before spawn");
-		});
-		expect(fallback).toMatchObject({
-			observed: true,
-			status: "raw-fallback",
-			key: null,
-			bundlePath: null,
-			fallback: true,
-			error: "corrupt manifest before spawn",
-		});
 	});
 
 	it("gates only image-backed sandbox cases and retains non-Docker coverage", () => {
