@@ -2004,8 +2004,20 @@ export async function buildReviewPrompt(
  * indefinitely for those — only the gap between attempts is bounded.
  */
 const PROVIDER_BACKOFF_RETRY_MAX_MS = 15 * 60 * 1000;
-/** Writer acknowledgements are local continuations, never restart-surviving command trees. */
-const VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS = 10_000;
+/** Admitted writer bodies are local continuations, never restart-surviving command trees. */
+const VERIFICATION_SHUTDOWN_WRITER_EXIT_TIMEOUT_MS = 10_000;
+
+interface VerificationWriterContext {
+	generation: number;
+	signal: AbortSignal;
+}
+
+class VerificationWriterInterruptedError extends Error {
+	constructor(label: string) {
+		super(`Verification writer interrupted by gateway shutdown (label=${JSON.stringify(label)})`);
+		this.name = "VerificationWriterInterruptedError";
+	}
+}
 
 /**
  * Inter-attempt delay for verification-step retries. Reuses `nextBackoffDelay`
@@ -2448,7 +2460,7 @@ export class VerificationHarness {
 		// is draining. Shutdown-owned cleanup callbacks may still durably advance
 		// exact ownership evidence before they are joined; after the join, the seal
 		// blocks every source. This is intentionally not a blanket shutdown no-op.
-		const writerGeneration = this._verificationWriterContext.getStore();
+		const writerGeneration = this._verificationWriterContext.getStore()?.generation;
 		if (this._verificationPersistenceSealed
 			|| (writerGeneration !== undefined && writerGeneration !== this._verificationWriterGeneration)) return false;
 		try {
@@ -2717,10 +2729,10 @@ export class VerificationHarness {
 		if (!signal) return null;
 
 		const cwd = goal.worktreePath || goal.cwd;
-		const [baseBranch, legacyMasterBranch] = await Promise.all([
+		const [baseBranch, legacyMasterBranch] = await this._awaitVerificationWriter(Promise.all([
 			this.resolveVerificationBaseBranch(goalId, cwd),
 			this.resolveLegacyMasterBranch(cwd),
-		]);
+		]));
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
 			baseBranch,
@@ -2827,7 +2839,7 @@ export class VerificationHarness {
 				const key = `${v.signalId}::${step.name}`;
 				const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 				this.pendingSignoffs.set(key, resolver);
-				const outcome = await promise;
+				const outcome = await this._awaitVerificationWriter(promise);
 				this.pendingSignoffs.delete(key);
 				if (!this._isResumeStillActive(v)) return;
 				let passed: boolean;
@@ -3467,16 +3479,16 @@ export class VerificationHarness {
 	/** Monotonic admission fence set synchronously before terminal owner snapshotting. */
 	private _terminalShutdownStarted = false;
 
-	/** Generation held by top-level verification writers admitted before shutdown. */
+	/** Generation and cancellation signal held by top-level writers admitted before shutdown. */
 	private _verificationWriterGeneration = 0;
-	private readonly _verificationWriterContext = new AsyncLocalStorage<number>();
+	private readonly _verificationWriterContext = new AsyncLocalStorage<VerificationWriterContext>();
 	private _verificationPersistenceSealed = false;
 	private _nextVerificationWriterId = 0;
 	private _verificationWriters = new Map<number, {
 		label: string;
 		generation: number;
 		interrupt: () => void;
-		acknowledgement: Promise<void>;
+		body: Promise<void>;
 	}>();
 
 	/** Every caller observes the same terminal owner-barrier outcome. */
@@ -3707,7 +3719,7 @@ export class VerificationHarness {
 		while (this.clock.now() < deadline) {
 			if (this._terminalShutdownStarted || isCancelled()) return;
 			const remaining = deadline - this.clock.now();
-			await new Promise<void>(r => this.clock.setTimeout(() => r(), Math.min(CHUNK_MS, remaining)));
+			await this._awaitVerificationWriter(new Promise<void>(r => this.clock.setTimeout(() => r(), Math.min(CHUNK_MS, remaining))));
 		}
 	}
 
@@ -4379,13 +4391,55 @@ export class VerificationHarness {
 		if (this._terminalShutdownStarted) return Promise.resolve();
 		const id = ++this._nextVerificationWriterId;
 		const generation = this._verificationWriterGeneration;
-		let interrupt!: () => void;
-		const interrupted = new Promise<void>(resolve => { interrupt = resolve; });
-		const body = Promise.resolve().then(() => this._verificationWriterContext.run(generation, run));
-		const acknowledgement = Promise.race([body, interrupted]);
-		this._verificationWriters.set(id, { label, generation, interrupt, acknowledgement });
-		void acknowledgement.finally(() => this._verificationWriters.delete(id)).catch(() => {});
-		return acknowledgement;
+		const controller = new AbortController();
+		const context: VerificationWriterContext = { generation, signal: controller.signal };
+		const body = Promise.resolve()
+			.then(() => this._verificationWriterContext.run(context, run))
+			.catch(error => {
+				// The terminal interruption is control flow, not a failed verification.
+				// Any ordinary error before shutdown keeps its original rejection.
+				if (controller.signal.aborted) return;
+				throw error;
+			});
+		const interrupt = () => controller.abort(new VerificationWriterInterruptedError(label));
+		this._verificationWriters.set(id, { label, generation, interrupt, body });
+		// A writer remains an admitted owner until its actual async body returns.
+		// Deleting it when interruption is merely requested would let shutdown race
+		// a suspended continuation that can later create owners or mutate state.
+		void body.finally(() => this._verificationWriters.delete(id)).catch(() => {});
+		return body;
+	}
+
+	private _verificationWriterSignal(): AbortSignal | undefined {
+		return this._verificationWriterContext.getStore()?.signal;
+	}
+
+	/**
+	 * Make an otherwise non-cancellable await stop the admitted writer body when
+	 * terminal shutdown begins. The underlying operation remains observed so a
+	 * late rejection cannot become unhandled, but none of its continuation runs.
+	 */
+	private _awaitVerificationWriter<T>(work: PromiseLike<T>): Promise<T> {
+		const signal = this._verificationWriterSignal();
+		if (!signal) return Promise.resolve(work);
+		if (signal.aborted) return Promise.reject(signal.reason);
+		return new Promise<T>((resolve, reject) => {
+			let settled = false;
+			const finish = (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				if (outcome.ok) resolve(outcome.value);
+				else reject(outcome.error);
+			};
+			const onAbort = () => finish({ ok: false, error: signal.reason });
+			signal.addEventListener("abort", onAbort, { once: true });
+			void Promise.resolve(work).then(
+				value => finish({ ok: true, value }),
+				error => finish({ ok: false, error }),
+			);
+			if (signal.aborted) onAbort();
+		});
 	}
 
 	private _interruptVerificationWaits(): void {
@@ -4414,8 +4468,8 @@ export class VerificationHarness {
 	shutdown(): Promise<void> {
 		if (!this._shutdownPromise) {
 			// Linearize before snapshots or wakeups. The generation makes every old
-			// continuation stale, while interruption releases its fire-and-forget caller
-			// without waiting for restart-surviving command promises.
+			// continuation stale; interruption unwinds cancellable waits so the terminal
+			// barrier can join each actual writer body without waiting on durable commands.
 			this._terminalShutdownStarted = true;
 			this._verificationWriterGeneration++;
 			for (const writer of this._verificationWriters.values()) writer.interrupt();
@@ -4425,7 +4479,7 @@ export class VerificationHarness {
 			for (const timer of this._commandKillRetryTimers.values()) this.clock.clearTimeout(timer);
 			this._commandKillRetryTimers.clear();
 			this._shutdownPromise = this._shutdownVerificationOwners().finally(() => {
-				// All admitted writers acknowledged and every shutdown-owned callback was
+				// All admitted writer bodies returned and every shutdown-owned callback was
 				// joined. No persistence source from this harness is valid beyond here.
 				this._verificationPersistenceSealed = true;
 			});
@@ -4455,7 +4509,7 @@ export class VerificationHarness {
 
 	private async _shutdownVerificationOwners(): Promise<void> {
 		const results = await Promise.allSettled([
-			this._drainVerificationWriterAcknowledgements(),
+			this._drainVerificationWriterBodies(),
 			this._shutdownTrackedCommandTrees(),
 			this._drainCommandKillRetryCallbacks(),
 		]);
@@ -4469,7 +4523,7 @@ export class VerificationHarness {
 		}
 	}
 
-	private async _drainVerificationWriterAcknowledgements(): Promise<void> {
+	private async _drainVerificationWriterBodies(): Promise<void> {
 		const writers = [...this._verificationWriters.values()];
 		const failures = (await Promise.all(writers.map(writer => new Promise<Error | undefined>(resolve => {
 			let settled = false;
@@ -4480,14 +4534,14 @@ export class VerificationHarness {
 				resolve(failure);
 			};
 			const timer = this.clock.setTimeout(() => finish(new Error(
-				`Verification writer did not acknowledge restart interruption within ${VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS}ms (label=${JSON.stringify(writer.label)}, generation=${writer.generation})`,
-			)), VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS);
-			void writer.acknowledgement.then(
+				`Verification writer body did not return after restart interruption within ${VERIFICATION_SHUTDOWN_WRITER_EXIT_TIMEOUT_MS}ms (label=${JSON.stringify(writer.label)}, generation=${writer.generation})`,
+			)), VERIFICATION_SHUTDOWN_WRITER_EXIT_TIMEOUT_MS);
+			void writer.body.then(
 				() => finish(),
-				error => finish(new Error(`Verification writer acknowledgement failed (label=${JSON.stringify(writer.label)}, generation=${writer.generation}): ${error instanceof Error ? error.message : String(error)}`, { cause: error })),
+				error => finish(new Error(`Verification writer body failed while joining shutdown (label=${JSON.stringify(writer.label)}, generation=${writer.generation}): ${error instanceof Error ? error.message : String(error)}`, { cause: error })),
 			);
 		})))).filter((failure): failure is Error => failure != null);
-		if (failures.length > 0) throw new AggregateError(failures, "Verification writer interruption acknowledgement failed");
+		if (failures.length > 0) throw new AggregateError(failures, "Verification writer body drain failed");
 	}
 
 	private async _drainCommandKillRetryCallbacks(): Promise<void> {
@@ -4808,10 +4862,10 @@ export class VerificationHarness {
 		}
 
 		try {
-			const [baseBranch, legacyMasterBranch] = await Promise.all([
+			const [baseBranch, legacyMasterBranch] = await this._awaitVerificationWriter(Promise.all([
 				this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master"),
 				this.resolveLegacyMasterBranch(cwd),
-			]);
+			]));
 			if (this._terminalShutdownStarted) {
 				this._completeTerminalShutdownVerification(signal, steps, "verification setup completion");
 				return;
@@ -5278,7 +5332,7 @@ export class VerificationHarness {
 									if (this.commandSemaphore.available === 0) {
 										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
 									}
-									await this.commandSemaphore.acquire();
+									await this._awaitVerificationWriter(this.commandSemaphore.acquire(this._verificationWriterSignal()));
 									try {
 										const terminalAfterSemaphore = this._recordTerminalShutdownStep(streamCtx, `command step "${step.name}" semaphore acquisition`);
 										result = terminalAfterSemaphore
@@ -5406,7 +5460,7 @@ export class VerificationHarness {
 								const key = `${signal.id}::${step.name}`;
 								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 								this.pendingSignoffs.set(key, resolver);
-								const outcome = await promise;
+								const outcome = await this._awaitVerificationWriter(promise);
 								this.pendingSignoffs.delete(key);
 								if ("decision" in outcome) {
 									const fb = outcome.feedback?.trim();
@@ -6973,7 +7027,7 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		const terminalBeforePreparation = this._recordTerminalShutdownStep(streamCtx, "command preparation");
 		if (terminalBeforePreparation) return terminalBeforePreparation;
-		if (this.beforeCommandSpawn) await this.beforeCommandSpawn();
+		if (this.beforeCommandSpawn) await this._awaitVerificationWriter(this.beforeCommandSpawn());
 		const terminalAfterPreparation = this._recordTerminalShutdownStep(streamCtx, "command pre-spawn preparation");
 		if (terminalAfterPreparation) return terminalAfterPreparation;
 		return this._runCommandStep(command, cwd, timeoutSec, expectFailure, streamCtx, errorPattern, containerId);

@@ -826,7 +826,44 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		expect(command.kills()).toBe(1);
 	});
 
-	it("acknowledges blocked setup and cannot resurrect state after teardown", async () => {
+	it("bounds an admitted body that ignores interruption and reports its identity", async () => {
+		const clock = createManualClock(0);
+		const harness = makeHarness({ clock });
+		let bodyStarted!: () => void;
+		let releaseBody!: () => void;
+		const started = new Promise<void>(resolve => { bodyStarted = resolve; });
+		const blocked = new Promise<void>(resolve => { releaseBody = resolve; });
+		const writer = (harness as any)._admitVerificationWriter("stuck writer", async () => {
+			bodyStarted();
+			await blocked;
+		}) as Promise<void>;
+		await started;
+
+		let shutdownSettled = false;
+		const shutdownOutcome = harness.shutdown().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		void shutdownOutcome.then(() => { shutdownSettled = true; });
+		await Promise.resolve();
+		clock.advance(9_999);
+		await Promise.resolve();
+		expect(shutdownSettled).toBe(false);
+		clock.advance(1);
+		const error = await shutdownOutcome;
+
+		assert.ok(error instanceof AggregateError);
+		expect(error.message).toContain("Verification harness shutdown failed");
+		expect(error.errors.map(item => String((item as Error).message)).join("\n"))
+			.toContain('Verification writer body did not return after restart interruption within 10000ms (label="stuck writer"');
+		expect((harness as any)._verificationWriters.size).toBe(1);
+
+		releaseBody();
+		await writer;
+		expect((harness as any)._verificationWriters.size).toBe(0);
+	});
+
+	it("joins blocked setup and cannot resurrect state after teardown", async () => {
 		let releaseSetup!: () => void;
 		let observeSetup!: () => void;
 		const setupStarted = new Promise<void>(resolve => { observeSetup = resolve; });
@@ -857,8 +894,14 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 
 		const verification = harness.verifyGateSignal(signal, gate, TEST_DIR);
 		await setupStarted;
+		let verificationReturned = false;
+		void verification.then(() => { verificationReturned = true; });
 		await harness.shutdown();
-		await verification;
+
+		// Shutdown joins the admitted body itself; setup is deliberately still
+		// blocked here, so an interruption acknowledgement alone cannot pass.
+		expect(verificationReturned).toBe(true);
+		expect((harness as any)._verificationWriters.size).toBe(0);
 		fs.rmSync(stateDir, { recursive: true, force: true });
 		releaseSetup();
 		await new Promise<void>(resolve => setImmediate(resolve));
@@ -904,8 +947,12 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		await acquireObserved;
 		const persistPath = (harness as any)._persistPath as string;
 		const durableBefore = fs.readFileSync(persistPath, "utf8");
+		let verificationReturned = false;
+		void verification.then(() => { verificationReturned = true; });
 		await harness.shutdown();
-		await verification;
+
+		expect(verificationReturned).toBe(true);
+		expect((harness as any)._verificationWriters.size).toBe(0);
 		releaseAcquire();
 		await new Promise<void>(resolve => setImmediate(resolve));
 
@@ -934,16 +981,21 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		const persistPath = (harness as any)._persistPath as string;
 		const before = fs.statSync(persistPath);
 		const beforeContent = fs.readFileSync(persistPath, "utf8");
-		const step = (harness as any).runCommandStep("echo held", TEST_DIR, 60, false, {
-			goalId: "goal-shutdown-pre-spawn", gateId: "gate-shutdown-pre-spawn", signalId, stepIndex: 0,
-		}) as Promise<{ passed: boolean; output: string }>;
+		const writer = (harness as any)._admitVerificationWriter("pre-spawn preparation", async () => {
+			await (harness as any).runCommandStep("echo held", TEST_DIR, 60, false, {
+				goalId: "goal-shutdown-pre-spawn", gateId: "gate-shutdown-pre-spawn", signalId, stepIndex: 0,
+			});
+		}) as Promise<void>;
 		await preparationStarted;
+		let writerReturned = false;
+		void writer.then(() => { writerReturned = true; });
 		await harness.shutdown();
-		releasePreparation();
-		const result = await step;
 
-		expect(result.passed).toBe(false);
-		expect(result.output).toContain("terminally cancelled because gateway shutdown started");
+		expect(writerReturned).toBe(true);
+		expect((harness as any)._verificationWriters.size).toBe(0);
+		releasePreparation();
+		await new Promise<void>(resolve => setImmediate(resolve));
+
 		expect(spawnCalls).toBe(0);
 		expect((harness as any)._trackedCommandChildren.size).toBe(0);
 		const after = fs.statSync(persistPath);
@@ -971,10 +1023,12 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		}) as Promise<void>;
 		await waitStarted;
 
+		let writerReturned = false;
+		void writer.then(() => { writerReturned = true; });
 		await harness.shutdown();
-		await writer;
-		await new Promise<void>(resolve => setImmediate(resolve));
 
+		expect(writerReturned).toBe(true);
+		expect((harness as any)._verificationWriters.size).toBe(0);
 		expect(interruptedVerdict).toMatchObject({ verdict: false, summary: expect.stringContaining("gateway restart") });
 		expect((harness as any).pendingResults.size).toBe(0);
 		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
@@ -1005,10 +1059,12 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		expect(await poll(() => (harness as any).pendingSignoffs.size === 1, 1_000, 5)).toBe(true);
 		const before = fs.statSync(persistPath);
 		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		let resumeReturned = false;
+		void resume.then(() => { resumeReturned = true; });
 		await harness.shutdown();
-		await resume;
-		await new Promise<void>(resolve => setImmediate(resolve));
 
+		expect(resumeReturned).toBe(true);
+		expect((harness as any)._verificationWriters.size).toBe(0);
 		expect(updates).toEqual([]);
 		expect(fs.statSync(persistPath).ino).toBe(before.ino);
 		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
