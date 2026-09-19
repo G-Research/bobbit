@@ -375,6 +375,28 @@ export function validateDistBuild(repoRoot, key) {
  * deterministic fixtures; production uses the normal build command and
  * conservative dead-owner bounds.
  */
+function publishDistBuild(repoRoot) {
+	// build:packs rewrites the committed market-packs bundles, which are part of
+	// the input set — recompute so the manifest keys the POST-build inputs.
+	const finalKey = computeDistBuildKey(repoRoot);
+	for (const artifact of [join("dist", "server", "cli.js"), join("dist", "ui", "index.html")]) {
+		if (!existsSync(join(repoRoot, artifact))) {
+			throw new Error(`[ensure-dist] build completed but expected artifact is missing: ${artifact}`);
+		}
+	}
+	const manifestPath = manifestPathFor(repoRoot);
+	const tempPath = `${manifestPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+	writeFileSync(tempPath, `${JSON.stringify({ schema: MANIFEST_SCHEMA, key: finalKey, createdAt: new Date().toISOString() }, null, 2)}\n`);
+	try {
+		rmSync(manifestPath, { force: true });
+		renameSync(tempPath, manifestPath);
+	} catch (error) {
+		rmSync(tempPath, { force: true });
+		throw error;
+	}
+	return { key: finalKey, cacheHit: false };
+}
+
 export function ensureDistBuild({
 	repoRoot = REPO_ROOT,
 	runBuild = () => execSync("npm run build", { cwd: repoRoot, stdio: "inherit" }),
@@ -400,6 +422,7 @@ export function ensureDistBuild({
 		...(afterAcquireIntent === undefined ? {} : { afterAcquireIntent }),
 		...(afterRecoveryClaim === undefined ? {} : { afterRecoveryClaim }),
 	});
+	let asyncBuild = false;
 	try {
 		// Another coordinator may have completed the build while we waited.
 		key = computeDistBuildKey(repoRoot);
@@ -412,28 +435,19 @@ export function ensureDistBuild({
 		// those partial artifacts with the old manifest and report a false hit.
 		rmSync(manifestPathFor(repoRoot), { force: true });
 		console.log(`[ensure-dist] dist build cache miss (key ${key}); running npm run build...`);
-		runBuild();
-		// build:packs rewrites the committed market-packs bundles, which are part of
-		// the input set — recompute so the manifest keys the POST-build inputs.
-		const finalKey = computeDistBuildKey(repoRoot);
-		for (const artifact of [join("dist", "server", "cli.js"), join("dist", "ui", "index.html")]) {
-			if (!existsSync(join(repoRoot, artifact))) {
-				throw new Error(`[ensure-dist] build completed but expected artifact is missing: ${artifact}`);
-			}
+		const build = runBuild();
+		if (build && typeof build.then === "function") {
+			// Packed-consumer preparation supplies an owned asynchronous command.
+			// Keep the same mutex held until its complete tree barrier settles and
+			// only then validate and atomically publish the manifest.
+			asyncBuild = true;
+			return Promise.resolve(build)
+				.then(() => publishDistBuild(repoRoot))
+				.finally(releaseLock);
 		}
-		const manifestPath = manifestPathFor(repoRoot);
-		const tempPath = `${manifestPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-		writeFileSync(tempPath, `${JSON.stringify({ schema: MANIFEST_SCHEMA, key: finalKey, createdAt: new Date().toISOString() }, null, 2)}\n`);
-		try {
-			rmSync(manifestPath, { force: true });
-			renameSync(tempPath, manifestPath);
-		} catch (error) {
-			rmSync(tempPath, { force: true });
-			throw error;
-		}
-		return { key: finalKey, cacheHit: false };
+		return publishDistBuild(repoRoot);
 	} finally {
-		releaseLock();
+		if (!asyncBuild) releaseLock();
 	}
 }
 

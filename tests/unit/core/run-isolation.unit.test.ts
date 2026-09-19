@@ -905,6 +905,36 @@ describe("unit run isolation", () => {
     }
   });
 
+  it("does not publish a Group C descriptor when bounded preparation retains failure evidence", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "serial-group-c-packed-failure-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      const environment = createSerialPlaywrightEnvironment({ BOBBIT_V2_RUN_ROOT: paths.root });
+      const fixtureRoot = join(paths.root, "prepared-packed-consumer");
+      mkdirSync(fixtureRoot, { recursive: true });
+      writeFileSync(join(fixtureRoot, "preparation-failure.json"), "{\"status\":\"failed\"}\n");
+
+      await expect(prepareGroupCPackedConsumer(
+        ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
+        environment,
+        paths,
+        async () => {
+          throw Object.assign(new Error("bounded dist build failed; retained evidence"), {
+            fixtureRoot,
+            evidencePath: join(fixtureRoot, "preparation-failure.json"),
+          });
+        },
+      )).rejects.toThrow(/retained evidence/);
+
+      expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
+      expect(existsSync(fixtureRoot)).toBe(true);
+      expect(existsSync(join(fixtureRoot, "preparation-failure.json"))).toBe(true);
+      expect(existsSync(join(fixtureRoot, "descriptor.json"))).toBe(false);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
   it("prepares full serial Group C once while keeping immutable B/C environments isolated", async () => {
     const temp = mkdtempSync(join(tmpdir(), "serial-group-c-packed-consumer-"));
     try {
