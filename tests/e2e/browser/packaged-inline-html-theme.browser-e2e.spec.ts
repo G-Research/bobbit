@@ -431,6 +431,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		const materialized = await materializePackedConsumerFixture(descriptor, {
 			coordinatorRunRoot: coordinatorRunRoot!,
 			name: `inline-theme-${testInfo.workerIndex}`,
+			mode: "consume",
 		});
 		const consumerDir = materialized.consumerDir;
 		const workspaceDir = join(consumerDir, "workspace");
@@ -455,7 +456,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			await writePackedAgent(agentPath);
 
 			// The coordinator ran one real npm pack and one strict-offline install.
-			// This worker consumes their immutable descriptor and a private real copy.
+			// This sole consumer atomically claims that prepared tree as its private,
+			// mutable runtime; a failed run retains the complete tree under materialized.
 			const { entry: pack, report: packReport } = parsePackResult(JSON.stringify(descriptor.packReport));
 			report.pack = packReport;
 			expect(pack).toEqual(descriptor.packEntry);
