@@ -633,8 +633,9 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 	it("resume boot surfaces nonInteractive reviewers with no active verification context", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
-		const resumeStart = source.indexOf("async resumeInterruptedVerifications(): Promise<void>");
-		assert.ok(resumeStart >= 0, "resumeInterruptedVerifications should exist");
+		const resumeMethod = /\b(?:async\s+)?resumeInterruptedVerifications\(\): Promise<void>\s*\{/.exec(source);
+		assert.ok(resumeMethod, "resumeInterruptedVerifications should exist");
+		const resumeStart = resumeMethod.index;
 		const findStepStart = source.indexOf("private async _resumeOneVerification", resumeStart);
 		assert.ok(findStepStart > resumeStart, "resumeInterruptedVerifications should be bounded");
 		const resumeBody = source.slice(resumeStart, findStepStart);
@@ -646,7 +647,7 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		);
 		assert.match(
 			resumeBody,
-			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);[\s\S]*if \(persisted\.length === 0\)/,
+			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);[\s\S]*if \((?:this\._terminalShutdownStarted \|\| )?persisted\.length === 0\)/,
 			"Boot resume must surface orphaned nonInteractive reviewer sessions before any early return.",
 		);
 		assert.match(
