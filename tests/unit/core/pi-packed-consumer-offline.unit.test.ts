@@ -66,6 +66,7 @@ type RunCommandOptions = {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	timeoutMs: number;
+	totalTimeoutMs?: number;
 };
 
 function commandResult(command: string, args: string[], overrides: Partial<{
@@ -151,11 +152,13 @@ describe("packed-consumer offline install contract", () => {
 			"materialization must copy the prepared installed dependency graph");
 		assert.match(source, /const OFFLINE_INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
 		assert.match(source, /export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 \* 60_000;/);
-		assert.match(source, /remainingCommandTimeout\("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS\)/,
+		assert.match(source, /\.\.\.commandDeadline\("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS\)/,
 			"the former 600-second install budget must be capped by the preparation-wide deadline");
+		assert.match(source, /totalTimeoutMs - Math\.max\(0, now\(\) - totalStartedAt\)/,
+			"the owned-command lifetime must debit ownership readiness from its absolute budget");
 		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
-			"spawn-time ownership must have a separate setup deadline before execution timing");
+			"spawn-time ownership must retain its independent setup cap inside the total deadline");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
 		assert.match(source, /await tracked\.waitForTreeExit\(treeExitTimeoutMs\)/);
 		assert.match(source, /await rename\(temporaryDescriptor, descriptorPath\)/,
@@ -367,13 +370,14 @@ describe("packed-consumer offline install contract", () => {
 		}
 	});
 
-	it("caps a live command by the remaining preparation deadline, joins its tree, and retains evidence", async () => {
+	it("caps ownership readiness by the remaining preparation deadline, joins its tree, and retains evidence", async () => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-deadline-pin-"));
 		const child = Object.assign(new EventEmitter(), {
 			pid: 4242,
 			stdout: new PassThrough(),
 			stderr: new PassThrough(),
 		});
+		const ownership = deferred<void>();
 		let nowMs = 0;
 		let observedTimeoutMs: number | undefined;
 		let killCount = 0;
@@ -392,9 +396,11 @@ describe("packed-consumer offline install contract", () => {
 						cwd: options.cwd,
 						env: options.env,
 						timeoutMs: options.timeoutMs,
+						totalTimeoutMs: options.totalTimeoutMs,
+						now: () => 0,
 						spawnOwned: async () => ({
 							child,
-							ownershipReady: Promise.resolve(),
+							ownershipReady: ownership.promise,
 							killTree: () => {
 								killCount++;
 								child.emit("close", null, "SIGKILL");
@@ -415,7 +421,7 @@ describe("packed-consumer offline install contract", () => {
 				},
 			}), (error: Error) => {
 				assert.match(error.message, /retained partial fixture and command evidence/);
-				assert.match(error.message, /timed out after 40ms/);
+				assert.match(error.message, /40ms total deadline \(including ownership readiness\)/);
 				return true;
 			});
 
@@ -424,8 +430,19 @@ describe("packed-consumer offline install contract", () => {
 			assert.equal(completionJoins, 1, "preparation does not reject until complete tree exit is verified");
 			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
 			const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
-			assert.match(evidence.error.message, /timed out after 40ms/);
+			assert.match(evidence.error.message, /40ms total deadline \(including ownership readiness\)/);
 			assert.match(evidence.error.message, /tree exit: verified complete/);
+			assert.deepEqual(evidence.error.shutdown, {
+				ownershipState: "termination requested before readiness",
+				killRequested: true,
+				rootCloseObserved: true,
+				rootExitCode: null,
+				rootSignal: "SIGKILL",
+				treeExitAttempted: true,
+				treeExitSettled: true,
+				treeExitVerified: true,
+				completionTimedOut: false,
+			});
 			assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false,
 				"deadline failure must not publish a descriptor that could start Group C");
 		} finally {
@@ -510,6 +527,66 @@ describe("packed-consumer offline install contract", () => {
 		assert.equal(killCount, 1, "timeout must request one owned kill");
 		assert.equal(completionJoins, 1, "timeout must join verified tree completion");
 		assert.deepEqual(clearedTimers, [ownershipTimerToken, executionTimerToken]);
+	});
+
+	it("keeps one absolute total deadline while ownership consumes most of the budget", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		const ownership = deferred<void>();
+		let nowMs = 0;
+		let fireTotalDeadline: (() => void) | undefined;
+		let killCount = 0;
+		let completionJoins = 0;
+		const timerDurations: number[] = [];
+		const running = runOwnedCommand("node", ["npm-cli.js", "install"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 100,
+			totalTimeoutMs: 100,
+			ownershipEstablishmentTimeoutMs: 1_000,
+			now: () => nowMs,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: ownership.promise,
+				killTree: () => {
+					killCount++;
+					child.emit("close", null, "SIGKILL");
+				},
+				waitForTreeExit: async () => {
+					completionJoins++;
+					return true;
+				},
+			}),
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				timerDurations.push(timeoutMs);
+				if (timeoutMs === 100) fireTotalDeadline = callback;
+				return Symbol(`timer-${timeoutMs}`);
+			},
+			clearTimer: () => {},
+		});
+
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(timerDurations, [100, 1_000],
+			"the total deadline must arm before waiting for ownership, alongside the independent setup cap");
+		nowMs = 80;
+		ownership.resolve(undefined);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(timerDurations, [100, 1_000],
+			"ownership readiness must not restart a full execution budget; only the original 20ms remainder remains");
+		nowMs = 100;
+		invokeTimer(fireTotalDeadline, "the original total deadline must stay armed across ownership readiness");
+
+		await assert.rejects(running, (error: unknown) => {
+			if (!(error instanceof OwnedCommandError)) return false;
+			const owned = error as Error & { shutdown: Record<string, unknown> };
+			assert.match(owned.message, /100ms total deadline \(including ownership readiness\)/);
+			assert.equal(isCompleteOwnedCommandShutdown(owned.shutdown), true,
+				"deadline failure must still carry complete owned-tree shutdown proof");
+			return true;
+		});
+		assert.equal(killCount, 1);
+		assert.equal(completionJoins, 1);
 	});
 
 	it("clears the setup timer when deferred ownership rejects", async () => {

@@ -23,17 +23,17 @@ const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
 const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 // This bounds dist readiness plus the whole package-command sequence. Each
-// owned command receives only the smaller of its command-specific limit and the
-// remaining preparation budget; runOwnedCommand still owns and joins its tree
-// after that timer fires.
+// owned command receives the absolute remaining preparation budget as its total
+// lifetime, including ownership readiness. Tree shutdown proof remains bounded
+// separately after that deadline fires.
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
 export const PACKED_CONSUMER_DESCRIPTOR_ENV = "BOBBIT_PACKED_CONSUMER_DESCRIPTOR";
 // Hosted Windows may spend more than 10 seconds establishing the Job-backed
-// ownership handshake under concurrent runner load. This deadline covers only
-// process-tree ownership setup; command execution retains its separate budget.
+// ownership handshake under concurrent runner load. This remains a setup cap,
+// but an optional command-wide deadline can expire sooner and includes setup.
 export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;
 const TREE_EXIT_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
@@ -173,12 +173,14 @@ export async function runOwnedCommand(command, args, {
 	cwd,
 	env = process.env,
 	timeoutMs,
+	totalTimeoutMs,
 	maxOutputBytes = MAX_OUTPUT_BYTES,
 	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	treeExitTimeoutMs = TREE_EXIT_TIMEOUT_MS,
 	repoRoot = REPO_ROOT,
 	ownershipBootstrapRoot,
 	spawnOwned = defaultSpawnOwned,
+	now = () => performance.now(),
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
 	setCompletionTimer = setTimeout,
@@ -186,6 +188,9 @@ export async function runOwnedCommand(command, args, {
 } = {}) {
 	if (!cwd) throw new Error("cwd is required");
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be a positive number");
+	if (totalTimeoutMs !== undefined && (!Number.isFinite(totalTimeoutMs) || totalTimeoutMs <= 0)) {
+		throw new Error("totalTimeoutMs must be a positive number when provided");
+	}
 	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("maxOutputBytes must be a positive number");
 	if (!Number.isFinite(ownershipEstablishmentTimeoutMs) || ownershipEstablishmentTimeoutMs <= 0) {
 		throw new Error("ownershipEstablishmentTimeoutMs must be a positive number");
@@ -193,6 +198,10 @@ export async function runOwnedCommand(command, args, {
 	if (!Number.isFinite(treeExitTimeoutMs) || treeExitTimeoutMs <= 0) throw new Error("treeExitTimeoutMs must be a positive number");
 
 	const rendered = displayCommand(command, args);
+	// Start the optional total lifetime before spawning. defaultSpawnOwned returns
+	// the tracked owner promptly; if even that setup exhausts the budget, kill and
+	// prove the returned tree rather than abandoning a potentially live process.
+	const totalStartedAt = now();
 	const tracked = await spawnOwned(command, args, {
 		cwd,
 		env,
@@ -209,6 +218,7 @@ export async function runOwnedCommand(command, args, {
 	let ownershipState = "pending";
 	let ownershipTimer;
 	let executionTimer;
+	let totalTimer;
 	let completionTimer;
 	let resolveKillRequested;
 	let resolveCompletionTimeout;
@@ -279,6 +289,13 @@ export async function runOwnedCommand(command, args, {
 	child.once("error", onError);
 	child.once("close", onClose);
 
+	if (totalTimeoutMs !== undefined) {
+		const elapsedMs = Math.max(0, now() - totalStartedAt);
+		const remainingMs = totalTimeoutMs - elapsedMs;
+		const deadlineError = new Error(`${rendered} exceeded its ${totalTimeoutMs}ms total deadline (including ownership readiness)`);
+		if (remainingMs <= 0) requestOwnedKill(deadlineError);
+		else totalTimer = setTimer(() => requestOwnedKill(deadlineError), remainingMs);
+	}
 	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`);
 	const terminationDuringOwnership = Symbol("termination-during-ownership");
 	try {
@@ -303,7 +320,14 @@ export async function runOwnedCommand(command, args, {
 		if (ownershipTimer !== undefined) clearTimer(ownershipTimer);
 	}
 	if (!terminalError) {
-		executionTimer = setTimer(() => requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`)), timeoutMs);
+		const totalRemainingMs = totalTimeoutMs === undefined
+			? Number.POSITIVE_INFINITY
+			: totalTimeoutMs - Math.max(0, now() - totalStartedAt);
+		if (totalRemainingMs <= 0) {
+			requestOwnedKill(new Error(`${rendered} exceeded its ${totalTimeoutMs}ms total deadline (including ownership readiness)`));
+		} else if (timeoutMs < totalRemainingMs) {
+			executionTimer = setTimer(() => requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`)), timeoutMs);
+		}
 	}
 
 	const closed = { observed: false, code: null, signal: null, spawnError: undefined };
@@ -323,6 +347,10 @@ export async function runOwnedCommand(command, args, {
 		if (executionTimer !== undefined) {
 			clearTimer(executionTimer);
 			executionTimer = undefined;
+		}
+		if (totalTimer !== undefined) {
+			clearTimer(totalTimer);
+			totalTimer = undefined;
 		}
 	});
 	let completionTimedOut = false;
@@ -344,6 +372,7 @@ export async function runOwnedCommand(command, args, {
 	child.off("close", onClose);
 	detachOutputListeners();
 	if (executionTimer !== undefined) clearTimer(executionTimer);
+	if (totalTimer !== undefined) clearTimer(totalTimer);
 	if (completionTimer !== undefined) clearCompletionTimer(completionTimer);
 	const stdoutText = Buffer.concat(stdout).toString("utf8");
 	const stderrText = Buffer.concat(stderr).toString("utf8");
@@ -610,10 +639,12 @@ export async function ensurePackedConsumerDist({
 		lockWaitMs: remainingPreparationMs("dist build lock"),
 		runBuild: async () => {
 			const args = [...npm.argsPrefix, "run", "build"];
+			const totalTimeoutMs = remainingPreparationMs("npm run build");
 			const result = await runCommand(npm.command, args, {
 				cwd: repoRoot,
 				env: baseEnv,
-				timeoutMs: Math.min(DIST_BUILD_TIMEOUT_MS, remainingPreparationMs("npm run build")),
+				timeoutMs: Math.min(DIST_BUILD_TIMEOUT_MS, totalTimeoutMs),
+				totalTimeoutMs,
 				repoRoot,
 				ownershipBootstrapRoot: fixtureRoot,
 			});
@@ -653,8 +684,13 @@ export async function preparePackedConsumerFixture({
 		}
 		return Math.ceil(remainingMs);
 	};
-	const remainingCommandTimeout = (label, commandTimeoutMs) =>
-		Math.min(commandTimeoutMs, remainingPreparationMs(label));
+	const commandDeadline = (label, commandTimeoutMs) => {
+		const totalTimeoutMs = remainingPreparationMs(label);
+		return {
+			timeoutMs: Math.min(commandTimeoutMs, totalTimeoutMs),
+			totalTimeoutMs,
+		};
+	};
 	const absoluteRunRoot = resolve(runRoot);
 	const fixtureRoot = join(absoluteRunRoot, FIXTURE_DIRECTORY);
 	const packDir = join(fixtureRoot, "pack");
@@ -683,8 +719,10 @@ export async function preparePackedConsumerFixture({
 		const npm = resolveNpm(baseEnv);
 		await measured("build", async () => {
 			if (ensureDist) {
+				const totalTimeoutMs = remainingPreparationMs("dist build");
 				await ensureDist({
-					timeoutMs: remainingPreparationMs("dist build"),
+					timeoutMs: totalTimeoutMs,
+					totalTimeoutMs,
 					fixtureRoot,
 					commands,
 					runCommand,
@@ -715,7 +753,7 @@ export async function preparePackedConsumerFixture({
 			const result = await runCommand(npm.command, packArgs, {
 				cwd: repoRoot,
 				env: baseEnv,
-				timeoutMs: remainingCommandTimeout("npm pack", PACK_TIMEOUT_MS),
+				...commandDeadline("npm pack", PACK_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
@@ -743,7 +781,7 @@ export async function preparePackedConsumerFixture({
 			const result = await runCommand(npm.command, resolveArgs, {
 				cwd: resolverDir,
 				env: resolverEnv,
-				timeoutMs: remainingCommandTimeout("npm lock resolution", LOCK_RESOLUTION_TIMEOUT_MS),
+				...commandDeadline("npm lock resolution", LOCK_RESOLUTION_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
@@ -771,7 +809,7 @@ export async function preparePackedConsumerFixture({
 				runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
 					cwd: resolverDir,
 					env: resolverEnv,
-					timeoutMs: remainingCommandTimeout(
+					...commandDeadline(
 						`npm cache batch ${Math.floor(offset / CACHE_BATCH_SIZE) + 1}`,
 						CACHE_BATCH_TIMEOUT_MS,
 					),
@@ -796,7 +834,7 @@ export async function preparePackedConsumerFixture({
 			const result = await runCommand(npm.command, installArgs, {
 				cwd: templateDir,
 				env: templateEnv,
-				timeoutMs: remainingCommandTimeout("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS),
+				...commandDeadline("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
