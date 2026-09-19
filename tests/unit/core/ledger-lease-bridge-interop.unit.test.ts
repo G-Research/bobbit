@@ -255,4 +255,75 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		const after = ledger.readLeases();
 		assert.equal(after.leases.filter((x: any) => x.pool === "browser").length, 0, "all leases released");
 	});
+
+	it("fails strict acquisition at the bounded deadline without exceeding the cap", async () => {
+		const { ledger, bridge } = await loadBoth();
+		for (const [name, implementation] of [["ledger", ledger], ["bridge", bridge]] as const) {
+			const pool = `strict-timeout-${name}`;
+			const holder = await implementation.acquireLease(pool, { cap: 1, timeoutMs: 100 });
+			let now = 0;
+			let sleeps = 0;
+			await assert.rejects(
+				implementation.acquireLease(pool, {
+					cap: 1,
+					timeoutMs: 10,
+					strict: true,
+					now: () => now,
+					sleep: async () => { sleeps++; now = 11; },
+				}),
+				(error: any) => {
+					assert.equal(error.code, "LEASE_ACQUIRE_TIMEOUT");
+					assert.match(error.message, new RegExp(`pool=${pool} cap=1 timeoutMs=10`));
+					assert.equal(error.message.includes(isolatedTmp), false, "timeout diagnostics must not expose paths");
+					return true;
+				},
+			);
+			assert.equal(sleeps, 1, "the injected deadline must bound acquisition deterministically");
+			const held = ledger.readLeases().leases.filter((lease: any) => lease.pool === pool);
+			assert.equal(held.length, 1, "strict timeout must not write an over-cap lease");
+			assert.equal(held[0].forced, false);
+			holder.release();
+		}
+	});
+
+	it("preserves generic fail-open leases while strict waiters acquire after release", async () => {
+		const { ledger, bridge } = await loadBoth();
+		const genericPool = "generic-fail-open";
+		const genericHolder = await ledger.acquireLease(genericPool, { cap: 1, timeoutMs: 100 });
+		let genericNow = 0;
+		const forced = await ledger.acquireLease(genericPool, {
+			cap: 1,
+			timeoutMs: 10,
+			now: () => genericNow,
+			sleep: async () => { genericNow = 11; },
+		});
+		assert.equal(forced.forced, true, "generic lease users must remain fail-open");
+		forced.release();
+		genericHolder.release();
+
+		const strictPool = "strict-release";
+		const holder = await ledger.acquireLease(strictPool, { cap: 1, timeoutMs: 100 });
+		let now = 0;
+		let releasedHolder = false;
+		const waiter = await bridge.acquireLease(strictPool, {
+			cap: 1,
+			timeoutMs: 10,
+			strict: true,
+			now: () => now,
+			sleep: async () => {
+				now++;
+				if (!releasedHolder) {
+					releasedHolder = true;
+					holder.release();
+				}
+			},
+		});
+		assert.equal(waiter.forced, false);
+		assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === strictPool).length, 1);
+		waiter.release();
+		const generationAfterRelease = ledger.readLeases().generation;
+		waiter.release();
+		assert.equal(ledger.readLeases().generation, generationAfterRelease, "release must be idempotent");
+		assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === strictPool).length, 0);
+	});
 });
