@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { spawnTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
@@ -2003,6 +2004,8 @@ export async function buildReviewPrompt(
  * indefinitely for those — only the gap between attempts is bounded.
  */
 const PROVIDER_BACKOFF_RETRY_MAX_MS = 15 * 60 * 1000;
+/** Writer acknowledgements are local continuations, never restart-surviving command trees. */
+const VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS = 10_000;
 
 /**
  * Inter-attempt delay for verification-step retries. Reuses `nextBackoffDelay`
@@ -2262,6 +2265,7 @@ export class VerificationHarness {
 	 * gate store directly.
 	 */
 	resolveSignoff(signalId: string, stepName: string, outcome: SignoffOutcome): boolean {
+		if (this._terminalShutdownStarted) return false;
 		const key = `${signalId}::${stepName}`;
 		const resolver = this.pendingSignoffs.get(key);
 		if (!resolver) return false;
@@ -2329,6 +2333,7 @@ export class VerificationHarness {
 	 * must precede verification_started".
 	 */
 	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		if (this._terminalShutdownStarted) return [];
 		const steps = gate.verify;
 		if (!steps || steps.length === 0) return [];
 
@@ -2439,6 +2444,13 @@ export class VerificationHarness {
 
 	/** Persist active verifications to disk. */
 	private _persistActive(): boolean {
+		// Fence only stale top-level writer generations while the terminal barrier
+		// is draining. Shutdown-owned cleanup callbacks may still durably advance
+		// exact ownership evidence before they are joined; after the join, the seal
+		// blocks every source. This is intentionally not a blanket shutdown no-op.
+		const writerGeneration = this._verificationWriterContext.getStore();
+		if (this._verificationPersistenceSealed
+			|| (writerGeneration !== undefined && writerGeneration !== this._verificationWriterGeneration)) return false;
 		try {
 			// When there is nothing active, remove the persist file entirely rather
 			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
@@ -2487,14 +2499,18 @@ export class VerificationHarness {
 	 * For running steps with sessionIds, attempts to extract or obtain a verdict
 	 * from the restored reviewer session. Fire-and-forget from the caller.
 	 */
-	async resumeInterruptedVerifications(): Promise<void> {
+	resumeInterruptedVerifications(): Promise<void> {
+		return this._admitVerificationWriter("resume interrupted verifications", () => this._resumeInterruptedVerifications());
+	}
+
+	private async _resumeInterruptedVerifications(): Promise<void> {
 		const persisted = this._loadActive();
 		// Surface orphaned reviewers before resuming unrelated active verifications.
 		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
 		// absent from active verification context should not be hidden behind that
 		// sequential recovery path.
 		await this._surfaceOrphanedNonInteractiveReviewers();
-		if (persisted.length === 0) {
+		if (this._terminalShutdownStarted || persisted.length === 0) {
 			return;
 		}
 
@@ -2516,6 +2532,7 @@ export class VerificationHarness {
 
 		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
 		if (running.length === 0) {
+			if (this._terminalShutdownStarted) return;
 			// Clean up stale file only after cancelled kill intents are settled.
 			if (this.activeVerifications.size === 0) {
 				try { fs.unlinkSync(this._persistPath); } catch {}
@@ -2551,7 +2568,7 @@ export class VerificationHarness {
 				await this._resumeOneVerification(v);
 			} catch (err) {
 				const errMsg = (err as Error).message;
-				if (!this._isResumeStillActive(v)) {
+				if (this._terminalShutdownStarted || !this._isResumeStillActive(v)) {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume of ${v.signalId} stopped after cancellation/supersession: ${errMsg}`);
 					continue;
 				}
@@ -2610,17 +2627,22 @@ export class VerificationHarness {
 					}
 				}
 			} finally {
-				// Drop only the entry this resume owns. If a cancellation/re-signal
-				// already removed it (or a future path replaced it), do not clobber
-				// that newer active state. A timeout/cancel kill intent that has not
-				// been verified complete must remain durable for retry after restart.
-				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
-					this.activeVerifications.delete(v.signalId);
+				// Terminal shutdown hands the durable row to the next harness. Never
+				// delete or rewrite it from an interrupted continuation.
+				if (!this._terminalShutdownStarted) {
+					// Drop only the entry this resume owns. If a cancellation/re-signal
+					// already removed it (or a future path replaced it), do not clobber
+					// that newer active state. A timeout/cancel kill intent that has not
+					// been verified complete must remain durable for retry after restart.
+					if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
+						this.activeVerifications.delete(v.signalId);
+					}
+					this._persistActive();
 				}
-				this._persistActive();
 			}
 		}
 
+		if (this._terminalShutdownStarted) return;
 		if (this.activeVerifications.size === 0) {
 			try { fs.unlinkSync(this._persistPath); } catch {}
 		} else {
@@ -2726,6 +2748,7 @@ export class VerificationHarness {
 	}
 
 	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
+		if (this._terminalShutdownStarted) return;
 		const stepIndex = v.steps.indexOf(step);
 		if (stepIndex < 0) return;
 		const status = persistedStatusForStep(result);
@@ -3444,6 +3467,18 @@ export class VerificationHarness {
 	/** Monotonic admission fence set synchronously before terminal owner snapshotting. */
 	private _terminalShutdownStarted = false;
 
+	/** Generation held by top-level verification writers admitted before shutdown. */
+	private _verificationWriterGeneration = 0;
+	private readonly _verificationWriterContext = new AsyncLocalStorage<number>();
+	private _verificationPersistenceSealed = false;
+	private _nextVerificationWriterId = 0;
+	private _verificationWriters = new Map<number, {
+		label: string;
+		generation: number;
+		interrupt: () => void;
+		acknowledgement: Promise<void>;
+	}>();
+
 	/** Every caller observes the same terminal owner-barrier outcome. */
 	private _shutdownPromise?: Promise<void>;
 
@@ -3528,6 +3563,7 @@ export class VerificationHarness {
 		// instance — simpler than scoping per (goal,gate,signal) and equally
 		// effective since the dedupe key includes signalId.
 		this.broadcastFn = (goalId: string, event: any) => {
+			if (this._terminalShutdownStarted) return;
 			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
 				if (event.seq == null) event.seq = ++this._verifSeqCounter;
 				if (event.type !== "gate_verification_step_output") {
@@ -3669,14 +3705,14 @@ export class VerificationHarness {
 		const CHUNK_MS = 2000;
 		const deadline = this.clock.now() + totalMs;
 		while (this.clock.now() < deadline) {
-			if (isCancelled()) return;
+			if (this._terminalShutdownStarted || isCancelled()) return;
 			const remaining = deadline - this.clock.now();
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), Math.min(CHUNK_MS, remaining)));
 		}
 	}
 
 	private _isResumeStillActive(v: ActiveVerification): boolean {
-		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
+		return !this._terminalShutdownStarted && this.activeVerifications.get(v.signalId) === v && !v.cancelled;
 	}
 
 	private _commandIdentityNonce(step: ActiveVerification["steps"][number]): string | undefined {
@@ -4000,7 +4036,7 @@ export class VerificationHarness {
 
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
-		if (this._hasPendingCommandKillCleanup(active)) return;
+		if (this._terminalShutdownStarted || this._hasPendingCommandKillCleanup(active)) return;
 		// A reset/re-signal may have replaced this active object while delayed exact
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
@@ -4043,9 +4079,8 @@ export class VerificationHarness {
 			const signal = pendingStep?.killSignal ?? "SIGKILL";
 			await this._killPersistedCommandSteps(active, signal, { markIntent: false });
 			if (this._terminalShutdownStarted) {
-				// Commit only cleanup progress already made by this callback. Restart
-				// owns any remaining cleanup or verification continuation; terminal
-				// shutdown must not publish a gate or create a new command owner.
+				// This callback crossed its timer boundary before the terminal latch and
+				// is joined by shutdown, so its exact cleanup progress is safe to commit.
 				this._persistActive();
 				return;
 			}
@@ -4059,6 +4094,7 @@ export class VerificationHarness {
 				// use the historical sentinel/PID on this boot.
 				await this._killTrackedForSignal(signalId, step => !!step?.containerId);
 			}
+			if (this._terminalShutdownStarted) return;
 			if (this._hasPendingCommandKillCleanup(active)) {
 				this._persistActive();
 				this._scheduleCommandKillCleanupRetry(signalId);
@@ -4072,6 +4108,7 @@ export class VerificationHarness {
 
 			if (this.activeVerifications.get(signalId) === active) {
 				await this._resumeOneVerification(active);
+				if (this._terminalShutdownStarted) return;
 				if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
 					this.activeVerifications.delete(signalId);
 				}
@@ -4335,19 +4372,63 @@ export class VerificationHarness {
 		}
 	}
 
+	private _admitVerificationWriter(label: string, run: () => Promise<void>): Promise<void> {
+		// Gateway call sites intentionally fire-and-forget these methods. A late
+		// admission therefore resolves as a declined/no-op admission rather than
+		// producing an unhandled rejection during teardown.
+		if (this._terminalShutdownStarted) return Promise.resolve();
+		const id = ++this._nextVerificationWriterId;
+		const generation = this._verificationWriterGeneration;
+		let interrupt!: () => void;
+		const interrupted = new Promise<void>(resolve => { interrupt = resolve; });
+		const body = Promise.resolve().then(() => this._verificationWriterContext.run(generation, run));
+		const acknowledgement = Promise.race([body, interrupted]);
+		this._verificationWriters.set(id, { label, generation, interrupt, acknowledgement });
+		void acknowledgement.finally(() => this._verificationWriters.delete(id)).catch(() => {});
+		return acknowledgement;
+	}
+
+	private _interruptVerificationWaits(): void {
+		for (const [key, resolver] of this.pendingSignoffs) {
+			this.pendingSignoffs.delete(key);
+			try { resolver({ cancelled: true }); } catch { /* already settled */ }
+		}
+		for (const [sessionId, resolver] of this.pendingResults) {
+			this.pendingResults.delete(sessionId);
+			try {
+				resolver({ verdict: false, summary: "Verification interrupted by gateway restart." });
+			} catch { /* already settled */ }
+		}
+		for (const [signalId, waiters] of this.verifierDispatchCancellationWaiters) {
+			this.verifierDispatchCancellationWaiters.delete(signalId);
+			for (const notify of waiters) {
+				try { notify(`Verifier prompt signal ${signalId} was interrupted by gateway restart`); } catch { /* already settled */ }
+			}
+		}
+	}
+
 	/**
 	 * Terminal owner barrier for live verification command trees. Durable commands
 	 * deliberately handed to restart recovery are not this gateway's teardown owners.
 	 */
 	shutdown(): Promise<void> {
 		if (!this._shutdownPromise) {
-			// This latch is monotonic and must linearize before either owner snapshot.
+			// Linearize before snapshots or wakeups. The generation makes every old
+			// continuation stale, while interruption releases its fire-and-forget caller
+			// without waiting for restart-surviving command promises.
+			this._terminalShutdownStarted = true;
+			this._verificationWriterGeneration++;
+			for (const writer of this._verificationWriters.values()) writer.interrupt();
+			this._interruptVerificationWaits();
 			// Clearing scheduled retries preserves their durable rows for restart; any
 			// callback already past its timer boundary is separately joined below.
-			this._terminalShutdownStarted = true;
 			for (const timer of this._commandKillRetryTimers.values()) this.clock.clearTimeout(timer);
 			this._commandKillRetryTimers.clear();
-			this._shutdownPromise = this._shutdownVerificationOwners();
+			this._shutdownPromise = this._shutdownVerificationOwners().finally(() => {
+				// All admitted writers acknowledged and every shutdown-owned callback was
+				// joined. No persistence source from this harness is valid beyond here.
+				this._verificationPersistenceSealed = true;
+			});
 		}
 		return this._shutdownPromise;
 	}
@@ -4357,51 +4438,24 @@ export class VerificationHarness {
 	}
 
 	private _recordTerminalShutdownStep(
-		streamCtx: { signalId: string; stepIndex: number } | undefined,
+		_streamCtx: { signalId: string; stepIndex: number } | undefined,
 		boundary: string,
 	): { passed: false; output: string } | undefined {
 		if (!this._terminalShutdownStarted) return undefined;
-		const output = this._terminalShutdownDiagnostic(boundary);
-		if (streamCtx) {
-			const active = this.activeVerifications.get(streamCtx.signalId);
-			const step = active?.steps[streamCtx.stepIndex];
-			if (step) {
-				step.status = "failed";
-				step.output = output;
-				step.durationMs = 0;
-				this._persistActive();
-			}
-		}
-		return { passed: false, output };
+		// This result exists only to unwind the old continuation. It must never be
+		// persisted or published as a product verdict: restart recovery owns the
+		// durable running row captured before the terminal latch.
+		return { passed: false, output: this._terminalShutdownDiagnostic(boundary) };
 	}
 
-	private _completeTerminalShutdownVerification(signal: GateSignal, steps: readonly VerifyStep[], boundary: string): void {
-		const output = this._terminalShutdownDiagnostic(boundary);
-		const result: GateSignalStep = {
-			name: "Cancelled",
-			type: "command",
-			passed: false,
-			status: "failed",
-			phase: 0,
-			output,
-			duration_ms: 0,
-		};
-		this.activeVerifications.delete(signal.id);
-		this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "failed", steps: [result] });
-		this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
-		this._persistActive();
-		this.broadcastFn(signal.goalId, {
-			type: "gate_verification_complete",
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			status: "cancelled",
-		});
-		this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [result], workflowAligned: steps.length > 0 });
+	private _completeTerminalShutdownVerification(_signal: GateSignal, _steps: readonly VerifyStep[], _boundary: string): void {
+		// Deliberately empty. The durable active row is restart-resumable state, not
+		// a failed/cancelled verification merely because this gateway is stopping.
 	}
 
 	private async _shutdownVerificationOwners(): Promise<void> {
 		const results = await Promise.allSettled([
+			this._drainVerificationWriterAcknowledgements(),
 			this._shutdownTrackedCommandTrees(),
 			this._drainCommandKillRetryCallbacks(),
 		]);
@@ -4413,6 +4467,27 @@ export class VerificationHarness {
 			const diagnostics = failures.map(failure => failure instanceof Error ? failure.message : String(failure)).join(" | ");
 			throw new AggregateError(failures, `Verification harness shutdown failed for ${failures.length} owner barrier(s): ${diagnostics}`);
 		}
+	}
+
+	private async _drainVerificationWriterAcknowledgements(): Promise<void> {
+		const writers = [...this._verificationWriters.values()];
+		const failures = (await Promise.all(writers.map(writer => new Promise<Error | undefined>(resolve => {
+			let settled = false;
+			const finish = (failure?: Error) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				resolve(failure);
+			};
+			const timer = this.clock.setTimeout(() => finish(new Error(
+				`Verification writer did not acknowledge restart interruption within ${VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS}ms (label=${JSON.stringify(writer.label)}, generation=${writer.generation})`,
+			)), VERIFICATION_SHUTDOWN_WRITER_ACK_TIMEOUT_MS);
+			void writer.acknowledgement.then(
+				() => finish(),
+				error => finish(new Error(`Verification writer acknowledgement failed (label=${JSON.stringify(writer.label)}, generation=${writer.generation}): ${error instanceof Error ? error.message : String(error)}`, { cause: error })),
+			);
+		})))).filter((failure): failure is Error => failure != null);
+		if (failures.length > 0) throw new AggregateError(failures, "Verification writer interruption acknowledgement failed");
 	}
 
 	private async _drainCommandKillRetryCallbacks(): Promise<void> {
@@ -4615,7 +4690,7 @@ export class VerificationHarness {
 			workflowAligned?: boolean;
 		},
 	): void {
-		if (!this.notifyTeamLeadFn) return;
+		if (this._terminalShutdownStarted || !this.notifyTeamLeadFn) return;
 		// Notify the goal's OWN team-lead first (intra-team signal).
 		if (status === "passed") {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
@@ -4636,7 +4711,22 @@ export class VerificationHarness {
 	 * Verify a gate signal asynchronously (fire-and-forget from caller).
 	 * Updates signal verification results and gate status when done.
 	 */
-	async verifyGateSignal(
+	verifyGateSignal(
+		signal: GateSignal,
+		gate: WorkflowGate,
+		cwd: string,
+		goalBranch?: string,
+		primaryBranch?: string,
+		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+		goalSpec?: string,
+	): Promise<void> {
+		return this._admitVerificationWriter(
+			`verify signal ${signal.id}`,
+			() => this._verifyGateSignal(signal, gate, cwd, goalBranch, primaryBranch, allGateStates, goalSpec),
+		);
+	}
+
+	private async _verifyGateSignal(
 		signal: GateSignal,
 		gate: WorkflowGate,
 		cwd: string,
@@ -4830,6 +4920,7 @@ export class VerificationHarness {
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
+				if (this._terminalShutdownStarted) return;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
@@ -5446,6 +5537,7 @@ export class VerificationHarness {
 						return { index, stepResult };
 					},
 				);
+				if (this._terminalShutdownStarted) return;
 
 				// Store phase results
 				for (const { index, stepResult } of phaseResults) {
@@ -5480,6 +5572,7 @@ export class VerificationHarness {
 			const allPassed = computeAllPassed(results);
 			const status = allPassed ? "passed" : "failed";
 
+			if (this._terminalShutdownStarted) return;
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 			this.activeVerifications.delete(signal.id);
@@ -5495,6 +5588,7 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
+			if (this._terminalShutdownStarted) return;
 			if (active.cancelled) {
 				await this._finalizeCancelledVerification(active);
 				return;
@@ -5622,9 +5716,13 @@ export class VerificationHarness {
 			resultPromise?: Promise<VerificationResult>;
 		},
 	): Promise<VerifierPromptDispatchOutcome> {
+		if (this._terminalShutdownStarted) {
+			return { type: "cancelled", reason: "Verifier prompt admission rejected because gateway shutdown started" };
+		}
 		const dispatchBudgetMs = verifierPromptDispatchTimeoutMs(args.whenReady);
 		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1} dispatchBudgetMs=${dispatchBudgetMs}`;
 		const signalIsCurrent = () => {
+			if (this._terminalShutdownStarted) return false;
 			if (args.goalId && this.projectContextManager?.getContextForGoal(args.goalId)?.goalStore.get(args.goalId)?.archived) {
 				return false;
 			}
