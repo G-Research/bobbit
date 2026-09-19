@@ -74,6 +74,10 @@ const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "sampl
 const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstrap.cjs");
 const CHILD_PROFILE_PRELOAD = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
 const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
+export const E2E_FINAL_CLEANUP_POLICY = Object.freeze({
+	traversalConcurrency: 32,
+	deadlineMs: 30_000,
+});
 
 function currentGitSha() {
 	try {
@@ -224,22 +228,30 @@ export async function finalizeE2ERunCleanup({
 	anyFailed,
 	lifecycle,
 	remove = removeOwnedPath,
+	logInfo = (message) => console.log(message),
 	logError = (message) => console.error(message),
+	now = () => performance.now(),
 }) {
 	if (anyFailed) {
 		logError(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
 		return 1;
 	}
+	const startedAt = now();
+	logInfo(`[e2e-v2] cleanup start: ${paths.root} (concurrency=${E2E_FINAL_CLEANUP_POLICY.traversalConcurrency}, deadlineMs=${E2E_FINAL_CLEANUP_POLICY.deadlineMs})`);
 	try {
 		await remove(paths.root, {
 			ownerRoot: paths.root,
 			allowOwnerRoot: true,
 			owner: { kind: "coordinator", id: paths.runId },
 			lifecycle,
+			...E2E_FINAL_CLEANUP_POLICY,
 		});
+		const elapsedMs = Math.max(0, now() - startedAt);
+		logInfo(`[e2e-v2] cleanup success in ${elapsedMs.toFixed(1)}ms: ${paths.root}`);
 		return 0;
 	} catch (error) {
-		logError(`[e2e-v2] could not remove successful run root: ${paths.root}\n${formatFailure(error)}`);
+		const elapsedMs = Math.max(0, now() - startedAt);
+		logError(`[e2e-v2] cleanup failed in ${elapsedMs.toFixed(1)}ms; could not remove successful run root: ${paths.root}\n${formatFailure(error)}`);
 		return 1;
 	}
 }

@@ -24,6 +24,8 @@ type CleanupAttempt = {
 	syscall?: string;
 	path?: string;
 	dest?: string;
+	stage?: string;
+	deadlineMs?: number;
 	message?: string;
 	traversal?: TraversalEvidence[];
 };
@@ -284,13 +286,27 @@ describe("owned path cleanup contract", () => {
 			name: "OwnedPathCleanupError",
 			attempts: 1,
 			elapsedMs: 11,
-			lifecycle,
-			history: [expect.objectContaining({
-				attempt: 1,
-				elapsedMs: 0,
-				code: "EBUSY",
-				message: "worker lock still held",
-			})],
+			lifecycle: {
+				...lifecycle,
+				cleanupDeadline: expect.objectContaining({
+					code: "ECLEANUPDEADLINE",
+					stage: "retry-delay",
+				}),
+			},
+			history: [
+				expect.objectContaining({
+					attempt: 1,
+					elapsedMs: 0,
+					code: "EBUSY",
+					message: "worker lock still held",
+				}),
+				expect.objectContaining({
+					attempt: 1,
+					elapsedMs: 11,
+					code: "ECLEANUPDEADLINE",
+					stage: "retry-delay",
+				}),
+			],
 		});
 		expect((failure as Error).message).toContain("overslept-run");
 		expect((failure as Error).message).toContain("worker lock still held");
@@ -528,6 +544,143 @@ describe("owned path cleanup contract", () => {
 			if (rebound) await unlink(ownerRoot).catch(() => {});
 			await rm(fixtureBase, { recursive: true, force: true });
 		}
+	});
+
+	it("expires during first-attempt wide traversal and stops queue admission", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("deadline-wide-owner");
+		const children = Array.from({ length: 2_000 }, (_, index) => `entry-${index}.txt`);
+		const fakeDirectoryStats = {
+			dev: 11,
+			ino: 1,
+			isDirectory: () => true,
+			isSymbolicLink: () => false,
+		};
+		let ticks = 0;
+		const lstatEntry = vi.fn(async () => fakeDirectoryStats);
+		const readdirEntry = vi.fn(async () => children.map(name => ({ name })));
+		const unlinkEntry = vi.fn(async () => {});
+		const rmdirEntry = vi.fn(async () => {});
+
+		const failure = await removeOwnedPath(ownerRoot, {
+			ownerRoot,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: "wide-deadline" },
+			lifecycle: { coordinator: "groups-settled" },
+			platform: "linux",
+			deadlineMs: 40,
+			traversalConcurrency: 32,
+			seams: {
+				now: () => ticks++,
+				fs: {
+					lstat: lstatEntry,
+					readdir: readdirEntry,
+					unlink: unlinkEntry,
+					rmdir: rmdirEntry,
+				},
+			},
+		}).then(() => undefined, (error: unknown) => error);
+
+		expect(failure).toMatchObject({
+			name: "OwnedPathCleanupError",
+			attempts: 1,
+			lifecycle: {
+				coordinator: "groups-settled",
+				cleanupDeadline: {
+					code: "ECLEANUPDEADLINE",
+					stage: "queue-admission-entry",
+					deadlineMs: 40,
+				},
+			},
+			history: [expect.objectContaining({
+				code: "ECLEANUPDEADLINE",
+				stage: "queue-admission-entry",
+				deadlineMs: 40,
+				path: expect.stringContaining("entry-"),
+			})],
+		});
+		expect(readdirEntry).toHaveBeenCalledOnce();
+		expect(lstatEntry.mock.calls.length).toBeLessThan(100);
+		expect(unlinkEntry).not.toHaveBeenCalled();
+		expect(rmdirEntry).not.toHaveBeenCalled();
+		expect((failure as Error).message).toContain("ECLEANUPDEADLINE");
+		expect((failure as Error).message).toContain("queue-admission-entry");
+	});
+
+	it("drains already-started metadata work at expiry and performs no calls after settlement", async () => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const ownerRoot = path.resolve("deadline-drain-owner");
+		const childPaths = [path.join(ownerRoot, "a.txt"), path.join(ownerRoot, "b.txt")];
+		const directoryStats = {
+			dev: 12,
+			ino: 1,
+			isDirectory: () => true,
+			isSymbolicLink: () => false,
+		};
+		const leafStats = (ino: number) => ({
+			dev: 12,
+			ino,
+			isDirectory: () => false,
+			isSymbolicLink: () => false,
+		});
+		let clock = 0;
+		const releases = new Map<string, () => void>();
+		const started = new Map<string, Promise<void>>();
+		const startedResolvers = new Map<string, () => void>();
+		for (const child of childPaths) {
+			started.set(child, new Promise(resolve => startedResolvers.set(child, resolve)));
+		}
+		const calls: string[] = [];
+		const lstatEntry = vi.fn(async (candidate: string) => {
+			calls.push(`lstat:${candidate}`);
+			if (candidate === ownerRoot) return directoryStats;
+			const childIndex = childPaths.indexOf(candidate);
+			if (childIndex < 0) throw fsError("ENOENT", candidate);
+			startedResolvers.get(candidate)!();
+			await new Promise<void>(resolve => releases.set(candidate, resolve));
+			return leafStats(childIndex + 2);
+		});
+		const unlinkEntry = vi.fn(async (candidate: string) => { calls.push(`unlink:${candidate}`); });
+		const rmdirEntry = vi.fn(async (candidate: string) => { calls.push(`rmdir:${candidate}`); });
+		let settled = false;
+		const running = removeOwnedPath(ownerRoot, {
+			ownerRoot,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: "drain-deadline" },
+			platform: "linux",
+			deadlineMs: 10,
+			traversalConcurrency: 2,
+			seams: {
+				now: () => clock,
+				fs: {
+					lstat: lstatEntry,
+					readdir: async () => childPaths.map(candidate => ({ name: path.basename(candidate) })),
+					unlink: unlinkEntry,
+					rmdir: rmdirEntry,
+				},
+			},
+		});
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		await Promise.all([...started.values()]);
+		clock = 10;
+		releases.get(childPaths[0])!();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(settled, "cleanup must await every started filesystem operation").toBe(false);
+		releases.get(childPaths[1])!();
+		const failure = await running.then(() => undefined, (error: unknown) => error);
+		expect(failure).toMatchObject({
+			name: "OwnedPathCleanupError",
+			history: [expect.objectContaining({
+				code: "ECLEANUPDEADLINE",
+				stage: "lstat",
+				path: expect.stringMatching(/[ab]\.txt$/),
+			})],
+		});
+		expect(unlinkEntry).not.toHaveBeenCalled();
+		expect(rmdirEntry).not.toHaveBeenCalled();
+		const callsAtSettlement = calls.length;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(calls).toHaveLength(callsAtSettlement);
 	});
 
 	it("keeps deep-tree metadata work linear and uses only the configured traversal concurrency", async () => {
