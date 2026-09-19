@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createBrowserProjects } from "./scripts/testing-v2/browser-project-schedule.mjs";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { TEST_LAYOUT } from "./scripts/testing/layout-policy.mjs";
@@ -203,16 +204,11 @@ export default {
 			],
 		},
 	},
-	projects: [
-		{
-			name: "browser-canonical",
-			testDir: "./tests/browser",
-			testMatch: canonicalBrowserMatches,
-			fullyParallel: true,
-			use: {
-				browserName: "chromium" as const,
-			},
+	projects: createBrowserProjects({
+		canonicalBrowserMatches,
+		use: {
+			browserName: "chromium" as const,
 		},
-	],
+	}),
 	outputDir: playwrightResultsDir,
 };

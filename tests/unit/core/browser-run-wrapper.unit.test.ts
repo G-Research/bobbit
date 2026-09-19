@@ -76,11 +76,11 @@ describe("browser-v2 coordinator wrapper", () => {
       "test",
       "--config", "playwright-v2.config.ts",
       ...forwarded,
-      "--project", "browser-canonical",
+      "--project", "browser-mcp", "browser-canonical",
     ]);
   });
 
-  it("preserves mixed caller filters and flags in order before the configured project", () => {
+  it("preserves mixed caller filters and flags in order before the configured projects", () => {
     const forwarded = [
       "tests/browser/journeys/message-editor.journey.spec.ts",
       "--grep", "cross-os coordinator",
@@ -89,8 +89,8 @@ describe("browser-v2 coordinator wrapper", () => {
     ];
     const args = playwrightCommandArgs(forwarded);
 
-    expect(args.slice(4, -2)).toEqual(forwarded);
-    expect(args.slice(-2)).toEqual(["--project", "browser-canonical"]);
+    expect(args.slice(4, -3)).toEqual(forwarded);
+    expect(args.slice(-3)).toEqual(["--project", "browser-mcp", "browser-canonical"]);
   });
 
   it("does not inject a retry policy while preserving an explicit caller policy", () => {
@@ -99,6 +99,6 @@ describe("browser-v2 coordinator wrapper", () => {
     const forwarded = ["--retries=0", "--workers=2"];
     const args = playwrightCommandArgs(forwarded);
     expect(args.filter((arg: string) => arg.startsWith("--retries"))).toEqual(["--retries=0"]);
-    expect(args.slice(4, -2)).toEqual(forwarded);
+    expect(args.slice(4, -3)).toEqual(forwarded);
   });
 });

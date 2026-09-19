@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
+import { BROWSER_PROJECT_NAMES } from "./browser-project-schedule.mjs";
 import { copyEnvironment } from "./environment-policy.mjs";
 import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
@@ -65,7 +66,7 @@ export function playwrightCommandArgs(forwardedArgs = []) {
 		"test",
 		"--config", "playwright-v2.config.ts",
 		...forwardedArgs,
-		"--project", "browser-canonical",
+		"--project", ...BROWSER_PROJECT_NAMES,
 	];
 }
 
