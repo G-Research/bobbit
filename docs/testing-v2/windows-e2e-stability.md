@@ -48,6 +48,16 @@ A terminal `OwnedPathCleanupError` includes:
 
 Pass current lifecycle state whenever a fixture calls the remover. Do not add fixture-local retries, suppress the terminal error, follow a reparse point, or delete outside the harness-owned run root.
 
+### Post-Git worktree cleanup
+
+Production worktree removal uses the shared `removeTargetedTree` primitive for residue that can remain after Git has successfully removed or unregistered a worktree. This matters on Windows because Git can finish before the final checkout handle is released; a one-off `EBUSY` at this point must not either fail the purge immediately or justify deleting an unknown replacement tree.
+
+The remover holds one process-wide cleanup slot across the full retry sequence and binds every attempt to the same exact root identity captured before Git acted. A missing target is success. Only `EACCES`, `EBUSY`, `ENOTEMPTY`, and `EPERM` are retried: production allows at most five attempts within a one-second monotonic deadline, with exponential delays starting at 50 milliseconds and capped at 400 milliseconds. The deadline also caps the final sleep, so retries cannot extend the purge indefinitely.
+
+Identity uncertainty remains terminal. An `ESTALE` or other non-transient error is not retried, and neither is a transient error that leaves an unresolved detached quarantine identity. This fail-closed rule prevents a later attempt from accepting a different generation at the original pathname. A terminal `TargetedTreeRemovalError` retains the resolved target, elapsed time and deadline, the error cause, and ordered attempt history with codes, messages, syscall paths, destinations, and quarantine paths when available.
+
+`cleanupWorktree` verifies that both the captured checkout and Git administration entry are absent after targeted removal. Local and optional remote branch deletion run only after those postconditions pass, so a cleanup failure cannot be hidden by deleting the branch first.
+
 ## Prepared packed consumer
 
 The inline-HTML/theme journey verifies a clean external consumer of the actual `npm pack` artifact, including its dependency graph, packaged CLI, served UI assets, and bundled theme bridge. Expensive preparation belongs to the applicable E2E coordinator rather than each browser test.
@@ -59,13 +69,19 @@ When selection can include the packaged-consumer spec, the coordinator prepares 
 1. Build the distributable and run one real `npm pack` into the run root.
 2. Use npm once to generate the consumer manifest and lock while populating a dedicated run-owned cache.
 3. Verify that both root and installed-package lock entries are `file:` references resolving to the emitted tarball.
-4. Copy the npm-generated manifest and lock into a same-depth immutable template, then run one `npm ci --offline --ignore-scripts --no-audit --no-fund` with the isolated cache and no package operand.
-5. Validate the installed dependency tree and atomically publish the descriptor.
-6. Materialize the template into a unique mutable directory for each consumer. Copied consumers are real directories with independent `node_modules`, workspace, secrets, and agent state; shared or symlinked dependencies are forbidden.
+4. Copy the npm-generated manifest and lock into a same-depth immutable template.
+5. Sort the compatible registry tarball URLs, retain the existing 32-item batches, and populate the fresh run-owned cache through a dynamic worker pool capped at three commands.
+6. After every admitted cache writer settles successfully, run one `npm ci --offline --ignore-scripts --no-audit --no-fund` with the isolated cache and no package operand.
+7. Validate the installed dependency tree and atomically publish the descriptor.
+8. Materialize the template into a unique mutable directory for each consumer. Copied consumers are real directories with independent `node_modules`, workspace, secrets, and agent state; shared or symlinked dependencies are forbidden.
+
+Each worker claims the next batch synchronously. The first observed failure closes admission, but preparation still awaits every already-admitted owned command and retains all failures. Results and failures are recorded by batch index rather than completion order, keeping descriptor and failure evidence deterministic. Neither offline `npm ci` nor descriptor publication can begin while a cache writer is active or after any writer fails.
+
+Concurrent use of this one cache is deliberately narrow. The cacache directory is fresh and owned by the current run, the sorted deduplicated URL set is divided into disjoint batches, and cacache publishes integrity-keyed content through atomic temporary files. No cache clean, verification, or reader overlaps the writers. The all-writer barrier precedes offline installation, whose generated lock verifies content integrity; a missing or corrupt object therefore fails preparation instead of producing a false pass.
 
 Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation. Materialization never reruns `npm pack` or npm installation.
 
-Copy remains the default when several consumers need isolated mutable trees. The sole retry-zero packaged browser consumer instead claims the template once with an atomic rename, eliminating both one recursive copy and the duplicate installed tree that final cleanup would otherwise traverse. The source and destination are at equal depth under the same run-owned fixture root, so relative `file:` lock references still resolve to the same packed artifact. A failed test retains the moved consumer in its final diagnostic location; a second consume fails rather than silently rebuilding or sharing it.
+Copy remains the default when several consumers need isolated mutable trees. With ordinary `repeatEach=1`, the retry-zero packaged browser consumer claims the template once with an atomic rename, eliminating both one recursive copy and the duplicate installed tree that final cleanup would otherwise traverse. With `repeatEach>1`, every possibly overlapping iteration instead receives an independent copy, and its materialization name includes the repeat index; all iterations still share the single preparation. The source and destinations stay at equal depth under the same run-owned fixture root, so relative `file:` lock references still resolve to the same packed artifact. A failed test retains its materialized consumer in the final diagnostic location; a second one-shot consume fails rather than silently rebuilding or sharing it.
 
 ### Provenance and process bounds
 
@@ -113,10 +129,16 @@ Before these changes, cleanup policy was split across synchronous removal, fixtu
 
 One later pre-fix full E2E run passed all assertions in 874.5 seconds but was killed near 903.6 seconds while deleting duplicated packed-consumer trees. A representative installed tree contained 35,479 files and 5,131 directories and occupied 620,922,686 bytes. Secure cleanup of that tree took 16.807 seconds; larger thread-pool or traversal-concurrency variants improved this by at most 0.773%, so final-root cleanup retains traversal concurrency 128 with a 32-thread isolated pool. One-shot consumption removes an entire duplicate tree and its recursive-copy cost instead of relying on marginal deletion tuning.
 
-Final implementation verification at `f38508f48` reported:
+Earlier implementation verification at `f38508f48` reported:
 
 - Browser passed in 755.664 seconds and full E2E passed in 829.498 seconds under the unchanged 900-second supervisor;
 - build and check passed, as did 46/46 focused reproduction tests and the full unit suite;
 - specification, integrated, and security reviews passed.
 
-These results show the known cleanup and repeated 600-second npm-install signatures were absent in the final qualified run, but they are not a controlled performance benchmark or proof of universal flake elimination. Three complete retry-free Windows repetitions were not recorded and must not be claimed.
+After the final PR-check repairs at `5646b9553`, local Windows verification reported:
+
+- 48/48 focused reproduction tests and the full unit suite passed;
+- Browser passed in 792.319 seconds and full E2E passed in 829.151 seconds under the unchanged 900-second supervisor;
+- build and check passed, and all requested code and systems reviews passed.
+
+These results show the known cleanup and repeated 600-second npm-install signatures were absent in the recorded local qualified runs, but they are not a controlled performance benchmark, proof of universal flake elimination, or evidence that hosted GitHub checks passed. Three complete retry-free Windows repetitions were not recorded and must not be claimed.
