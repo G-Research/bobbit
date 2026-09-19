@@ -54,10 +54,15 @@ import {
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
 import { seedTransformCache } from "./pwtest-cache.ts";
-import { ensureE2EDistServerPrebundle } from "./server-prebundle.mjs";
 import {
+	E2E_DIST_CHILD_MODE,
+	resolveValidatedE2EDistServerPrebundle,
+} from "./server-prebundle.mjs";
+import {
+	OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	PACKED_CONSUMER_DESCRIPTOR_ENV,
 	preparePackedConsumerFixture,
+	runOwnedCommand,
 } from "./prewarm-packed-consumer-cache.mjs";
 import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
@@ -321,6 +326,9 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 const TSX_CLI = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
 const PLAYWRIGHT_E2E_WRAPPER = join(REPO_ROOT, "scripts", "run-playwright-e2e.mjs");
+const E2E_DIST_PREBUNDLE_CLI = join(HERE, "server-prebundle.mjs");
+const E2E_DIST_PREBUNDLE_TIMEOUT_MS = 25_000;
+const E2E_DIST_PREBUNDLE_TREE_EXIT_TIMEOUT_MS = 10_000;
 
 function localNodeInvocation(entryPoint, args, dependency, {
 	exists = existsSync,
@@ -474,19 +482,110 @@ export function resolveE2ERetryCount(env = process.env) {
 	return env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3;
 }
 
-export async function prepareE2EDistServerPrebundle(paths, ensure = ensureE2EDistServerPrebundle) {
-	const startedAt = performance.now();
+export function createE2EDistPrebundleInvocation(paths, {
+	execPath = process.execPath,
+	cli = E2E_DIST_PREBUNDLE_CLI,
+	repoRoot = REPO_ROOT,
+} = {}) {
+	return Object.freeze({
+		command: execPath,
+		args: Object.freeze([
+			cli,
+			E2E_DIST_CHILD_MODE,
+			"--repo-root", repoRoot,
+			"--run-root", paths.root,
+		]),
+		shell: false,
+	});
+}
+
+function parseE2EDistChildResult(stdout) {
+	let result;
 	try {
-		const result = await ensure({ repoRoot: REPO_ROOT, runRoot: paths.root });
+		result = JSON.parse(stdout.trim());
+	} catch (error) {
+		throw new Error("E2E dist prebundle child did not emit one terminal JSON result", { cause: error });
+	}
+	if (!result || typeof result !== "object" || result.ok !== true || typeof result.cacheHit !== "boolean") {
+		throw new Error("E2E dist prebundle child reported failure or an invalid terminal result");
+	}
+	return result;
+}
+
+function boundedChildDiagnostic(value) {
+	const text = String(value ?? "").trim();
+	return text.length <= 4_000 ? text : `${text.slice(0, 4_000)}…`;
+}
+
+/**
+ * Build compiled Group B inputs in an owned child. Raw fallback is authorized
+ * only after structural proof that the complete child tree has exited.
+ */
+export async function prepareE2EDistServerPrebundle(paths, environment, {
+	runCommand = runOwnedCommand,
+	remove = removeOwnedPath,
+	resolvePrebundle = resolveValidatedE2EDistServerPrebundle,
+	invocation = createE2EDistPrebundleInvocation(paths),
+	timeoutMs = E2E_DIST_PREBUNDLE_TIMEOUT_MS,
+	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
+	treeExitTimeoutMs = E2E_DIST_PREBUNDLE_TREE_EXIT_TIMEOUT_MS,
+	repoRoot = REPO_ROOT,
+} = {}) {
+	const startedAt = performance.now();
+	let shutdownVerified = false;
+	let terminal;
+	try {
+		const command = await runCommand(invocation.command, invocation.args, {
+			cwd: repoRoot,
+			env: environment,
+			timeoutMs,
+			ownershipEstablishmentTimeoutMs,
+			treeExitTimeoutMs,
+			repoRoot,
+		});
+		shutdownVerified = command.shutdown?.treeExitVerified === true;
+		if (!shutdownVerified) {
+			throw new Error("E2E dist prebundle child returned without verified process-tree completion");
+		}
+		if (command.code !== 0) {
+			throw new Error(`E2E dist prebundle child exited ${command.code}\n${boundedChildDiagnostic(command.stderr)}\n${boundedChildDiagnostic(command.stdout)}`);
+		}
+		terminal = parseE2EDistChildResult(command.stdout);
+		// Recompute the content key and canonical run-owned location, then hash
+		// every manifest entry. Child JSON is status-only and cannot select a path.
+		const result = resolvePrebundle({ repoRoot, runRoot: paths.root });
 		return {
 			observed: true,
-			status: result.cacheHit ? "reused" : "built",
+			status: terminal.cacheHit ? "reused" : "built",
 			key: result.key,
 			bundlePath: result.bundlePath,
 			buildWallMs: Math.round(performance.now() - startedAt),
 			fallback: false,
 		};
 	} catch (error) {
+		const verifiedFailure = shutdownVerified || error?.treeExitVerified === true;
+		if (!verifiedFailure) {
+			throw new Error(
+				"E2E dist prebundle failed without verified process-tree shutdown; refusing to launch raw Group B",
+				{ cause: error },
+			);
+		}
+		const prebundleRoot = join(resolve(paths.root), "e2e-dist-server-prebundle");
+		try {
+			await remove(prebundleRoot, {
+				ownerRoot: paths.root,
+				owner: { kind: "coordinator-child", id: "e2e-dist-server-prebundle" },
+				lifecycle: {
+					child: { state: "closed", treeExitVerified: true },
+					fallback: { state: "pending-cleanup" },
+				},
+			});
+		} catch (cleanupError) {
+			throw new AggregateError(
+				[error, cleanupError],
+				`E2E dist prebundle failed and its verified-stopped subtree could not be cleaned: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+			);
+		}
 		return {
 			observed: true,
 			status: "raw-fallback",
@@ -753,7 +852,7 @@ async function main() {
 		console.log("[e2e-v2] schedule: A → B → C → D (serialized; B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
 		captureLatestProfile("A");
-		bundle = await prepareE2EDistServerPrebundle(paths);
+		bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv);
 		if (bundle.fallback) {
 			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
 		} else {

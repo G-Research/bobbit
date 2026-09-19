@@ -50,6 +50,51 @@ const E2E_DIST_NAMESPACE_SOURCES = Object.freeze({
 });
 const LOCK_STALE_MS = 10 * 60_000;
 const LOCK_WAIT_MS = 5 * 60_000;
+export const E2E_DIST_CHILD_MODE = "--e2e-dist-child";
+
+function emitE2EDistPhase(telemetry, phase, state, elapsedMs = 0, details = {}) {
+	if (typeof telemetry !== "function") return;
+	telemetry({ phase, state, elapsedMs: Math.max(0, Math.round(elapsedMs)), ...details });
+}
+
+async function runE2EDistPhase(telemetry, phase, operation, completedDetails = () => ({})) {
+	const startedAt = Date.now();
+	emitE2EDistPhase(telemetry, phase, "started");
+	try {
+		const result = await operation();
+		emitE2EDistPhase(telemetry, phase, "completed", Date.now() - startedAt, completedDetails(result));
+		return result;
+	} catch (error) {
+		emitE2EDistPhase(telemetry, phase, "failed", Date.now() - startedAt, {
+			errorName: error instanceof Error ? error.name : "Error",
+			...(typeof error?.code === "string" ? { errorCode: error.code } : {}),
+		});
+		throw error;
+	}
+}
+
+/** Create bounded, monotonically sequenced stderr telemetry for the child CLI. */
+export function createE2EDistPhaseTelemetry(write = chunk => process.stderr.write(chunk)) {
+	let sequence = 0;
+	return event => {
+		const record = {
+			kind: "e2e-dist-prebundle-phase",
+			sequence: ++sequence,
+			phase: event.phase,
+			state: event.state,
+			elapsedMs: Number.isFinite(event.elapsedMs) ? Math.max(0, Math.round(event.elapsedMs)) : 0,
+			...(typeof event.key === "string" ? { key: event.key.slice(0, 64) } : {}),
+			...(typeof event.valid === "boolean" ? { valid: event.valid } : {}),
+			...(Number.isInteger(event.inputCount) ? { inputCount: event.inputCount } : {}),
+			...(Number.isInteger(event.outputCount) ? { outputCount: event.outputCount } : {}),
+			...(Number.isInteger(event.fileCount) ? { fileCount: event.fileCount } : {}),
+			...(typeof event.errorName === "string" ? { errorName: event.errorName.slice(0, 80) } : {}),
+			...(typeof event.errorCode === "string" ? { errorCode: event.errorCode.slice(0, 40) } : {}),
+		};
+		write(`${JSON.stringify(record)}\n`);
+		return record;
+	};
+}
 
 function fileDigest(file) {
 	return createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -576,93 +621,145 @@ function e2eDistCacheRoot(runRoot) {
 	return { canonicalRunRoot, cacheRoot: canonicalCacheRoot };
 }
 
-export async function ensureE2EDistServerPrebundle({ repoRoot = REPO_ROOT, runRoot } = {}) {
+export function resolveValidatedE2EDistServerPrebundle({ repoRoot = REPO_ROOT, runRoot } = {}) {
 	const absoluteRepoRoot = realpathSync(repoRoot);
 	const { canonicalRunRoot, cacheRoot } = e2eDistCacheRoot(runRoot);
 	const key = computeE2EDistServerPrebundleKey(absoluteRepoRoot);
+	const expectedDir = join(cacheRoot, key);
+	if (!isContainedPath(canonicalRunRoot, expectedDir)) {
+		throw new Error(`[e2e-dist-server-prebundle] artifact escaped run root: ${expectedDir}`);
+	}
+	const canonicalDir = realpathSync(expectedDir);
+	if (!isContainedPath(canonicalRunRoot, canonicalDir) || resolve(canonicalDir) !== resolve(expectedDir)) {
+		throw new Error("[e2e-dist-server-prebundle] canonical artifact does not match the expected run-owned directory");
+	}
+	if (!validateE2EDistServerPrebundle(canonicalDir, key)) {
+		throw new Error("[e2e-dist-server-prebundle] canonical artifact failed immutable manifest validation");
+	}
+	return resultFromCache(canonicalDir, key, true);
+}
+
+export async function ensureE2EDistServerPrebundle({ repoRoot = REPO_ROOT, runRoot, telemetry } = {}) {
+	const absoluteRepoRoot = realpathSync(repoRoot);
+	const { canonicalRunRoot, cacheRoot } = e2eDistCacheRoot(runRoot);
+	const key = await runE2EDistPhase(
+		telemetry,
+		"key",
+		() => computeE2EDistServerPrebundleKey(absoluteRepoRoot),
+		computedKey => ({ key: computedKey }),
+	);
 	const finalDir = join(cacheRoot, key);
 	if (!isContainedPath(canonicalRunRoot, finalDir)) {
 		throw new Error(`[e2e-dist-server-prebundle] artifact escaped run root: ${finalDir}`);
 	}
-	if (validateE2EDistServerPrebundle(finalDir, key)) return resultFromCache(finalDir, key, true);
+	const initiallyValid = await runE2EDistPhase(
+		telemetry,
+		"initial-validation",
+		() => validateE2EDistServerPrebundle(finalDir, key),
+		valid => ({ valid }),
+	);
+	if (initiallyValid) {
+		await runE2EDistPhase(telemetry, "final-validation", () => {
+			if (!validateE2EDistServerPrebundle(finalDir, key)) throw new Error("[e2e-dist-server-prebundle] cached artifact changed during validation");
+			return true;
+		}, valid => ({ valid }));
+		return resultFromCache(finalDir, key, true);
+	}
 
-	const releaseLock = await acquireBuildLock(cacheRoot, key);
+	const releaseLock = await runE2EDistPhase(telemetry, "lock", () => acquireBuildLock(cacheRoot, key));
+	let cacheHit = false;
 	try {
-		if (validateE2EDistServerPrebundle(finalDir, key)) return resultFromCache(finalDir, key, true);
-		const tempDir = join(cacheRoot, `.tmp-${key}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
-		if (!isContainedPath(canonicalRunRoot, tempDir)) {
-			throw new Error(`[e2e-dist-server-prebundle] temporary artifact escaped run root: ${tempDir}`);
-		}
-		mkdirSync(tempDir, { recursive: true });
-		try {
-			const runtimeEntry = join(absoluteRepoRoot, ...E2E_DIST_RUNTIME_ENTRY.split("/"));
-			const namespaceEntries = Object.values(E2E_DIST_NAMESPACE_SOURCES).map((source) => join(absoluteRepoRoot, ...source.split("/")));
-			for (const source of [runtimeEntry, ...namespaceEntries]) {
-				if (!existsSync(source)) throw new Error(`[e2e-dist-server-prebundle] missing compiled input: ${source}`);
+		if (validateE2EDistServerPrebundle(finalDir, key)) {
+			cacheHit = true;
+		} else {
+			const tempDir = join(cacheRoot, `.tmp-${key}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+			if (!isContainedPath(canonicalRunRoot, tempDir)) {
+				throw new Error(`[e2e-dist-server-prebundle] temporary artifact escaped run root: ${tempDir}`);
 			}
-			const serverEntry = join(absoluteRepoRoot, ...E2E_DIST_NAMESPACE_SOURCES.server.split("/"));
-			const entryPoints = Object.fromEntries(
-				[runtimeEntry, serverEntry].map((source) => [entryName(source, absoluteRepoRoot), source]),
-			);
-			const distServerRoot = normalizeServerSourcePath(join(absoluteRepoRoot, "dist", "server")) + "/";
-			const buildResult = await build({
-				absWorkingDir: absoluteRepoRoot,
-				entryPoints,
-				outdir: tempDir,
-				entryNames: "entries/[dir]/[name]-[hash]",
-				chunkNames: "chunks/[name]-[hash]",
-				assetNames: "assets/[name]-[hash]",
-				outExtension: { ".js": ".mjs" },
-				bundle: true,
-				splitting: true,
-				platform: "node",
-				format: "esm",
-				target: "node22",
-				sourcemap: "external",
-				sourcesContent: true,
-				metafile: true,
-				logLevel: "silent",
-				plugins: [
-					importMetaResolveExternalPlugin(absoluteRepoRoot),
-					sourceUrlPlugin(absoluteRepoRoot, { sourceRoots: [distServerRoot], webSourceRoots: [] }),
-					checkoutPackageExternalPlugin(absoluteRepoRoot),
-				],
-			});
-			const manifest = buildManifest({
-				key,
-				repoRoot: absoluteRepoRoot,
-				tempDir,
-				metafile: buildResult.metafile,
-				runtimeEntry,
-				schema: E2E_DIST_BUNDLE_SCHEMA,
-				namespaces: E2E_DIST_NAMESPACE_SOURCES,
-			});
-			const serverOutput = manifest.entries[E2E_DIST_NAMESPACE_SOURCES.server];
-			if (!serverOutput) throw new Error(`[e2e-dist-server-prebundle] missing direct entry: ${E2E_DIST_NAMESPACE_SOURCES.server}`);
-			// Runtime evaluation belongs to focused parity coverage. The exact E2E
-			// command validates the immutable graph here without evaluating it twice;
-			// a worker-side import failure remains fatal once bundle mode is observed.
-			assertGeneratedSourcePreserved(tempDir, manifest);
-			writeFileSync(join(tempDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-
-			rmSync(finalDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+			mkdirSync(tempDir, { recursive: true });
 			try {
-				renameSync(tempDir, finalDir);
+				const { runtimeEntry, entryPoints, distServerRoot } = await runE2EDistPhase(telemetry, "inputs", () => {
+					const runtimeEntry = join(absoluteRepoRoot, ...E2E_DIST_RUNTIME_ENTRY.split("/"));
+					const namespaceEntries = Object.values(E2E_DIST_NAMESPACE_SOURCES).map((source) => join(absoluteRepoRoot, ...source.split("/")));
+					for (const source of [runtimeEntry, ...namespaceEntries]) {
+						if (!existsSync(source)) throw new Error(`[e2e-dist-server-prebundle] missing compiled input: ${source}`);
+					}
+					const serverEntry = join(absoluteRepoRoot, ...E2E_DIST_NAMESPACE_SOURCES.server.split("/"));
+					return {
+						runtimeEntry,
+						entryPoints: Object.fromEntries(
+							[runtimeEntry, serverEntry].map(source => [entryName(source, absoluteRepoRoot), source]),
+						),
+						distServerRoot: normalizeServerSourcePath(join(absoluteRepoRoot, "dist", "server")) + "/",
+						inputCount: namespaceEntries.length + 1,
+					};
+				}, result => ({ inputCount: result.inputCount }));
+				const buildResult = await runE2EDistPhase(telemetry, "esbuild", () => build({
+					absWorkingDir: absoluteRepoRoot,
+					entryPoints,
+					outdir: tempDir,
+					entryNames: "entries/[dir]/[name]-[hash]",
+					chunkNames: "chunks/[name]-[hash]",
+					assetNames: "assets/[name]-[hash]",
+					outExtension: { ".js": ".mjs" },
+					bundle: true,
+					splitting: true,
+					platform: "node",
+					format: "esm",
+					target: "node22",
+					sourcemap: "external",
+					sourcesContent: true,
+					metafile: true,
+					logLevel: "silent",
+					plugins: [
+						importMetaResolveExternalPlugin(absoluteRepoRoot),
+						sourceUrlPlugin(absoluteRepoRoot, { sourceRoots: [distServerRoot], webSourceRoots: [] }),
+						checkoutPackageExternalPlugin(absoluteRepoRoot),
+					],
+				}), result => ({ outputCount: Object.keys(result.metafile.outputs).length }));
+				const manifest = await runE2EDistPhase(telemetry, "manifest-hash", () => {
+					const manifest = buildManifest({
+						key,
+						repoRoot: absoluteRepoRoot,
+						tempDir,
+						metafile: buildResult.metafile,
+						runtimeEntry,
+						schema: E2E_DIST_BUNDLE_SCHEMA,
+						namespaces: E2E_DIST_NAMESPACE_SOURCES,
+					});
+					const serverOutput = manifest.entries[E2E_DIST_NAMESPACE_SOURCES.server];
+					if (!serverOutput) throw new Error(`[e2e-dist-server-prebundle] missing direct entry: ${E2E_DIST_NAMESPACE_SOURCES.server}`);
+					// Runtime evaluation belongs to focused parity coverage. The exact E2E
+					// command validates the immutable graph here without evaluating it twice.
+					assertGeneratedSourcePreserved(tempDir, manifest);
+					writeFileSync(join(tempDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+					return manifest;
+				}, result => ({ fileCount: result.fileCount }));
+				await runE2EDistPhase(telemetry, "publish", () => {
+					rmSync(finalDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+					try {
+						renameSync(tempDir, finalDir);
+					} catch (error) {
+						if (!validateE2EDistServerPrebundle(finalDir, key)) throw error;
+						rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+					}
+					return manifest.fileCount;
+				}, fileCount => ({ fileCount }));
 			} catch (error) {
-				if (!validateE2EDistServerPrebundle(finalDir, key)) throw error;
 				rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+				throw error;
 			}
-		} catch (error) {
-			rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
-			throw error;
 		}
 	} finally {
 		releaseLock();
 	}
-	if (!validateE2EDistServerPrebundle(finalDir, key)) {
-		throw new Error(`[e2e-dist-server-prebundle] invalid artifact after build: ${finalDir}`);
-	}
-	return resultFromCache(finalDir, key, false);
+	await runE2EDistPhase(telemetry, "final-validation", () => {
+		if (!validateE2EDistServerPrebundle(finalDir, key)) {
+			throw new Error(`[e2e-dist-server-prebundle] invalid artifact after build: ${finalDir}`);
+		}
+		return true;
+	}, valid => ({ valid }));
+	return resultFromCache(finalDir, key, cacheHit);
 }
 
 function resolveSourceCandidate(source, importer, repoRoot) {
@@ -775,7 +872,41 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT, webEn
 	};
 }
 
+function childOption(argv, name) {
+	const positions = argv.flatMap((value, index) => value === name ? [index] : []);
+	if (positions.length !== 1 || !argv[positions[0] + 1] || argv[positions[0] + 1].startsWith("--")) {
+		throw new Error(`[e2e-dist-server-prebundle] child requires exactly one ${name}`);
+	}
+	return argv[positions[0] + 1];
+}
+
+async function runE2EDistChild(argv) {
+	const telemetry = createE2EDistPhaseTelemetry();
+	try {
+		const result = await ensureE2EDistServerPrebundle({
+			repoRoot: childOption(argv, "--repo-root"),
+			runRoot: childOption(argv, "--run-root"),
+			telemetry,
+		});
+		process.stdout.write(`${JSON.stringify({ ok: true, key: result.key, cacheHit: result.cacheHit })}\n`);
+	} catch (error) {
+		process.stdout.write(`${JSON.stringify({
+			ok: false,
+			error: {
+				name: error instanceof Error ? error.name : "Error",
+				message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+				...(typeof error?.code === "string" ? { code: error.code } : {}),
+			},
+		})}\n`);
+		process.exitCode = 1;
+	}
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	const result = await ensureServerTestPrebundle();
-	console.log(JSON.stringify(result));
+	const argv = process.argv.slice(2);
+	if (argv[0] === E2E_DIST_CHILD_MODE) await runE2EDistChild(argv.slice(1));
+	else {
+		const result = await ensureServerTestPrebundle();
+		console.log(JSON.stringify(result));
+	}
 }
