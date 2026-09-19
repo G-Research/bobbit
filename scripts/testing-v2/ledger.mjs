@@ -66,6 +66,8 @@
  * — reliability > speed).
  *
  *   acquireLease(pool, opts?) -> Promise<{ release, id, forced, pool, cap }>
+ *       opts.strict=true rejects at the bounded deadline instead of creating a
+ *       forced over-cap lease. Generic callers remain fail-open by default.
  *   acquireGatewayBootLease(opts?) -> Promise<{ release, ... }>  // pool="gateway-boot"
  *   acquireBrowserRenderLease(opts?) -> Promise<{ release, ... }> // pool="browser"
  *   readLeases(opts?) -> { leases, generation }   leaseCap(pool, opts?) -> int
@@ -79,9 +81,11 @@
  *     Playwright worker's WHOLE life (30-min max-hold backstop vs 3-min for
  *     gateway-boot). Cap: opts.cap ?? BOBBIT_V2_MAX_BROWSER ?? budget-caps.json
  *     ?? floor(cores/6).
- * acquire is fail-open: after timeoutMs it proceeds anyway (a `forced` lease) so
- * a boot/worker can never deadlock; dead holders are swept immediately on PID
- * liveness so a crashed run never wedges a slot.
+ * acquire is fail-open by default: after timeoutMs it proceeds anyway (a
+ * `forced` lease) so a boot/worker can never deadlock. Correctness-sensitive
+ * callers can opt into bounded fail-closed acquisition with `strict:true`.
+ * Dead holders are swept immediately on PID liveness so a crashed run never
+ * wedges a slot.
  *
  * All exported reservations MUST be released on process exit; the ledger also
  * self-heals: every read sweeps entries whose owner PID is no longer alive.
@@ -697,24 +701,40 @@ export function leaseCap(pool, opts = {}) {
 
 const sleepAsync = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function strictLeaseTimeout(pool, cap, timeoutMs) {
+	return Object.assign(
+		new Error(`strict lease acquisition timed out for pool=${pool} cap=${cap} timeoutMs=${timeoutMs}`),
+		{ code: "LEASE_ACQUIRE_TIMEOUT" },
+	);
+}
+
 /**
  * Acquire a lease from a cross-process pool, WAITING (async) while the pool is
  * saturated. Returns once granted; the returned release() removes the lease.
- * Fail-open: after opts.timeoutMs the lease is granted anyway (`forced:true`)
- * so a heavy op can never deadlock behind a mis-counted or slow peer.
+ * Generic callers remain fail-open after opts.timeoutMs (`forced:true`). With
+ * opts.strict=true, deadline exhaustion rejects without writing an over-cap
+ * lease. opts.now/opts.sleep are deterministic test seams, not persisted state.
  */
 export async function acquireLease(pool, opts = {}) {
 	const id = newId(`lease-${pool}`);
 	const cap = leaseCap(pool, opts);
-	const deadline = Date.now() + (opts.timeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS);
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS;
+	const now = opts.now ?? Date.now;
+	const sleep = opts.sleep ?? sleepAsync;
+	const deadline = now() + timeoutMs;
+	const strict = opts.strict === true;
 	let forced = false;
 	for (;;) {
+		if (strict && now() > deadline) throw strictLeaseTimeout(pool, cap, timeoutMs);
+		const lockOpts = strict
+			? { ...opts, lockTimeoutMs: Math.min(opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS, Math.max(1, deadline - now())) }
+			: opts;
 		const outcome = withLock(() => {
 			const state = readLeasesRaw();
 			sweepLeases(state);
 			const held = state.leases.filter((l) => l.pool === pool).length;
-			const timedOut = Date.now() > deadline;
-			if (held < cap || timedOut) {
+			const timedOut = now() > deadline;
+			if (held < cap || (timedOut && !strict)) {
 				const wasForced = timedOut && held >= cap;
 				state.leases.push({ id, pool, pid: process.pid, at: new Date().toISOString(), forced: wasForced });
 				writeLeases(state);
@@ -723,13 +743,14 @@ export async function acquireLease(pool, opts = {}) {
 			// Persist the sweep so a dead holder's slot is freed for peers even when
 			// we ourselves don't get in this round.
 			writeLeases(state);
-			return { granted: false };
-		}, opts);
+			return { granted: false, timedOut };
+		}, lockOpts);
 		if (outcome.granted) {
 			forced = outcome.forced;
 			break;
 		}
-		await sleepAsync(jitter(LEASE_POLL_MS));
+		if (strict && outcome.timedOut) throw strictLeaseTimeout(pool, cap, timeoutMs);
+		await sleep(jitter(LEASE_POLL_MS));
 	}
 	let released = false;
 	const onExit = () => release();

@@ -281,14 +281,21 @@ describe("browser harness startup", () => {
 		const mcpBlock = source.slice(mcpLeaseAt, browserLeaseAt);
 		assert.match(mcpBlock, /async \(\{ enableMcp \}, use\)/, "MCP admission must remain worker-option aware");
 		assert.match(mcpBlock, /if \(enableMcp && process\.env\.BOBBIT_V2_BROWSER_LEASE === "1"\)/);
-		assert.match(mcpBlock, /acquireLease\("mcp-browser", \{\s*cap: 1,\s*timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,/s);
+		assert.match(
+			mcpBlock,
+			/acquireLease\("mcp-browser", \{\s*cap: 1,\s*timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,\s*strict: true,/s,
+			"MCP admission must use the ledger's fail-closed mode",
+		);
 		assert.match(mcpBlock, /scope: "worker", auto: true/);
 		const useAt = mcpBlock.indexOf("await use();");
+		const throwAt = mcpBlock.indexOf("throw new Error", mcpBlock.indexOf("} catch (error)"));
 		const finallyAt = mcpBlock.indexOf("} finally {", useAt);
 		const releaseAt = mcpBlock.indexOf("\n\t\t\trelease();", finallyAt);
+		assert.ok(throwAt > 0 && throwAt < useAt, "admission failure must abort before downstream fixture ownership");
 		assert.ok(useAt > 0 && finallyAt > useAt && releaseAt > finallyAt, "the MCP lease must outlive every dependent worker fixture");
 		assert.match(mcpBlock, /finally \{\s*release\(\);/s, "failure must still release the MCP lease");
-		assert.match(mcpBlock, /lease\.forced/, "bounded fail-open acquisition must be diagnostic");
+		assert.equal(mcpBlock.match(/lease\.release\(\)/g)?.length, 1, "an acquired MCP lease must have one release owner");
+		assert.doesNotMatch(mcpBlock, /continuing without serialization|lease\.forced/, "MCP admission must never fail open");
 		assert.doesNotMatch(mcpBlock, /error\.(?:message|stack)/, "lease diagnostics must not expose paths or secrets");
 
 		const browserBlock = source.slice(browserLeaseAt, gatewayAt);

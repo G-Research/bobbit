@@ -359,30 +359,30 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// pool. Serialise opted-in v2 workers before they acquire a Chromium render
 	// slot or boot a gateway; the dependency chain tears those resources down
 	// before this lease is released. Non-MCP and legacy workers do not load or
-	// touch the lease ledger. Acquisition is bounded and fail-open so a damaged
-	// ledger cannot deadlock the suite. Diagnostics deliberately expose only
-	// lifecycle timings and sanitised error identity, never paths or environment.
+	// touch the lease ledger. Acquisition is bounded and fail-closed: an MCP
+	// worker that cannot obtain the singleton admission slot must fail before it
+	// owns a browser-render lease, Chromium, or gateway. Diagnostics deliberately
+	// expose only lifecycle timings and sanitised error identity, never paths or environment.
 	mcpBrowserLease: [async ({ enableMcp }, use) => {
 		let release: () => void = () => {};
 		let acquiredAt: number | undefined;
-		if (enableMcp && process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
-			const startedAt = Date.now();
-			try {
-				const { acquireLease } = await loadLedger();
-				const lease = await acquireLease("mcp-browser", {
-					cap: 1,
-					timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,
-				});
-				acquiredAt = Date.now();
-				release = () => lease.release();
-				const message = `[gateway-harness] MCP browser lease acquired waitMs=${acquiredAt - startedAt} cap=${lease.cap} forced=${lease.forced}`;
-				if (lease.forced) console.warn(message);
-				else console.log(message);
-			} catch (error) {
-				console.warn(`[gateway-harness] MCP browser lease unavailable; continuing without serialization (${safeLeaseFailure(error)})`);
-			}
-		}
 		try {
+			if (enableMcp && process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
+				const startedAt = Date.now();
+				try {
+					const { acquireLease } = await loadLedger();
+					const lease = await acquireLease("mcp-browser", {
+						cap: 1,
+						timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,
+						strict: true,
+					});
+					acquiredAt = Date.now();
+					release = () => lease.release();
+					console.log(`[gateway-harness] MCP browser lease acquired waitMs=${acquiredAt - startedAt} cap=${lease.cap}`);
+				} catch (error) {
+					throw new Error(`[gateway-harness] MCP browser lease unavailable (${safeLeaseFailure(error)})`);
+				}
+			}
 			await use();
 		} finally {
 			release();
