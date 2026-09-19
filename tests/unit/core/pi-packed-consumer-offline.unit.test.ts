@@ -16,7 +16,9 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
 import {
+	isCompleteOwnedCommandShutdown,
 	lockedTarballsMissingFromRepository,
+	OwnedCommandError,
 	preparePackedConsumerFixture,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
@@ -538,6 +540,21 @@ describe("packed-consumer offline install contract", () => {
 			const result = await observed;
 			assert.ok("error" in result);
 			assert.match(String(result.error), /ownership readiness timed out after 17ms/);
+			assert.ok(result.error instanceof OwnedCommandError);
+			const shutdown = (result.error as { shutdown: Record<string, unknown> }).shutdown;
+			assert.deepEqual(shutdown, {
+				ownershipState: "timed out",
+				killRequested: true,
+				rootCloseObserved: true,
+				rootExitCode: null,
+				rootSignal: "SIGKILL",
+				treeExitAttempted: true,
+				treeExitSettled: true,
+				treeExitVerified: true,
+				completionTimedOut: false,
+			});
+			assert.equal(isCompleteOwnedCommandShutdown(shutdown), false,
+				"verified tree exit before ownership acknowledgement must remain incomplete proof");
 
 			if (lateSettlement === "resolve") ownership.resolve(undefined);
 			else ownership.reject(new Error("late injected ownership rejection"));

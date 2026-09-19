@@ -59,7 +59,9 @@ import {
 	resolveValidatedE2EDistServerPrebundle,
 } from "./server-prebundle.mjs";
 import {
+	isCompleteOwnedCommandShutdown,
 	OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
+	OwnedCommandError,
 	PACKED_CONSUMER_DESCRIPTOR_ENV,
 	preparePackedConsumerFixture,
 	runOwnedCommand,
@@ -532,7 +534,7 @@ export async function prepareE2EDistServerPrebundle(paths, environment, {
 	repoRoot = REPO_ROOT,
 } = {}) {
 	const startedAt = performance.now();
-	let shutdownVerified = false;
+	let completedShutdown;
 	let terminal;
 	try {
 		const command = await runCommand(invocation.command, invocation.args, {
@@ -543,10 +545,10 @@ export async function prepareE2EDistServerPrebundle(paths, environment, {
 			treeExitTimeoutMs,
 			repoRoot,
 		});
-		shutdownVerified = command.shutdown?.treeExitVerified === true;
-		if (!shutdownVerified) {
-			throw new Error("E2E dist prebundle child returned without verified process-tree completion");
+		if (!isCompleteOwnedCommandShutdown(command.shutdown)) {
+			throw new Error("E2E dist prebundle child returned without complete owned-process shutdown proof");
 		}
+		completedShutdown = Object.freeze({ ...command.shutdown });
 		if (command.code !== 0) {
 			throw new Error(`E2E dist prebundle child exited ${command.code}\n${boundedChildDiagnostic(command.stderr)}\n${boundedChildDiagnostic(command.stdout)}`);
 		}
@@ -563,10 +565,13 @@ export async function prepareE2EDistServerPrebundle(paths, environment, {
 			fallback: false,
 		};
 	} catch (error) {
-		const verifiedFailure = shutdownVerified || error?.treeExitVerified === true;
-		if (!verifiedFailure) {
+		const fallbackShutdown = completedShutdown
+			?? (error instanceof OwnedCommandError && isCompleteOwnedCommandShutdown(error.shutdown)
+				? error.shutdown
+				: undefined);
+		if (!fallbackShutdown) {
 			throw new Error(
-				"E2E dist prebundle failed without verified process-tree shutdown; refusing to launch raw Group B",
+				"E2E dist prebundle failed without complete owned-process shutdown proof; retaining the run root and refusing to launch raw Group B",
 				{ cause: error },
 			);
 		}
@@ -576,7 +581,11 @@ export async function prepareE2EDistServerPrebundle(paths, environment, {
 				ownerRoot: paths.root,
 				owner: { kind: "coordinator-child", id: "e2e-dist-server-prebundle" },
 				lifecycle: {
-					child: { state: "closed", treeExitVerified: true },
+					child: {
+						...fallbackShutdown,
+						state: fallbackShutdown.rootCloseObserved ? "closed" : "unclosed",
+						shutdownComplete: isCompleteOwnedCommandShutdown(fallbackShutdown),
+					},
 					fallback: { state: "pending-cleanup" },
 				},
 			});

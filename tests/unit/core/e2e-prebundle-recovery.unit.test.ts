@@ -11,14 +11,29 @@ import {
 	createE2EDistPhaseTelemetry,
 } from "../../../scripts/testing-v2/server-prebundle.mjs";
 import {
+	isCompleteOwnedCommandShutdown,
 	OwnedCommandError,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
 
-const VERIFIED_SHUTDOWN = Object.freeze({ treeExitVerified: true });
+const COMPLETE_SHUTDOWN = Object.freeze({
+	ownershipState: "established",
+	killRequested: false,
+	rootCloseObserved: true,
+	rootExitCode: 0,
+	rootSignal: null,
+	treeExitAttempted: true,
+	treeExitSettled: true,
+	treeExitVerified: true,
+	completionTimedOut: false,
+});
+
+function shutdown(overrides: Record<string, unknown> = {}) {
+	return Object.freeze({ ...COMPLETE_SHUTDOWN, ...overrides });
+}
 
 function successfulChild(stdout = JSON.stringify({ ok: true, cacheHit: false })) {
-	return async () => ({ code: 0, stdout, stderr: "", shutdown: VERIFIED_SHUTDOWN });
+	return async () => ({ code: 0, stdout, stderr: "", shutdown: COMPLETE_SHUTDOWN });
 }
 
 function canonicalResult() {
@@ -55,7 +70,7 @@ describe("bounded E2E dist prebundle recovery", () => {
 					code: 0,
 					stdout: JSON.stringify({ ok: true, cacheHit: false, bundlePath: foreign, key: "foreign-key" }),
 					stderr: "",
-					shutdown: VERIFIED_SHUTDOWN,
+					shutdown: COMPLETE_SHUTDOWN,
 				};
 			},
 			resolvePrebundle: ({ runRoot }: { runRoot: string }) => {
@@ -78,11 +93,7 @@ describe("bounded E2E dist prebundle recovery", () => {
 			command: "node",
 			args: ["server-prebundle.mjs"],
 			cwd: "repo-root",
-			shutdown: {
-				rootCloseObserved: true,
-				treeExitSettled: true,
-				treeExitVerified: true,
-			},
+			shutdown: shutdown({ killRequested: true, rootExitCode: null, rootSignal: "SIGKILL" }),
 		});
 		const result = await prepareE2EDistServerPrebundle({ root: "owned-run" }, {}, {
 			runCommand: async () => {
@@ -94,7 +105,11 @@ describe("bounded E2E dist prebundle recovery", () => {
 				assert.match(target.replace(/\\/g, "/"), /owned-run\/e2e-dist-server-prebundle$/);
 				assert.equal(options.ownerRoot, "owned-run");
 				assert.equal(options.allowOwnerRoot, undefined);
-				assert.equal(options.lifecycle.child.treeExitVerified, true);
+				assert.deepEqual(options.lifecycle.child, {
+					...failure.shutdown,
+					state: "closed",
+					shutdownComplete: true,
+				});
 			},
 			resolvePrebundle: () => { throw new Error("failed child must not validate"); },
 		});
@@ -124,23 +139,45 @@ describe("bounded E2E dist prebundle recovery", () => {
 		assert.match(result.error!, /immutable manifest validation/);
 	});
 
-	it("fails closed without cleanup or Group B fallback when tree exit is unverified", async () => {
+	it.each([
+		["ownership timed out despite tree=true", new OwnedCommandError("ownership timeout", {
+			shutdown: shutdown({ ownershipState: "timed out", killRequested: true, rootExitCode: null, rootSignal: "SIGKILL" }),
+		})],
+		["ownership failed despite tree=true", new OwnedCommandError("ownership failed", {
+			shutdown: shutdown({ ownershipState: "failed", killRequested: true, rootExitCode: null, rootSignal: "SIGKILL" }),
+		})],
+		["root close was not observed", new OwnedCommandError("root close missing", {
+			shutdown: shutdown({ rootCloseObserved: false, rootExitCode: null }),
+		})],
+		["tree verification was not attempted", new OwnedCommandError("tree attempt missing", {
+			shutdown: shutdown({ treeExitAttempted: false }),
+		})],
+		["tree verification did not settle", new OwnedCommandError("tree unsettled", {
+			shutdown: shutdown({ treeExitSettled: false }),
+		})],
+		["tree exit was not verified", new OwnedCommandError("tree unverified", {
+			shutdown: shutdown({ treeExitVerified: false }),
+		})],
+		["completion state is absent despite root/tree flags", new OwnedCommandError("completion state absent", {
+			shutdown: shutdown({ completionTimedOut: undefined }),
+		})],
+		["completion deadline expired despite root/tree flags", new OwnedCommandError("completion timed out", {
+			shutdown: shutdown({ completionTimedOut: true }),
+		})],
+		["plain Error spoofs treeExitVerified=true", Object.assign(new Error("spoof"), {
+			treeExitVerified: true,
+			shutdown: COMPLETE_SHUTDOWN,
+		})],
+	] as const)("fails closed when %s", async (_label, failure) => {
 		let removed = false;
 		let validated = false;
-		const failure = new OwnedCommandError("tree join expired", {
-			shutdown: {
-				rootCloseObserved: false,
-				treeExitSettled: false,
-				treeExitVerified: false,
-			},
-		});
 		await assert.rejects(
 			prepareE2EDistServerPrebundle({ root: "owned-run" }, {}, {
 				runCommand: async () => { throw failure; },
 				remove: async () => { removed = true; },
 				resolvePrebundle: () => { validated = true; return canonicalResult(); },
 			}),
-			/refusing to launch raw Group B/,
+			/retaining the run root and refusing to launch raw Group B/,
 		);
 		assert.equal(removed, false);
 		assert.equal(validated, false);
@@ -149,7 +186,7 @@ describe("bounded E2E dist prebundle recovery", () => {
 	it("treats cleanup failure as fatal instead of masking it with raw fallback", async () => {
 		await assert.rejects(
 			prepareE2EDistServerPrebundle({ root: "owned-run" }, {}, {
-				runCommand: async () => ({ code: 1, stdout: "{}", stderr: "build failed", shutdown: VERIFIED_SHUTDOWN }),
+				runCommand: async () => ({ code: 1, stdout: "{}", stderr: "build failed", shutdown: COMPLETE_SHUTDOWN }),
 				remove: async () => { throw new Error("cleanup EBUSY history"); },
 			}),
 			/cleanup EBUSY history/,
@@ -180,6 +217,55 @@ describe("bounded E2E dist prebundle recovery", () => {
 		}
 	});
 
+	it("marks tree=true with a missed root-close deadline as structured incomplete proof", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let executionTimeout: (() => void) | undefined;
+		let completionTimeout: (() => void) | undefined;
+		const running = runOwnedCommand("node", ["stalled-child.js"], {
+			cwd: "repo-root",
+			timeoutMs: 41,
+			ownershipEstablishmentTimeoutMs: 17,
+			treeExitTimeoutMs: 23,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => {},
+				waitForTreeExit: async () => true,
+			}),
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				if (timeoutMs === 41) executionTimeout = callback;
+				return Symbol(`timer-${timeoutMs}`);
+			},
+			clearTimer: () => {},
+			setCompletionTimer: (callback: () => void) => {
+				completionTimeout = callback;
+				return Symbol("completion-timer");
+			},
+			clearCompletionTimer: () => {},
+		});
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.ok(executionTimeout, "execution timer must arm after ownership is established");
+		executionTimeout!();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.ok(completionTimeout, "post-kill completion timer must arm");
+		completionTimeout!();
+		await assert.rejects(running, (error: unknown) => {
+			if (!(error instanceof OwnedCommandError)) return false;
+			const proof = (error as { shutdown: typeof COMPLETE_SHUTDOWN }).shutdown;
+			assert.equal(proof.ownershipState, "established");
+			assert.equal(proof.rootCloseObserved, false);
+			assert.equal(proof.treeExitAttempted, true);
+			assert.equal(proof.treeExitSettled, true);
+			assert.equal(proof.treeExitVerified, true);
+			assert.equal(proof.completionTimedOut, true);
+			assert.equal(isCompleteOwnedCommandShutdown(proof), false);
+			return true;
+		});
+	});
+
 	it("retains structured package-command shutdown proof on terminal errors", async () => {
 		const child = Object.assign(new EventEmitter(), {
 			stdout: new PassThrough(),
@@ -199,13 +285,11 @@ describe("bounded E2E dist prebundle recovery", () => {
 		child.emit("close", 0, null);
 		await assert.rejects(running, (error: unknown) => {
 			if (!(error instanceof OwnedCommandError)) return false;
-			const structured = error as {
-				treeExitVerified: boolean;
-				shutdown: { rootCloseObserved: boolean; treeExitSettled: boolean };
-			};
+			const structured = (error as { shutdown: typeof COMPLETE_SHUTDOWN }).shutdown;
+			assert.equal(structured.rootCloseObserved, true);
+			assert.equal(structured.treeExitSettled, true);
 			assert.equal(structured.treeExitVerified, false);
-			assert.equal(structured.shutdown.rootCloseObserved, true);
-			assert.equal(structured.shutdown.treeExitSettled, true);
+			assert.equal(isCompleteOwnedCommandShutdown(structured), false);
 			return true;
 		});
 	});
