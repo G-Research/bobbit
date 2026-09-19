@@ -13,6 +13,8 @@ import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
+import { pipeline } from "node:stream/promises";
+import cacache from "cacache";
 import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +31,8 @@ const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const CACHE_WORKER_COUNT = 3;
+const CACHE_TRANSFER_WORKER_COUNT = 8;
+const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
 export const PACKED_CONSUMER_DESCRIPTOR_ENV = "BOBBIT_PACKED_CONSUMER_DESCRIPTOR";
@@ -605,12 +609,12 @@ function runtimeLibc(platform = process.platform) {
 	return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
 }
 
-function compatibleRegistryTarballs(lock, {
+function compatibleRegistryArtifacts(lock, {
 	platform = process.platform,
 	arch = process.arch,
 	libc = runtimeLibc(platform),
 } = {}) {
-	const urls = new Set();
+	const artifacts = new Map();
 	for (const [location, entry] of Object.entries(lock.packages)) {
 		if (!location || !entry || typeof entry !== "object") continue;
 		const resolved = entry.resolved;
@@ -621,15 +625,166 @@ function compatibleRegistryTarballs(lock, {
 		if (!allowsRuntime(entry.os, platform, "os", location) ||
 			!allowsRuntime(entry.cpu, arch, "cpu", location) ||
 			!allowsRuntime(entry.libc, libc, "libc", location)) continue;
-		urls.add(resolved);
+		const integrity = typeof entry.integrity === "string" && entry.integrity.length > 0
+			? entry.integrity
+			: undefined;
+		const identity = integrity ? `integrity:${integrity}` : `url:${resolved}`;
+		if (!artifacts.has(identity)) artifacts.set(identity, { resolved, integrity });
 	}
-	return urls;
+	return [...artifacts.values()].sort((left, right) =>
+		(left.integrity ?? left.resolved).localeCompare(right.integrity ?? right.resolved) ||
+		left.resolved.localeCompare(right.resolved));
+}
+
+function compatibleRegistryTarballs(lock, runtime = {}) {
+	return new Set(compatibleRegistryArtifacts(lock, runtime).map(artifact => artifact.resolved));
 }
 
 export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock, runtime = {}) {
 	const required = compatibleRegistryTarballs(consumerLock, runtime);
 	const alreadyCached = compatibleRegistryTarballs(repositoryLock, runtime);
 	return [...required].filter(url => !alreadyCached.has(url)).sort();
+}
+
+const DEFAULT_CONTENT_CACHE = Object.freeze({
+	hasContent: (cache, integrity) => cacache.get.hasContent(cache, integrity),
+	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
+	createWriteStream: (cache, key, options) => cacache.put.stream(cache, key, options),
+});
+
+function cacheMiss(error) {
+	return error?.code === "ENOENT" || error?.code === "EINTEGRITY";
+}
+
+function transferKey(artifact) {
+	return `packed-consumer:${artifact.resolved}`;
+}
+
+async function transferArtifact({
+	artifact,
+	sourceContentCache,
+	destinationContentCache,
+	contentCache,
+	remainingPreparationMs,
+	setTimer,
+	clearTimer,
+}) {
+	let sourceHit;
+	try {
+		sourceHit = await contentCache.hasContent(sourceContentCache, artifact.integrity);
+	} catch (error) {
+		if (cacheMiss(error)) return false;
+		throw error;
+	}
+	if (!sourceHit) return false;
+	const remainingMs = remainingPreparationMs(`cache transfer ${artifact.integrity}`);
+	const abort = new AbortController();
+	const timer = setTimer(() => abort.abort(new Error(
+		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved}`,
+	)), remainingMs);
+	let source;
+	let destination;
+	try {
+		source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
+		destination = contentCache.createWriteStream(
+			destinationContentCache,
+			transferKey(artifact),
+			{ integrity: artifact.integrity },
+		);
+		await pipeline(source, destination, { signal: abort.signal });
+		remainingPreparationMs(`post-transfer verification ${artifact.integrity}`);
+		return true;
+	} catch (error) {
+		if (!abort.signal.aborted && cacheMiss(error)) return false;
+		throw error;
+	} finally {
+		clearTimer(timer);
+		// pipeline() normally destroys both streams itself. These calls also fence
+		// adapters that reject before attaching the whole chain.
+		source?.destroy?.();
+		destination?.destroy?.();
+	}
+}
+
+async function transferAvailableArtifacts({
+	artifacts,
+	sourceContentCache,
+	destinationContentCache,
+	contentCache,
+	remainingPreparationMs,
+	setTimer,
+	clearTimer,
+}) {
+	const transferable = artifacts.filter(artifact => artifact.integrity);
+	const missing = [];
+	let transferredCount = 0;
+	const failures = new Array(transferable.length);
+	let nextIndex = 0;
+	let stopAdmission = false;
+	const worker = async () => {
+		while (!stopAdmission) {
+			const index = nextIndex++;
+			if (index >= transferable.length) return;
+			try {
+				const transferred = await transferArtifact({
+					artifact: transferable[index],
+					sourceContentCache,
+					destinationContentCache,
+					contentCache,
+					remainingPreparationMs,
+					setTimer,
+					clearTimer,
+				});
+				if (transferred) transferredCount++;
+				else missing.push(transferable[index]);
+			} catch (error) {
+				failures[index] = error;
+				stopAdmission = true;
+			}
+		}
+	};
+	await Promise.allSettled(Array.from(
+		{ length: Math.min(CACHE_TRANSFER_WORKER_COUNT, transferable.length) },
+		() => worker(),
+	));
+	const observed = failures.filter(error => error !== undefined);
+	if (observed.length > 0) {
+		throw new AggregateError(observed, "Packed-consumer cache transfer failed");
+	}
+	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
+	return {
+		fallbackArtifacts: [...missing, ...noIntegrity].sort((left, right) => left.resolved.localeCompare(right.resolved)),
+		transferredCount,
+		missingDigestCount: missing.length,
+		noIntegrityCount: noIntegrity.length,
+	};
+}
+
+async function verifyDestinationArtifacts(artifacts, destinationContentCache, contentCache, remainingPreparationMs) {
+	const missing = [];
+	for (const artifact of artifacts) {
+		if (!artifact.integrity) continue;
+		remainingPreparationMs(`destination digest verification ${artifact.integrity}`);
+		let present;
+		try {
+			present = await contentCache.hasContent(destinationContentCache, artifact.integrity);
+		} catch (error) {
+			if (!cacheMiss(error)) throw error;
+		}
+		remainingPreparationMs(`post-destination digest verification ${artifact.integrity}`);
+		if (!present) missing.push(`${artifact.resolved} (${artifact.integrity})`);
+	}
+	if (missing.length > 0) {
+		throw new Error(`Packed-consumer isolated cache is missing required digests after transfer/fetch:\n${missing.join("\n")}`);
+	}
+}
+
+function ambientCacheFromOutput(stdout) {
+	const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+	if (lines.length !== 1 || !isAbsolute(lines[0])) {
+		throw new Error(`npm config get cache must return one absolute path, received ${JSON.stringify(stdout)}`);
+	}
+	return resolve(lines[0]);
 }
 
 function isStrictChild(root, candidate) {
@@ -760,8 +915,11 @@ export async function preparePackedConsumerFixture({
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
 	runtime,
+	contentCache = DEFAULT_CONTENT_CACHE,
 	preparationTimeoutMs = PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
 	now = () => performance.now(),
+	setTimer = setTimeout,
+	clearTimer = clearTimeout,
 } = {}) {
 	if (!runRoot) throw new Error("preparePackedConsumerFixture requires runRoot");
 	if (!Number.isFinite(preparationTimeoutMs) || preparationTimeoutMs <= 0) {
@@ -840,7 +998,14 @@ export async function preparePackedConsumerFixture({
 		const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
 		const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
 		const consumerManifest = cleanConsumerManifest(nodeTypesVersion);
-		await Promise.all([writeManifest(resolverDir, consumerManifest), writeManifest(templateDir, consumerManifest)]);
+		// Seed Arborist with the checkout's exact graph. npm remains authoritative:
+		// it prunes this lock to the minimal external manifest and adds the emitted
+		// tarball rather than solving the complete graph online from an empty lock.
+		await Promise.all([
+			writeManifest(resolverDir, consumerManifest),
+			writeManifest(templateDir, consumerManifest),
+			copyFile(join(repoRoot, "package-lock.json"), join(resolverDir, "package-lock.json")),
+		]);
 
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
 		const packCommand = await measured("pack", async () => {
@@ -865,6 +1030,7 @@ export async function preparePackedConsumerFixture({
 			...npm.argsPrefix,
 			"install",
 			"--package-lock-only",
+			"--offline",
 			"--ignore-scripts",
 			"--no-audit",
 			"--no-fund",
@@ -895,12 +1061,44 @@ export async function preparePackedConsumerFixture({
 			copyFile(resolverManifestPath, join(templateDir, "package.json")),
 			copyFile(resolverLockPath, join(templateDir, "package-lock.json")),
 		]);
-		const selectedTarballs = [...compatibleRegistryTarballs(consumerLock, runtime)].sort();
-		const cacheBatches = [];
-		for (let offset = 0; offset < selectedTarballs.length; offset += CACHE_BATCH_SIZE) {
-			cacheBatches.push(selectedTarballs.slice(offset, offset + CACHE_BATCH_SIZE));
+		const discoveryArgs = [...npm.argsPrefix, "config", "get", "cache"];
+		const discoveryCommand = await measured("ambient cache discovery", async () => {
+			const result = await runCommand(npm.command, discoveryArgs, {
+				cwd: repoRoot,
+				env: packedConsumerNpmEnv(repoRoot, baseEnv),
+				...commandDeadline("ambient npm cache discovery", CACHE_DISCOVERY_TIMEOUT_MS),
+				repoRoot,
+			});
+			commands.push(result);
+			requireSuccess(result);
+			return result;
+		});
+		const ambientCacheDir = ambientCacheFromOutput(discoveryCommand.stdout);
+		if (ambientCacheDir === resolve(cacheDir) || ambientCacheDir === resolve(fixtureRoot) || isStrictChild(fixtureRoot, ambientCacheDir)) {
+			throw new Error(`Ambient npm cache must lie outside the packed-consumer fixture: ${ambientCacheDir}`);
 		}
-		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs in ${cacheBatches.length} batches`);
+		const sourceContentCache = join(ambientCacheDir, "_cacache");
+		const destinationContentCache = join(cacheDir, "_cacache");
+		assertOwnedPath(absoluteRunRoot, destinationContentCache, "destinationContentCache");
+
+		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
+		console.log(`[packed-consumer] cache: selectively transferring ${selectedArtifacts.filter(artifact => artifact.integrity).length} exact digests from ${ambientCacheDir}`);
+		const transferResult = await measured("cache transfer", () => transferAvailableArtifacts({
+			artifacts: selectedArtifacts,
+			sourceContentCache,
+			destinationContentCache,
+			contentCache,
+			remainingPreparationMs,
+			setTimer,
+			clearTimer,
+		}));
+		console.log(`[packed-consumer] cache transfer: ${transferResult.transferredCount} hits, ${transferResult.missingDigestCount} digest misses, ${transferResult.noIntegrityCount} no-integrity fallbacks`);
+		const fallbackUrls = [...new Set(transferResult.fallbackArtifacts.map(artifact => artifact.resolved))].sort();
+		const cacheBatches = [];
+		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) {
+			cacheBatches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));
+		}
+		console.log(`[packed-consumer] cache: fetching ${fallbackUrls.length} exact misses in ${cacheBatches.length} batches`);
 		const cacheResults = new Array(cacheBatches.length);
 		const cacheFailures = new Array(cacheBatches.length);
 		let nextBatchIndex = 0;
@@ -946,6 +1144,13 @@ export async function preparePackedConsumerFixture({
 				`npm cache population failed for ${failedCacheBatches.map(failure => `batch ${failure.index + 1}`).join(", ")}`,
 			);
 		}
+		await measured("cache verification", () => verifyDestinationArtifacts(
+			selectedArtifacts,
+			destinationContentCache,
+			contentCache,
+			remainingPreparationMs,
+		));
+		remainingPreparationMs("post-cache verification");
 
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
 		const installArgs = [

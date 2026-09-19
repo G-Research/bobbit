@@ -43,7 +43,7 @@ const WORKFLOW_SOURCE = readFileSync(
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const PACKAGE_MANIFEST = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { files: string[] };
 const PACKAGE_LOCK = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8")) as {
-	packages?: Record<string, { version?: string; gypfile?: boolean }>;
+	packages?: Record<string, { name?: string; version?: string; gypfile?: boolean }>;
 };
 
 type WorkflowStep = {
@@ -143,7 +143,12 @@ describe("packed-consumer offline install contract", () => {
 			"npm pack's filename must identify one file directly inside the owned pack directory");
 		assert.match(source, /const tarball = await stat\(tarballPath\)/,
 			"the exact emitted tarball must exist before dependency resolution");
-		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
+		assert.match(source, /copyFile\(join\(repoRoot, "package-lock\.json"\), join\(resolverDir, "package-lock\.json"\)\)/,
+			"the committed lock must seed npm's sole external lock update");
+		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
+		assert.match(source, /cacache\.get\.stream\.byDigest\(cache, integrity\)/,
+			"only exact integrity-addressed ambient content may be read");
+		assert.doesNotMatch(source, /cacache\.ls\(/, "ambient cache entries must never be enumerated wholesale");
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
 		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
 			"cache population must retain the accepted bounded concurrency");
@@ -173,19 +178,23 @@ describe("packed-consumer offline install contract", () => {
 			"the descriptor must publish atomically after validation");
 	});
 
-	it("resolves a fresh empty consumer and caches only newly selected tarballs", async () => {
+	it("seeds npm's lock update and selectively transfers an exact ambient digest", async () => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-pin-"));
+		const ambientCache = join(tempParent, "ambient-cache");
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
+		const cacheReads: Array<{ cache: string; integrity: string }> = [];
+		const cacheWrites: Array<{ cache: string; key: string; integrity: string }> = [];
 		let nowMs = 0;
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
+		const selectedIntegrity = "sha512-fixture";
 		try {
-			await preparePackedConsumerFixture({
+			const descriptor = await preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
 				runRoot: tempParent,
 				baseEnv: {
 					PATH: process.env.PATH,
-					npm_config_cache: "inherited-cache",
+					npm_config_cache: ambientCache,
 					npm_config_registry: "https://registry.example.test/",
 					npm_config_userconfig: "inherited-userconfig",
 					NODE_AUTH_TOKEN: "inherited-auth",
@@ -195,6 +204,19 @@ describe("packed-consumer offline install contract", () => {
 				},
 				ensureDist: () => { order.push("ensure-dist"); },
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+				contentCache: {
+					hasContent: async () => true,
+					createReadStream: (cache: string, integrity: string) => {
+						cacheReads.push({ cache, integrity });
+						const stream = new PassThrough();
+						stream.end("selected artifact bytes");
+						return stream;
+					},
+					createWriteStream: (cache: string, key: string, options: { integrity: string }) => {
+						cacheWrites.push({ cache, key, integrity: options.integrity });
+						return new PassThrough();
+					},
+				},
 				now: () => nowMs,
 				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
 					calls.push({ args: [...args], cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs });
@@ -210,10 +232,13 @@ describe("packed-consumer offline install contract", () => {
 					if (args.includes("--package-lock-only")) {
 						order.push("resolve");
 						const manifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
+						const seedLock = JSON.parse(readFileSync(join(options.cwd, "package-lock.json"), "utf8"));
 						assert.equal(manifest.name, "bobbit-inline-theme-clean-consumer");
 						assert.equal(manifest.private, true);
-						assert.deepEqual(readdirSync(options.cwd), ["package.json"],
-							"dependency resolution must begin without a lock or installed tree");
+						assert.equal(seedLock.packages[""].name, PACKAGE_LOCK.packages?.[""]?.name,
+							"the repository lock must exist before npm produces the external lock");
+						assert.deepEqual(readdirSync(options.cwd), ["package-lock.json", "package.json"],
+							"dependency resolution must begin from only the manifest and repository lock seed");
 						manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-1.0.0.tgz" };
 						writeFileSync(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
 						writeFileSync(join(options.cwd, "package-lock.json"), JSON.stringify({
@@ -233,13 +258,17 @@ describe("packed-consumer offline install contract", () => {
 								"node_modules/new-dependency": {
 									version: "1.2.3",
 									resolved: selectedUrl,
-									integrity: "sha512-fixture",
+									integrity: selectedIntegrity,
 								},
 							},
 						}));
 						return commandResult(command, args);
 					}
-					if (args.includes("--offline")) {
+					if (args.includes("config") && args.includes("get") && args.includes("cache")) {
+						order.push("discover");
+						return commandResult(command, args, { stdout: `${ambientCache}\n` });
+					}
+					if (args.includes("ci") && args.includes("--offline")) {
 						order.push("install");
 						const stagedManifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
 						const stagedLock = JSON.parse(readFileSync(join(options.cwd, "package-lock.json"), "utf8"));
@@ -251,38 +280,41 @@ describe("packed-consumer offline install contract", () => {
 						mkdirSync(join(options.cwd, "node_modules"), { recursive: true });
 						return commandResult(command, args);
 					}
-					order.push("cache");
-					return commandResult(command, args);
+					assert.fail(`unexpected package command: ${args.join(" ")}`);
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "cache", "install"]);
+			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "install"]);
 			assert.equal(calls.length, 4);
 			assert.deepEqual(calls[0]?.args.slice(1), [
 				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
 			]);
-			assert.deepEqual(calls[1]?.args.slice(1, 6), [
-				"install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
+			assert.deepEqual(calls[1]?.args.slice(1, 7), [
+				"install", "--package-lock-only", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
 			]);
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
-			assert.deepEqual(calls[2]?.args.slice(0, 4), ["npm-cli.js", "cache", "add", "--cache"]);
-			assert.equal(calls[2]?.args.at(-1), selectedUrl);
+			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "config", "get", "cache"]);
 			assert.equal(calls[3]?.args[1], "ci");
 			assert.ok(calls[3]?.args.includes("--offline"));
 			assert.ok(!calls[3]?.args.includes(calls[1]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
 			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
-			assert.equal(calls[2]?.timeoutMs, 3 * 60_000);
+			assert.equal(calls[2]?.timeoutMs, 30_000);
 			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000,
 				"late commands must receive only the remaining monotonic preparation budget");
+			assert.deepEqual(cacheReads, [{ cache: join(ambientCache, "_cacache"), integrity: selectedIntegrity }]);
+			assert.equal(cacheWrites.length, 1);
+			assert.equal(cacheWrites[0]?.cache, join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"));
+			assert.equal(cacheWrites[0]?.integrity, selectedIntegrity);
+			assert.match(cacheWrites[0]?.key ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			const inherited: Record<string, string> = {
-				npm_config_cache: "inherited-cache",
+				npm_config_cache: ambientCache,
 				npm_config_registry: "https://registry.example.test/",
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const call of calls.slice(1)) {
+			for (const call of [calls[1]!, calls[3]!]) {
 				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
 				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
 				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));
@@ -291,6 +323,11 @@ describe("packed-consumer offline install contract", () => {
 				assert.equal(call.env.npm_package_name, undefined);
 				assert.equal(call.env.INIT_CWD, call.cwd);
 			}
+			assert.equal(calls[2]?.env.npm_config_cache, ambientCache,
+				"cache discovery may inspect but must not mutate or pass ambient state to consumer commands");
+			const publishedEvidence = JSON.stringify(descriptor.commands);
+			assert.doesNotMatch(publishedEvidence, /inherited-auth|inherited-userconfig/,
+				"published command diagnostics must not serialize credential-bearing environment values");
 			assert.ok(readdirSync(tempParent).includes("prepared-packed-consumer"), "successful preparation must retain its descriptor and template");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });

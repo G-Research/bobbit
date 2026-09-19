@@ -38,6 +38,12 @@ type CommandCall = {
 	options: CommandOptions;
 };
 
+type ContentCache = {
+	hasContent: (cache: string, integrity: string) => Promise<unknown>;
+	createReadStream: (cache: string, integrity: string) => NodeJS.ReadableStream;
+	createWriteStream: (cache: string, key: string, options: { integrity: string }) => NodeJS.WritableStream;
+};
+
 type PreparedDescriptor = {
 	version: number;
 	runRoot: string;
@@ -70,8 +76,11 @@ type PackedConsumerApi = {
 			stdout: string;
 			stderr: string;
 		}>;
+		contentCache?: ContentCache;
 		preparationTimeoutMs?: number;
 		now?: () => number;
+		setTimer?: (callback: () => void, timeoutMs: number) => unknown;
+		clearTimer?: (timer: unknown) => void;
 	}) => Promise<PreparedDescriptor>;
 	readPreparedPackedConsumerDescriptor?: (
 		descriptorPath: string,
@@ -136,25 +145,41 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 async function prepareFixture({
 	registryTarballCount = 0,
+	registryArtifacts,
+	contentCache,
 	onCacheCommand,
 	onOfflineInstall,
+	setTimer,
+	clearTimer,
 }: {
 	registryTarballCount?: number;
+	registryArtifacts?: Array<{ resolved: string; integrity?: string }>;
+	contentCache?: ContentCache;
 	onCacheCommand?: (batchIndex: number, result: CommandResult, options: CommandOptions) => Promise<void>;
 	onOfflineInstall?: () => void | Promise<void>;
+	setTimer?: (callback: () => void, timeoutMs: number) => unknown;
+	clearTimer?: (timer: unknown) => void;
 } = {}) {
 	const runRoot = await mkdtemp(join(tmpdir(), "bobbit-prepared-consumer-unit-"));
 	roots.push(runRoot);
 	const calls: CommandCall[] = [];
 	let cacheBatchIndex = 0;
+	const ambientCache = join(tmpdir(), "ambient-cache-read-only");
 	const prepare = requireApi("preparePackedConsumerFixture");
 	const descriptor = await prepare({
 		repoRoot: REPO_ROOT,
 		runRoot,
 		baseEnv: {
 			PATH: process.env.PATH,
-			npm_config_cache: join(tmpdir(), "ambient-cache-must-not-be-used"),
+			npm_config_cache: ambientCache,
 		},
+		contentCache: contentCache ?? {
+			hasContent: async cache => cache !== join(ambientCache, "_cacache"),
+			createReadStream: () => { throw new Error("cache miss must not open a source stream"); },
+			createWriteStream: () => { throw new Error("cache miss must not open a destination stream"); },
+		},
+		...(setTimer ? { setTimer } : {}),
+		...(clearTimer ? { clearTimer } : {}),
 		ensureDist: () => {},
 		resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 		runCommand: async (command, args, options) => {
@@ -178,13 +203,13 @@ async function prepareFixture({
 				const manifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
 				manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-fixture.tgz" };
 				await writeFile(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
-				const registryPackages = Object.fromEntries(Array.from({ length: registryTarballCount }, (_, index) => [
+				const artifacts = registryArtifacts ?? Array.from({ length: registryTarballCount }, (_, index) => ({
+					resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
+					integrity: `sha512-${index}`,
+				}));
+				const registryPackages = Object.fromEntries(artifacts.map((artifact, index) => [
 					`node_modules/dependency-${String(index).padStart(3, "0")}`,
-					{
-						version: "1.0.0",
-						resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
-						integrity: `sha512-${index}`,
-					},
+					{ version: "1.0.0", ...artifact },
 				]));
 				await writeFile(join(options.cwd, "package-lock.json"), JSON.stringify({
 					name: "prepared-consumer",
@@ -199,6 +224,10 @@ async function prepareFixture({
 						...registryPackages,
 					},
 				}));
+				return result;
+			}
+			if (args.includes("config") && args.includes("get") && args.includes("cache")) {
+				result.stdout = `${ambientCache}\n`;
 				return result;
 			}
 			if (args.includes("cache") && args.includes("add")) {
@@ -257,9 +286,162 @@ describe("prepared packed consumer", () => {
 		);
 		assert.notEqual(
 			resolve(descriptor.cacheDir),
-			resolve(join(tmpdir(), "ambient-cache-must-not-be-used")),
+			resolve(join(tmpdir(), "ambient-cache-read-only")),
 			`${FAILURE_PREFIX}: preparation must not inherit the ambient npm cache`,
 		);
+	});
+
+	it("transfers each exact ambient digest once into only the owned cache", async () => {
+		const integrity = "sha512-shared-exact-digest";
+		const sourceReads: Array<{ cache: string; integrity: string }> = [];
+		const destinationWrites: Array<{ cache: string; key: string; integrity: string }> = [];
+		const { calls, descriptor } = await prepareFixture({
+			registryArtifacts: [
+				{ resolved: "https://registry.example.test/a.tgz", integrity },
+				{ resolved: "https://registry.example.test/unrelated-alias.tgz", integrity },
+			],
+			contentCache: {
+				hasContent: async () => true,
+				createReadStream: (cache, expectedIntegrity) => {
+					sourceReads.push({ cache, integrity: expectedIntegrity });
+					const source = new PassThrough();
+					source.end("verified artifact bytes");
+					return source;
+				},
+				createWriteStream: (cache, key, options) => {
+					destinationWrites.push({ cache, key, integrity: options.integrity });
+					return new PassThrough();
+				},
+			},
+		});
+
+		assert.equal(sourceReads.length, 1, `${FAILURE_PREFIX}: duplicate integrities must transfer only once`);
+		assert.equal(sourceReads[0]?.integrity, integrity);
+		assert.match(sourceReads[0]?.cache ?? "", /ambient-cache-read-only[\\/]_cacache$/,
+			`${FAILURE_PREFIX}: transfer must read only the discovered ambient content store`);
+		assert.deepEqual(destinationWrites.map(write => write.integrity), [integrity]);
+		assert.equal(resolve(destinationWrites[0]?.cache ?? ""), resolve(descriptor.cacheDir, "_cacache"));
+		assert.ok(isStrictChild(descriptor.runRoot, destinationWrites[0]?.cache ?? ""),
+			`${FAILURE_PREFIX}: transferred content must stay below the run root`);
+		assert.match(destinationWrites[0]?.key ?? "", /packed-consumer:https:\/\/registry\.example\.test\/a\.tgz/);
+		assert.equal(calls.filter(call => call.args.includes("cache") && call.args.includes("add")).length, 0,
+			`${FAILURE_PREFIX}: an exact ambient hit must not perform an online fallback`);
+	});
+
+	it("falls back by exact URL for source misses, corrupt content, and entries without integrity", async () => {
+		const missingUrl = "https://registry.example.test/missing.tgz";
+		const corruptUrl = "https://registry.example.test/corrupt.tgz";
+		const noIntegrityUrl = "https://registry.example.test/no-integrity.tgz";
+		const sourceIntegrities: string[] = [];
+		const { calls } = await prepareFixture({
+			registryArtifacts: [
+				{ resolved: missingUrl, integrity: "sha512-missing" },
+				{ resolved: corruptUrl, integrity: "sha512-corrupt" },
+				{ resolved: noIntegrityUrl },
+			],
+			contentCache: {
+				hasContent: async (cache, integrity) => {
+					if (!cache.includes("ambient-cache-read-only")) return true;
+					if (integrity === "sha512-missing") throw Object.assign(new Error("source absent"), { code: "ENOENT" });
+					return true;
+				},
+				createReadStream: (_cache, integrity) => {
+					sourceIntegrities.push(integrity);
+					const source = new PassThrough();
+					queueMicrotask(() => source.destroy(Object.assign(new Error("corrupt source"), { code: "EINTEGRITY" })));
+					return source;
+				},
+				createWriteStream: () => new PassThrough(),
+			},
+		});
+
+		assert.deepEqual(sourceIntegrities, ["sha512-corrupt"],
+			`${FAILURE_PREFIX}: ENOENT and no-integrity entries must not open ambient content streams`);
+		const cacheAdds = calls.filter(call => call.args.includes("cache") && call.args.includes("add"));
+		assert.equal(cacheAdds.length, 1);
+		assert.deepEqual(cacheAdds[0]?.args.slice(cacheAdds[0]!.args.indexOf("--cache") + 2),
+			[corruptUrl, missingUrl, noIntegrityUrl].sort(),
+			`${FAILURE_PREFIX}: fallback must contain only exact locked URLs in deterministic order`);
+	});
+
+	it("blocks offline install and descriptor publication when a fallback digest is still absent", async () => {
+		let offlineStarted = false;
+		const preparing = prepareFixture({
+			registryArtifacts: [{
+				resolved: "https://registry.example.test/still-missing.tgz",
+				integrity: "sha512-still-missing",
+			}],
+			contentCache: {
+				hasContent: async () => false,
+				createReadStream: () => { throw new Error("a miss must not be read"); },
+				createWriteStream: () => { throw new Error("a miss must not be written directly"); },
+			},
+			onOfflineInstall: () => { offlineStarted = true; },
+		});
+
+		await assert.rejects(preparing, /isolated cache is missing required digests/);
+		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: verification failure must prevent offline npm ci`);
+		const runRoot = roots.at(-1)!;
+		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
+		const evidence = JSON.parse(await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8"));
+		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing\)/);
+	});
+
+	it("stops transfer admission at the shared deadline and settles every admitted stream", async () => {
+		const timerCallbacks: Array<() => void> = [];
+		const sources: PassThrough[] = [];
+		const destinations: PassThrough[] = [];
+		let sourceCloses = 0;
+		let destinationCloses = 0;
+		let cacheCommandStarted = false;
+		let offlineStarted = false;
+		const preparing = prepareFixture({
+			registryArtifacts: Array.from({ length: 12 }, (_, index) => ({
+				resolved: `https://registry.example.test/deadline-${index}.tgz`,
+				integrity: `sha512-deadline-${index}`,
+			})),
+			contentCache: {
+				hasContent: async () => true,
+				createReadStream: () => {
+					const stream = new PassThrough();
+					stream.once("close", () => { sourceCloses++; });
+					sources.push(stream);
+					return stream;
+				},
+				createWriteStream: () => {
+					const stream = new PassThrough();
+					stream.once("close", () => { destinationCloses++; });
+					destinations.push(stream);
+					return stream;
+				},
+			},
+			setTimer: callback => {
+				timerCallbacks.push(callback);
+				return Symbol("cache-transfer-deadline");
+			},
+			clearTimer: () => {},
+			onCacheCommand: async () => { cacheCommandStarted = true; },
+			onOfflineInstall: () => { offlineStarted = true; },
+		});
+		const observed = preparing.then(
+			() => ({ error: undefined }),
+			error => ({ error }),
+		);
+
+		await waitFor(() => sources.length === 8 && timerCallbacks.length === 8);
+		for (const expire of [...timerCallbacks]) expire();
+		const { error } = await observed;
+		assert.ok(error instanceof Error);
+		assert.match(error.message, /cache transfer failed/);
+		assert.equal(sources.length, 8, `${FAILURE_PREFIX}: a transfer failure must stop later admission`);
+		assert.equal(destinations.length, 8);
+		assert.ok(sources.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted source must be destroyed`);
+		assert.ok(destinations.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted destination must be destroyed`);
+		assert.equal(sourceCloses, 8, `${FAILURE_PREFIX}: rejection must join every admitted source close`);
+		assert.equal(destinationCloses, 8, `${FAILURE_PREFIX}: rejection must join every admitted destination close`);
+		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: fallback must not start after transfer expiry`);
+		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after transfer expiry`);
 	});
 
 	it("fills nine cache batches through a dynamic three-worker pool before offline install", async () => {
