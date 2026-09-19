@@ -437,6 +437,47 @@ describe("source runtime process ownership and teardown", () => {
 		assert.deepEqual(events, ["report"]);
 	});
 
+	it("source finalization reports but retains the root after the test body fails", async () => {
+		const events: string[] = [];
+		const bodyFailure = new Error("source fixture assertion failed");
+
+		await assert.rejects(
+			finalizeSourceRuntimes({
+				bodyFailure: { reason: bodyFailure },
+				callerClose: { label: "page close", result: { status: "fulfilled", value: undefined } },
+				report: async () => { events.push("report"); },
+				removeTemp: async () => { events.push("remove-temp"); },
+			}),
+			(error: Error) => {
+				assert.equal(error, bodyFailure, "finalization must surface the original body failure");
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["report"]);
+	});
+
+	it("source finalization retains the root when diagnostic reporting fails", async () => {
+		const events: string[] = [];
+		const reportFailure = new Error("report attachment failed");
+
+		await assert.rejects(
+			finalizeSourceRuntimes({
+				callerClose: { label: "page close", result: { status: "fulfilled", value: undefined } },
+				report: async () => {
+					events.push("report");
+					throw reportFailure;
+				},
+				removeTemp: async () => { events.push("remove-temp"); },
+			}),
+			(error: Error) => {
+				assert.match(error.message, /source runtime report failed: report attachment failed/);
+				assert.equal(error.cause, reportFailure);
+				return true;
+			},
+		);
+		assert.deepEqual(events, ["report"]);
+	});
+
 	it("source finalization removes the root last after every owner proves shutdown", { timeout: 10_000 }, async () => {
 		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			stdio: ["ignore", "pipe", "pipe"],
