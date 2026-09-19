@@ -21,6 +21,10 @@ const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
 const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
+// This bounds the whole package-command sequence. Each owned command receives
+// only the smaller of its command-specific limit and the remaining preparation
+// budget; runOwnedCommand still owns and joins its tree after that timer fires.
+export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
@@ -570,8 +574,26 @@ export async function preparePackedConsumerFixture({
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
 	runtime,
+	preparationTimeoutMs = PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
+	now = () => performance.now(),
 } = {}) {
 	if (!runRoot) throw new Error("preparePackedConsumerFixture requires runRoot");
+	if (!Number.isFinite(preparationTimeoutMs) || preparationTimeoutMs <= 0) {
+		throw new Error("preparationTimeoutMs must be a positive number");
+	}
+	const preparationStartedAt = now();
+	let latestNow = preparationStartedAt;
+	const remainingPreparationMs = (label) => {
+		latestNow = Math.max(latestNow, now());
+		const elapsedMs = latestNow - preparationStartedAt;
+		const remainingMs = preparationTimeoutMs - elapsedMs;
+		if (remainingMs <= 0) {
+			throw new Error(`Packed-consumer preparation deadline exhausted before ${label} after ${Math.round(elapsedMs)}ms (limit ${preparationTimeoutMs}ms)`);
+		}
+		return Math.ceil(remainingMs);
+	};
+	const remainingCommandTimeout = (label, commandTimeoutMs) =>
+		Math.min(commandTimeoutMs, remainingPreparationMs(label));
 	const absoluteRunRoot = resolve(runRoot);
 	const fixtureRoot = join(absoluteRunRoot, FIXTURE_DIRECTORY);
 	const packDir = join(fixtureRoot, "pack");
@@ -610,7 +632,12 @@ export async function preparePackedConsumerFixture({
 
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
 		const packCommand = await measured("pack", async () => {
-			const result = await runCommand(npm.command, packArgs, { cwd: repoRoot, env: baseEnv, timeoutMs: PACK_TIMEOUT_MS, repoRoot });
+			const result = await runCommand(npm.command, packArgs, {
+				cwd: repoRoot,
+				env: baseEnv,
+				timeoutMs: remainingCommandTimeout("npm pack", PACK_TIMEOUT_MS),
+				repoRoot,
+			});
 			commands.push(result);
 			requireSuccess(result);
 			return result;
@@ -636,7 +663,7 @@ export async function preparePackedConsumerFixture({
 			const result = await runCommand(npm.command, resolveArgs, {
 				cwd: resolverDir,
 				env: resolverEnv,
-				timeoutMs: LOCK_RESOLUTION_TIMEOUT_MS,
+				timeoutMs: remainingCommandTimeout("npm lock resolution", LOCK_RESOLUTION_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
@@ -664,7 +691,10 @@ export async function preparePackedConsumerFixture({
 				runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
 					cwd: resolverDir,
 					env: resolverEnv,
-					timeoutMs: CACHE_BATCH_TIMEOUT_MS,
+					timeoutMs: remainingCommandTimeout(
+						`npm cache batch ${Math.floor(offset / CACHE_BATCH_SIZE) + 1}`,
+						CACHE_BATCH_TIMEOUT_MS,
+					),
 					repoRoot,
 				}),
 			);
@@ -686,7 +716,7 @@ export async function preparePackedConsumerFixture({
 			const result = await runCommand(npm.command, installArgs, {
 				cwd: templateDir,
 				env: templateEnv,
-				timeoutMs: OFFLINE_INSTALL_TIMEOUT_MS,
+				timeoutMs: remainingCommandTimeout("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
@@ -719,6 +749,7 @@ export async function preparePackedConsumerFixture({
 		};
 		const temporaryDescriptor = `${descriptorPath}.tmp-${process.pid}-${randomUUID()}`;
 		await writeFile(temporaryDescriptor, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx" });
+		remainingPreparationMs("descriptor publication");
 		await rename(temporaryDescriptor, descriptorPath);
 		console.log(`[packed-consumer] descriptor: ${descriptorPath}`);
 		return descriptor;

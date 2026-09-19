@@ -633,6 +633,48 @@ export async function prepareGroupCPackedConsumer(specs, environment, paths, pre
 	};
 }
 
+function startConcurrentOperation(operation) {
+	try {
+		return Promise.resolve(operation());
+	} catch (error) {
+		return Promise.reject(error);
+	}
+}
+
+/**
+ * Overlap the run-owned packed-consumer preparation with Group B, while keeping
+ * one barrier in front of cache fan-out and Group C. B starts first and receives
+ * its settlement observer before preparation starts, so neither rejection can
+ * become unhandled and profiling can close at B's actual process boundary.
+ */
+export async function runGroupBWithPackedConsumerPreparation({
+	runGroupB,
+	preparePackedConsumer,
+	onGroupBSettled = () => {},
+}) {
+	const groupBPromise = startConcurrentOperation(runGroupB);
+	const observedGroupBPromise = groupBPromise.then((groupB) => {
+		onGroupBSettled(groupB);
+		return groupB;
+	});
+	const packedConsumerPromise = startConcurrentOperation(preparePackedConsumer);
+	const [groupBSettlement, packedConsumerSettlement] = await Promise.allSettled([
+		observedGroupBPromise,
+		packedConsumerPromise,
+	]);
+	const failures = [groupBSettlement, packedConsumerSettlement]
+		.filter((settlement) => settlement.status === "rejected")
+		.map((settlement) => settlement.reason);
+	if (failures.length === 2) {
+		throw new AggregateError(failures, "Group B and packed-consumer preparation both failed");
+	}
+	if (failures.length === 1) throw failures[0];
+	return Object.freeze({
+		groupB: groupBSettlement.value,
+		packedConsumer: packedConsumerSettlement.value,
+	});
+}
+
 function isRetryFreeQualification(env = process.env) {
 	return resolveE2ERetryCount(env) === 0;
 }
@@ -855,10 +897,10 @@ async function main() {
 		}
 		if (only === "D") { results.push(await runGroupD(D, { coordinatorEnv })); captureLatestProfile("D"); }
 	} else {
-		// Hosted runners cannot reliably absorb a second process-heavy coordinator
-		// alongside the gateway/worktree/browser phases. Preserve each group's own
-		// retries and worker controls, but do not overlap their process trees.
-		console.log("[e2e-v2] schedule: A → B → C → D (serialized; B/C share run-local transform cache)");
+		// Hosted runners cannot reliably absorb overlapping test coordinators. The
+		// one run-owned package preparation may overlap B, but C and D still wait
+		// for both owners to settle before they start.
+		console.log("[e2e-v2] schedule: A → prebundle → (B ∥ packed preparation) → C → D (B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
 		captureLatestProfile("A");
 		bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv);
@@ -867,18 +909,30 @@ async function main() {
 		} else {
 			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
 		}
+		// Keep B's server selector in a frozen snapshot. The separate C environment
+		// is mutable only while preparation publishes its descriptor, then frozen
+		// before any worker receives it.
 		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
-		if (bundle.bundlePath) sharedPlaywrightEnv.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle.bundlePath;
+		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
+		const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(sharedPlaywrightEnv,
+			bundle.bundlePath ? { BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundle.bundlePath } : {}));
 		const retries = resolveE2ERetryCount(coordinatorEnv);
 		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
-		results.push(await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries));
-		captureLatestProfile("B");
+		const paired = await runGroupBWithPackedConsumerPreparation({
+			runGroupB: () => runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries),
+			preparePackedConsumer: () => prepareGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
+			onGroupBSettled: (groupBResult) => {
+				results.push(groupBResult);
+				captureLatestProfile("B");
+			},
+		});
+		packedConsumer = paired.packedConsumer;
+		// Preserve the explicit C-side fail-closed guard even though its environment
+		// was never given B's selector. Existing source-order pins protect this line.
 		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
+		Object.freeze(sharedPlaywrightEnv);
 		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
-		// C receives the same shared cache environment only after the runner removes
-		// Group B's bundle setting. No C worker can observe bundled server mode.
-		packedConsumer = await prepareGroupCPackedConsumer(C, sharedPlaywrightEnv, paths);
 		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
 		captureLatestProfile("C");
 		results.push(await runGroupD(D, { coordinatorEnv }));

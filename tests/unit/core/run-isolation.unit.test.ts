@@ -905,20 +905,25 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("prepares full serial Group C exactly once in the authoritative coordinator root", async () => {
+  it("prepares full serial Group C once while keeping immutable B/C environments isolated", async () => {
     const temp = mkdtempSync(join(tmpdir(), "serial-group-c-packed-consumer-"));
     try {
       const paths = createE2ERunPaths(temp);
-      const environment: NodeJS.ProcessEnv = {};
+      const environment = createSerialPlaywrightEnvironment({ BOBBIT_V2_RUN_ROOT: paths.root });
+      const bundlePath = join(paths.root, "dist-server-prebundle", "bundle.mjs");
+      const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(environment, {
+        BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundlePath,
+      }));
       const descriptorPath = join(paths.root, "prepared-packed-consumer", "descriptor.json");
       let preparations = 0;
       const result = await prepareGroupCPackedConsumer(
         ["tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts"],
         environment,
         paths,
-        async ({ runRoot }: { runRoot: string }) => {
+        async ({ runRoot, baseEnv }: { runRoot: string; baseEnv: NodeJS.ProcessEnv }) => {
           preparations++;
           expect(runRoot).toBe(paths.root);
+          expect(baseEnv).toBe(environment);
           return {
             descriptorPath,
             tarballPath: join(paths.root, "prepared-packed-consumer", "pack", "bobbit.tgz"),
@@ -926,16 +931,22 @@ describe("unit run isolation", () => {
           };
         },
       );
+      Object.freeze(environment);
 
       expect(preparations).toBe(1);
       expect(result).toMatchObject({ selected: true, descriptorPath });
+      expect(groupBEnvironment).not.toBe(environment);
+      expect(Object.isFrozen(groupBEnvironment)).toBe(true);
+      expect(Object.isFrozen(environment)).toBe(true);
+      expect(groupBEnvironment.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE).toBe(bundlePath);
+      expect(groupBEnvironment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
+      expect(environment.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE).toBeUndefined();
       expect(environment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBe(descriptorPath);
 
       // Match the full Group-C launch: playwright-e2e.config installs run
       // isolation before workers start, stripping the handoff pathname while
       // retaining the authoritative fresh run root. The worker must still
       // discover exactly the descriptor prepared above, without another pack.
-      environment.BOBBIT_V2_RUN_ROOT = paths.root;
       const workerEnvironment = sanitizeTestEnvironment(environment);
       expect(workerEnvironment.BOBBIT_PACKED_CONSUMER_DESCRIPTOR).toBeUndefined();
       expect(resolvePackedConsumerDescriptorPath(workerEnvironment, workerEnvironment.BOBBIT_V2_RUN_ROOT!)).toBe(descriptorPath);

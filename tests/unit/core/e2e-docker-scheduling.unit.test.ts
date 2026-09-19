@@ -5,6 +5,7 @@ import {
 	prepareE2EDistServerPrebundle,
 	resolveE2ePlaywrightWorkers,
 	resolveE2ERetryCount,
+	runGroupBWithPackedConsumerPreparation,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 import {
 	isDockerSandboxAvailable,
@@ -18,6 +19,16 @@ function capabilityProbe(daemonAvailable: boolean, imageAvailable: boolean, call
 		calls.push({ args, timeoutMs });
 		return args[0] === "info" ? daemonAvailable : imageAvailable;
 	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
 }
 
 describe("E2E Docker capability and scheduling", () => {
@@ -39,7 +50,7 @@ describe("E2E Docker capability and scheduling", () => {
 		}
 	});
 
-	it("runs A → B → cache fan-out → C → D serially without changing retries or workers", () => {
+	it("runs A → prebundle → concurrent B/preparation barrier → cache fan-out → C → D without changing retries or workers", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
 		expect(defaultSchedule).toBeDefined();
@@ -47,9 +58,9 @@ describe("E2E Docker capability and scheduling", () => {
 		const steps = [
 			"await runGroupA(A, coordinatorEnv)",
 			"await prepareE2EDistServerPrebundle(paths, coordinatorEnv)",
-			"sharedPlaywrightEnv.BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE = bundle.bundlePath",
-			"await runSerialGroupB(B, sharedPlaywrightEnv, paths, groupBWorkers, retries)",
-			'deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE")',
+			"createSerialPlaywrightEnvironment(coordinatorEnv)",
+			"const groupBEnvironment = Object.freeze(composeE2EChildEnvironment",
+			"const paired = await runGroupBWithPackedConsumerPreparation({",
 			"fanOutSerialTransformCache(paths.cacheRoot, paths.root)",
 			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath)",
 			"await runGroupD(D, { coordinatorEnv })",
@@ -60,9 +71,17 @@ describe("E2E Docker capability and scheduling", () => {
 			expect(position, step).toBeGreaterThan(previous);
 			previous = position;
 		}
-		expect(defaultSchedule).toContain("createSerialPlaywrightEnvironment(coordinatorEnv)");
+		const barrierStart = defaultSchedule!.indexOf("const paired = await runGroupBWithPackedConsumerPreparation({");
+		const barrierEnd = defaultSchedule!.indexOf("});", barrierStart);
+		const barrier = defaultSchedule!.slice(barrierStart, barrierEnd);
+		expect(barrier.indexOf("runSerialGroupB(B, groupBEnvironment")).toBeGreaterThanOrEqual(0);
+		expect(barrier.indexOf("prepareGroupCPackedConsumer(C, sharedPlaywrightEnv")).toBeGreaterThan(
+			barrier.indexOf("runSerialGroupB(B, groupBEnvironment"),
+		);
+		expect(barrier).toContain("results.push(groupBResult)");
+		expect(barrier).toContain('captureLatestProfile("B")');
+		expect(defaultSchedule).toContain("Object.freeze(sharedPlaywrightEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
-		expect(defaultSchedule).not.toContain("Promise.all");
 		expect(resolveE2ERetryCount({})).toBe(3);
 		expect(resolveE2ePlaywrightWorkers({})).toBe(2);
 		expect(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "4" })).toBe(4);
@@ -78,6 +97,70 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(cleanupCall).toContain('coordinator: { pid: process.pid, state: "groups-settled" }');
 		expect(cleanupCall).toContain('sampler: { state: "stopped"');
 		expect(cleanupCall).toContain('state: "written"');
+	});
+
+	it.each(["group-b", "preparation"] as const)("waits at the overlap barrier when %s settles first", async (first) => {
+		const groupB = deferred<{ code: number }>();
+		const preparation = deferred<{ selected: boolean }>();
+		const events: string[] = [];
+		const running = runGroupBWithPackedConsumerPreparation({
+			runGroupB: () => {
+				events.push("start-b");
+				return groupB.promise;
+			},
+			preparePackedConsumer: () => {
+				events.push("start-preparation");
+				return preparation.promise;
+			},
+			onGroupBSettled: () => events.push("profile-b"),
+		});
+		let settled = false;
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		expect(events).toEqual(["start-b", "start-preparation"]);
+
+		if (first === "group-b") groupB.resolve({ code: 0 });
+		else preparation.resolve({ selected: true });
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(events.includes("profile-b")).toBe(first === "group-b");
+
+		if (first === "group-b") preparation.resolve({ selected: true });
+		else groupB.resolve({ code: 0 });
+		await expect(running).resolves.toEqual({ groupB: { code: 0 }, packedConsumer: { selected: true } });
+		expect(events).toEqual(["start-b", "start-preparation", "profile-b"]);
+	});
+
+	it("waits for B and retains its nonzero result before propagating preparation failure", async () => {
+		const groupB = deferred<{ code: number }>();
+		const preparationFailure = new Error("preparation deadline exhausted");
+		let observedB: { code: number } | undefined;
+		let settled = false;
+		const running = runGroupBWithPackedConsumerPreparation({
+			runGroupB: () => groupB.promise,
+			preparePackedConsumer: () => Promise.reject(preparationFailure),
+			onGroupBSettled: (result: { code: number }) => { observedB = result; },
+		});
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		groupB.resolve({ code: 7 });
+		await expect(running).rejects.toBe(preparationFailure);
+		expect(observedB).toEqual({ code: 7 });
+	});
+
+	it("aggregates simultaneous B and preparation exceptions", async () => {
+		const groupBFailure = new Error("B threw");
+		const preparationFailure = new Error("preparation threw");
+		await expect(runGroupBWithPackedConsumerPreparation({
+			runGroupB: () => Promise.reject(groupBFailure),
+			preparePackedConsumer: () => Promise.reject(preparationFailure),
+		})).rejects.toSatisfy((error: unknown) => {
+			expect(error).toBeInstanceOf(AggregateError);
+			expect((error as AggregateError).errors).toEqual([groupBFailure, preparationFailure]);
+			expect((error as Error).message).toContain("Group B and packed-consumer preparation both failed");
+			return true;
+		});
 	});
 
 	it("reports child build/reuse details after parent-side validation", async () => {

@@ -19,6 +19,7 @@ import {
 	isCompleteOwnedCommandShutdown,
 	lockedTarballsMissingFromRepository,
 	OwnedCommandError,
+	PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
 	preparePackedConsumerFixture,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
@@ -149,6 +150,9 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /await copy\(validated\.templateDir, consumerDir/,
 			"materialization must copy the prepared installed dependency graph");
 		assert.match(source, /const OFFLINE_INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
+		assert.match(source, /export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 \* 60_000;/);
+		assert.match(source, /remainingCommandTimeout\("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS\)/,
+			"the former 600-second install budget must be capped by the preparation-wide deadline");
 		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
 			"spawn-time ownership must have a separate setup deadline before execution timing");
@@ -162,6 +166,7 @@ describe("packed-consumer offline install contract", () => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-pin-"));
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
+		let nowMs = 0;
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		try {
 			await preparePackedConsumerFixture({
@@ -179,8 +184,10 @@ describe("packed-consumer offline install contract", () => {
 				},
 				ensureDist: () => { order.push("ensure-dist"); },
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+				now: () => nowMs,
 				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
 					calls.push({ args: [...args], cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs });
+					nowMs += 5_000;
 					if (args.includes("pack")) {
 						order.push("pack");
 						const packDir = args[args.indexOf("--pack-destination") + 1];
@@ -254,9 +261,10 @@ describe("packed-consumer offline install contract", () => {
 			assert.ok(!calls[3]?.args.includes(calls[1]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
-			assert.equal(calls[1]?.timeoutMs, 5 * 60_000);
+			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
 			assert.equal(calls[2]?.timeoutMs, 3 * 60_000);
-			assert.equal(calls[3]?.timeoutMs, 10 * 60_000);
+			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000,
+				"late commands must receive only the remaining monotonic preparation budget");
 			const inherited: Record<string, string> = {
 				npm_config_cache: "inherited-cache",
 				npm_config_registry: "https://registry.example.test/",
@@ -354,6 +362,72 @@ describe("packed-consumer offline install contract", () => {
 			assert.equal(evidence.commands.length, expectedCommands);
 			assert.equal(evidence.commands.at(-1)?.code, expectedLastCode,
 				"failure evidence must include the last completed command result, including nonzero exits");
+		} finally {
+			rmSync(tempParent, { recursive: true, force: true });
+		}
+	});
+
+	it("caps a live command by the remaining preparation deadline, joins its tree, and retains evidence", async () => {
+		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-deadline-pin-"));
+		const child = Object.assign(new EventEmitter(), {
+			pid: 4242,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let nowMs = 0;
+		let observedTimeoutMs: number | undefined;
+		let killCount = 0;
+		let completionJoins = 0;
+		try {
+			await assert.rejects(preparePackedConsumerFixture({
+				repoRoot: REPO_ROOT,
+				runRoot: tempParent,
+				preparationTimeoutMs: 50,
+				now: () => nowMs,
+				ensureDist: () => { nowMs = 10; },
+				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
+					observedTimeoutMs = options.timeoutMs;
+					return runOwnedCommand(command, args, {
+						cwd: options.cwd,
+						env: options.env,
+						timeoutMs: options.timeoutMs,
+						spawnOwned: async () => ({
+							child,
+							ownershipReady: Promise.resolve(),
+							killTree: () => {
+								killCount++;
+								child.emit("close", null, "SIGKILL");
+							},
+							waitForTreeExit: async () => {
+								completionJoins++;
+								return true;
+							},
+						}),
+						setTimer: (callback: () => void, timeoutMs: number) => {
+							if (timeoutMs === observedTimeoutMs) queueMicrotask(callback);
+							return Symbol(`timer-${timeoutMs}`);
+						},
+						clearTimer: () => {},
+						setCompletionTimer: () => Symbol("completion-timer"),
+						clearCompletionTimer: () => {},
+					});
+				},
+			}), (error: Error) => {
+				assert.match(error.message, /retained partial fixture and command evidence/);
+				assert.match(error.message, /timed out after 40ms/);
+				return true;
+			});
+
+			assert.equal(observedTimeoutMs, 40, "npm pack receives only the deadline remainder after build preparation");
+			assert.equal(killCount, 1, "deadline expiry terminates the one owned process tree");
+			assert.equal(completionJoins, 1, "preparation does not reject until complete tree exit is verified");
+			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
+			const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+			assert.match(evidence.error.message, /timed out after 40ms/);
+			assert.match(evidence.error.message, /tree exit: verified complete/);
+			assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false,
+				"deadline failure must not publish a descriptor that could start Group C");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });
 		}
