@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -473,6 +473,60 @@ describe("owned path cleanup contract", () => {
 			}
 			await rm(fixtureBase, { recursive: true, force: true });
 			await rm(external, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ platform: "win32" as const, linkType: "junction" as const, enabled: process.platform === "win32" },
+		{ platform: process.platform, linkType: "dir" as const, enabled: process.platform !== "win32" },
+	].filter(testCase => testCase.enabled))("rejects owner-root $linkType rebinding after the target is captured", async ({ platform, linkType }) => {
+		const { removeOwnedPath } = await loadCleanupContract();
+		const fixtureBase = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-root-rebind-"));
+		const ownerRoot = path.join(fixtureBase, "owner");
+		const detachedOwner = path.join(fixtureBase, "detached-owner");
+		const target = path.join(ownerRoot, "worker", "tree");
+		const sentinel = path.join(target, "keep.txt");
+		const detachedSentinel = path.join(detachedOwner, "worker", "tree", "keep.txt");
+		await mkdir(target, { recursive: true });
+		await writeFile(sentinel, "external sentinel");
+		let rebound = false;
+		const unlinkEntry = vi.fn(unlink);
+		const rmdirEntry = vi.fn(rmdir);
+
+		try {
+			const failure = await removeOwnedPath(target, {
+				ownerRoot,
+				platform,
+				maxAttempts: 1,
+				traversalConcurrency: 1,
+				seams: {
+					fs: {
+						readdir: async (candidate, options) => {
+							const entries = await readdir(candidate, options);
+							if (!rebound && path.resolve(candidate) === path.resolve(target)) {
+								rebound = true;
+								await rename(ownerRoot, detachedOwner);
+								await symlink(detachedOwner, ownerRoot, linkType);
+							}
+							return entries;
+						},
+						unlink: unlinkEntry,
+						rmdir: rmdirEntry,
+					},
+				},
+			}).then(() => undefined, (error: unknown) => error);
+
+			expect(rebound).toBe(true);
+			expect(failure).toMatchObject({
+				name: "OwnedPathCleanupError",
+				history: [expect.objectContaining({ code: "EUNSAFEPATH" })],
+			});
+			expect(unlinkEntry, "owner-root rebinding must fail before unlink").not.toHaveBeenCalled();
+			expect(rmdirEntry, "owner-root rebinding must fail before rmdir").not.toHaveBeenCalled();
+			expect(await readFile(detachedSentinel, "utf8")).toBe("external sentinel");
+		} finally {
+			if (rebound) await unlink(ownerRoot).catch(() => {});
+			await rm(fixtureBase, { recursive: true, force: true });
 		}
 	});
 
