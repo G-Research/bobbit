@@ -828,6 +828,7 @@ export function groupDVitestArgs(env = process.env) {
 	return [
 		"run",
 		"--config", "vitest.config.ts",
+		"--project", "v2-e2e-vitest-cli",
 		"--project", "v2-e2e-vitest",
 		"--silent=passed-only",
 		...(isRetryFreeQualification(env) ? ["--retry=0"] : []),
