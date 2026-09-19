@@ -285,7 +285,13 @@ async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal
 	const captured = await captureParentClaim(ownerRoot, target, fsImpl, platform, traversal);
 	if (captured.missing) return;
 
-	let operationRoot;
+	// Child cleanup remains anchored to the identity captured for the
+	// authoritative owner root. Using the target itself as the operation root
+	// would let an owner-root rename/reparse substitution preserve the target
+	// and immediate-parent identities while redirecting later pathname I/O.
+	// Coordinator-owned root deletion has no parent claim, so its target still
+	// becomes the operation root when processEntry captures it below.
+	let operationRoot = captured.claim?.rootClaim;
 	const processEntry = async (candidate, parentClaim, complete, enqueue) => {
 		await assertClaimCurrent(parentClaim, fsImpl, platform, traversal);
 		const stats = await lstatIfPresent(candidate, fsImpl, traversal);
