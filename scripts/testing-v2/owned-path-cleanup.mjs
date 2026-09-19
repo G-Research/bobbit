@@ -1,6 +1,8 @@
+import { fork } from "node:child_process";
 import { lstat, readlink, readdir, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TRANSIENT_REMOVAL_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
 const DEFAULT_MAX_ATTEMPTS = 32;
@@ -8,7 +10,9 @@ const DEFAULT_DEADLINE_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 25;
 const DEFAULT_MAX_DELAY_MS = 500;
 const DEFAULT_TRAVERSAL_CONCURRENCY = 8;
+const DEFAULT_SUBPROCESS_THREAD_POOL_SIZE = 32;
 const CLEANUP_DEADLINE_CODE = "ECLEANUPDEADLINE";
+const CLEANUP_CHILD_ARGUMENT = "--owned-path-cleanup-child";
 
 function isOwnedChild(ownerRoot, target) {
 	const relative = path.relative(ownerRoot, target);
@@ -628,6 +632,194 @@ export async function removeOwnedPath(target, options = {}) {
 		history,
 		elapsedMs: Math.max(0, now() - startedAt),
 		cause: lastError,
+	});
+}
+
+const SUBPROCESS_REMOVE_OPTION_KEYS = [
+	"ownerRoot",
+	"allowOwnerRoot",
+	"owner",
+	"lifecycle",
+	"platform",
+	"maxAttempts",
+	"deadlineMs",
+	"initialDelayMs",
+	"maxDelayMs",
+	"traversalConcurrency",
+];
+const MAX_IPC_TEXT_LENGTH = 16_384;
+const MAX_IPC_TRAVERSAL_RECORDS = 32;
+
+function boundedText(value) {
+	if (typeof value !== "string" || value.length <= MAX_IPC_TEXT_LENGTH) return value;
+	return `${value.slice(0, MAX_IPC_TEXT_LENGTH)}… [truncated ${value.length - MAX_IPC_TEXT_LENGTH} chars]`;
+}
+
+function boundedPlainValue(value) {
+	try {
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined) return undefined;
+		if (encoded.length <= MAX_IPC_TEXT_LENGTH) return JSON.parse(encoded);
+		return { truncated: true, preview: boundedText(encoded) };
+	} catch (error) {
+		return { unavailable: boundedText(error instanceof Error ? error.message : String(error)) };
+	}
+}
+
+function boundedCleanupHistory(history) {
+	if (!Array.isArray(history)) return undefined;
+	return history.slice(-DEFAULT_MAX_ATTEMPTS).map(record => {
+		if (!record || typeof record !== "object") return boundedPlainValue(record);
+		const bounded = {};
+		for (const key of ["attempt", "elapsedMs", "code", "syscall", "path", "dest", "stage", "deadlineMs", "message"]) {
+			if (record[key] !== undefined) bounded[key] = boundedText(record[key]);
+		}
+		if (Array.isArray(record.traversal)) {
+			bounded.traversal = record.traversal.slice(-MAX_IPC_TRAVERSAL_RECORDS).map(boundedPlainValue);
+			if (record.traversal.length > MAX_IPC_TRAVERSAL_RECORDS) {
+				bounded.traversalOmitted = record.traversal.length - MAX_IPC_TRAVERSAL_RECORDS;
+			}
+		}
+		return bounded;
+	});
+}
+
+function serializedCleanupError(error) {
+	if (!(error instanceof Error)) return { name: "Error", message: boundedText(String(error)) };
+	const serialized = {
+		name: boundedText(error.name),
+		message: boundedText(error.message),
+		stack: boundedText(error.stack),
+	};
+	for (const key of ["target", "ownerRoot"]) {
+		if (error[key] !== undefined) serialized[key] = boundedText(error[key]);
+	}
+	for (const key of ["owner", "lifecycle"]) {
+		if (error[key] !== undefined) serialized[key] = boundedPlainValue(error[key]);
+	}
+	if (error.history !== undefined) serialized.history = boundedCleanupHistory(error.history);
+	if (error.elapsedMs !== undefined) serialized.elapsedMs = error.elapsedMs;
+	return serialized;
+}
+
+function cleanupErrorFromPayload(payload) {
+	const error = new Error(payload?.message ?? "Owned cleanup subprocess failed");
+	if (payload && typeof payload === "object") Object.assign(error, payload);
+	return error;
+}
+
+/**
+ * Run a large owned removal in a short-lived process with an isolated libuv
+ * filesystem pool. The parent settles only after that process exits, so the
+ * direct remover's deadline/drain/no-background-work contract is unchanged.
+ */
+export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
+	if (options.seams !== undefined) {
+		throw new TypeError("removeOwnedPathInSubprocess does not accept in-process seams");
+	}
+	const threadPoolSize = positiveInteger(
+		options.subprocessThreadPoolSize,
+		DEFAULT_SUBPROCESS_THREAD_POOL_SIZE,
+		"subprocessThreadPoolSize",
+	);
+	const unknownOptions = Object.keys(options).filter(key => key !== "subprocessThreadPoolSize" && !SUBPROCESS_REMOVE_OPTION_KEYS.includes(key));
+	if (unknownOptions.length > 0) {
+		throw new TypeError(`removeOwnedPathInSubprocess received unsupported options: ${unknownOptions.join(", ")}`);
+	}
+	const removeOptions = Object.fromEntries(
+		SUBPROCESS_REMOVE_OPTION_KEYS
+			.filter(key => options[key] !== undefined)
+			.map(key => [key, options[key]]),
+	);
+	let request;
+	try {
+		request = structuredClone({ target, options: removeOptions });
+	} catch (error) {
+		throw new TypeError(`removeOwnedPathInSubprocess options must be serializable: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const forkProcess = seams.forkProcess ?? fork;
+	const modulePath = fileURLToPath(import.meta.url);
+
+	return new Promise((resolve, reject) => {
+		let response;
+		let transportError;
+		let settled = false;
+		const child = forkProcess(modulePath, [CLEANUP_CHILD_ARGUMENT], {
+			env: { ...process.env, UV_THREADPOOL_SIZE: String(threadPoolSize) },
+			execArgv: [],
+			stdio: ["ignore", "inherit", "inherit", "ipc"],
+			windowsHide: true,
+		});
+		const settle = (action, value) => {
+			if (settled) return;
+			settled = true;
+			action(value);
+		};
+		child.once("message", message => {
+			response = message;
+		});
+		child.once("error", error => {
+			// `close` follows `error`; wait for it so the parent never reports
+			// settlement while a partially spawned child could still be alive.
+			transportError = error;
+		});
+		child.once("close", (code, signal) => {
+			if (settled) return;
+			if (code === 0 && response?.ok === true && response.result?.removed === true) {
+				settle(resolve, response.result);
+				return;
+			}
+			let failure;
+			if (response?.ok === false && typeof response.error?.message === "string") {
+				failure = cleanupErrorFromPayload(response.error);
+			} else if (transportError) {
+				failure = transportError;
+			} else if (response === undefined) {
+				failure = new Error(`Owned cleanup subprocess exited without a result (code=${code ?? "null"} signal=${signal ?? "none"})`);
+			} else {
+				failure = new Error(`Owned cleanup subprocess returned a malformed result (code=${code ?? "null"} signal=${signal ?? "none"})`);
+			}
+			settle(reject, failure);
+		});
+		child.send(request, error => {
+			if (!error) return;
+			transportError = error;
+			child.kill();
+		});
+	});
+}
+
+async function runCleanupChild() {
+	const request = await new Promise((resolve, reject) => {
+		process.once("message", resolve);
+		process.once("disconnect", () => reject(new Error("Cleanup parent disconnected before sending work")));
+	});
+	let response;
+	let exitCode = 0;
+	try {
+		response = { ok: true, result: await removeOwnedPath(request.target, request.options) };
+	} catch (error) {
+		response = { ok: false, error: serializedCleanupError(error) };
+		exitCode = 1;
+	}
+	await new Promise((resolve, reject) => {
+		if (typeof process.send !== "function") {
+			reject(new Error("Cleanup child IPC channel is unavailable"));
+			return;
+		}
+		process.send(response, error => error ? reject(error) : resolve());
+	});
+	process.disconnect();
+	process.exitCode = exitCode;
+}
+
+const isCleanupChild = process.argv[1]
+	&& import.meta.url === pathToFileURL(process.argv[1]).href
+	&& process.argv[2] === CLEANUP_CHILD_ARGUMENT;
+if (isCleanupChild) {
+	runCleanupChild().catch(error => {
+		console.error("[owned-path-cleanup] child failed:", error);
+		process.exit(1);
 	});
 }
 

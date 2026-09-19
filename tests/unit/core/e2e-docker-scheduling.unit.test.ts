@@ -170,7 +170,8 @@ describe("E2E Docker capability and scheduling", () => {
 
 	it("uses the bounded high-cardinality cleanup policy and reports terminal timing", async () => {
 		expect(E2E_FINAL_CLEANUP_POLICY).toEqual({
-			traversalConcurrency: 32,
+			traversalConcurrency: 128,
+			subprocessThreadPoolSize: 32,
 			deadlineMs: 30_000,
 		});
 		expect(Object.isFrozen(E2E_FINAL_CLEANUP_POLICY)).toBe(true);

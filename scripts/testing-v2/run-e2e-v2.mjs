@@ -66,7 +66,7 @@ import {
 	preparePackedConsumerFixture,
 	runOwnedCommand,
 } from "./prewarm-packed-consumer-cache.mjs";
-import { removeOwnedPath } from "./owned-path-cleanup.mjs";
+import { removeOwnedPath, removeOwnedPathInSubprocess } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -75,7 +75,11 @@ const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstr
 const CHILD_PROFILE_PRELOAD = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
 const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
 export const E2E_FINAL_CLEANUP_POLICY = Object.freeze({
-	traversalConcurrency: 32,
+	// Keep high-cardinality package trees below the coordinator's outer timeout.
+	// The short-lived cleanup process gets its own bounded libuv filesystem pool;
+	// test subprocesses retain Node's default pool throughout the actual suite.
+	traversalConcurrency: 128,
+	subprocessThreadPoolSize: 32,
 	deadlineMs: 30_000,
 });
 
@@ -227,7 +231,7 @@ export async function finalizeE2ERunCleanup({
 	paths,
 	anyFailed,
 	lifecycle,
-	remove = removeOwnedPath,
+	remove = removeOwnedPathInSubprocess,
 	logInfo = (message) => console.log(message),
 	logError = (message) => console.error(message),
 	now = () => performance.now(),
@@ -237,7 +241,7 @@ export async function finalizeE2ERunCleanup({
 		return 1;
 	}
 	const startedAt = now();
-	logInfo(`[e2e-v2] cleanup start: ${paths.root} (concurrency=${E2E_FINAL_CLEANUP_POLICY.traversalConcurrency}, deadlineMs=${E2E_FINAL_CLEANUP_POLICY.deadlineMs})`);
+	logInfo(`[e2e-v2] cleanup start: ${paths.root} (concurrency=${E2E_FINAL_CLEANUP_POLICY.traversalConcurrency}, threadPoolSize=${E2E_FINAL_CLEANUP_POLICY.subprocessThreadPoolSize}, deadlineMs=${E2E_FINAL_CLEANUP_POLICY.deadlineMs})`);
 	try {
 		await remove(paths.root, {
 			ownerRoot: paths.root,
