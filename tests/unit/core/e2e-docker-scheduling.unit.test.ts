@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	detectDockerSandboxCapability,
+	E2E_FINAL_CLEANUP_POLICY,
+	finalizeE2ERunCleanup,
 	prepareE2EDistServerPrebundle,
 	resolveE2ePlaywrightWorkers,
 	resolveE2ERetryCount,
@@ -139,6 +141,55 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(cleanupCall).toContain('coordinator: { pid: process.pid, state: "groups-settled" }');
 		expect(cleanupCall).toContain('sampler: { state: "stopped"');
 		expect(cleanupCall).toContain('state: "written"');
+	});
+
+	it("uses the bounded high-cardinality cleanup policy and reports terminal timing", async () => {
+		expect(E2E_FINAL_CLEANUP_POLICY).toEqual({
+			traversalConcurrency: 32,
+			deadlineMs: 30_000,
+		});
+		expect(Object.isFrozen(E2E_FINAL_CLEANUP_POLICY)).toBe(true);
+		const paths = { root: "owned-e2e-root", runId: "cleanup-policy" };
+		const info: string[] = [];
+		const errors: string[] = [];
+		const options: Record<string, unknown>[] = [];
+		let clock = 100;
+		const success = await finalizeE2ERunCleanup({
+			paths,
+			anyFailed: false,
+			lifecycle: { groups: "settled" },
+			remove: async (_target: string, removeOptions: Record<string, unknown>) => {
+				options.push(removeOptions);
+				clock = 132;
+			},
+			logInfo: (message: string) => info.push(message),
+			logError: (message: string) => errors.push(message),
+			now: () => clock,
+		});
+		expect(success).toBe(0);
+		expect(options).toEqual([expect.objectContaining(E2E_FINAL_CLEANUP_POLICY)]);
+		expect(info).toEqual([
+			expect.stringContaining("cleanup start"),
+			expect.stringContaining("cleanup success in 32.0ms"),
+		]);
+		expect(errors).toEqual([]);
+
+		clock = 200;
+		const failure = await finalizeE2ERunCleanup({
+			paths,
+			anyFailed: false,
+			lifecycle: { groups: "settled" },
+			remove: async () => {
+				clock = 230;
+				throw new Error("terminal cleanup failure");
+			},
+			logInfo: (message: string) => info.push(message),
+			logError: (message: string) => errors.push(message),
+			now: () => clock,
+		});
+		expect(failure).toBe(1);
+		expect(errors.at(-1)).toContain("cleanup failed in 30.0ms");
+		expect(errors.at(-1)).toContain("terminal cleanup failure");
 	});
 
 	it.each(["group-b", "preparation"] as const)("waits at the overlap barrier when %s settles first", async (first) => {

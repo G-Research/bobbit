@@ -8,6 +8,7 @@ const DEFAULT_DEADLINE_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 25;
 const DEFAULT_MAX_DELAY_MS = 500;
 const DEFAULT_TRAVERSAL_CONCURRENCY = 8;
+const CLEANUP_DEADLINE_CODE = "ECLEANUPDEADLINE";
 
 function isOwnedChild(ownerRoot, target) {
 	const relative = path.relative(ownerRoot, target);
@@ -38,9 +39,10 @@ function positiveInteger(value, fallback, name) {
 function errorAttempt(error, attempt, elapsedMs, traversal) {
 	const record = { attempt, elapsedMs };
 	if (error && typeof error === "object") {
-		for (const key of ["code", "syscall", "path", "dest"]) {
+		for (const key of ["code", "syscall", "path", "dest", "stage"]) {
 			if (typeof error[key] === "string") record[key] = error[key];
 		}
+		if (Number.isFinite(error.deadlineMs)) record.deadlineMs = error.deadlineMs;
 	}
 	if (traversal.length > 0) record.traversal = traversal;
 	record.message = error instanceof Error ? error.message : String(error);
@@ -50,11 +52,64 @@ function errorAttempt(error, attempt, elapsedMs, traversal) {
 function errorFields(error) {
 	const fields = {};
 	if (error && typeof error === "object") {
-		for (const key of ["code", "syscall", "path", "dest"]) {
+		for (const key of ["code", "syscall", "path", "dest", "stage"]) {
 			if (typeof error[key] === "string") fields[key] = error[key];
 		}
 	}
 	return fields;
+}
+
+function createDeadlineGuard({ deadlineMs, startedAt, now }) {
+	const expiresAt = startedAt + deadlineMs;
+	let failure;
+	const checkpoint = (stage, currentPath) => {
+		if (failure) throw failure;
+		const elapsedMs = Math.max(0, now() - startedAt);
+		if (elapsedMs < deadlineMs) return;
+		failure = Object.assign(
+			new Error(`Owned-path cleanup deadline expired during ${stage} at "${currentPath}" after ${elapsedMs}ms (deadline ${deadlineMs}ms)`),
+			{
+				code: CLEANUP_DEADLINE_CODE,
+				stage,
+				path: currentPath,
+				deadlineMs,
+				elapsedMs,
+				expiresAt,
+			},
+		);
+		throw failure;
+	};
+	return { checkpoint, get failure() { return failure; }, expiresAt };
+}
+
+async function runGuardedBoundary(guard, stage, currentPath, operation) {
+	guard.checkpoint(stage, currentPath);
+	try {
+		const result = await operation();
+		guard.checkpoint(stage, currentPath);
+		return result;
+	} catch (error) {
+		// If the I/O itself crossed the immutable expiry, the deadline is the
+		// authoritative failure. The operation is already settled before this
+		// checkpoint can reject, so no work is abandoned.
+		guard.checkpoint(stage, currentPath);
+		throw error;
+	}
+}
+
+function lifecycleWithDeadline(lifecycle, error) {
+	if (error?.code !== CLEANUP_DEADLINE_CODE) return lifecycle;
+	const base = lifecycle && typeof lifecycle === "object"
+		? { ...lifecycle }
+		: { suppliedLifecycle: lifecycle ?? null };
+	base.cleanupDeadline = {
+		code: error.code,
+		stage: error.stage,
+		path: error.path,
+		deadlineMs: error.deadlineMs,
+		elapsedMs: error.elapsedMs,
+	};
+	return base;
 }
 
 function stableIdentity(stats) {
@@ -81,9 +136,9 @@ function recordDetectionFailure(traversal, candidate, operation, error) {
 	});
 }
 
-async function lstatIfPresent(candidate, fsImpl, traversal) {
+async function lstatIfPresent(candidate, fsImpl, traversal, guard) {
 	try {
-		return await fsImpl.lstat(candidate);
+		return await runGuardedBoundary(guard, "lstat", candidate, () => fsImpl.lstat(candidate));
 	} catch (error) {
 		if (error?.code === "ENOENT") return undefined;
 		recordDetectionFailure(traversal, candidate, "lstat", error);
@@ -91,7 +146,7 @@ async function lstatIfPresent(candidate, fsImpl, traversal) {
 	}
 }
 
-async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
+async function classifyEntry(candidate, stats, fsImpl, platform, traversal, guard) {
 	const identity = stableIdentity(stats);
 	if (identity === undefined) {
 		recordDetectionFailure(traversal, candidate, "stable-identity", unsafePathError(candidate, "filesystem identity is unavailable"));
@@ -100,8 +155,10 @@ async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
 
 	if (stats.isSymbolicLink()) {
 		try {
-			return { type: platform === "win32" ? "junction-or-symbolic-link" : "symbolic-link", identity, target: await fsImpl.readlink(candidate) };
+			const target = await runGuardedBoundary(guard, "readlink", candidate, () => fsImpl.readlink(candidate));
+			return { type: platform === "win32" ? "junction-or-symbolic-link" : "symbolic-link", identity, target };
 		} catch (error) {
+			if (error?.code === CLEANUP_DEADLINE_CODE) throw error;
 			recordDetectionFailure(traversal, candidate, "readlink", error);
 			throw unsafePathError(candidate, "link target could not be identified", error);
 		}
@@ -109,9 +166,10 @@ async function classifyEntry(candidate, stats, fsImpl, platform, traversal) {
 
 	if (stats.isDirectory() && platform === "win32") {
 		try {
-			const target = await fsImpl.readlink(candidate);
+			const target = await runGuardedBoundary(guard, "readlink-directory-probe", candidate, () => fsImpl.readlink(candidate));
 			return { type: "directory-reparse-point", identity, target };
 		} catch (error) {
+			if (error?.code === CLEANUP_DEADLINE_CODE) throw error;
 			// Current Node releases identify junctions as symbolic links. The probe
 			// also protects older/runtime-specific representations where lstat
 			// reports a directory. EINVAL is the sole expected answer for a genuine
@@ -140,32 +198,42 @@ function entryMatchesClaim(entry, claim) {
  * pathname still reaches the exact authorized directory; the root claim fences
  * replacement of the operation tree itself.
  */
-async function assertClaimCurrent(claim, fsImpl, platform, traversal) {
+async function assertClaimCurrent(claim, fsImpl, platform, traversal, guard, probeDirectories = false) {
 	if (!claim) return;
 	const claims = new Set([claim.rootClaim, claim.parent, claim]);
 	claims.delete(undefined);
 	for (const currentClaim of claims) {
-		const current = await lstatIfPresent(currentClaim.path, fsImpl, traversal);
+		const current = await lstatIfPresent(currentClaim.path, fsImpl, traversal, guard);
 		if (!current) throw unsafePathError(currentClaim.path, "an entry disappeared during removal");
-		const entry = await classifyEntry(currentClaim.path, current, fsImpl, platform, traversal);
+		// Initial capture proves an ordinary directory with the Windows readlink
+		// probe. Revalidation can compare its stable identity plus lstat type;
+		// repeat the expensive throwing probe only at a directory-delete boundary.
+		// Links always re-read their target, and any junction reported as a link
+		// therefore still fails the type/target comparison before pathname I/O.
+		const entry = !probeDirectories
+			&& currentClaim.type === "directory"
+			&& current.isDirectory()
+			&& !current.isSymbolicLink()
+			? { type: "directory", identity: stableIdentity(current) }
+			: await classifyEntry(currentClaim.path, current, fsImpl, platform, traversal, guard);
 		if (!entryMatchesClaim(entry, currentClaim)) {
 			throw unsafePathError(currentClaim.path, "entry identity, type, or link target changed during removal");
 		}
 	}
 }
 
-async function withCurrentClaim(claim, fsImpl, platform, traversal, operation) {
-	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+async function withCurrentClaim(claim, fsImpl, platform, traversal, guard, stage, operation) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal, guard);
 	let result;
 	try {
-		result = await operation();
+		result = await runGuardedBoundary(guard, stage, claim.path, operation);
 	} catch (operationError) {
 		// Prefer an identity error when namespace replacement caused the I/O
 		// failure; otherwise preserve the original filesystem error for retry.
-		await assertClaimCurrent(claim, fsImpl, platform, traversal);
+		await assertClaimCurrent(claim, fsImpl, platform, traversal, guard);
 		throw operationError;
 	}
-	await assertClaimCurrent(claim, fsImpl, platform, traversal);
+	await assertClaimCurrent(claim, fsImpl, platform, traversal, guard);
 	return result;
 }
 
@@ -182,26 +250,29 @@ function makeClaim(candidate, entry, parent, operationRoot) {
 	return claim;
 }
 
-async function removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence) {
-	await assertClaimCurrent(claim, fsImpl, platform, traversal);
-	if (claim.type === "directory-reparse-point") await fsImpl.rmdir(claim.path);
-	else await fsImpl.unlink(claim.path);
-	const residual = await lstatIfPresent(claim.path, fsImpl, traversal);
+async function removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence, guard) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal, guard);
+	if (claim.type === "directory-reparse-point") {
+		await runGuardedBoundary(guard, "rmdir-reparse-point", claim.path, () => fsImpl.rmdir(claim.path));
+	} else {
+		await runGuardedBoundary(guard, "unlink", claim.path, () => fsImpl.unlink(claim.path));
+	}
+	const residual = await lstatIfPresent(claim.path, fsImpl, traversal, guard);
 	if (residual) throw unsafePathError(claim.path, "entry remained or was replaced after non-recursive removal");
-	await assertClaimCurrent(claim.parent, fsImpl, platform, traversal);
+	// No parent recheck is needed after absence is established: every later
+	// destructive boundary independently validates its root/producer claim.
 	if (evidence) evidence.outcome = "removed";
 }
 
-async function removeClaimedDirectory(claim, fsImpl, platform, traversal) {
-	await assertClaimCurrent(claim, fsImpl, platform, traversal);
-	await fsImpl.rmdir(claim.path);
-	const residual = await lstatIfPresent(claim.path, fsImpl, traversal);
+async function removeClaimedDirectory(claim, fsImpl, platform, traversal, guard) {
+	await assertClaimCurrent(claim, fsImpl, platform, traversal, guard, true);
+	await runGuardedBoundary(guard, "rmdir", claim.path, () => fsImpl.rmdir(claim.path));
+	const residual = await lstatIfPresent(claim.path, fsImpl, traversal, guard);
 	if (residual) throw unsafePathError(claim.path, "directory remained or was replaced after removal");
-	await assertClaimCurrent(claim.parent, fsImpl, platform, traversal);
 }
 
 /** Run dynamically discovered entry work with one operation-level ceiling. */
-async function processRemovalQueue(initialJob, concurrency) {
+async function processRemovalQueue(initialJob, concurrency, guard, target) {
 	await new Promise((resolve, reject) => {
 		let queue = [];
 		let cursor = 0;
@@ -225,12 +296,18 @@ async function processRemovalQueue(initialJob, concurrency) {
 		const finish = error => {
 			active--;
 			outstanding--;
-			if (error !== undefined && !stopped) {
-				stopped = true;
-				firstError = error;
-				outstanding -= queuedCount();
-				queue = [];
-				cursor = 0;
+			if (error !== undefined) {
+				if (!stopped) {
+					stopped = true;
+					firstError = error;
+					outstanding -= queuedCount();
+					queue = [];
+					cursor = 0;
+				} else if (error?.code === CLEANUP_DEADLINE_CODE) {
+					// A deadline observed while already-started peers drain is more
+					// actionable than the transient failure that first stopped admission.
+					firstError = error;
+				}
 			}
 			schedule();
 			settle();
@@ -238,25 +315,26 @@ async function processRemovalQueue(initialJob, concurrency) {
 		const schedule = () => {
 			if (stopped) return;
 			while (active < concurrency && cursor < queue.length) {
-				const job = queue[cursor++];
+				const queued = queue[cursor++];
 				compactQueue();
 				active++;
-				void Promise.resolve().then(job).then(() => finish(), finish);
+				void Promise.resolve().then(queued.job).then(() => finish(), finish);
 			}
 		};
-		const enqueue = job => {
+		const enqueue = (job, context = {}) => {
 			if (stopped) return false;
-			queue.push(job);
+			guard.checkpoint(context.stage ?? "queue-admission", context.path ?? target);
+			queue.push({ job });
 			outstanding++;
 			schedule();
 			return true;
 		};
 
-		enqueue(() => initialJob(enqueue));
+		enqueue(() => initialJob(enqueue), { stage: "queue-admission-root", path: target });
 	});
 }
 
-async function captureParentClaim(ownerRoot, target, fsImpl, platform, traversal) {
+async function captureParentClaim(ownerRoot, target, fsImpl, platform, traversal, guard) {
 	if (ownerRoot === target) return { missing: false, claim: undefined };
 	const relative = path.relative(ownerRoot, path.dirname(target));
 	const segments = relative === "" ? [] : relative.split(path.sep);
@@ -265,9 +343,9 @@ async function captureParentClaim(ownerRoot, target, fsImpl, platform, traversal
 	let current = ownerRoot;
 	for (const segment of ["", ...segments]) {
 		if (segment) current = path.join(current, segment);
-		const stats = await lstatIfPresent(current, fsImpl, traversal);
+		const stats = await lstatIfPresent(current, fsImpl, traversal, guard);
 		if (!stats) return { missing: true, claim: undefined };
-		const entry = await classifyEntry(current, stats, fsImpl, platform, traversal);
+		const entry = await classifyEntry(current, stats, fsImpl, platform, traversal, guard);
 		if (entry.type !== "directory") {
 			traversal.push({ type: "unsafe-ancestor", path: current, entryType: entry.type, target: entry.target });
 			throw unsafePathError(current, "target traversal would cross a link, reparse point, or non-directory");
@@ -281,8 +359,8 @@ async function captureParentClaim(ownerRoot, target, fsImpl, platform, traversal
 	return { missing: false, claim };
 }
 
-async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal, concurrency) {
-	const captured = await captureParentClaim(ownerRoot, target, fsImpl, platform, traversal);
+async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal, concurrency, guard) {
+	const captured = await captureParentClaim(ownerRoot, target, fsImpl, platform, traversal, guard);
 	if (captured.missing) return;
 
 	// Child cleanup remains anchored to the identity captured for the
@@ -293,14 +371,19 @@ async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal
 	// becomes the operation root when processEntry captures it below.
 	let operationRoot = captured.claim?.rootClaim;
 	const processEntry = async (candidate, parentClaim, complete, enqueue) => {
-		await assertClaimCurrent(parentClaim, fsImpl, platform, traversal);
-		const stats = await lstatIfPresent(candidate, fsImpl, traversal);
+		guard.checkpoint("entry-start", candidate);
+		// Capturing metadata is non-destructive. The leaf delete or directory read
+		// below validates the resulting claim together with its producer and root
+		// immediately around the first pathname I/O that can mutate or enumerate.
+		const stats = await lstatIfPresent(candidate, fsImpl, traversal, guard);
 		if (!stats) {
 			complete();
 			return;
 		}
-		await assertClaimCurrent(parentClaim, fsImpl, platform, traversal);
-		const entry = await classifyEntry(candidate, stats, fsImpl, platform, traversal);
+		const entry = await classifyEntry(candidate, stats, fsImpl, platform, traversal, guard);
+		// The leaf deletion or directory read that follows revalidates this entry,
+		// its producer, and the operation root immediately around pathname I/O.
+		// Avoid a duplicate parent/root probe here for every high-cardinality leaf.
 		const claim = makeClaim(candidate, entry, parentClaim, operationRoot);
 		if (!operationRoot) {
 			operationRoot = claim;
@@ -318,7 +401,7 @@ async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal
 				};
 				traversal.push(evidence);
 			}
-			await removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence);
+			await removeClaimedLeaf(claim, fsImpl, platform, traversal, evidence, guard);
 			complete();
 			return;
 		}
@@ -328,10 +411,12 @@ async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal
 			fsImpl,
 			platform,
 			traversal,
+			guard,
+			"readdir",
 			() => fsImpl.readdir(candidate, { withFileTypes: true }),
 		);
 		if (entries.length === 0) {
-			await removeClaimedDirectory(claim, fsImpl, platform, traversal);
+			await removeClaimedDirectory(claim, fsImpl, platform, traversal, guard);
 			complete();
 			return;
 		}
@@ -341,23 +426,26 @@ async function removePathNoFollow(target, ownerRoot, fsImpl, platform, traversal
 			remaining--;
 			if (remaining !== 0) return;
 			enqueue(async () => {
-				await removeClaimedDirectory(claim, fsImpl, platform, traversal);
+				await removeClaimedDirectory(claim, fsImpl, platform, traversal, guard);
 				complete();
-			});
+			}, { stage: "queue-admission-directory", path: claim.path });
 		};
 		for (const child of entries) {
+			const childPath = path.join(candidate, child.name);
 			enqueue(() => processEntry(
-				path.join(candidate, child.name),
+				childPath,
 				claim,
 				childComplete,
 				enqueue,
-			));
+			), { stage: "queue-admission-entry", path: childPath });
 		}
 	};
 
 	await processRemovalQueue(
 		enqueue => processEntry(target, captured.claim, () => {}, enqueue),
 		concurrency,
+		guard,
+		target,
 	);
 }
 
@@ -380,12 +468,13 @@ function diagnosticJson(value) {
 /** A terminal removal failure carrying the complete cleanup history. */
 export class OwnedPathCleanupError extends Error {
 	constructor({ target, ownerRoot, owner, lifecycle, history, elapsedMs, cause }) {
+		const attempts = history.reduce((maximum, record) => Math.max(maximum, record.attempt ?? 0), 0);
 		const details = {
 			target,
 			ownerRoot,
 			owner: owner ?? null,
 			elapsedMs,
-			attempts: history.length,
+			attempts,
 			history,
 			lifecycle: lifecycle ?? null,
 		};
@@ -397,7 +486,7 @@ export class OwnedPathCleanupError extends Error {
 		this.target = target;
 		this.ownerRoot = ownerRoot;
 		this.owner = owner;
-		this.attempts = history.length;
+		this.attempts = attempts;
 		this.elapsedMs = elapsedMs;
 		this.history = history;
 		this.lifecycle = lifecycle;
@@ -451,6 +540,11 @@ export async function removeOwnedPath(target, options = {}) {
 		unlink,
 		...options.seams?.fs,
 	};
+	const sleep = options.seams?.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
+	const now = options.seams?.now ?? (() => performance.now());
+	const history = [];
+	const startedAt = now();
+	const deadlineGuard = createDeadlineGuard({ deadlineMs, startedAt, now });
 	// The whole-attempt override exists only for deterministic retry-policy tests.
 	// Production callers always use the no-follow traversal above.
 	const remove = options.seams?.remove
@@ -461,29 +555,19 @@ export async function removeOwnedPath(target, options = {}) {
 			platform,
 			traversal,
 			traversalConcurrency,
+			deadlineGuard,
 		));
-	const sleep = options.seams?.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
-	const now = options.seams?.now ?? (() => performance.now());
-	const history = [];
-	const startedAt = now();
 	let lastError;
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const elapsedMs = Math.max(0, now() - startedAt);
-		if (attempt > 1 && elapsedMs >= deadlineMs) {
-			throw new OwnedPathCleanupError({
-				target: resolvedTarget,
-				ownerRoot,
-				owner: options.owner,
-				lifecycle: options.lifecycle,
-				history,
-				elapsedMs,
-				cause: lastError,
-			});
-		}
 		const traversal = [];
 		try {
+			deadlineGuard.checkpoint("attempt-start", resolvedTarget);
 			await remove(resolvedTarget, traversal);
+			// Whole-attempt test seams do not receive the production traversal
+			// guard, so recheck before reporting their completion as successful.
+			deadlineGuard.checkpoint("attempt-complete", resolvedTarget);
 			history.push({ attempt, elapsedMs, ...(traversal.length > 0 ? { traversal } : {}) });
 			return { removed: true, attempts: attempt, history };
 		} catch (error) {
@@ -508,13 +592,29 @@ export async function removeOwnedPath(target, options = {}) {
 					target: resolvedTarget,
 					ownerRoot,
 					owner: options.owner,
-					lifecycle: options.lifecycle,
+					lifecycle: lifecycleWithDeadline(options.lifecycle, lastError),
 					history,
 					elapsedMs: currentElapsedMs,
 					cause: lastError,
 				});
 			}
 			await sleep(delayMs);
+			try {
+				deadlineGuard.checkpoint("retry-delay", resolvedTarget);
+			} catch (deadlineError) {
+				lastError = deadlineError;
+				const afterDelayElapsedMs = Math.max(0, now() - startedAt);
+				history.push(errorAttempt(deadlineError, attempt, afterDelayElapsedMs, []));
+				throw new OwnedPathCleanupError({
+					target: resolvedTarget,
+					ownerRoot,
+					owner: options.owner,
+					lifecycle: lifecycleWithDeadline(options.lifecycle, deadlineError),
+					history,
+					elapsedMs: afterDelayElapsedMs,
+					cause: deadlineError,
+				});
+			}
 		}
 	}
 
@@ -524,7 +624,7 @@ export async function removeOwnedPath(target, options = {}) {
 		target: resolvedTarget,
 		ownerRoot,
 		owner: options.owner,
-		lifecycle: options.lifecycle,
+		lifecycle: lifecycleWithDeadline(options.lifecycle, lastError),
 		history,
 		elapsedMs: Math.max(0, now() - startedAt),
 		cause: lastError,
