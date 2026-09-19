@@ -50,6 +50,18 @@ describe("E2E Docker capability and scheduling", () => {
 		}
 	});
 
+	it.each([
+		[{}, 2],
+		[{ E2E_V2_PW_WORKERS: "1" }, 1],
+		[{ E2E_V2_PW_WORKERS: "2" }, 2],
+		[{ E2E_V2_PW_WORKERS: "3" }, 3],
+		[{ E2E_V2_PW_WORKERS: "4" }, 4],
+		[{ E2E_V2_PW_WORKERS: "5" }, 4],
+		[{ E2E_V2_PW_WORKERS: "invalid" }, 2],
+	] as const)("resolves the bounded Group B worker policy from %j", (env, expected) => {
+		expect(resolveE2ePlaywrightWorkers(env)).toBe(expected);
+	});
+
 	it("runs A → prebundle → concurrent B/preparation barrier → cache fan-out → C → D without changing retries or workers", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
@@ -83,10 +95,19 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(defaultSchedule).toContain("Object.freeze(sharedPlaywrightEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
 		expect(resolveE2ERetryCount({})).toBe(3);
-		expect(resolveE2ePlaywrightWorkers({})).toBe(2);
-		expect(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "4" })).toBe(4);
-		expect(defaultSchedule).toContain("const groupBWorkers = process.platform === \"win32\"");
+		expect(defaultSchedule).toContain("const groupBWorkers = resolveE2ePlaywrightWorkers()");
 		expect(defaultSchedule).toContain("const groupCWorkers = resolveE2ePlaywrightWorkers()");
+		const focusedGroupB = source.slice(
+			source.indexOf("async function runGroupB("),
+			source.indexOf("async function runSerialGroupB("),
+		);
+		expect(focusedGroupB).toContain("const pwWorkers = resolveE2ePlaywrightWorkers()");
+		const reportCapacity = source.slice(
+			source.indexOf("\n\t\tcapacity: {"),
+			source.indexOf("\n\t\t},", source.indexOf("\n\t\tcapacity: {")),
+		);
+		expect(reportCapacity).toContain("B: resolveE2ePlaywrightWorkers()");
+		expect(source).not.toContain('process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1');
 		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
 		const reportAt = source.indexOf("const report = {");
 		const bundleFieldAt = source.indexOf("\n\t\tbundle,", reportAt);
