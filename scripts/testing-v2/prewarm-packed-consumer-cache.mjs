@@ -13,7 +13,8 @@ import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import { pipeline } from "node:stream/promises";
+import { Writable } from "node:stream";
+import { finished, pipeline } from "node:stream/promises";
 import cacache from "cacache";
 import { ensureDistBuild } from "./ensure-dist.mjs";
 
@@ -647,7 +648,6 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 }
 
 const DEFAULT_CONTENT_CACHE = Object.freeze({
-	hasContent: (cache, integrity) => cacache.get.hasContent(cache, integrity),
 	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
 	createWriteStream: (cache, key, options) => cacache.put.stream(cache, key, options),
 });
@@ -660,6 +660,43 @@ function transferKey(artifact) {
 	return `packed-consumer:${artifact.resolved}`;
 }
 
+function streamSettlementError(error) {
+	if (!error) return "unknown";
+	return error.code ?? error.name ?? "error";
+}
+
+async function destroyAndSettleStreams(streams) {
+	const opened = streams.filter(([, stream]) => stream !== undefined);
+	const settlements = opened.map(async ([role, stream]) => {
+		try {
+			await finished(stream, { cleanup: true });
+			return `${role}:closed`;
+		} catch (error) {
+			return `${role}:closed:${streamSettlementError(error)}`;
+		}
+	});
+	for (const [, stream] of opened) stream.destroy?.();
+	return Promise.all(settlements);
+}
+
+function cacheOperationError(stage, artifact, error, abort, settlements) {
+	const deadlineAborted = abort.signal.aborted;
+	const cause = deadlineAborted && abort.signal.reason instanceof Error ? abort.signal.reason : error;
+	const operationError = new Error(
+		`Packed-consumer ${stage} failed for ${artifact.resolved} (${artifact.integrity}); ` +
+		`deadlineAborted=${deadlineAborted}; streams=${settlements.join(",")}: ${cause instanceof Error ? cause.message : String(cause)}`,
+		{ cause },
+	);
+	operationError.cacheOperation = {
+		stage,
+		resolved: artifact.resolved,
+		integrity: artifact.integrity,
+		deadlineAborted,
+		streams: settlements,
+	};
+	return operationError;
+}
+
 async function transferArtifact({
 	artifact,
 	sourceContentCache,
@@ -669,23 +706,24 @@ async function transferArtifact({
 	setTimer,
 	clearTimer,
 }) {
-	let sourceHit;
-	try {
-		sourceHit = await contentCache.hasContent(sourceContentCache, artifact.integrity);
-	} catch (error) {
-		if (cacheMiss(error)) return false;
-		throw error;
-	}
-	if (!sourceHit) return false;
-	const remainingMs = remainingPreparationMs(`cache transfer ${artifact.integrity}`);
+	const stage = "cache transfer";
+	const remainingMs = remainingPreparationMs(`${stage} ${artifact.integrity}`);
 	const abort = new AbortController();
 	const timer = setTimer(() => abort.abort(new Error(
-		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved}`,
+		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
 	)), remainingMs);
 	let source;
 	let destination;
+	let sourceError;
+	let operationError;
 	try {
-		source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
+		try {
+			source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
+		} catch (error) {
+			sourceError = error;
+			throw error;
+		}
+		source.once?.("error", error => { sourceError ??= error; });
 		destination = contentCache.createWriteStream(
 			destinationContentCache,
 			transferKey(artifact),
@@ -693,17 +731,18 @@ async function transferArtifact({
 		);
 		await pipeline(source, destination, { signal: abort.signal });
 		remainingPreparationMs(`post-transfer verification ${artifact.integrity}`);
-		return true;
 	} catch (error) {
-		if (!abort.signal.aborted && cacheMiss(error)) return false;
-		throw error;
+		operationError = error;
 	} finally {
 		clearTimer(timer);
-		// pipeline() normally destroys both streams itself. These calls also fence
-		// adapters that reject before attaching the whole chain.
-		source?.destroy?.();
-		destination?.destroy?.();
 	}
+	if (!operationError) return true;
+	const settlements = await destroyAndSettleStreams([
+		["source", source],
+		["destination", destination],
+	]);
+	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
+	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
 }
 
 async function transferAvailableArtifacts({
@@ -760,18 +799,68 @@ async function transferAvailableArtifacts({
 	};
 }
 
-async function verifyDestinationArtifacts(artifacts, destinationContentCache, contentCache, remainingPreparationMs) {
+async function verifyDestinationArtifact({
+	artifact,
+	destinationContentCache,
+	contentCache,
+	remainingPreparationMs,
+	setTimer,
+	clearTimer,
+}) {
+	const stage = "destination digest verification";
+	const remainingMs = remainingPreparationMs(`${stage} ${artifact.integrity}`);
+	const abort = new AbortController();
+	const timer = setTimer(() => abort.abort(new Error(
+		`Packed-consumer destination verification exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
+	)), remainingMs);
+	let source;
+	let discard;
+	let sourceError;
+	let operationError;
+	try {
+		try {
+			source = contentCache.createReadStream(destinationContentCache, artifact.integrity);
+		} catch (error) {
+			sourceError = error;
+			throw error;
+		}
+		source.once?.("error", error => { sourceError ??= error; });
+		discard = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+		await pipeline(source, discard, { signal: abort.signal });
+		remainingPreparationMs(`post-${stage} ${artifact.integrity}`);
+	} catch (error) {
+		operationError = error;
+	} finally {
+		clearTimer(timer);
+	}
+	if (!operationError) return true;
+	const settlements = await destroyAndSettleStreams([
+		["source", source],
+		["discard", discard],
+	]);
+	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
+	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
+}
+
+async function verifyDestinationArtifacts({
+	artifacts,
+	destinationContentCache,
+	contentCache,
+	remainingPreparationMs,
+	setTimer,
+	clearTimer,
+}) {
 	const missing = [];
 	for (const artifact of artifacts) {
 		if (!artifact.integrity) continue;
-		remainingPreparationMs(`destination digest verification ${artifact.integrity}`);
-		let present;
-		try {
-			present = await contentCache.hasContent(destinationContentCache, artifact.integrity);
-		} catch (error) {
-			if (!cacheMiss(error)) throw error;
-		}
-		remainingPreparationMs(`post-destination digest verification ${artifact.integrity}`);
+		const present = await verifyDestinationArtifact({
+			artifact,
+			destinationContentCache,
+			contentCache,
+			remainingPreparationMs,
+			setTimer,
+			clearTimer,
+		});
 		if (!present) missing.push(`${artifact.resolved} (${artifact.integrity})`);
 	}
 	if (missing.length > 0) {
@@ -834,12 +923,14 @@ function errorEvidence(error) {
 	const aggregate = error instanceof AggregateError ? {
 		errors: [...error.errors].map(errorEvidence),
 	} : {};
+	const cacheOperation = error.cacheOperation ? { cacheOperation: error.cacheOperation } : {};
 	return {
 		name: error.name,
 		message: error.message,
 		stack: error.stack,
 		...owned,
 		...aggregate,
+		...cacheOperation,
 		...(cause === undefined ? {} : { cause: errorEvidence(cause) }),
 	};
 }
@@ -1144,12 +1235,14 @@ export async function preparePackedConsumerFixture({
 				`npm cache population failed for ${failedCacheBatches.map(failure => `batch ${failure.index + 1}`).join(", ")}`,
 			);
 		}
-		await measured("cache verification", () => verifyDestinationArtifacts(
-			selectedArtifacts,
+		await measured("cache verification", () => verifyDestinationArtifacts({
+			artifacts: selectedArtifacts,
 			destinationContentCache,
 			contentCache,
 			remainingPreparationMs,
-		));
+			setTimer,
+			clearTimer,
+		}));
 		remainingPreparationMs("post-cache verification");
 
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);

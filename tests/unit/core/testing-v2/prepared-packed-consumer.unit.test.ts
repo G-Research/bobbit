@@ -39,7 +39,6 @@ type CommandCall = {
 };
 
 type ContentCache = {
-	hasContent: (cache: string, integrity: string) => Promise<unknown>;
 	createReadStream: (cache: string, integrity: string) => NodeJS.ReadableStream;
 	createWriteStream: (cache: string, key: string, options: { integrity: string }) => NodeJS.WritableStream;
 };
@@ -174,9 +173,16 @@ async function prepareFixture({
 			npm_config_cache: ambientCache,
 		},
 		contentCache: contentCache ?? {
-			hasContent: async cache => cache !== join(ambientCache, "_cacache"),
-			createReadStream: () => { throw new Error("cache miss must not open a source stream"); },
-			createWriteStream: () => { throw new Error("cache miss must not open a destination stream"); },
+			createReadStream: cache => {
+				const stream = new PassThrough();
+				if (cache === join(ambientCache, "_cacache")) {
+					queueMicrotask(() => stream.destroy(Object.assign(new Error("source absent"), { code: "ENOENT" })));
+				} else {
+					stream.end("verified fallback bytes");
+				}
+				return stream;
+			},
+			createWriteStream: () => new PassThrough(),
 		},
 		...(setTimer ? { setTimer } : {}),
 		...(clearTimer ? { clearTimer } : {}),
@@ -301,9 +307,8 @@ describe("prepared packed consumer", () => {
 				{ resolved: "https://registry.example.test/unrelated-alias.tgz", integrity },
 			],
 			contentCache: {
-				hasContent: async () => true,
 				createReadStream: (cache, expectedIntegrity) => {
-					sourceReads.push({ cache, integrity: expectedIntegrity });
+					if (cache.includes("ambient-cache-read-only")) sourceReads.push({ cache, integrity: expectedIntegrity });
 					const source = new PassThrough();
 					source.end("verified artifact bytes");
 					return source;
@@ -340,23 +345,23 @@ describe("prepared packed consumer", () => {
 				{ resolved: noIntegrityUrl },
 			],
 			contentCache: {
-				hasContent: async (cache, integrity) => {
-					if (!cache.includes("ambient-cache-read-only")) return true;
-					if (integrity === "sha512-missing") throw Object.assign(new Error("source absent"), { code: "ENOENT" });
-					return true;
-				},
-				createReadStream: (_cache, integrity) => {
-					sourceIntegrities.push(integrity);
+				createReadStream: (cache, integrity) => {
 					const source = new PassThrough();
-					queueMicrotask(() => source.destroy(Object.assign(new Error("corrupt source"), { code: "EINTEGRITY" })));
+					if (!cache.includes("ambient-cache-read-only")) {
+						source.end("fetched fallback bytes");
+						return source;
+					}
+					sourceIntegrities.push(integrity);
+					const code = integrity === "sha512-missing" ? "ENOENT" : "EINTEGRITY";
+					queueMicrotask(() => source.destroy(Object.assign(new Error("unavailable source"), { code })));
 					return source;
 				},
 				createWriteStream: () => new PassThrough(),
 			},
 		});
 
-		assert.deepEqual(sourceIntegrities, ["sha512-corrupt"],
-			`${FAILURE_PREFIX}: ENOENT and no-integrity entries must not open ambient content streams`);
+		assert.deepEqual(sourceIntegrities, ["sha512-corrupt", "sha512-missing"],
+			`${FAILURE_PREFIX}: every integrity-bearing source is read directly without a preflight probe`);
 		const cacheAdds = calls.filter(call => call.args.includes("cache") && call.args.includes("add"));
 		assert.equal(cacheAdds.length, 1);
 		assert.deepEqual(cacheAdds[0]?.args.slice(cacheAdds[0]!.args.indexOf("--cache") + 2),
@@ -372,9 +377,12 @@ describe("prepared packed consumer", () => {
 				integrity: "sha512-still-missing",
 			}],
 			contentCache: {
-				hasContent: async () => false,
-				createReadStream: () => { throw new Error("a miss must not be read"); },
-				createWriteStream: () => { throw new Error("a miss must not be written directly"); },
+				createReadStream: () => {
+					const source = new PassThrough();
+					queueMicrotask(() => source.destroy(Object.assign(new Error("digest absent"), { code: "ENOENT" })));
+					return source;
+				},
+				createWriteStream: () => new PassThrough(),
 			},
 			onOfflineInstall: () => { offlineStarted = true; },
 		});
@@ -388,7 +396,7 @@ describe("prepared packed consumer", () => {
 		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing\)/);
 	});
 
-	it("stops transfer admission at the shared deadline and settles every admitted stream", async () => {
+	it("bounds stalled source digest reads and settles every admitted stream before rejection", async () => {
 		const timerCallbacks: Array<() => void> = [];
 		const sources: PassThrough[] = [];
 		const destinations: PassThrough[] = [];
@@ -402,7 +410,6 @@ describe("prepared packed consumer", () => {
 				integrity: `sha512-deadline-${index}`,
 			})),
 			contentCache: {
-				hasContent: async () => true,
 				createReadStream: () => {
 					const stream = new PassThrough();
 					stream.once("close", () => { sourceCloses++; });
@@ -442,6 +449,77 @@ describe("prepared packed consumer", () => {
 		assert.equal(destinationCloses, 8, `${FAILURE_PREFIX}: rejection must join every admitted destination close`);
 		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: fallback must not start after transfer expiry`);
 		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after transfer expiry`);
+		const runRoot = roots.at(-1)!;
+		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
+			(candidate: NodeJS.ErrnoException) => candidate.code === "ENOENT");
+		const evidence = await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8");
+		assert.match(evidence, /"stage": "cache transfer"/);
+		assert.match(evidence, /deadline-0\.tgz/);
+		assert.match(evidence, /sha512-deadline-0/);
+		assert.match(evidence, /"deadlineAborted": true/);
+		assert.match(evidence, /source:closed/);
+		assert.match(evidence, /destination:closed/);
+	});
+
+	it("bounds stalled destination digest verification and closes its read and discard streams", async () => {
+		type TimerRecord = { callback: () => void; cleared: boolean };
+		const timers: TimerRecord[] = [];
+		const verificationSources: PassThrough[] = [];
+		let verificationCloses = 0;
+		let cacheCommandStarted = false;
+		let offlineStarted = false;
+		const resolved = "https://registry.example.test/verify-deadline.tgz";
+		const integrity = "sha512-verify-deadline";
+		const preparing = prepareFixture({
+			registryArtifacts: [{ resolved, integrity }],
+			contentCache: {
+				createReadStream: cache => {
+					const stream = new PassThrough();
+					if (cache.includes("ambient-cache-read-only")) {
+						stream.end("verified artifact bytes");
+					} else {
+						stream.once("close", () => { verificationCloses++; });
+						verificationSources.push(stream);
+					}
+					return stream;
+				},
+				createWriteStream: () => new PassThrough(),
+			},
+			setTimer: callback => {
+				const record = { callback, cleared: false };
+				timers.push(record);
+				return record;
+			},
+			clearTimer: timer => { (timer as TimerRecord).cleared = true; },
+			onCacheCommand: async () => { cacheCommandStarted = true; },
+			onOfflineInstall: () => { offlineStarted = true; },
+		});
+		const observed = preparing.then(
+			() => ({ error: undefined }),
+			error => ({ error }),
+		);
+
+		await waitFor(() => verificationSources.length === 1 && timers.some(timer => !timer.cleared));
+		const activeTimer = timers.find(timer => !timer.cleared);
+		assert.ok(activeTimer, `${FAILURE_PREFIX}: destination verification must arm its deadline before reading`);
+		activeTimer.callback();
+		const { error } = await observed;
+		assert.ok(error instanceof Error);
+		assert.match(error.message, /destination digest verification/);
+		assert.equal(verificationSources[0]?.destroyed, true);
+		assert.equal(verificationCloses, 1, `${FAILURE_PREFIX}: verification rejection must join the destination digest close`);
+		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: successful transfer must not start fallback before verification`);
+		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after verification expiry`);
+		const runRoot = roots.at(-1)!;
+		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
+			(candidate: NodeJS.ErrnoException) => candidate.code === "ENOENT");
+		const evidence = await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8");
+		assert.match(evidence, /"stage": "destination digest verification"/);
+		assert.match(evidence, /verify-deadline\.tgz/);
+		assert.match(evidence, /sha512-verify-deadline/);
+		assert.match(evidence, /"deadlineAborted": true/);
+		assert.match(evidence, /source:closed/);
+		assert.match(evidence, /discard:closed/);
 	});
 
 	it("fills nine cache batches through a dynamic three-worker pool before offline install", async () => {
