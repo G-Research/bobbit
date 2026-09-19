@@ -28,6 +28,7 @@ const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 // separately after that deadline fires.
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
+const CACHE_WORKER_COUNT = 3;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
 export const PACKED_CONSUMER_DESCRIPTOR_ENV = "BOBBIT_PACKED_CONSUMER_DESCRIPTOR";
@@ -675,16 +676,16 @@ function errorEvidence(error) {
 		cwd: error.cwd,
 		shutdown: error.shutdown,
 	} : {};
+	const aggregate = error instanceof AggregateError ? {
+		errors: [...error.errors].map(errorEvidence),
+	} : {};
 	return {
 		name: error.name,
 		message: error.message,
 		stack: error.stack,
 		...owned,
-		...(cause === undefined ? {} : {
-			cause: cause instanceof Error
-				? { name: cause.name, message: cause.message, stack: cause.stack }
-				: { message: String(cause) },
-		}),
+		...aggregate,
+		...(cause === undefined ? {} : { cause: errorEvidence(cause) }),
 	};
 }
 
@@ -895,22 +896,55 @@ export async function preparePackedConsumerFixture({
 			copyFile(resolverLockPath, join(templateDir, "package-lock.json")),
 		]);
 		const selectedTarballs = [...compatibleRegistryTarballs(consumerLock, runtime)].sort();
-		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs`);
+		const cacheBatches = [];
 		for (let offset = 0; offset < selectedTarballs.length; offset += CACHE_BATCH_SIZE) {
-			const batch = selectedTarballs.slice(offset, offset + CACHE_BATCH_SIZE);
-			const result = await measured(`cache batch ${Math.floor(offset / CACHE_BATCH_SIZE) + 1}/${Math.ceil(selectedTarballs.length / CACHE_BATCH_SIZE)}`, () =>
-				runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
-					cwd: resolverDir,
-					env: resolverEnv,
-					...commandDeadline(
-						`npm cache batch ${Math.floor(offset / CACHE_BATCH_SIZE) + 1}`,
-						CACHE_BATCH_TIMEOUT_MS,
-					),
-					repoRoot,
-				}),
+			cacheBatches.push(selectedTarballs.slice(offset, offset + CACHE_BATCH_SIZE));
+		}
+		console.log(`[packed-consumer] cache: populating ${selectedTarballs.length} compatible dependency tarballs in ${cacheBatches.length} batches`);
+		const cacheResults = new Array(cacheBatches.length);
+		const cacheFailures = new Array(cacheBatches.length);
+		let nextBatchIndex = 0;
+		let stopAdmission = false;
+		const cacheWorker = async () => {
+			while (!stopAdmission) {
+				// JavaScript runs this claim without an await, so workers cannot claim
+				// the same batch. A failure closes admission before this point can run again.
+				const batchIndex = nextBatchIndex++;
+				if (batchIndex >= cacheBatches.length) return;
+				const batch = cacheBatches[batchIndex];
+				try {
+					const result = await measured(`cache batch ${batchIndex + 1}/${cacheBatches.length}`, () =>
+						runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
+							cwd: resolverDir,
+							env: resolverEnv,
+							// Calculate this at admission, not while partitioning, so all
+							// children share the unchanged absolute preparation deadline.
+							...commandDeadline(`npm cache batch ${batchIndex + 1}`, CACHE_BATCH_TIMEOUT_MS),
+							repoRoot,
+						}),
+					);
+					cacheResults[batchIndex] = result;
+					requireSuccess(result);
+				} catch (error) {
+					cacheFailures[batchIndex] = error;
+					stopAdmission = true;
+					return;
+				}
+			}
+		};
+		await Promise.allSettled(
+			Array.from({ length: Math.min(CACHE_WORKER_COUNT, cacheBatches.length) }, () => cacheWorker()),
+		);
+		// Evidence is stable even when commands completed out of order.
+		for (const result of cacheResults) if (result !== undefined) commands.push(result);
+		const failedCacheBatches = cacheFailures
+			.map((error, index) => error === undefined ? undefined : { error, index })
+			.filter(Boolean);
+		if (failedCacheBatches.length > 0) {
+			throw new AggregateError(
+				failedCacheBatches.map(failure => failure.error),
+				`npm cache population failed for ${failedCacheBatches.map(failure => `batch ${failure.index + 1}`).join(", ")}`,
 			);
-			commands.push(result);
-			requireSuccess(result);
 		}
 
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
