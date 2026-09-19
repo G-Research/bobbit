@@ -148,6 +148,8 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /cacache\.get\.stream\.byDigest\(cache, integrity\)/,
 			"only exact integrity-addressed ambient content may be read");
+		assert.doesNotMatch(source, /hasContent/,
+			"uncancellable cache probes must not precede deadline-bound digest streams");
 		assert.doesNotMatch(source, /cacache\.ls\(/, "ambient cache entries must never be enumerated wholesale");
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
 		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
@@ -205,9 +207,8 @@ describe("packed-consumer offline install contract", () => {
 				ensureDist: () => { order.push("ensure-dist"); },
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 				contentCache: {
-					hasContent: async () => true,
 					createReadStream: (cache: string, integrity: string) => {
-						cacheReads.push({ cache, integrity });
+						if (cache === join(ambientCache, "_cacache")) cacheReads.push({ cache, integrity });
 						const stream = new PassThrough();
 						stream.end("selected artifact bytes");
 						return stream;
