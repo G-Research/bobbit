@@ -33,6 +33,12 @@ export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const CACHE_WORKER_COUNT = 3;
 const CACHE_TRANSFER_WORKER_COUNT = 8;
+// cacache.put.stream() finishes each transfer with an asynchronous content move
+// and index append. A full worker batch can starve together behind concurrent
+// Windows fixture cleanup, even though the same digests transfer quickly alone.
+// Serial Windows transfer adds only a few seconds for the complete locked graph
+// and prevents that filesystem contention from stranding every admitted stream.
+const WINDOWS_CACHE_TRANSFER_WORKER_COUNT = 1;
 const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
@@ -665,18 +671,23 @@ function streamSettlementError(error) {
 	return error.code ?? error.name ?? "error";
 }
 
-async function destroyAndSettleStreams(streams) {
-	const opened = streams.filter(([, stream]) => stream !== undefined);
-	const settlements = opened.map(async ([role, stream]) => {
-		try {
-			await finished(stream, { cleanup: true });
-			return `${role}:closed`;
-		} catch (error) {
-			return `${role}:closed:${streamSettlementError(error)}`;
-		}
-	});
-	for (const [, stream] of opened) stream.destroy?.();
-	return Promise.all(settlements);
+// cacache's Minipass streams may replay completion synchronously. Observe them
+// at creation time; attaching finished() only after pipeline failure can throw
+// before Node finishes initializing its own terminal-event listener state.
+function observeStreamSettlement(role, stream) {
+	return {
+		role,
+		stream,
+		settlement: finished(stream, { cleanup: true }).then(
+			() => `${role}:closed`,
+			error => `${role}:closed:${streamSettlementError(error)}`,
+		),
+	};
+}
+
+async function destroyAndSettleStreams(observers) {
+	for (const { stream } of observers) stream.destroy?.();
+	return Promise.all(observers.map(({ settlement }) => settlement));
 }
 
 function cacheOperationError(stage, artifact, error, abort, settlements) {
@@ -716,9 +727,11 @@ async function transferArtifact({
 	let destination;
 	let sourceError;
 	let operationError;
+	const streamObservers = [];
 	try {
 		try {
 			source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
+			streamObservers.push(observeStreamSettlement("source", source));
 		} catch (error) {
 			sourceError = error;
 			throw error;
@@ -729,6 +742,7 @@ async function transferArtifact({
 			transferKey(artifact),
 			{ integrity: artifact.integrity },
 		);
+		streamObservers.push(observeStreamSettlement("destination", destination));
 		await pipeline(source, destination, { signal: abort.signal });
 		remainingPreparationMs(`post-transfer verification ${artifact.integrity}`);
 	} catch (error) {
@@ -737,10 +751,7 @@ async function transferArtifact({
 		clearTimer(timer);
 	}
 	if (!operationError) return true;
-	const settlements = await destroyAndSettleStreams([
-		["source", source],
-		["destination", destination],
-	]);
+	const settlements = await destroyAndSettleStreams(streamObservers);
 	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
 	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
 }
@@ -753,6 +764,7 @@ async function transferAvailableArtifacts({
 	remainingPreparationMs,
 	setTimer,
 	clearTimer,
+	platform,
 }) {
 	const transferable = artifacts.filter(artifact => artifact.integrity);
 	const missing = [];
@@ -782,8 +794,11 @@ async function transferAvailableArtifacts({
 			}
 		}
 	};
+	const workerCount = platform === "win32"
+		? WINDOWS_CACHE_TRANSFER_WORKER_COUNT
+		: CACHE_TRANSFER_WORKER_COUNT;
 	await Promise.allSettled(Array.from(
-		{ length: Math.min(CACHE_TRANSFER_WORKER_COUNT, transferable.length) },
+		{ length: Math.min(workerCount, transferable.length) },
 		() => worker(),
 	));
 	const observed = failures.filter(error => error !== undefined);
@@ -817,15 +832,18 @@ async function verifyDestinationArtifact({
 	let discard;
 	let sourceError;
 	let operationError;
+	const streamObservers = [];
 	try {
 		try {
 			source = contentCache.createReadStream(destinationContentCache, artifact.integrity);
+			streamObservers.push(observeStreamSettlement("source", source));
 		} catch (error) {
 			sourceError = error;
 			throw error;
 		}
 		source.once?.("error", error => { sourceError ??= error; });
 		discard = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+		streamObservers.push(observeStreamSettlement("discard", discard));
 		await pipeline(source, discard, { signal: abort.signal });
 		remainingPreparationMs(`post-${stage} ${artifact.integrity}`);
 	} catch (error) {
@@ -834,10 +852,7 @@ async function verifyDestinationArtifact({
 		clearTimer(timer);
 	}
 	if (!operationError) return true;
-	const settlements = await destroyAndSettleStreams([
-		["source", source],
-		["discard", discard],
-	]);
+	const settlements = await destroyAndSettleStreams(streamObservers);
 	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
 	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
 }
@@ -1182,6 +1197,7 @@ export async function preparePackedConsumerFixture({
 			remainingPreparationMs,
 			setTimer,
 			clearTimer,
+			platform: runtime?.platform ?? process.platform,
 		}));
 		console.log(`[packed-consumer] cache transfer: ${transferResult.transferredCount} hits, ${transferResult.missingDigestCount} digest misses, ${transferResult.noIntegrityCount} no-integrity fallbacks`);
 		const fallbackUrls = [...new Set(transferResult.fallbackArtifacts.map(artifact => artifact.resolved))].sort();
