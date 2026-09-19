@@ -370,6 +370,142 @@ describe("packed-consumer offline install contract", () => {
 		}
 	});
 
+	it("prevents a late spawn when the total deadline expires during pre-handle setup", async () => {
+		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-prehandle-deadline-pin-"));
+		const beforeCreation = deferred<void>();
+		const factoryEntered = deferred<void>();
+		let fireTotalDeadline: (() => void) | undefined;
+		let spawnCount = 0;
+		try {
+			const preparing = preparePackedConsumerFixture({
+				repoRoot: REPO_ROOT,
+				runRoot: tempParent,
+				preparationTimeoutMs: 50,
+				now: () => 0,
+				ensureDist: () => {},
+				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+				runCommand: (command: string, args: string[], options: RunCommandOptions) => runOwnedCommand(command, args, {
+					cwd: options.cwd,
+					env: options.env,
+					timeoutMs: options.timeoutMs,
+					totalTimeoutMs: options.totalTimeoutMs,
+					now: () => 0,
+					spawnOwned: async (_ownedCommand: string, _ownedArgs: string[], spawnOptions: { signal: AbortSignal }) => {
+						factoryEntered.resolve(undefined);
+						await beforeCreation.promise;
+						spawnOptions.signal.throwIfAborted();
+						spawnCount++;
+						throw new Error("a child must not be created after the deadline");
+					},
+					setTimer: (callback: () => void, timeoutMs: number) => {
+						if (timeoutMs === 50) fireTotalDeadline = callback;
+						return Symbol(`timer-${timeoutMs}`);
+					},
+					clearTimer: () => {},
+				}),
+			});
+
+			await factoryEntered.promise;
+			invokeTimer(fireTotalDeadline, "the total deadline must arm before the spawn factory returns");
+			beforeCreation.resolve(undefined);
+			await assert.rejects(preparing, (error: Error) => {
+				assert.match(error.message, /retained partial fixture and command evidence/);
+				assert.match(error.message, /50ms total deadline/);
+				return true;
+			});
+
+			assert.equal(spawnCount, 0, "an aborted pre-handle factory must never create a late child");
+			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
+			const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+			assert.deepEqual(evidence.error.shutdown, {
+				ownershipState: "not spawned before deadline",
+				killRequested: false,
+				rootCloseObserved: false,
+				rootExitCode: null,
+				rootSignal: null,
+				treeExitAttempted: false,
+				treeExitSettled: false,
+				treeExitVerified: false,
+				completionTimedOut: false,
+			});
+			assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false,
+				"a pre-handle deadline failure must not publish a descriptor");
+		} finally {
+			rmSync(tempParent, { recursive: true, force: true });
+		}
+	});
+
+	it("terminates an exposed tree once when the spawn factory returns after the deadline", async () => {
+		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-exposed-deadline-pin-"));
+		const factoryReturn = deferred<void>();
+		const handleExposed = deferred<void>();
+		const child = Object.assign(new EventEmitter(), {
+			pid: 4343,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let fireTotalDeadline: (() => void) | undefined;
+		let killCount = 0;
+		let completionJoins = 0;
+		try {
+			const preparing = preparePackedConsumerFixture({
+				repoRoot: REPO_ROOT,
+				runRoot: tempParent,
+				preparationTimeoutMs: 50,
+				now: () => 0,
+				ensureDist: () => {},
+				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+				runCommand: (command: string, args: string[], options: RunCommandOptions) => runOwnedCommand(command, args, {
+					cwd: options.cwd,
+					env: options.env,
+					timeoutMs: options.timeoutMs,
+					totalTimeoutMs: options.totalTimeoutMs,
+					now: () => 0,
+					spawnOwned: async (_ownedCommand: string, _ownedArgs: string[], spawnOptions: { onSpawned: (tracked: unknown) => void }) => {
+						const tracked = {
+							child,
+							ownershipReady: Promise.resolve(),
+							killTree: () => {
+								killCount++;
+								child.emit("close", null, "SIGKILL");
+							},
+							waitForTreeExit: async () => {
+								completionJoins++;
+								return true;
+							},
+						};
+						spawnOptions.onSpawned(tracked);
+						handleExposed.resolve(undefined);
+						await factoryReturn.promise;
+						return tracked;
+					},
+					setTimer: (callback: () => void, timeoutMs: number) => {
+						if (timeoutMs === 50) fireTotalDeadline = callback;
+						return Symbol(`timer-${timeoutMs}`);
+					},
+					clearTimer: () => {},
+				}),
+			});
+
+			await handleExposed.promise;
+			invokeTimer(fireTotalDeadline, "the total deadline must remain active while the exposed factory is delayed");
+			assert.equal(killCount, 1, "deadline expiry must terminate the exposed tree immediately and exactly once");
+			factoryReturn.resolve(undefined);
+			await assert.rejects(preparing, /retained partial fixture and command evidence/);
+
+			assert.equal(killCount, 1, "factory settlement must not request a second tree termination");
+			assert.equal(completionJoins, 1, "failure must await the exposed tree's bounded completion proof");
+			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
+			const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+			assert.equal(isCompleteOwnedCommandShutdown(evidence.error.shutdown), true);
+			assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false,
+				"an exposed-tree deadline failure must not publish a descriptor");
+		} finally {
+			factoryReturn.resolve(undefined);
+			rmSync(tempParent, { recursive: true, force: true });
+		}
+	});
+
 	it("caps ownership readiness by the remaining preparation deadline, joins its tree, and retains evidence", async () => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-deadline-pin-"));
 		const child = Object.assign(new EventEmitter(), {

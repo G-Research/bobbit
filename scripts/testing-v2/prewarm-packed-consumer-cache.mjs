@@ -92,6 +92,7 @@ function isolatedNpmEnv(cwd, cacheDir, baseEnv) {
 }
 
 async function defaultSpawnOwned(command, args, options) {
+	options.signal?.throwIfAborted();
 	let spawnTreePath = join(options.repoRoot, "dist", "server", "agent", "spawn-tree.js");
 	if (!existsSync(spawnTreePath)) {
 		// A clean checkout has no dist primitive yet. Bootstrap the exact source
@@ -113,12 +114,21 @@ async function defaultSpawnOwned(command, args, options) {
 		}
 	}
 	const { spawnTracked } = await import(pathToFileURL(spawnTreePath).href);
-	return spawnTracked(command, args, {
+	// The command-wide deadline is armed before bootstrap/import. This final
+	// synchronous check is the no-late-spawn boundary: once aborted, no child may
+	// be created after async setup eventually returns.
+	options.signal?.throwIfAborted();
+	const tracked = spawnTracked(command, args, {
 		cwd: options.cwd,
 		env: options.env,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
 	});
+	// Expose ownership in the same turn as child creation. A caller can then
+	// terminate and join the tree even when this async factory is wrapped or its
+	// returned promise is delayed after spawn.
+	options.onSpawned?.(tracked);
+	return tracked;
 }
 
 export function isCompleteOwnedCommandShutdown(shutdown) {
@@ -198,21 +208,14 @@ export async function runOwnedCommand(command, args, {
 	if (!Number.isFinite(treeExitTimeoutMs) || treeExitTimeoutMs <= 0) throw new Error("treeExitTimeoutMs must be a positive number");
 
 	const rendered = displayCommand(command, args);
-	// Start the optional total lifetime before spawning. defaultSpawnOwned returns
-	// the tracked owner promptly; if even that setup exhausts the budget, kill and
-	// prove the returned tree rather than abandoning a potentially live process.
 	const totalStartedAt = now();
-	const tracked = await spawnOwned(command, args, {
-		cwd,
-		env,
-		repoRoot,
-		ownershipBootstrapRoot,
-	});
-	const child = tracked.child;
+	const spawnAbort = new AbortController();
 	const stdout = [];
 	const stderr = [];
 	let outputBytes = 0;
 	let terminalError;
+	let tracked;
+	let child;
 	let killRequested = false;
 	let killError;
 	let ownershipState = "pending";
@@ -226,9 +229,14 @@ export async function runOwnedCommand(command, args, {
 	const completionTimeoutResult = new Promise(resolveTimeout => { resolveCompletionTimeout = resolveTimeout; });
 	const treeExit = { attempted: false, settled: false, verified: false, error: undefined };
 	let treeExitResult;
+	let closeSettled = false;
+	let resolveCloseResult;
+	const closeResult = new Promise(resolveClose => { resolveCloseResult = resolveClose; });
+	let outputDetached = false;
 
 	const startTreeExitVerification = () => {
 		if (treeExitResult) return treeExitResult;
+		if (!tracked) throw new Error("Cannot verify a process tree before its owned handle is exposed");
 		treeExit.attempted = true;
 		treeExitResult = (async () => {
 			try {
@@ -248,14 +256,14 @@ export async function runOwnedCommand(command, args, {
 	};
 	const requestOwnedKill = (error) => {
 		if (!terminalError) terminalError = error;
-		if (killRequested) return;
+		if (!tracked || killRequested) return;
 		killRequested = true;
 		armCompletionTimeout();
 		resolveKillRequested();
 		try {
 			tracked.killTree("SIGKILL");
-		} catch (error) {
-			killError = error instanceof Error ? error : new Error(String(error));
+		} catch (killFailure) {
+			killError = killFailure instanceof Error ? killFailure : new Error(String(killFailure));
 		} finally {
 			startTreeExitVerification();
 		}
@@ -271,31 +279,108 @@ export async function runOwnedCommand(command, args, {
 	};
 	const collectStdout = chunk => collect(stdout, chunk);
 	const collectStderr = chunk => collect(stderr, chunk);
-	child.stdout?.on("data", collectStdout);
-	child.stderr?.on("data", collectStderr);
-
-	let closeSettled = false;
-	let resolveCloseResult;
-	const closeResult = new Promise(resolveClose => { resolveCloseResult = resolveClose; });
+	const detachOutputListeners = () => {
+		if (outputDetached || !child) return;
+		outputDetached = true;
+		child.stdout?.off("data", collectStdout);
+		child.stderr?.off("data", collectStderr);
+	};
 	const finishClose = result => {
 		if (closeSettled) return;
 		closeSettled = true;
-		child.off("error", onError);
-		child.off("close", onClose);
+		child?.off("error", onError);
+		child?.off("close", onClose);
 		resolveCloseResult(result);
 	};
 	const onError = error => finishClose({ spawnError: error, code: null, signal: null });
 	const onClose = (code, signal) => finishClose({ code, signal });
-	child.once("error", onError);
-	child.once("close", onClose);
-
-	if (totalTimeoutMs !== undefined) {
-		const elapsedMs = Math.max(0, now() - totalStartedAt);
-		const remainingMs = totalTimeoutMs - elapsedMs;
-		const deadlineError = new Error(`${rendered} exceeded its ${totalTimeoutMs}ms total deadline (including ownership readiness)`);
-		if (remainingMs <= 0) requestOwnedKill(deadlineError);
-		else totalTimer = setTimer(() => requestOwnedKill(deadlineError), remainingMs);
+	const exposeSpawned = candidate => {
+		if (tracked && tracked !== candidate) {
+			throw new Error(`${rendered} spawn factory exposed more than one owned process tree`);
+		}
+		if (tracked) return tracked;
+		if (!candidate?.child || typeof candidate.killTree !== "function" || typeof candidate.waitForTreeExit !== "function") {
+			throw new Error(`${rendered} spawn factory exposed an invalid owned process-tree handle`);
+		}
+		tracked = candidate;
+		child = candidate.child;
+		child.stdout?.on("data", collectStdout);
+		child.stderr?.on("data", collectStderr);
+		child.once("error", onError);
+		child.once("close", onClose);
+		if (terminalError) requestOwnedKill(terminalError);
+		return tracked;
+	};
+	const closed = { observed: false, code: null, signal: null, spawnError: undefined };
+	const observedCloseResult = closeResult.then(result => {
+		closed.observed = true;
+		closed.code = result.code;
+		closed.signal = result.signal;
+		closed.spawnError = result.spawnError;
+		detachOutputListeners();
+		if (executionTimer !== undefined) {
+			clearTimer(executionTimer);
+			executionTimer = undefined;
+		}
+		if (totalTimer !== undefined) {
+			clearTimer(totalTimer);
+			totalTimer = undefined;
+		}
+	});
+	const deadlineError = totalTimeoutMs === undefined
+		? undefined
+		: new Error(`${rendered} exceeded its ${totalTimeoutMs}ms total deadline (including ownership readiness)`);
+	if (deadlineError) {
+		const remainingMs = totalTimeoutMs - Math.max(0, now() - totalStartedAt);
+		const expire = () => {
+			if (!terminalError) terminalError = deadlineError;
+			spawnAbort.abort(deadlineError);
+			requestOwnedKill(deadlineError);
+		};
+		if (remainingMs <= 0) expire();
+		else totalTimer = setTimer(expire, remainingMs);
 	}
+
+	let spawnFailure;
+	if (!spawnAbort.signal.aborted) {
+		try {
+			const returned = await spawnOwned(command, args, {
+				cwd,
+				env,
+				repoRoot,
+				ownershipBootstrapRoot,
+				signal: spawnAbort.signal,
+				onSpawned: exposeSpawned,
+			});
+			exposeSpawned(returned);
+		} catch (error) {
+			spawnFailure = error instanceof Error ? error : new Error(String(error));
+		}
+	}
+	if (!tracked) {
+		if (totalTimer !== undefined) clearTimer(totalTimer);
+		ownershipState = terminalError ? "not spawned before deadline" : "spawn failed";
+		const cause = terminalError ?? spawnFailure ?? new Error(`Failed to spawn ${rendered}`);
+		const shutdown = Object.freeze({
+			ownershipState,
+			killRequested: false,
+			rootCloseObserved: false,
+			rootExitCode: null,
+			rootSignal: null,
+			treeExitAttempted: false,
+			treeExitSettled: false,
+			treeExitVerified: false,
+			completionTimedOut: false,
+		});
+		throw new OwnedCommandError(
+			`${cause.message}\ncommand: ${rendered}\ncwd: ${cwd}\npid: unavailable\nownership: ${ownershipState}\ntree termination requested: no\ntree exit: not applicable (no child created)`,
+			{ cause, command, args, cwd, shutdown },
+		);
+	}
+	if (spawnFailure) {
+		requestOwnedKill(new Error(`${rendered} spawn factory failed after exposing its owned process tree`, { cause: spawnFailure }));
+	}
+
 	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`);
 	const terminationDuringOwnership = Symbol("termination-during-ownership");
 	try {
@@ -330,29 +415,6 @@ export async function runOwnedCommand(command, args, {
 		}
 	}
 
-	const closed = { observed: false, code: null, signal: null, spawnError: undefined };
-	let outputDetached = false;
-	const detachOutputListeners = () => {
-		if (outputDetached) return;
-		outputDetached = true;
-		child.stdout?.off("data", collectStdout);
-		child.stderr?.off("data", collectStderr);
-	};
-	const observedCloseResult = closeResult.then(result => {
-		closed.observed = true;
-		closed.code = result.code;
-		closed.signal = result.signal;
-		closed.spawnError = result.spawnError;
-		detachOutputListeners();
-		if (executionTimer !== undefined) {
-			clearTimer(executionTimer);
-			executionTimer = undefined;
-		}
-		if (totalTimer !== undefined) {
-			clearTimer(totalTimer);
-			totalTimer = undefined;
-		}
-	});
 	let completionTimedOut = false;
 	const firstBoundary = await Promise.race([
 		observedCloseResult.then(() => "close"),
