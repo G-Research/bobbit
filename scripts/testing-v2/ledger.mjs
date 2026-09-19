@@ -136,12 +136,12 @@ const PLAYWRIGHT_CAP = 3;
 const LEASES_FILENAME = "leases.json";
 const DEFAULT_LEASE_TIMEOUT_MS = 120_000; // fail-open after this (never deadlock a boot)
 const LEASE_MAX_HOLD_MS = 180_000; // gateway-boot: held only for a boot (seconds) → 3-min backstop
-// The browser-render lease is held for a Playwright WORKER's whole life (many
-// tests, minutes) — legitimately far longer than a gateway boot. Its max-hold
-// backstop must exceed any realistic worker lifetime so a LIVE browser lease is
-// never swept out from under an active worker (which would break the cap and let
-// an extra Chromium in). Dead holders are still reclaimed immediately by the
-// PID-liveness sweep; this backstop only guards a leaked release on a hung PID.
+// Browser and MCP-browser leases are held for a Playwright WORKER's whole life
+// (many tests, minutes) — legitimately far longer than a gateway boot. Their
+// max-hold backstop must exceed any realistic worker lifetime so a LIVE lease is
+// never swept out from under an active worker (which would break the cap). Dead
+// holders are still reclaimed immediately by the PID-liveness sweep; this
+// backstop only guards a leaked release on a hung PID.
 const BROWSER_LEASE_MAX_HOLD_MS = 1_800_000; // 30 min
 // Browser-render acquires WAIT for a free slot (respecting the cap) rather than
 // force-proceeding early — the cap integrity is the whole point. This large
@@ -154,7 +154,7 @@ const BUDGET_CAPS_PATH = join(LEDGER_FILE_DIR, "..", "..", "tests", "support", "
 
 /** Per-pool max-hold backstop for the sweep (dead holders are always reclaimed). */
 function leaseMaxHoldMs(pool) {
-	return pool === "browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
+	return pool === "browser" || pool === "mcp-browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
 }
 
 /** Read a committed per-pool cap from tests/support/data/quality/budgets/budget-caps.json (missing → null). */
@@ -648,8 +648,8 @@ function readLeasesRaw() {
 /**
  * Drop leases whose owner PID is dead OR that have out-lived their pool's
  * max-hold backstop. gateway-boot wraps a boot (seconds) → 3-min backstop;
- * browser wraps a worker's whole life (minutes) → 30-min backstop. Dead holders
- * are reclaimed immediately regardless of age (PID liveness), so a crashed run
+ * browser and mcp-browser wrap a worker's whole life (minutes) → 30-min
+ * backstop. Dead holders are reclaimed immediately regardless of age, so a crashed run
  * never wedges a slot; the age backstop only guards a leaked release on a hung
  * but still-alive PID.
  */
@@ -734,7 +734,14 @@ export async function acquireLease(pool, opts = {}) {
 			sweepLeases(state);
 			const held = state.leases.filter((l) => l.pool === pool).length;
 			const timedOut = now() > deadline;
-			if (held < cap || (timedOut && !strict)) {
+			// The lock wait is part of the absolute acquisition deadline. Re-check
+			// inside the transaction before even a free-capacity grant so strict
+			// callers can never publish a lease after crossing that deadline.
+			if (strict && timedOut) {
+				writeLeases(state);
+				return { granted: false, timedOut: true };
+			}
+			if (held < cap || timedOut) {
 				const wasForced = timedOut && held >= cap;
 				state.leases.push({ id, pool, pid: process.pid, at: new Date().toISOString(), forced: wasForced });
 				writeLeases(state);
@@ -1349,10 +1356,10 @@ async function cliLeaseSelftest() {
 	console.log("  dead-pid lease swept ✓");
 
 	// 5) Per-pool max-hold: a LIVE lease aged past the gateway-boot backstop (3
-	//    min) is swept, but a LIVE browser lease of the same age is NOT (30-min
-	//    backstop) — a worker legitimately holds its browser lease for minutes and
-	//    must never have its slot swept out from under it. Seed both owned by THIS
-	//    (live) pid, aged 5 min.
+	//    min) is swept, but LIVE browser and mcp-browser leases of the same age are
+	//    NOT (30-min backstop) — workers legitimately hold these leases for minutes
+	//    and must never have a slot swept out from under them. Seed all three owned
+	//    by THIS (live) pid, aged 5 min.
 	const agedIso = new Date(Date.now() - 300_000).toISOString();
 	writeFileSync(
 		leasesPath(),
@@ -1362,6 +1369,7 @@ async function cliLeaseSelftest() {
 				leases: [
 					{ id: "aged-gw", pool: "gateway-boot", pid: process.pid, at: agedIso },
 					{ id: "aged-browser", pool: "browser", pid: process.pid, at: agedIso },
+					{ id: "aged-mcp-browser", pool: "mcp-browser", pid: process.pid, at: agedIso },
 				],
 			},
 			null,
@@ -1371,7 +1379,8 @@ async function cliLeaseSelftest() {
 	const afterAgeSweep = readLeases().leases;
 	assert(!afterAgeSweep.some((l) => l.id === "aged-gw"), "live gateway-boot lease aged past 3-min backstop should be swept");
 	assert(afterAgeSweep.some((l) => l.id === "aged-browser"), "live browser lease aged 5 min must NOT be swept (30-min backstop)");
-	console.log("  per-pool max-hold: gateway-boot swept @5min, browser retained ✓");
+	assert(afterAgeSweep.some((l) => l.id === "aged-mcp-browser"), "live MCP-browser lease aged 5 min must NOT be swept (30-min backstop)");
+	console.log("  per-pool max-hold: gateway-boot swept @5min, browser leases retained ✓");
 
 	try {
 		rmSync(leasesPath(), { force: true });

@@ -279,6 +279,11 @@ describe("browser harness startup", () => {
 		assert.ok(mcpLeaseAt > 0 && browserLeaseAt > mcpLeaseAt && gatewayAt > browserLeaseAt);
 
 		const mcpBlock = source.slice(mcpLeaseAt, browserLeaseAt);
+		assert.match(
+			source,
+			/const MCP_BROWSER_LEASE_TIMEOUT_MS = 300_000;/,
+			"MCP queueing must have bounded headroom above a legitimate 120s holder without approaching the 900s job bound",
+		);
 		assert.match(mcpBlock, /async \(\{ enableMcp \}, use\)/, "MCP admission must remain worker-option aware");
 		assert.match(mcpBlock, /if \(enableMcp && process\.env\.BOBBIT_V2_BROWSER_LEASE === "1"\)/);
 		assert.match(
@@ -286,7 +291,7 @@ describe("browser harness startup", () => {
 			/acquireLease\("mcp-browser", \{\s*cap: 1,\s*timeoutMs: MCP_BROWSER_LEASE_TIMEOUT_MS,\s*strict: true,/s,
 			"MCP admission must use the ledger's fail-closed mode",
 		);
-		assert.match(mcpBlock, /scope: "worker", auto: true/);
+		assert.match(mcpBlock, /scope: "worker", auto: true, timeout: MCP_BROWSER_LEASE_TIMEOUT_MS \+ 30_000/);
 		const useAt = mcpBlock.indexOf("await use();");
 		const throwAt = mcpBlock.indexOf("throw new Error", mcpBlock.indexOf("} catch (error)"));
 		const finallyAt = mcpBlock.indexOf("} finally {", useAt);

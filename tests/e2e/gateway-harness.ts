@@ -60,7 +60,10 @@ function loadLedger(): Promise<any> {
 }
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
-const MCP_BROWSER_LEASE_TIMEOUT_MS = 120_000;
+// A legitimate MCP holder may consume a 120s test plus gateway/browser setup
+// and teardown. Five minutes gives that lifecycle bounded headroom while staying
+// well inside the coordinator's fixed 900s outer deadline.
+const MCP_BROWSER_LEASE_TIMEOUT_MS = 300_000;
 
 function safeLeaseFailure(error: unknown): string {
 	const code = error && typeof error === "object" && "code" in error

@@ -30,7 +30,7 @@ const LEASES_FILENAME = "leases.json";
 const LOCK_STALE_MS = 30_000;
 const DEFAULT_LEASE_TIMEOUT_MS = 120_000;
 const LEASE_MAX_HOLD_MS = 180_000; // gateway-boot backstop
-const BROWSER_LEASE_MAX_HOLD_MS = 1_800_000; // browser: held for a worker's whole life
+const BROWSER_LEASE_MAX_HOLD_MS = 1_800_000; // browser pools: held for a worker's whole life
 const DEFAULT_BROWSER_LEASE_TIMEOUT_MS = 1_200_000;
 const LEASE_POLL_MS = 150;
 
@@ -78,7 +78,7 @@ function pidAlive(pid) {
 }
 
 function leaseMaxHoldMs(pool) {
-	return pool === "browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
+	return pool === "browser" || pool === "mcp-browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
 }
 
 function budgetCapFromFile(pool) {
@@ -222,7 +222,14 @@ export async function acquireLease(pool, opts = {}) {
 			sweepLeases(state);
 			const held = state.leases.filter((l) => l.pool === pool).length;
 			const timedOut = now() > deadline;
-			if (held < cap || (timedOut && !strict)) {
+			// The lock wait is part of the absolute acquisition deadline. Re-check
+			// inside the transaction before even a free-capacity grant so strict
+			// callers can never publish a lease after crossing that deadline.
+			if (strict && timedOut) {
+				writeLeases(state);
+				return { granted: false, timedOut: true };
+			}
+			if (held < cap || timedOut) {
 				const wasForced = timedOut && held >= cap;
 				state.leases.push({ id, pool, pid: process.pid, at: new Date().toISOString(), forced: wasForced });
 				writeLeases(state);

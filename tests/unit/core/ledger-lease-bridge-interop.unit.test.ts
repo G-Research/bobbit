@@ -4,7 +4,7 @@
 // browser tier AND the vitest tier AND concurrent runs. If someone changes one
 // side's ledger dir / lock rule / leases shape / cap resolution without the
 // other, this test fails — see the INVARIANT note in ledger-lease-bridge.mjs.
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -103,6 +103,16 @@ async function loadBoth() {
 	const ledger: any = await import("../../../scripts/testing-v2/ledger.mjs");
 	const bridge: any = await import("../../../tests/e2e/ledger-lease-bridge.mjs");
 	return { ledger, bridge };
+}
+
+function seedLeases(leases: Array<Record<string, unknown>>) {
+	const ledgerRoot = process.env.BOBBIT_V2_LEDGER_DIR!;
+	mkdirSync(ledgerRoot, { recursive: true });
+	writeFileSync(join(ledgerRoot, "leases.json"), `${JSON.stringify({ generation: 1, leases }, null, 2)}\n`);
+}
+
+function rawLeases(): any[] {
+	return JSON.parse(readFileSync(join(process.env.BOBBIT_V2_LEDGER_DIR!, "leases.json"), "utf8")).leases;
 }
 
 function preGuardFixtureBackend(): FixtureCommandBackend {
@@ -286,7 +296,68 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		}
 	});
 
-	it("preserves generic fail-open leases while strict waiters acquire after release", async () => {
+	it("rejects strict acquisition when the clock crosses its deadline during the lock", async () => {
+		const { ledger, bridge } = await loadBoth();
+		for (const [name, implementation] of [["ledger", ledger], ["bridge", bridge]] as const) {
+			seedLeases([]);
+			const readings = [0, 0, 0, 11];
+			let clockReads = 0;
+			await assert.rejects(
+				implementation.acquireLease(`strict-lock-deadline-${name}`, {
+					cap: 1,
+					timeoutMs: 10,
+					strict: true,
+					now: () => readings[clockReads++] ?? 11,
+					sleep: async () => assert.fail("a deadline crossed while locking must not poll"),
+				}),
+				(error: any) => {
+					assert.equal(error.code, "LEASE_ACQUIRE_TIMEOUT");
+					assert.equal(error.message.includes(isolatedTmp), false, "timeout diagnostics must stay sanitized");
+					return true;
+				},
+			);
+			assert.ok(clockReads >= 4, "the deadline must be re-checked inside the locked callback");
+			assert.equal(rawLeases().length, 0, "strict acquisition must not publish a lease after its deadline");
+		}
+	});
+
+	it("retains aged live MCP holders while reclaiming aged gateway boots", async () => {
+		const { ledger, bridge } = await loadBoth();
+		for (const [name, implementation] of [["ledger", ledger], ["bridge", bridge]] as const) {
+			const agedAt = new Date(Date.now() - 300_000).toISOString();
+			seedLeases([{ id: `aged-mcp-${name}`, pool: "mcp-browser", pid: process.pid, at: agedAt, forced: false }]);
+			let now = 0;
+			await assert.rejects(
+				implementation.acquireLease("mcp-browser", {
+					cap: 1,
+					timeoutMs: 10,
+					strict: true,
+					now: () => now,
+					sleep: async () => { now = 11; },
+				}),
+				(error: any) => error.code === "LEASE_ACQUIRE_TIMEOUT",
+			);
+			assert.deepEqual(
+				rawLeases().map(lease => lease.id),
+				[`aged-mcp-${name}`],
+				"a live MCP holder beyond the generic 180s backstop must retain the singleton slot",
+			);
+
+			seedLeases([{ id: `aged-boot-${name}`, pool: "gateway-boot", pid: process.pid, at: agedAt, forced: false }]);
+			const gatewayLease = await implementation.acquireLease("gateway-boot", {
+				cap: 1,
+				timeoutMs: 10,
+				strict: true,
+				now: () => 0,
+				sleep: async () => assert.fail("an aged gateway boot should be reclaimed immediately"),
+			});
+			assert.equal(gatewayLease.forced, false);
+			assert.equal(rawLeases().some(lease => lease.id === `aged-boot-${name}`), false);
+			gatewayLease.release();
+		}
+	});
+
+	it("preserves generic fail-open leases while MCP waiters acquire after a valid holder releases", async () => {
 		const { ledger, bridge } = await loadBoth();
 		const genericPool = "generic-fail-open";
 		const genericHolder = await ledger.acquireLease(genericPool, { cap: 1, timeoutMs: 100 });
@@ -301,29 +372,32 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		forced.release();
 		genericHolder.release();
 
-		const strictPool = "strict-release";
-		const holder = await ledger.acquireLease(strictPool, { cap: 1, timeoutMs: 100 });
-		let now = 0;
-		let releasedHolder = false;
-		const waiter = await bridge.acquireLease(strictPool, {
-			cap: 1,
-			timeoutMs: 10,
-			strict: true,
-			now: () => now,
-			sleep: async () => {
-				now++;
-				if (!releasedHolder) {
-					releasedHolder = true;
+		for (const [name, waiterImplementation, holderImplementation] of [
+			["ledger", ledger, bridge],
+			["bridge", bridge, ledger],
+		] as const) {
+			const holder = await holderImplementation.acquireLease("mcp-browser", { cap: 1, timeoutMs: 100 });
+			let now = 0;
+			let sleeps = 0;
+			const waiter = await waiterImplementation.acquireLease("mcp-browser", {
+				cap: 1,
+				timeoutMs: 300_000,
+				strict: true,
+				now: () => now,
+				sleep: async () => {
+					sleeps++;
+					now = 120_001;
 					holder.release();
-				}
-			},
-		});
-		assert.equal(waiter.forced, false);
-		assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === strictPool).length, 1);
-		waiter.release();
-		const generationAfterRelease = ledger.readLeases().generation;
-		waiter.release();
-		assert.equal(ledger.readLeases().generation, generationAfterRelease, "release must be idempotent");
-		assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === strictPool).length, 0);
+				},
+			});
+			assert.equal(sleeps, 1, `${name} waiter must survive a valid holder beyond the generic 120s timeout`);
+			assert.equal(waiter.forced, false);
+			assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === "mcp-browser").length, 1);
+			waiter.release();
+			const generationAfterRelease = ledger.readLeases().generation;
+			waiter.release();
+			assert.equal(ledger.readLeases().generation, generationAfterRelease, "release must be idempotent");
+			assert.equal(ledger.readLeases().leases.filter((lease: any) => lease.pool === "mcp-browser").length, 0);
+		}
 	});
 });
