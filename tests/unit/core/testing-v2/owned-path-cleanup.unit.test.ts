@@ -69,6 +69,15 @@ type ShutdownPhase = {
 	owners: Array<() => void | Promise<void>>;
 };
 
+type OwnedCleanupControl = {
+	child: EventEmitter & {
+		send(message: unknown, callback: (error?: Error | null) => void): void;
+	};
+	ownershipReady: Promise<void>;
+	killTree(signal?: "SIGTERM" | "SIGKILL", graceMs?: number): void;
+	waitForTreeExit(timeoutMs?: number): Promise<boolean>;
+};
+
 type CleanupContract = {
 	removeOwnedPath(target: string, options: RemoveOptions): Promise<RemoveResult>;
 	removeOwnedPathInSubprocess(target: string, options: RemoveOptions, seams?: {
@@ -76,8 +85,15 @@ type CleanupContract = {
 			send(message: unknown, callback: (error?: Error | null) => void): void;
 			kill(signal?: string): boolean | void;
 		};
+		spawnOwned?: (
+			modulePath: string,
+			env: NodeJS.ProcessEnv,
+			onSpawned: (tracked: OwnedCleanupControl) => void,
+		) => OwnedCleanupControl | Promise<OwnedCleanupControl>;
 		setTimer?: (callback: () => void, delayMs: number) => unknown;
 		clearTimer?: (timer: unknown) => void;
+		setJoinTimer?: (callback: () => void, delayMs: number) => unknown;
+		clearJoinTimer?: (timer: unknown) => void;
 		now?: () => number;
 	}): Promise<RemoveResult>;
 	shutdownResourcesThenRemove(options: {
@@ -179,19 +195,25 @@ describe("owned path cleanup contract", () => {
 		expect(settled).toBe(true);
 	});
 
-	it("bounds a never-ready child, kills it once, and rejects only after close", async () => {
+	it("escalates a timed-out owned tree and rejects only after close plus verified exit", async () => {
 		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
 		const ownerRoot = path.resolve("stalled-subprocess-owner");
-		const child = new EventEmitter() as EventEmitter & {
-			send(message: unknown, callback: (error?: Error | null) => void): void;
-			kill(signal?: string): boolean;
-		};
+		const child = new EventEmitter() as OwnedCleanupControl["child"];
 		let sendCallback: ((error?: Error | null) => void) | undefined;
 		child.send = (_message, callback) => {
 			sendCallback = callback;
 			callback();
 		};
-		child.kill = vi.fn(() => true);
+		let proveForcedExit!: (exited: boolean) => void;
+		const forcedExit = new Promise<boolean>(resolve => { proveForcedExit = resolve; });
+		const control: OwnedCleanupControl = {
+			child,
+			ownershipReady: Promise.resolve(),
+			killTree: vi.fn(),
+			waitForTreeExit: vi.fn()
+				.mockResolvedValueOnce(false)
+				.mockImplementationOnce(() => forcedExit),
+		};
 		let now = 5_000;
 		let deadlineCallback: (() => void) | undefined;
 		const timerToken = {};
@@ -206,25 +228,26 @@ describe("owned path cleanup contract", () => {
 			deadlineMs: 50,
 			lifecycle: { gateway: "closed", watcher: "awaited" },
 		}, {
-			forkProcess: () => child,
+			spawnOwned: (_modulePath, _env, onSpawned) => { onSpawned(control); return control; },
 			setTimer,
 			clearTimer,
 			now: () => now,
 		});
 		void running.then(() => { settled = true; }, () => { settled = true; });
+		await new Promise<void>(resolve => setImmediate(resolve));
 
 		expect(setTimer).toHaveBeenCalledWith(expect.any(Function), 1_050);
 		now += 1_050;
 		deadlineCallback!();
-		expect(child.kill).toHaveBeenCalledTimes(1);
-		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
 		await Promise.resolve();
-		expect(settled, "timeout must not masquerade termination request as process close").toBe(false);
-		deadlineCallback!();
-		child.emit("error", new Error("late child error"));
-		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(control.killTree).toHaveBeenNthCalledWith(1, "SIGTERM", 250);
+		expect(control.killTree).toHaveBeenNthCalledWith(2, "SIGKILL", 0);
+		expect(settled, "signals are requests, not proof that deletion stopped").toBe(false);
 
 		child.emit("close", null, "SIGKILL");
+		await Promise.resolve();
+		expect(settled, "close alone is not verified tree exit").toBe(false);
+		proveForcedExit(true);
 		const failure = await running.then(() => undefined, (error: unknown) => error) as Error & {
 			code: string;
 			stage: string;
@@ -242,20 +265,66 @@ describe("owned path cleanup contract", () => {
 				subprocess: expect.objectContaining({
 					terminationRequested: true,
 					terminationReason: "await-result",
+					treeExitVerified: true,
+					treeExitAttempts: 2,
 					closed: true,
 					closeSignal: "SIGKILL",
+					killAttempts: [
+						expect.objectContaining({ signal: "SIGTERM", phase: "graceful", requested: true }),
+						expect.objectContaining({ signal: "SIGKILL", phase: "forced", requested: true }),
+					],
 				}),
 			},
 		});
 		expect(failure.message).toContain(path.basename(ownerRoot));
-		expect(failure.message).toContain("await-result");
 		expect(clearTimer).toHaveBeenCalledWith(timerToken);
 
-		// Even hostile late callbacks cannot act on the child after settlement.
+		// Even hostile late callbacks cannot act on the tree after settlement.
 		sendCallback!(new Error("late send failure"));
 		deadlineCallback!();
 		child.emit("message", { unexpected: "late result" });
-		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(control.killTree).toHaveBeenCalledTimes(2);
+	});
+
+	it("reports bounded termination diagnostics when tree exit cannot be proven", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("unverified-subprocess-owner");
+		const child = new EventEmitter() as OwnedCleanupControl["child"];
+		child.send = (_message, callback) => callback();
+		const control: OwnedCleanupControl = {
+			child,
+			ownershipReady: Promise.resolve(),
+			killTree: vi.fn(),
+			waitForTreeExit: vi.fn().mockResolvedValue(false),
+		};
+		let deadlineCallback!: () => void;
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot, deadlineMs: 0 }, {
+			spawnOwned: (_modulePath, _env, onSpawned) => { onSpawned(control); return control; },
+			setTimer: callback => { deadlineCallback = callback; return {}; },
+			clearTimer: () => {},
+			now: () => 0,
+		});
+		await new Promise<void>(resolve => setImmediate(resolve));
+		deadlineCallback();
+
+		const failure = await running.then(() => undefined, (error: unknown) => error);
+		expect(failure).toMatchObject({
+			code: "ECLEANUPSUBPROCESSTERMINATION",
+			stage: "termination-proof-after-await-result",
+			lifecycle: {
+				subprocess: expect.objectContaining({
+					treeExitVerified: false,
+					treeExitAttempts: 2,
+					closed: false,
+					killAttempts: [
+						expect.objectContaining({ signal: "SIGTERM", requested: true }),
+						expect.objectContaining({ signal: "SIGKILL", requested: true }),
+					],
+				}),
+			},
+		});
+		expect(control.waitForTreeExit).toHaveBeenNthCalledWith(1, 250);
+		expect(control.waitForTreeExit).toHaveBeenNthCalledWith(2, 3_000);
 	});
 
 	it.each([
@@ -286,9 +355,11 @@ describe("owned path cleanup contract", () => {
 			clearTimer: () => {},
 			now: () => 0,
 		});
+		await new Promise<void>(resolve => setImmediate(resolve));
 
 		deadlineCallback!();
 		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 		child.emit("close", null, "SIGKILL");
 		await expect(running).rejects.toMatchObject({
 			code: "ECLEANUPSUBPROCESSTIMEOUT",
@@ -321,9 +392,10 @@ describe("owned path cleanup contract", () => {
 		let settled = false;
 		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot }, { forkProcess: () => child });
 		void running.then(() => { settled = true; }, () => { settled = true; });
+		await Promise.resolve();
 
 		expect(child.kill).toHaveBeenCalledTimes(1);
-		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+		expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 		await Promise.resolve();
 		expect(settled).toBe(false);
 		child.emit("close", null, "SIGKILL");
@@ -371,6 +443,7 @@ describe("owned path cleanup contract", () => {
 		child.kill = vi.fn(() => true);
 		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot }, { forkProcess: () => child });
 		if (message !== undefined) child.emit("message", message);
+		await Promise.resolve();
 		expect(child.kill).toHaveBeenCalledTimes(expectsKill ? 1 : 0);
 		child.emit("close", expectsKill ? null : 1, expectsKill ? "SIGKILL" : null);
 
