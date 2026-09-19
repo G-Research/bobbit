@@ -6,7 +6,7 @@
  * The coordinator packs Bobbit, resolves a lock-free external consumer into a
  * run-owned npm cache, installs the emitted tarball strictly offline into an
  * immutable template, and atomically publishes a descriptor. Browser workers
- * only copy that template; they never run npm pack/install themselves.
+ * materialize that template; they never run npm pack/install themselves.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
@@ -1019,18 +1019,29 @@ export async function readPreparedPackedConsumerDescriptor(descriptorPath, coord
 	return descriptor;
 }
 
-/** Copy the installed template into a unique, mutable, run-owned consumer. */
+/** Materialize the installed template into a unique, mutable, run-owned consumer. */
 export async function materializePackedConsumerFixture(descriptor, {
 	coordinatorRunRoot,
 	name = "consumer",
+	mode = "copy",
 	copy = cp,
+	move = rename,
 } = {}) {
 	const validated = validateDescriptor(descriptor, coordinatorRunRoot);
+	if (mode !== "copy" && mode !== "consume") {
+		throw new Error(`Unsupported packed-consumer materialization mode: ${mode}`);
+	}
 	const safeName = String(name).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "consumer";
 	const consumerDir = join(validated.consumersDir, `${safeName}-${process.pid}-${randomUUID()}`);
 	assertOwnedPath(resolve(coordinatorRunRoot), consumerDir, "consumerDir");
 	await mkdir(validated.consumersDir, { recursive: true });
-	await copy(validated.templateDir, consumerDir, { recursive: true, force: false, errorOnExist: true });
+	if (mode === "consume") {
+		// The template and destination have equal depth below the same run-owned
+		// fixture root. Rename is therefore atomic and preserves ../../pack lock refs.
+		await move(validated.templateDir, consumerDir);
+	} else {
+		await copy(validated.templateDir, consumerDir, { recursive: true, force: false, errorOnExist: true });
+	}
 	return { consumerDir };
 }
 

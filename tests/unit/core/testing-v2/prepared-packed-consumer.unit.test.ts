@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
@@ -67,7 +67,9 @@ type PackedConsumerApi = {
 		options: {
 			coordinatorRunRoot: string;
 			name?: string;
+			mode?: "copy" | "consume";
 			copy?: (source: string, destination: string, options: object) => Promise<void>;
+			move?: (source: string, destination: string) => Promise<void>;
 		},
 	) => Promise<string | { consumerDir: string }>;
 };
@@ -229,6 +231,72 @@ describe("prepared packed consumer", () => {
 			(error: NodeJS.ErrnoException) => error.code === "ENOENT",
 			`${FAILURE_PREFIX}: consumer workspace state must remain isolated`,
 		);
+	});
+
+	it("atomically consumes the prepared tree once without copying or rerunning package commands", async () => {
+		const { runRoot, calls, descriptor } = await prepareFixture();
+		const materialize = requireApi("materializePackedConsumerFixture");
+		const packageCommandCount = calls.length;
+		const marker = join("node_modules", "fixture-dependency", "marker.txt");
+		const manifestBytes = await readFile(join(descriptor.templateDir, "package.json"));
+		const lockBytes = await readFile(join(descriptor.templateDir, "package-lock.json"));
+		const markerBytes = await readFile(join(descriptor.templateDir, marker));
+		let copyCount = 0;
+		const moves: Array<{ source: string; destination: string }> = [];
+
+		const consumed = consumerPath(await materialize(descriptor, {
+			coordinatorRunRoot: runRoot,
+			name: "one-shot",
+			mode: "consume",
+			copy: async () => { copyCount++; },
+			move: async (source, destination) => {
+				moves.push({ source, destination });
+				await rename(source, destination);
+			},
+		}));
+
+		assert.equal(copyCount, 0, `${FAILURE_PREFIX}: consume mode must not copy the installed tree`);
+		assert.deepEqual(moves, [{ source: descriptor.templateDir, destination: consumed }],
+			`${FAILURE_PREFIX}: consume mode must atomically rename the prepared template`);
+		assert.equal(calls.length, packageCommandCount, `${FAILURE_PREFIX}: consumption must not invoke a package command`);
+		assert.notEqual(resolve(consumed), resolve(descriptor.templateDir), `${FAILURE_PREFIX}: destination must be unique from the template`);
+		assert.ok(isStrictChild(runRoot, consumed), `${FAILURE_PREFIX}: consumed tree escaped the run root`);
+		const destination = await lstat(consumed);
+		assert.equal(destination.isDirectory(), true, `${FAILURE_PREFIX}: consumed destination must be an ordinary directory`);
+		assert.equal(destination.isSymbolicLink(), false, `${FAILURE_PREFIX}: consumed destination must not be a symlink`);
+		assert.equal((await lstat(join(consumed, "node_modules"))).isSymbolicLink(), false,
+			`${FAILURE_PREFIX}: consumed node_modules must remain an ordinary private tree`);
+		assert.deepEqual(await readFile(join(consumed, "package.json")), manifestBytes,
+			`${FAILURE_PREFIX}: consume mode must preserve manifest bytes`);
+		assert.deepEqual(await readFile(join(consumed, "package-lock.json")), lockBytes,
+			`${FAILURE_PREFIX}: consume mode must preserve lock bytes`);
+		assert.deepEqual(await readFile(join(consumed, marker)), markerBytes,
+			`${FAILURE_PREFIX}: consume mode must preserve installed marker bytes`);
+		const lock = JSON.parse(lockBytes.toString("utf8"));
+		const packedReference = lock.packages[""].dependencies[descriptor.packageName] as string;
+		assert.match(packedReference, /^file:/, `${FAILURE_PREFIX}: consumed lock must retain its file reference`);
+		assert.equal(
+			resolve(consumed, decodeURIComponent(packedReference.slice("file:".length))),
+			resolve(descriptor.tarballPath),
+			`${FAILURE_PREFIX}: equal-depth move must keep the lock bound to the real packed tarball`,
+		);
+		await assert.rejects(
+			lstat(descriptor.templateDir),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT",
+			`${FAILURE_PREFIX}: successful consumption must remove the template source name`,
+		);
+		await assert.rejects(
+			materialize(descriptor, {
+				coordinatorRunRoot: runRoot,
+				name: "second-consume",
+				mode: "consume",
+				copy: async () => { copyCount++; },
+			}),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT",
+			`${FAILURE_PREFIX}: the prepared tree must be consumable only once`,
+		);
+		assert.equal(copyCount, 0, `${FAILURE_PREFIX}: failed second consumption must not fall back to copying`);
+		assert.equal(calls.length, packageCommandCount, `${FAILURE_PREFIX}: failed second consumption must not invoke a package command`);
 	});
 
 	it("rejects a self-consistent descriptor owned by a different run root before reuse", async () => {
