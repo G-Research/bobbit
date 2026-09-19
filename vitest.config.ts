@@ -130,7 +130,7 @@ export default defineConfig({
 					name: "v2-e2e-vitest",
 					environment: "node",
 					isolate: true,
-					maxWorkers: 1,
+					maxWorkers: Math.min(2, MAX_WORKERS),
 					include: discovery.vitestE2E,
 				},
 			}] : []),
