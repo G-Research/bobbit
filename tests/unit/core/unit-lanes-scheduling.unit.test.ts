@@ -113,6 +113,7 @@ const originalWorkerFlag = process.env.VITEST_MAX_WORKERS;
 let normal: LoadedConfig;
 let withNonExactE2eFlag: LoadedConfig;
 let withE2e: LoadedConfig;
+let withE2eOneWorker: LoadedConfig;
 let withNonExactRetryFreeFlag: LoadedConfig;
 let withRetryFree: LoadedConfig;
 
@@ -125,15 +126,17 @@ function restoreEnvironment(): void {
 	else process.env.VITEST_MAX_WORKERS = originalWorkerFlag;
 }
 
-async function loadConfig({ e2eFlag, retryFreeFlag }: {
+async function loadConfig({ e2eFlag, retryFreeFlag, maxWorkers }: {
 	e2eFlag?: string;
 	retryFreeFlag?: string;
+	maxWorkers?: string;
 } = {}): Promise<LoadedConfig> {
 	if (e2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = e2eFlag;
 	if (retryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
 	else process.env.BOBBIT_V2_RETRY_FREE = retryFreeFlag;
-	delete process.env.VITEST_MAX_WORKERS;
+	if (maxWorkers === undefined) delete process.env.VITEST_MAX_WORKERS;
+	else process.env.VITEST_MAX_WORKERS = maxWorkers;
 	vi.resetModules();
 	return await import("../../../vitest.config.ts") as LoadedConfig;
 }
@@ -143,6 +146,7 @@ beforeAll(async () => {
 		normal = await loadConfig();
 		withNonExactE2eFlag = await loadConfig({ e2eFlag: "true" });
 		withE2e = await loadConfig({ e2eFlag: "1" });
+		withE2eOneWorker = await loadConfig({ e2eFlag: "1", maxWorkers: "1" });
 		withNonExactRetryFreeFlag = await loadConfig({ retryFreeFlag: "true" });
 		withRetryFree = await loadConfig({ retryFreeFlag: "1" });
 	} finally {
@@ -376,11 +380,21 @@ describe("direct unit-stage scheduling", () => {
 				environment: "node",
 				pool: "forks",
 				isolate: true,
-				maxWorkers: 1,
+				maxWorkers: 2,
 				retry: 3,
 				include: discoveredTests.vitestE2E,
 				setupFiles: undefined,
 			},
+		);
+		assert.equal(
+			projects(withE2eOneWorker)[0].maxWorkers,
+			1,
+			"the shared VITEST_MAX_WORKERS diagnostic control may lower Group D without raising its cap",
+		);
+		assert.match(
+			configSource,
+			/maxWorkers: Math\.min\(2, MAX_WORKERS\)/,
+			"Group D must derive its cap from the globally resolved worker policy",
 		);
 	});
 });

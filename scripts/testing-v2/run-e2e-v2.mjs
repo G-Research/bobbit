@@ -407,6 +407,14 @@ export function resolveE2ePlaywrightWorkers(env = process.env) {
 	return Math.min(4, requested);
 }
 
+/** Group D defaults to two forks while retaining the suite-wide diagnostic lowering control. */
+export function resolveE2eVitestWorkers(env = process.env) {
+	const requested = Number(env.VITEST_MAX_WORKERS);
+	return Number.isFinite(requested) && requested >= 1
+		? Math.min(2, Math.floor(requested))
+		: 2;
+}
+
 function run(command, args, { env = {}, label } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
@@ -821,7 +829,7 @@ async function runGroupD(specs, { coordinatorEnv } = {}) {
 		env: composeE2EChildEnvironment(coordinatorEnv, {
 			...EXTERNAL_FREE_ENV,
 			BOBBIT_V2_E2E_VITEST: "1",
-			VITEST_MAX_WORKERS: "1",
+			VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv)),
 		}),
 		label: "D/vitest-real-fidelity",
 	});
@@ -989,7 +997,7 @@ async function main() {
 			A: Number(process.env.E2E_V2_NODE_CONCURRENCY || 2),
 			B: resolveE2ePlaywrightWorkers(),
 			C: resolveE2ePlaywrightWorkers(),
-			D: 1,
+			D: resolveE2eVitestWorkers(coordinatorEnv),
 		},
 		retryCount: resolveE2ERetryCount(coordinatorEnv),
 		excluded,

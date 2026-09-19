@@ -5,6 +5,7 @@ import {
 	prepareE2EDistServerPrebundle,
 	resolveE2ePlaywrightWorkers,
 	resolveE2ERetryCount,
+	resolveE2eVitestWorkers,
 	runGroupBWithPackedConsumerPreparation,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 import {
@@ -62,7 +63,20 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(resolveE2ePlaywrightWorkers(env)).toBe(expected);
 	});
 
-	it("runs A → prebundle → concurrent B/preparation barrier → cache fan-out → C → D without changing retries or workers", () => {
+	it.each([
+		[{}, 2],
+		[{ VITEST_MAX_WORKERS: "1" }, 1],
+		[{ VITEST_MAX_WORKERS: "1.9" }, 1],
+		[{ VITEST_MAX_WORKERS: "2" }, 2],
+		[{ VITEST_MAX_WORKERS: "3" }, 2],
+		[{ VITEST_MAX_WORKERS: "999" }, 2],
+		[{ VITEST_MAX_WORKERS: "0" }, 2],
+		[{ VITEST_MAX_WORKERS: "invalid" }, 2],
+	] as const)("resolves the bounded Group D worker policy from %j", (env, expected) => {
+		expect(resolveE2eVitestWorkers(env)).toBe(expected);
+	});
+
+	it("runs A → prebundle → concurrent B/preparation barrier → cache fan-out → C → D with D strictly last", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
 		expect(defaultSchedule).toBeDefined();
@@ -94,6 +108,7 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(barrier).toContain('captureLatestProfile("B")');
 		expect(defaultSchedule).toContain("Object.freeze(sharedPlaywrightEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
+		expect(defaultSchedule).not.toMatch(/Promise\.all[\s\S]*runGroupD/);
 		expect(resolveE2ERetryCount({})).toBe(3);
 		expect(defaultSchedule).toContain("const groupBWorkers = resolveE2ePlaywrightWorkers()");
 		expect(defaultSchedule).toContain("const groupCWorkers = resolveE2ePlaywrightWorkers()");
@@ -107,6 +122,12 @@ describe("E2E Docker capability and scheduling", () => {
 			source.indexOf("\n\t\t},", source.indexOf("\n\t\tcapacity: {")),
 		);
 		expect(reportCapacity).toContain("B: resolveE2ePlaywrightWorkers()");
+		expect(reportCapacity).toContain("D: resolveE2eVitestWorkers(coordinatorEnv)");
+		const focusedGroupD = source.slice(
+			source.indexOf("async function runGroupD("),
+			source.indexOf("async function main()"),
+		);
+		expect(focusedGroupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 		expect(source).not.toContain('process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1');
 		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
 		const reportAt = source.indexOf("const report = {");
