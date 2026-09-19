@@ -22,6 +22,8 @@ type ProjectConfig = {
 		maxWorkers: number;
 		retry: number;
 		include: string[];
+		exclude?: string[];
+		sequence?: { groupOrder: number };
 		setupFiles?: string[];
 		experimental: {
 			fsModuleCache: boolean;
@@ -350,30 +352,59 @@ describe("direct unit-stage scheduling", () => {
 		);
 	});
 
-	it("adds only the exact isolated E2E project when explicitly enabled", () => {
+	it("adds exact ordered E2E projects with disjoint, exhaustive ownership", () => {
 		const normalNames = ["v2-core", "v2-dom", "v2-integration", "v2-isolated"];
 		assert.deepEqual(
 			projects(withNonExactE2eFlag).map(({ name }) => name),
 			normalNames,
-			"only the exact flag value 1 may enable the E2E project",
+			"only the exact flag value 1 may enable the E2E projects",
 		);
 
 		const actual = projects(withE2e);
 		assert.deepEqual(
 			actual.map(({ name }) => name),
-			["v2-e2e-vitest", ...normalNames],
+			["v2-e2e-vitest-cli", "v2-e2e-vitest", ...normalNames],
 		);
-		const e2e = actual[0];
+		const [cli, concurrent] = actual;
+		const cliSpec = "tests/e2e/vitest/base-path-cli-entrypoint.vitest-e2e.test.ts";
 		assert.deepEqual(
 			{
-				name: e2e.name,
-				environment: e2e.environment,
-				pool: e2e.pool,
-				isolate: e2e.isolate,
-				maxWorkers: e2e.maxWorkers,
-				retry: e2e.retry,
-				include: e2e.include,
-				setupFiles: e2e.setupFiles,
+				name: cli.name,
+				environment: cli.environment,
+				pool: cli.pool,
+				isolate: cli.isolate,
+				maxWorkers: cli.maxWorkers,
+				retry: cli.retry,
+				sequence: cli.sequence,
+				include: cli.include,
+				exclude: cli.exclude,
+				setupFiles: cli.setupFiles,
+			},
+			{
+				name: "v2-e2e-vitest-cli",
+				environment: "node",
+				pool: "forks",
+				isolate: true,
+				maxWorkers: 1,
+				retry: 3,
+				sequence: { groupOrder: 1 },
+				include: [cliSpec],
+				exclude: undefined,
+				setupFiles: undefined,
+			},
+		);
+		assert.deepEqual(
+			{
+				name: concurrent.name,
+				environment: concurrent.environment,
+				pool: concurrent.pool,
+				isolate: concurrent.isolate,
+				maxWorkers: concurrent.maxWorkers,
+				retry: concurrent.retry,
+				sequence: concurrent.sequence,
+				include: concurrent.include,
+				exclude: concurrent.exclude,
+				setupFiles: concurrent.setupFiles,
 			},
 			{
 				name: "v2-e2e-vitest",
@@ -382,19 +413,32 @@ describe("direct unit-stage scheduling", () => {
 				isolate: true,
 				maxWorkers: 2,
 				retry: 3,
+				sequence: { groupOrder: 2 },
 				include: discoveredTests.vitestE2E,
+				exclude: [cliSpec],
 				setupFiles: undefined,
 			},
 		);
-		assert.equal(
-			projects(withE2eOneWorker)[0].maxWorkers,
-			1,
-			"the shared VITEST_MAX_WORKERS diagnostic control may lower Group D without raising its cap",
+		const ownedByCli = new Set(cli.include);
+		const ownedByConcurrent = new Set(concurrent.include.filter(file => !concurrent.exclude?.includes(file)));
+		assert.deepEqual([...ownedByCli], [cliSpec], "the CLI smoke must have exact singleton ownership");
+		assert.deepEqual([...ownedByCli].filter(file => ownedByConcurrent.has(file)), [], "Group D projects must be disjoint");
+		assert.deepEqual(
+			[...new Set([...ownedByCli, ...ownedByConcurrent])].sort(),
+			[...discoveredTests.vitestE2E].sort(),
+			"the two projects must exhaust the convention-discovered nine-file inventory",
+		);
+		assert.equal(discoveredTests.vitestE2E.length, 9);
+		assert.ok(cli.sequence!.groupOrder < concurrent.sequence!.groupOrder, "the one-worker CLI group must run first");
+		assert.deepEqual(
+			projects(withE2eOneWorker).slice(0, 2).map(({ maxWorkers }) => maxWorkers),
+			[1, 1],
+			"the shared VITEST_MAX_WORKERS diagnostic control may lower the concurrent group without changing the CLI cap",
 		);
 		assert.match(
 			configSource,
 			/maxWorkers: Math\.min\(2, MAX_WORKERS\)/,
-			"Group D must derive its cap from the globally resolved worker policy",
+			"the concurrent Group D project must derive its cap from the globally resolved worker policy",
 		);
 	});
 });

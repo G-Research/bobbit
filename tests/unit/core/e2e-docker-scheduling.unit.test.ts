@@ -4,6 +4,7 @@ import {
 	detectDockerSandboxCapability,
 	E2E_FINAL_CLEANUP_POLICY,
 	finalizeE2ERunCleanup,
+	groupDVitestArgs,
 	prepareE2EDistServerPrebundle,
 	resolveE2ePlaywrightWorkers,
 	resolveE2ERetryCount,
@@ -76,6 +77,30 @@ describe("E2E Docker capability and scheduling", () => {
 		[{ VITEST_MAX_WORKERS: "invalid" }, 2],
 	] as const)("resolves the bounded Group D worker policy from %j", (env, expected) => {
 		expect(resolveE2eVitestWorkers(env)).toBe(expected);
+	});
+
+	it("selects both ordered Group D projects in one Vitest invocation", () => {
+		expect(groupDVitestArgs({})).toEqual([
+			"run",
+			"--config", "vitest.config.ts",
+			"--project", "v2-e2e-vitest-cli",
+			"--project", "v2-e2e-vitest",
+			"--silent=passed-only",
+		]);
+		expect(groupDVitestArgs({ BOBBIT_V2_RETRY_FREE: "1" })).toEqual([
+			"run",
+			"--config", "vitest.config.ts",
+			"--project", "v2-e2e-vitest-cli",
+			"--project", "v2-e2e-vitest",
+			"--silent=passed-only",
+			"--retry=0",
+		]);
+		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
+		const groupD = source.slice(source.indexOf("async function runGroupD("), source.indexOf("async function main()"));
+		expect(groupD.match(/\breturn run\(/g)).toHaveLength(1);
+		expect(groupD.match(/groupDVitestArgs\(coordinatorEnv\)/g)).toHaveLength(1);
+		expect(groupD).toContain('BOBBIT_V2_E2E_VITEST: "1"');
+		expect(groupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 	});
 
 	it("runs A → prebundle → concurrent B/preparation barrier → cache fan-out → C → D with D strictly last", () => {

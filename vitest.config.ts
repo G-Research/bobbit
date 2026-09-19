@@ -83,6 +83,7 @@ const shared = {
 	},
 };
 const tier1SetupFiles = ["tests/support/harnesses/unit/tier1-spawn-guard.ts"];
+const e2eVitestCliSpec = "tests/e2e/vitest/base-path-cli-entrypoint.vitest-e2e.test.ts";
 // Per-file reset of leaking dir singletons for the isolate:false projects.
 const fileBoundaryRunner = "tests/support/harnesses/unit/file-boundary-runner.ts";
 
@@ -123,17 +124,35 @@ export default defineConfig({
 		],
 		coverage,
 		projects: [
-			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
-				plugins: prebundlePlugins({ webEntries: false }),
-				test: {
-					...shared,
-					name: "v2-e2e-vitest",
-					environment: "node",
-					isolate: true,
-					maxWorkers: Math.min(2, MAX_WORKERS),
-					include: discovery.vitestE2E,
+			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [
+				{
+					plugins: prebundlePlugins({ webEntries: false }),
+					test: {
+						...shared,
+						name: "v2-e2e-vitest-cli",
+						environment: "node",
+						isolate: true,
+						maxWorkers: 1,
+						// Vitest 4 appends isolated order-0 single-worker files to a trailing
+						// bucket, so distinct non-zero orders keep this CLI smoke first.
+						sequence: { groupOrder: 1 },
+						include: [e2eVitestCliSpec],
+					},
 				},
-			}] : []),
+				{
+					plugins: prebundlePlugins({ webEntries: false }),
+					test: {
+						...shared,
+						name: "v2-e2e-vitest",
+						environment: "node",
+						isolate: true,
+						maxWorkers: Math.min(2, MAX_WORKERS),
+						sequence: { groupOrder: 2 },
+						include: discovery.vitestE2E,
+						exclude: [e2eVitestCliSpec],
+					},
+				},
+			] : []),
 			{
 				plugins: prebundlePlugins({ webEntries: false }),
 				test: {
