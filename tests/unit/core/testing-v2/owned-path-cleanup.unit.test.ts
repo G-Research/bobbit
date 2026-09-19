@@ -71,7 +71,9 @@ type ShutdownPhase = {
 
 type OwnedCleanupControl = {
 	child: EventEmitter & {
-		send(message: unknown, callback: (error?: Error | null) => void): void;
+		send?: (message: unknown, callback: (error?: Error | null) => void) => void;
+		stdin?: EventEmitter & { end(data: string, callback: (error?: Error | null) => void): void };
+		stdout?: EventEmitter;
 	};
 	ownershipReady: Promise<void>;
 	killTree(signal?: "SIGTERM" | "SIGKILL", graceMs?: number): void;
@@ -88,8 +90,9 @@ type CleanupContract = {
 		spawnOwned?: (
 			modulePath: string,
 			env: NodeJS.ProcessEnv,
-			onSpawned: (tracked: OwnedCleanupControl) => void,
-		) => OwnedCleanupControl | Promise<OwnedCleanupControl>;
+			onSpawned: (tracked: OwnedCleanupControl) => boolean | void,
+			options: { signal: AbortSignal },
+		) => OwnedCleanupControl | undefined | Promise<OwnedCleanupControl | undefined>;
 		setTimer?: (callback: () => void, delayMs: number) => unknown;
 		clearTimer?: (timer: unknown) => void;
 		setJoinTimer?: (callback: () => void, delayMs: number) => unknown;
@@ -193,6 +196,110 @@ describe("owned path cleanup contract", () => {
 		child.emit("close", 0, null);
 		await expect(running).resolves.toEqual({ removed: true, attempts: 1, history: [] });
 		expect(settled).toBe(true);
+	});
+
+	it("bounds a never-settling pre-handle factory without admitting a child", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("never-settling-cleanup-bootstrap");
+		let deadlineCallback!: () => void;
+		let factorySignal: AbortSignal | undefined;
+		const spawnOwned = vi.fn((_modulePath, _env, _onSpawned, options: { signal: AbortSignal }) => {
+			factorySignal = options.signal;
+			return new Promise<OwnedCleanupControl>(() => {});
+		});
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot, deadlineMs: 0 }, {
+			spawnOwned,
+			setTimer: callback => { deadlineCallback = callback; return {}; },
+			clearTimer: () => {},
+			now: () => 0,
+		});
+		await Promise.resolve();
+
+		deadlineCallback();
+		await expect(running).rejects.toMatchObject({
+			code: "ECLEANUPSUBPROCESSTIMEOUT",
+			stage: "spawn",
+			lifecycle: {
+				subprocess: expect.objectContaining({
+					spawned: false,
+					terminationRequested: true,
+					terminationReason: "spawn",
+					killAttempts: [],
+				}),
+			},
+		});
+		expect(factorySignal?.aborted).toBe(true);
+		expect(spawnOwned).toHaveBeenCalledTimes(1);
+	});
+
+	it("consumes late bootstrap settlement and preserves the no-late-spawn fence", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("late-cleanup-bootstrap");
+		let deadlineCallback!: () => void;
+		let releaseBootstrap!: () => void;
+		const bootstrap = new Promise<void>(resolve => { releaseBootstrap = resolve; });
+		const spawnProcess = vi.fn();
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot, deadlineMs: 0 }, {
+			spawnOwned: async (_modulePath, _env, _onSpawned, { signal }) => {
+				await bootstrap;
+				signal.throwIfAborted();
+				spawnProcess();
+				return undefined;
+			},
+			setTimer: callback => { deadlineCallback = callback; return {}; },
+			clearTimer: () => {},
+			now: () => 0,
+		});
+		await Promise.resolve();
+
+		deadlineCallback();
+		await expect(running).rejects.toMatchObject({ code: "ECLEANUPSUBPROCESSTIMEOUT", stage: "spawn" });
+		releaseBootstrap();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(spawnProcess).not.toHaveBeenCalled();
+	});
+
+	it("joins an exposed handle without waiting for its never-settling factory", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("exposed-never-settling-cleanup-bootstrap");
+		const child = new EventEmitter() as OwnedCleanupControl["child"];
+		const control: OwnedCleanupControl = {
+			child,
+			ownershipReady: Promise.resolve(),
+			killTree: vi.fn(),
+			waitForTreeExit: vi.fn().mockResolvedValue(true),
+		};
+		let deadlineCallback!: () => void;
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot, deadlineMs: 0 }, {
+			spawnOwned: (_modulePath, _env, onSpawned) => {
+				onSpawned(control);
+				return new Promise<OwnedCleanupControl>(() => {});
+			},
+			setTimer: callback => { deadlineCallback = callback; return {}; },
+			clearTimer: () => {},
+			now: () => 0,
+		});
+		await Promise.resolve();
+
+		deadlineCallback();
+		await Promise.resolve();
+		expect(control.killTree).toHaveBeenCalledWith("SIGTERM", 250);
+		let settled = false;
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		await Promise.resolve();
+		expect(settled, "verified tree exit still requires actual child close").toBe(false);
+		child.emit("close", null, "SIGTERM");
+		await expect(running).rejects.toMatchObject({
+			code: "ECLEANUPSUBPROCESSTIMEOUT",
+			stage: "ownership-ready",
+			lifecycle: {
+				subprocess: expect.objectContaining({
+					spawned: true,
+					treeExitVerified: true,
+					closed: true,
+				}),
+			},
+		});
 	});
 
 	it("escalates a timed-out owned tree and rejects only after close plus verified exit", async () => {
@@ -405,6 +512,50 @@ describe("owned path cleanup contract", () => {
 			cause: sendFailure,
 		});
 		expect(child.kill).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{
+			label: "stdin EPIPE",
+			code: "ECLEANUPSUBPROCESSSEND",
+			stage: "send-request-stream",
+			emitError(child: OwnedCleanupControl["child"], error: Error) { child.stdin!.emit("error", error); },
+		},
+		{
+			label: "stdout error",
+			code: "ECLEANUPSUBPROCESSPROTOCOL",
+			stage: "receive-result-stream",
+			emitError(child: OwnedCleanupControl["child"], error: Error) { child.stdout!.emit("error", error); },
+		},
+	])("routes $label through exact-tree termination and close", async ({ label, code, stage, emitError }) => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve(`stream-error-${label.replaceAll(" ", "-")}`);
+		const stdin = new EventEmitter() as NonNullable<OwnedCleanupControl["child"]["stdin"]>;
+		stdin.end = (_data, callback) => callback();
+		const stdout = new EventEmitter();
+		const child = Object.assign(new EventEmitter(), { stdin, stdout }) as OwnedCleanupControl["child"];
+		const control: OwnedCleanupControl = {
+			child,
+			ownershipReady: Promise.resolve(),
+			killTree: vi.fn(),
+			waitForTreeExit: vi.fn().mockResolvedValue(true),
+		};
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot }, {
+			spawnOwned: (_modulePath, _env, onSpawned) => { onSpawned(control); return control; },
+		});
+		await new Promise<void>(resolve => setImmediate(resolve));
+		const streamFailure = Object.assign(new Error(label), label === "stdin EPIPE" ? { code: "EPIPE" } : {});
+
+		expect(() => emitError(child, streamFailure)).not.toThrow();
+		await Promise.resolve();
+		expect(control.killTree).toHaveBeenCalledWith("SIGTERM", 250);
+		let settled = false;
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		await Promise.resolve();
+		expect(settled, "a stream error still requires actual child close").toBe(false);
+		child.emit("close", null, "SIGTERM");
+		await expect(running).rejects.toMatchObject({ code, stage, cause: streamFailure });
+		expect(control.waitForTreeExit).toHaveBeenCalledWith(250);
 	});
 
 	it.each([
