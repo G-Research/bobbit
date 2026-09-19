@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import {
 	RECOVERY_IO_CONCURRENCY,
 	type AsyncTreeDirent,
@@ -39,6 +39,88 @@ function fakeDirent(name: string, kind: NodeKind): AsyncTreeDirent {
 
 function missing(filePath: string): NodeJS.ErrnoException {
 	return Object.assign(new Error(`missing ${filePath}`), { code: "ENOENT" });
+}
+
+function ioError(code: string, operation: string): NodeJS.ErrnoException {
+	return Object.assign(new Error(`${operation} failed with ${code}`), {
+		code,
+		syscall: "rename",
+	});
+}
+
+class RootRenameRetryFs {
+	readonly parent = path.resolve("/retry-cleanup");
+	readonly root = path.join(this.parent, "target");
+	readonly nodes = new Map<string, FakeNode>([
+		[this.parent, { kind: "directory", id: 20, children: ["target"] }],
+		[this.root, { kind: "directory", id: 21, children: [] }],
+	]);
+	readonly calls: string[] = [];
+	readonly quarantinePaths: string[] = [];
+	private readonly failures: string[];
+	private readonly moveBeforeFailure: boolean;
+	private readonly denyRestore: boolean;
+
+	constructor(
+		failures: string[],
+		options: { moveBeforeFailure?: boolean; denyRestore?: boolean } = {},
+	) {
+		this.failures = [...failures];
+		this.moveBeforeFailure = options.moveBeforeFailure ?? false;
+		this.denyRestore = options.denyRestore ?? false;
+	}
+
+	async lstat(filePath: string): Promise<AsyncTreeStats> {
+		const absolute = path.resolve(filePath);
+		this.calls.push(`lstat:${absolute}`);
+		const node = this.nodes.get(absolute);
+		if (!node) throw missing(absolute);
+		return fakeStats(node.kind, node.id);
+	}
+
+	async opendir(dirPath: string): Promise<AsyncTreeDirectory> {
+		const absolute = path.resolve(dirPath);
+		this.calls.push(`opendir:${absolute}`);
+		if (this.nodes.get(absolute)?.kind !== "directory") throw missing(absolute);
+		return {
+			read: async () => null,
+			close: async () => {},
+		};
+	}
+
+	async rename(oldPath: string, newPath: string): Promise<void> {
+		const source = path.resolve(oldPath);
+		const destination = path.resolve(newPath);
+		this.calls.push(`rename:${source}->${destination}`);
+		const isDetach = source === this.root && path.basename(destination).startsWith(".bobbit-remove-");
+		const isRestore = path.basename(source).startsWith(".bobbit-remove-") && destination === this.root;
+		if (isRestore && this.denyRestore) throw ioError("EACCES", "restore");
+
+		const failureCode = isDetach ? this.failures.shift() : undefined;
+		if (failureCode && !this.moveBeforeFailure) throw ioError(failureCode, "detach");
+		const node = this.nodes.get(source);
+		if (!node) throw missing(source);
+		this.nodes.delete(source);
+		this.nodes.set(destination, node);
+		if (isDetach) this.quarantinePaths.push(destination);
+		if (failureCode) throw ioError(failureCode, "detach");
+	}
+
+	async unlink(filePath: string): Promise<void> {
+		const absolute = path.resolve(filePath);
+		this.calls.push(`unlink:${absolute}`);
+		if (!this.nodes.delete(absolute)) throw missing(absolute);
+	}
+
+	async rmdir(dirPath: string): Promise<void> {
+		const absolute = path.resolve(dirPath);
+		this.calls.push(`rmdir:${absolute}`);
+		if (!this.nodes.delete(absolute)) throw missing(absolute);
+	}
+
+	detachAttempts(): number {
+		return this.calls.filter(call => call.startsWith(`rename:${this.root}->`)).length;
+	}
 }
 
 /**
@@ -158,6 +240,105 @@ async function waitUntil(predicate: () => boolean, attempts = 1_000): Promise<vo
 }
 
 describe("targeted Git cleanup symlink safety", () => {
+	it("retries transient root-detach contention with bounded exponential delays", async () => {
+		const io = new RootRenameRetryFs(["EBUSY", "EPERM"]);
+		const delays: number[] = [];
+		let now = 0;
+
+		await removeTargetedTree(io.root, io, undefined, {
+			maxAttempts: 5,
+			deadlineMs: 1_000,
+			initialDelayMs: 10,
+			maxDelayMs: 40,
+			now: () => now,
+			sleep: async delayMs => { delays.push(delayMs); now += delayMs; },
+		});
+
+		assert.equal(io.detachAttempts(), 3);
+		assert.deepEqual(delays, [10, 20]);
+		assert.equal(io.nodes.has(io.root), false);
+	});
+
+	it("stops at the monotonic deadline and retains complete attempt diagnostics", async () => {
+		const io = new RootRenameRetryFs(Array.from({ length: 10 }, () => "ENOTEMPTY"));
+		let now = 0;
+		let terminal: (Error & {
+			code?: string;
+			targetPath?: string;
+			deadlineMs?: number;
+			elapsedMs?: number;
+			attemptHistory?: Array<{ attempt: number; code: string; elapsedMs: number }>;
+		}) | undefined;
+
+		await assert.rejects(
+			removeTargetedTree(io.root, io, undefined, {
+				maxAttempts: 10,
+				deadlineMs: 25,
+				initialDelayMs: 10,
+				maxDelayMs: 20,
+				now: () => now,
+				sleep: async delayMs => { now += delayMs; },
+			}),
+			(error: unknown) => {
+				terminal = error as typeof terminal;
+				return true;
+			},
+		);
+
+		assert.equal(io.detachAttempts(), 2, "the deadline must prevent a third destructive attempt");
+		assert.equal(terminal?.name, "TargetedTreeRemovalError");
+		assert.equal(terminal?.code, "ENOTEMPTY");
+		assert.equal(terminal?.targetPath, io.root);
+		assert.equal(terminal?.deadlineMs, 25);
+		assert.equal(terminal?.elapsedMs, 25);
+		assert.deepEqual(terminal?.attemptHistory?.map(entry => [entry.attempt, entry.code, entry.elapsedMs]), [
+			[1, "ENOTEMPTY", 0],
+			[2, "ENOTEMPTY", 10],
+		]);
+		assert.match(terminal?.message ?? "", /deadline 25ms.*#1@0ms:ENOTEMPTY.*#2@10ms:ENOTEMPTY/);
+	});
+
+	it("does not retry a non-transient removal failure", async () => {
+		const io = new RootRenameRetryFs(["EIO"]);
+		const failure = await removeTargetedTree(io.root, io, undefined, {
+			maxAttempts: 5,
+			deadlineMs: 1_000,
+			sleep: async () => { throw new Error("unexpected retry delay"); },
+		}).then(() => undefined, error => error as NodeJS.ErrnoException);
+
+		assert.equal(failure?.code, "EIO");
+		assert.equal(failure?.name, "Error", "the first non-transient error remains the public cause");
+		assert.equal(io.detachAttempts(), 1);
+	});
+
+	it("does not retry a transient failure with an unresolved quarantine", async () => {
+		const io = new RootRenameRetryFs(["EBUSY"], { moveBeforeFailure: true, denyRestore: true });
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		let terminal: (Error & { quarantinePath?: string; attemptHistory?: Array<{ quarantinePath?: string }> }) | undefined;
+		try {
+			await assert.rejects(
+				removeTargetedTree(io.root, io, undefined, {
+					maxAttempts: 5,
+					deadlineMs: 1_000,
+					sleep: async () => { throw new Error("unsafe retry attempted"); },
+				}),
+				(error: unknown) => {
+					terminal = error as typeof terminal;
+					return true;
+				},
+			);
+		} finally {
+			logged.mockRestore();
+		}
+
+		assert.equal(io.detachAttempts(), 1);
+		assert.equal(io.nodes.has(io.root), false);
+		assert.equal(terminal?.name, "TargetedTreeRemovalError");
+		assert.equal(terminal?.quarantinePath, io.quarantinePaths[0]);
+		assert.equal(terminal?.attemptHistory?.[0]?.quarantinePath, io.quarantinePaths[0]);
+		assert.equal(io.nodes.has(io.quarantinePaths[0]!), true, "the unresolved exact identity must remain untouched");
+	});
+
 	it("restores a mismatched detach without deleting the external sentinel", async () => {
 		const io = new SwapBeforeOpenFs();
 
@@ -166,6 +347,11 @@ describe("targeted Git cleanup symlink safety", () => {
 			(error: unknown) => (error as NodeJS.ErrnoException).code === "ESTALE",
 		);
 
+		assert.equal(
+			io.calls.filter(call => call.startsWith(`rename:${io.target}->`)).length,
+			1,
+			"an identity failure must never enter the retry loop",
+		);
 		assert.equal(io.nodes.get(io.target)?.kind, "symlink", "the mismatched detach must be restored");
 		assert.equal(io.nodes.has(io.detachedOriginal), true, "the originally authorized directory must survive the race");
 		assert.equal(io.nodes.has(io.external), true, "the external directory must remain");

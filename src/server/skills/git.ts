@@ -7,6 +7,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnosti
 import {
 	hasStableFileIdentity,
 	RECOVERY_IO_CONCURRENCY,
+	realAsyncTreeFs,
 	sameFileIdentity,
 	removeTree,
 	type AsyncTreeFs,
@@ -303,27 +304,186 @@ async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<
 	}
 }
 
+const TARGETED_REMOVAL_ATTEMPTS = 5;
+const TARGETED_REMOVAL_DEADLINE_MS = 1_000;
+const TARGETED_REMOVAL_INITIAL_DELAY_MS = 50;
+const TARGETED_REMOVAL_MAX_DELAY_MS = 400;
+const TARGETED_REMOVAL_TRANSIENT_CODES = new Set(["EACCES", "EBUSY", "ENOTEMPTY", "EPERM"]);
+
+type TargetedRemovalFs = Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">;
+
+export interface TargetedTreeRemovalRetryOptions {
+	maxAttempts?: number;
+	deadlineMs?: number;
+	initialDelayMs?: number;
+	maxDelayMs?: number;
+	/** Test seam; production uses the monotonic performance clock. */
+	now?: () => number;
+	/** Test seam; production uses an ordinary timer. */
+	sleep?: (delayMs: number) => Promise<void>;
+}
+
+interface TargetedRemovalAttempt {
+	attempt: number;
+	elapsedMs: number;
+	code: string;
+	message: string;
+	syscall?: string;
+	path?: string;
+	destination?: string;
+	quarantinePath?: string;
+}
+
+function targetedRemovalErrorCode(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === "string" ? code : "UNKNOWN";
+}
+
+function targetedRemovalQuarantine(error: unknown): string | undefined {
+	const quarantinePath = (error as { quarantinePath?: unknown } | null)?.quarantinePath;
+	return typeof quarantinePath === "string" ? quarantinePath : undefined;
+}
+
+function targetedRemovalAttempt(error: unknown, attempt: number, elapsedMs: number): TargetedRemovalAttempt {
+	const ioError = error as (NodeJS.ErrnoException & { dest?: unknown }) | null;
+	return {
+		attempt,
+		elapsedMs: Math.max(0, Math.round(elapsedMs)),
+		code: targetedRemovalErrorCode(error),
+		message: error instanceof Error ? error.message : String(error),
+		...(typeof ioError?.syscall === "string" ? { syscall: ioError.syscall } : {}),
+		...(typeof ioError?.path === "string" ? { path: ioError.path } : {}),
+		...(typeof ioError?.dest === "string" ? { destination: ioError.dest } : {}),
+		...(targetedRemovalQuarantine(error) ? { quarantinePath: targetedRemovalQuarantine(error) } : {}),
+	};
+}
+
+function targetedRemovalTerminalError(
+	targetPath: string,
+	deadlineMs: number,
+	startedAt: number,
+	now: () => number,
+	history: readonly TargetedRemovalAttempt[],
+	cause: unknown,
+): Error {
+	const elapsedMs = Math.max(0, Math.round(now() - startedAt));
+	const historyText = history.map(entry => {
+		const fields = [
+			`#${entry.attempt}@${entry.elapsedMs}ms:${entry.code}`,
+			entry.syscall ? `syscall=${entry.syscall}` : "",
+			entry.path ? `path=${entry.path}` : "",
+			entry.destination ? `destination=${entry.destination}` : "",
+			entry.quarantinePath ? `quarantine=${entry.quarantinePath}` : "",
+			entry.message,
+		].filter(Boolean);
+		return fields.join(" ");
+	}).join("; ");
+	let quarantinePath: string | undefined;
+	for (let index = history.length - 1; index >= 0; index--) {
+		if (history[index]!.quarantinePath) {
+			quarantinePath = history[index]!.quarantinePath;
+			break;
+		}
+	}
+	const error = new Error(
+		`Failed to remove targeted tree ${targetPath} after ${history.length} attempt(s) `
+		+ `in ${elapsedMs}ms (deadline ${deadlineMs}ms); history: ${historyText}`,
+		{ cause },
+	) as Error & {
+		code?: string;
+		targetPath?: string;
+		deadlineMs?: number;
+		elapsedMs?: number;
+		attemptHistory?: readonly TargetedRemovalAttempt[];
+		quarantinePath?: string;
+	};
+	error.name = "TargetedTreeRemovalError";
+	error.code = history.at(-1)?.code;
+	error.targetPath = targetPath;
+	error.deadlineMs = deadlineMs;
+	error.elapsedMs = elapsedMs;
+	error.attemptHistory = history;
+	if (quarantinePath) error.quarantinePath = quarantinePath;
+	return error;
+}
+
 /**
  * Remove one exact path through the canonical bounded tree remover. It
  * revalidates an opened directory path before using each returned child name,
  * so replacing a verified directory with a symlink can only unlink the link;
  * it can never redirect child deletion outside the target.
  *
- * The operation owns one process-wide slot for its lifetime. Concurrent
- * worktree/pool cleanup therefore retains the shared recovery I/O ceiling
- * without multiplying it at nested tree levels. When supplied, the expected
- * root stats bind deletion to that exact pre-operation filesystem identity.
+ * The operation owns one process-wide slot for its lifetime, including bounded
+ * retries for transient filesystem contention. A retry is permitted only after
+ * removeTree restored every detached identity: an error carrying quarantine
+ * context is terminal. The initial root identity is reused for every attempt,
+ * preventing a replacement generation from entering a later retry.
  */
 export async function removeTargetedTree(
 	targetPath: string,
-	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">,
+	treeFs?: TargetedRemovalFs,
 	expectedRootStats?: AsyncTreeStats,
+	retryOptions: TargetedTreeRemovalRetryOptions = {},
 ): Promise<void> {
-	await withTargetedRemovalSlot(() => removeTree(targetPath, {
-		fs: treeFs,
-		force: true,
-		expectedRootStats,
-	}));
+	const absoluteTarget = path.resolve(targetPath);
+	const effectiveFs = treeFs ?? realAsyncTreeFs;
+	const maxAttempts = Math.max(1, Math.floor(retryOptions.maxAttempts ?? TARGETED_REMOVAL_ATTEMPTS));
+	const deadlineMs = Math.max(0, retryOptions.deadlineMs ?? TARGETED_REMOVAL_DEADLINE_MS);
+	const initialDelayMs = Math.max(0, retryOptions.initialDelayMs ?? TARGETED_REMOVAL_INITIAL_DELAY_MS);
+	const maxDelayMs = Math.max(0, retryOptions.maxDelayMs ?? TARGETED_REMOVAL_MAX_DELAY_MS);
+	const now = retryOptions.now ?? (() => performance.now());
+	const sleep = retryOptions.sleep ?? ((delayMs: number) => new Promise<void>(resolve => setTimeout(resolve, delayMs)));
+
+	await withTargetedRemovalSlot(async () => {
+		const startedAt = now();
+		let rootIdentity = expectedRootStats;
+		if (!rootIdentity) {
+			try {
+				rootIdentity = await effectiveFs.lstat(absoluteTarget);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
+				throw error;
+			}
+		}
+
+		const history: TargetedRemovalAttempt[] = [];
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				await removeTree(absoluteTarget, {
+					fs: effectiveFs,
+					force: true,
+					expectedRootStats: rootIdentity,
+				});
+				return;
+			} catch (error) {
+				lastError = error;
+				const elapsedMs = now() - startedAt;
+				history.push(targetedRemovalAttempt(error, attempt, elapsedMs));
+				const transient = TARGETED_REMOVAL_TRANSIENT_CODES.has(targetedRemovalErrorCode(error));
+				const quarantinePath = targetedRemovalQuarantine(error);
+				if (!transient) {
+					if (history.length === 1 && !quarantinePath) throw error;
+					throw targetedRemovalTerminalError(absoluteTarget, deadlineMs, startedAt, now, history, error);
+				}
+				if (quarantinePath || attempt === maxAttempts || elapsedMs >= deadlineMs) {
+					throw targetedRemovalTerminalError(absoluteTarget, deadlineMs, startedAt, now, history, error);
+				}
+
+				const remainingMs = deadlineMs - elapsedMs;
+				const exponentialDelay = initialDelayMs * (2 ** (attempt - 1));
+				const delayMs = Math.min(maxDelayMs, exponentialDelay, remainingMs);
+				if (delayMs <= 0) {
+					throw targetedRemovalTerminalError(absoluteTarget, deadlineMs, startedAt, now, history, error);
+				}
+				await sleep(delayMs);
+				if (now() - startedAt >= deadlineMs) {
+					throw targetedRemovalTerminalError(absoluteTarget, deadlineMs, startedAt, now, history, error);
+				}
+			}
+		}
+		throw targetedRemovalTerminalError(absoluteTarget, deadlineMs, startedAt, now, history, lastError);
+	});
 }
 
 async function resolveRemotePrimary(repoPath: string, commandRunner: CommandRunner = realCommandRunner): Promise<string> {
