@@ -4394,7 +4394,10 @@ export class VerificationHarness {
 		const controller = new AbortController();
 		const context: VerificationWriterContext = { generation, signal: controller.signal };
 		const body = Promise.resolve()
-			.then(() => this._verificationWriterContext.run(context, run))
+			.then(() => {
+				if (controller.signal.aborted) throw controller.signal.reason;
+				return this._verificationWriterContext.run(context, run);
+			})
 			.catch(error => {
 				// The terminal interruption is control flow, not a failed verification.
 				// Any ordinary error before shutdown keeps its original rejection.
@@ -4440,6 +4443,29 @@ export class VerificationHarness {
 			);
 			if (signal.aborted) onAbort();
 		});
+	}
+
+	/**
+	 * Acquire a subgoal permit as part of the admitted writer. Passing the
+	 * signal removes a queued waiter synchronously on shutdown; the late-release
+	 * fallback also keeps injected/non-cancellable semaphore seams from leaking
+	 * a permit after the writer has unwound.
+	 */
+	private async _acquireVerificationWriterPermit(semaphore: Semaphore): Promise<void> {
+		const signal = this._verificationWriterSignal();
+		let acquired = false;
+		const acquisition = semaphore.acquire(signal).then(() => { acquired = true; });
+		try {
+			await this._awaitVerificationWriter(acquisition);
+		} catch (error) {
+			if (acquired) semaphore.release();
+			else void acquisition.then(() => semaphore.release(), () => {});
+			throw error;
+		}
+		if (signal?.aborted) {
+			semaphore.release();
+			throw signal.reason;
+		}
 	}
 
 	private _interruptVerificationWaits(): void {
@@ -8896,6 +8922,10 @@ export class VerificationHarness {
 		const goalManager = ctx.goalManager;
 		const teamManager = this.teamManager;
 		const rootGoalId = parent.rootGoalId ?? parent.id;
+		const _terminalAbort = (boundary: string): { passed: false; output: string } | undefined =>
+			this._recordTerminalShutdownStep({ signalId: signal.id, stepIndex }, boundary);
+		const terminalAtEntry = _terminalAbort(`subgoal step for plan "${planId}"`);
+		if (terminalAtEntry) return terminalAtEntry;
 
 		// Tag the active step with the planId early so cancellation paths /
 		// restart-resume can correlate without spawn having succeeded yet.
@@ -8939,7 +8969,11 @@ export class VerificationHarness {
 		) {
 			const childId = resolved.child.id;
 			try {
+				const terminalBeforeMerge = _terminalAbort(`workflow-less subgoal merge for plan "${planId}"`);
+				if (terminalBeforeMerge) return terminalBeforeMerge;
 				const outcome = await goalManager.mergeChild(parentGoalId, childId);
+				const terminalAfterMerge = _terminalAbort(`workflow-less subgoal archive for plan "${planId}"`);
+				if (terminalAfterMerge) return terminalAfterMerge;
 				if (outcome.merged || outcome.alreadyMerged) {
 					// Authoritative archival reconciles the team without deleting recovery evidence.
 					await goalManager.archiveGoalAfterMerge(childId);
@@ -8964,10 +8998,7 @@ export class VerificationHarness {
 		// semaphore (cheap reject) AND again after acquisition immediately
 		// before createGoal (pause/cancel can race during the acquire await).
 		const _shouldAbortSpawn = (): { passed: boolean; output: string } | null => {
-			const terminalShutdown = this._recordTerminalShutdownStep(
-				{ signalId: signal.id, stepIndex },
-				`subgoal owner creation for plan "${planId}"`,
-			);
+			const terminalShutdown = _terminalAbort(`subgoal owner creation for plan "${planId}"`);
 			if (terminalShutdown) return terminalShutdown;
 			if (active.cancelled) {
 				return { passed: false, output: `runSubgoalStep: verification cancelled — not spawning child for plan "${planId}".` };
@@ -8983,7 +9014,7 @@ export class VerificationHarness {
 
 		// ── 6 + 7 + 8 + 9. Acquire semaphore → spawn or use existing → wait → merge ──
 		const sem = this._acquireRootSubgoalSemaphore(rootGoalId, parentGoalId);
-		await sem.acquire();
+		await this._acquireVerificationWriterPermit(sem);
 		// `permitHeld` tracks whether we currently own the semaphore permit. A
 		// child created BLOCKED on unmet deps releases the permit while it waits
 		// for the auto-unblock scan (holding it would deadlock a cap=1 root —
@@ -8992,6 +9023,8 @@ export class VerificationHarness {
 		// only releases when we actually hold the permit.
 		let permitHeld = true;
 		try {
+			const terminalAfterAcquire = _shouldAbortSpawn();
+			if (terminalAfterAcquire) return terminalAfterAcquire;
 			let childGoalId: string;
 			if (resolved.child) {
 				// Existing live child (tier-1 / tier-3 / tier-5 / cached). Re-tag
@@ -9024,7 +9057,7 @@ export class VerificationHarness {
 					if (unblockOutcome === "archived-complete") return { passed: true, output: `Subgoal already complete + archived (during dep-wait): ${childGoalId}` };
 					if (unblockOutcome === "archived-other") return { passed: false, output: `Subgoal ${childGoalId} archived externally while blocked (state != complete) — re-signal to re-resolve` };
 					if (unblockOutcome === "timeout") return { passed: false, output: `Subgoal ${childGoalId} blocked-dep wait timed out (>24h) — re-signal to retry` };
-					await sem.acquire();
+					await this._acquireVerificationWriterPermit(sem);
 					permitHeld = true;
 					// pause/cancel can race during the (re)acquire await.
 					const _abortAfterUnblock = _shouldAbortSpawn();
@@ -9246,10 +9279,14 @@ export class VerificationHarness {
 					// hold its per-root permit (cap=1) and starting there would run
 					// this dependent outside the concurrency cap. Re-acquire the
 					// permit and start the team HERE so it runs within the bound.
-					await sem.acquire();
+					await this._acquireVerificationWriterPermit(sem);
 					permitHeld = true;
+					const terminalBeforeUnblockedStart = _shouldAbortSpawn();
+					if (terminalBeforeUnblockedStart) return terminalBeforeUnblockedStart;
 					await this._startChildTeam(childGoalId, goalManager, teamManager);
 				} else {
+					const terminalBeforeStart = _shouldAbortSpawn();
+					if (terminalBeforeStart) return terminalBeforeStart;
 					// Trigger worktree setup + team start (asynchronously kicked off;
 					// `waitForReadyToMerge` polls the gate state regardless of when
 					// setup completes).
@@ -9279,9 +9316,13 @@ export class VerificationHarness {
 				return { passed: false, output: `Subgoal ${childGoalId} wait timed out (>24h) — re-signal to retry` };
 			}
 			// ready-to-merge passed — proceed to merge.
+			const terminalBeforeMerge = _terminalAbort(`subgoal merge for plan "${planId}"`);
+			if (terminalBeforeMerge) return terminalBeforeMerge;
 
 			// ── 8. Merge + archive ────────────────────────────────────
 			const outcome = await goalManager.mergeChild(parentGoalId, childGoalId);
+			const terminalAfterMerge = _terminalAbort(`subgoal post-merge update for plan "${planId}"`);
+			if (terminalAfterMerge) return terminalAfterMerge;
 			if (outcome.merged || outcome.alreadyMerged) {
 				// Durable merge-conflict flag: a successful merge clears any
 				// prior conflict (data contract for /descendants).
@@ -9294,6 +9335,8 @@ export class VerificationHarness {
 				}
 				// Authoritative archival reconciles the team without deleting recovery evidence.
 				await goalManager.archiveGoalAfterMerge(childGoalId);
+				const terminalAfterArchive = _terminalAbort(`subgoal dependency auto-unblock for plan "${planId}"`);
+				if (terminalAfterArchive) return terminalAfterArchive;
 				// dependsOn scheduling — auto-unblock any sibling whose deps are now
 				// ALL complete after this merge. Harness equivalent of the
 				// integrate-child REST auto-unblock scan, which does NOT run on the
@@ -9323,9 +9366,11 @@ export class VerificationHarness {
 		} finally {
 			if (permitHeld) {
 				sem.release();
-				// Every actual release must drive the next capacity-blocked child,
-				// including validation failures before a child is created.
-				this.childScheduler.startNextEligible(rootGoalId);
+				// Every ordinary release drives the next capacity-blocked child,
+				// including validation failures before a child is created. Terminal
+				// shutdown leaves queued scheduler work for restart recovery instead
+				// of creating another team owner from the retiring harness.
+				if (!this._terminalShutdownStarted) this.childScheduler.startNextEligible(rootGoalId);
 			}
 		}
 	}
@@ -9364,6 +9409,7 @@ export class VerificationHarness {
 		goalManager: import("./goal-manager.js").GoalManager,
 		teamManager: import("./team-manager.js").TeamManager | undefined,
 	): Promise<void> {
+		if (this._terminalShutdownStarted) return;
 		if (this._subgoalHooks?.setupChildAndStartTeam) {
 			try { await this._subgoalHooks.setupChildAndStartTeam(childGoalId); } catch (err) {
 				console.warn(`[verification] setupChildAndStartTeam hook failed for ${childGoalId}:`, err);
@@ -9372,6 +9418,7 @@ export class VerificationHarness {
 		}
 		if (teamManager) {
 			goalManager.setupWorktreeAndStartTeam(childGoalId, async () => {
+				if (this._terminalShutdownStarted) return;
 				return teamManager.startTeam(childGoalId);
 			}).catch((err) => {
 				console.warn(`[verification] setupWorktreeAndStartTeam failed for child ${childGoalId} (non-fatal):`, err);
@@ -9404,6 +9451,7 @@ export class VerificationHarness {
 		goalManager: import("./goal-manager.js").GoalManager,
 	): Promise<void> {
 		try {
+			if (this._terminalShutdownStarted) return;
 			const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
 			if (!ctx) return;
 			const all = ctx.goalStore.getAll();
@@ -9421,6 +9469,7 @@ export class VerificationHarness {
 					return !!depSib && depSib.state === "complete";
 				});
 				if (!allResolved) continue;
+				if (this._terminalShutdownStarted) return;
 				// Unblock: flip state='blocked' → 'todo' ONLY. Do NOT start the
 				// team here. Each harness-spawned blocked child is parked in its
 				// own runSubgoalStep `_waitForChildUnblock` poll (it released its
@@ -9476,7 +9525,7 @@ export class VerificationHarness {
 			}
 			if (child.state !== "blocked") return "unblocked";
 			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
-			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
+			await this._awaitVerificationWriter(new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS)));
 		}
 	}
 
@@ -9499,14 +9548,11 @@ export class VerificationHarness {
 	): Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> {
 		// Test seam: allow callers to swap in a deterministic resolver.
 		if (this._subgoalHooks?.waitForReadyToMerge) {
-			const aborter = { aborted: !!active.cancelled };
-			// keep aborter.aborted in sync with active.cancelled (best effort)
-			const sync = this.clock.setInterval(() => { aborter.aborted = !!active.cancelled; }, 50);
-			try {
-				return await this._subgoalHooks.waitForReadyToMerge(childGoalId, aborter);
-			} finally {
-				this.clock.clearInterval(sync);
-			}
+			const writerSignal = this._verificationWriterSignal();
+			const aborter = {
+				get aborted() { return !!active.cancelled || !!writerSignal?.aborted; },
+			};
+			return this._awaitVerificationWriter(this._subgoalHooks.waitForReadyToMerge(childGoalId, aborter));
 		}
 
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
@@ -9534,7 +9580,7 @@ export class VerificationHarness {
 			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
 			// paused / pending / failed all continue the wait — only an external
 			// archive or a passed ready-to-merge is terminal.
-			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
+			await this._awaitVerificationWriter(new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS)));
 		}
 	}
 }
