@@ -735,7 +735,7 @@ async function runGroupB(specs, coordinatorEnv, profile = null) {
 	const retries = resolveE2ERetryCount(coordinatorEnv);
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
-	const pwWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
+	const pwWorkers = resolveE2ePlaywrightWorkers();
 	const invocation = createGroupBInvocation(specs, { workers: pwWorkers, retries });
 	return run(invocation.command, invocation.args, {
 		env: createE2EProfilingEnvironment(composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV), profile, "B"),
@@ -917,7 +917,7 @@ async function main() {
 		const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(sharedPlaywrightEnv,
 			bundle.bundlePath ? { BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundle.bundlePath } : {}));
 		const retries = resolveE2ERetryCount(coordinatorEnv);
-		const groupBWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
+		const groupBWorkers = resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
 		const paired = await runGroupBWithPackedConsumerPreparation({
 			runGroupB: () => runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries),
@@ -987,7 +987,7 @@ async function main() {
 		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
 		capacity: {
 			A: Number(process.env.E2E_V2_NODE_CONCURRENCY || 2),
-			B: process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers(),
+			B: resolveE2ePlaywrightWorkers(),
 			C: resolveE2ePlaywrightWorkers(),
 			D: 1,
 		},
