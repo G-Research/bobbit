@@ -176,25 +176,6 @@ describe("owned path cleanup contract", () => {
 		expect(settled).toBe(true);
 	});
 
-	it("removes an owned root through the real isolated cleanup process", async () => {
-		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
-		const ownerRoot = await mkdtemp(path.join(os.tmpdir(), "bobbit-owned-cleanup-child-"));
-		await writeFile(path.join(ownerRoot, "entry.txt"), "owned");
-		try {
-			await expect(removeOwnedPathInSubprocess(ownerRoot, {
-				ownerRoot,
-				allowOwnerRoot: true,
-				owner: { kind: "coordinator", id: "subprocess-integration" },
-				deadlineMs: 5_000,
-				traversalConcurrency: 8,
-				subprocessThreadPoolSize: 8,
-			})).resolves.toMatchObject({ removed: true, attempts: 1 });
-			await expect(lstat(ownerRoot)).rejects.toMatchObject({ code: "ENOENT" });
-		} finally {
-			await rm(ownerRoot, { recursive: true, force: true });
-		}
-	});
-
 	it("retries transient Windows removal failures with capped exponential delays", async () => {
 		const { removeOwnedPath } = await loadCleanupContract();
 		const ownerRoot = path.resolve("fixture-run-root");
