@@ -145,6 +145,10 @@ describe("packed-consumer offline install contract", () => {
 			"the exact emitted tarball must exist before dependency resolution");
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
+		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
+			"cache population must retain the accepted bounded concurrency");
+		assert.match(source, /await Promise\.allSettled\([\s\S]{0,200}CACHE_WORKER_COUNT/,
+			"all admitted cache writers must settle before preparation advances");
 		assert.match(source, /"ci",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir/s);
 		assert.doesNotMatch(source, /"ci",[\s\S]{0,200}tarballPath/,
 			"offline npm ci must materialize the generated lock without a second package operand");
@@ -923,8 +927,12 @@ describe("packed-consumer offline install contract", () => {
 			"the browser journey must resolve the canonical coordinator-owned descriptor path");
 		assert.match(packedConsumer, /readPreparedPackedConsumerDescriptor\(descriptorPath, coordinatorRunRoot!\)/,
 			"the browser journey must bind the canonical descriptor to the authoritative coordinator root");
-		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor, \{\s*coordinatorRunRoot: coordinatorRunRoot![\s\S]{0,200}mode: "consume"/,
-			"the sole browser journey must atomically claim the authoritative-root-bound prepared tree");
+		assert.match(packedConsumer, /const repeatedProject = testInfo\.project\.repeatEach > 1/,
+			"repeat-each projects must avoid racing to consume one prepared tree");
+		assert.match(packedConsumer, /name: `inline-theme-\$\{testInfo\.workerIndex\}-\$\{testInfo\.repeatEachIndex\}`/,
+			"repeat materializations must include the repeat index in their unique name");
+		assert.match(packedConsumer, /materializePackedConsumerFixture\(descriptor, \{\s*coordinatorRunRoot: coordinatorRunRoot![\s\S]{0,250}mode: repeatedProject \? "copy" : "consume"/,
+			"ordinary runs must consume once while every potentially overlapping repeat receives a copy");
 		assert.match(packedConsumer, /const tarballPath = resolve\(descriptor\.tarballPath\)/,
 			"the browser must validate npm pack's actual emitted tarball");
 		assert.match(packedConsumer, /packed tarball must be owned by the authoritative coordinator root/,

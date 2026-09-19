@@ -15,6 +15,21 @@ type CommandOptions = {
 	cwd: string;
 	env?: NodeJS.ProcessEnv;
 	timeoutMs: number;
+	totalTimeoutMs?: number;
+};
+
+type CommandResult = {
+	command: string;
+	args: string[];
+	code: number;
+	stdout: string;
+	stderr: string;
+};
+
+type Deferred = {
+	promise: Promise<void>;
+	resolve: () => void;
+	reject: (error: Error) => void;
 };
 
 type CommandCall = {
@@ -101,10 +116,37 @@ function cachePath(call: CommandCall): string | undefined {
 	return call.options.env?.npm_config_cache ?? call.options.env?.NPM_CONFIG_CACHE;
 }
 
-async function prepareFixture() {
+function deferred(): Deferred {
+	let resolvePromise!: () => void;
+	let rejectPromise!: (error: Error) => void;
+	const promise = new Promise<void>((resolve, reject) => {
+		resolvePromise = resolve;
+		rejectPromise = reject;
+	});
+	return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		if (predicate()) return;
+		await new Promise(resolve => setTimeout(resolve, 0));
+	}
+	assert.fail(`${FAILURE_PREFIX}: condition did not become true`);
+}
+
+async function prepareFixture({
+	registryTarballCount = 0,
+	onCacheCommand,
+	onOfflineInstall,
+}: {
+	registryTarballCount?: number;
+	onCacheCommand?: (batchIndex: number, result: CommandResult, options: CommandOptions) => Promise<void>;
+	onOfflineInstall?: () => void | Promise<void>;
+} = {}) {
 	const runRoot = await mkdtemp(join(tmpdir(), "bobbit-prepared-consumer-unit-"));
 	roots.push(runRoot);
 	const calls: CommandCall[] = [];
+	let cacheBatchIndex = 0;
 	const prepare = requireApi("preparePackedConsumerFixture");
 	const descriptor = await prepare({
 		repoRoot: REPO_ROOT,
@@ -136,6 +178,14 @@ async function prepareFixture() {
 				const manifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
 				manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-fixture.tgz" };
 				await writeFile(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
+				const registryPackages = Object.fromEntries(Array.from({ length: registryTarballCount }, (_, index) => [
+					`node_modules/dependency-${String(index).padStart(3, "0")}`,
+					{
+						version: "1.0.0",
+						resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
+						integrity: `sha512-${index}`,
+					},
+				]));
 				await writeFile(join(options.cwd, "package-lock.json"), JSON.stringify({
 					name: "prepared-consumer",
 					version: "1.0.0",
@@ -146,11 +196,19 @@ async function prepareFixture() {
 							version: "1.0.0",
 							resolved: "file:../../pack/bobbit-fixture.tgz",
 						},
+						...registryPackages,
 					},
 				}));
 				return result;
 			}
+			if (args.includes("cache") && args.includes("add")) {
+				const batchIndex = cacheBatchIndex++;
+				result.stdout = `cache-batch-${batchIndex}`;
+				await onCacheCommand?.(batchIndex, result, options);
+				return result;
+			}
 			if (args.includes("ci") && args.includes("--offline")) {
+				await onOfflineInstall?.();
 				const stagedManifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
 				const stagedLock = JSON.parse(await readFile(join(options.cwd, "package-lock.json"), "utf8"));
 				assert.deepEqual(stagedLock.packages[""].dependencies, stagedManifest.dependencies,
@@ -202,6 +260,140 @@ describe("prepared packed consumer", () => {
 			resolve(join(tmpdir(), "ambient-cache-must-not-be-used")),
 			`${FAILURE_PREFIX}: preparation must not inherit the ambient npm cache`,
 		);
+	});
+
+	it("fills nine cache batches through a dynamic three-worker pool before offline install", async () => {
+		const gates = Array.from({ length: 9 }, deferred);
+		const admitted: number[] = [];
+		const completed: number[] = [];
+		const released = new Set<number>();
+		let active = 0;
+		let maxActive = 0;
+		let completionsAtOfflineInstall = -1;
+		const preparing = prepareFixture({
+			registryTarballCount: 9 * 32,
+			onCacheCommand: async batchIndex => {
+				admitted.push(batchIndex);
+				active++;
+				maxActive = Math.max(maxActive, active);
+				try {
+					await gates[batchIndex]!.promise;
+					completed.push(batchIndex);
+				} finally {
+					active--;
+				}
+			},
+			onOfflineInstall: () => { completionsAtOfflineInstall = completed.length; },
+		});
+
+		await waitFor(() => admitted.length === 3);
+		while (admitted.length < 9) {
+			const batchIndex = [...admitted].reverse().find(index => !released.has(index));
+			assert.notEqual(batchIndex, undefined);
+			const priorAdmissions = admitted.length;
+			released.add(batchIndex!);
+			gates[batchIndex!]!.resolve();
+			await waitFor(() => admitted.length === priorAdmissions + 1);
+		}
+		for (const batchIndex of admitted) {
+			if (!released.has(batchIndex)) gates[batchIndex]!.resolve();
+		}
+		const { calls, descriptor } = await preparing;
+
+		assert.equal(maxActive, 3, `${FAILURE_PREFIX}: cache preparation must cap active commands at three`);
+		assert.equal(completionsAtOfflineInstall, 9,
+			`${FAILURE_PREFIX}: offline install and descriptor publication require all nine cache successes`);
+		assert.deepEqual(admitted, [0, 1, 2, 3, 4, 5, 6, 7, 8],
+			`${FAILURE_PREFIX}: each completion must dynamically admit the next deterministic batch`);
+		assert.notDeepEqual(completed, [...completed].sort((left, right) => left - right),
+			`${FAILURE_PREFIX}: the injected runner must exercise out-of-order completion`);
+		const cacheCalls = calls.filter(call => call.args.includes("cache") && call.args.includes("add"));
+		assert.equal(cacheCalls.length, 9);
+		assert.ok(cacheCalls.every(call => cachePath(call) === descriptor.cacheDir),
+			`${FAILURE_PREFIX}: concurrent writers must share only the isolated run-owned cache`);
+		assert.ok(cacheCalls.every(call => typeof call.options.totalTimeoutMs === "number" && call.options.totalTimeoutMs! <= 5 * 60_000),
+			`${FAILURE_PREFIX}: each admitted cache owner must receive the common preparation deadline remainder`);
+		const recordedCache = (descriptor.commands as CommandResult[])
+			.filter(command => command.args.includes("cache") && command.args.includes("add"));
+		assert.deepEqual(recordedCache.map(command => command.stdout),
+			Array.from({ length: 9 }, (_, index) => `cache-batch-${index}`),
+			`${FAILURE_PREFIX}: descriptor evidence must be ordered by batch index, not completion`);
+		const offlineIndex = calls.findIndex(call => call.args.includes("ci") && call.args.includes("--offline"));
+		assert.ok(offlineIndex > Math.max(...cacheCalls.map(call => calls.indexOf(call))),
+			`${FAILURE_PREFIX}: offline install must start only after all cache writers settle successfully`);
+	});
+
+	it("stops cache admission after an observed failure and retains every admitted failure in batch order", async () => {
+		const gates = Array.from({ length: 9 }, deferred);
+		const admitted: number[] = [];
+		const settled: number[] = [];
+		let preparationSettled = false;
+		const preparing = prepareFixture({
+			registryTarballCount: 9 * 32,
+			onCacheCommand: async (batchIndex, _result, options) => {
+				admitted.push(batchIndex);
+				try {
+					await gates[batchIndex]!.promise;
+				} catch {
+					throw new packedConsumerModule.OwnedCommandError(`cache batch ${batchIndex + 1} failed`, {
+						command: "node",
+						args: ["npm-cli.js", "cache", "add", `batch-${batchIndex + 1}`],
+						cwd: options.cwd,
+						shutdown: {
+							ownershipState: "established",
+							rootCloseObserved: true,
+							treeExitAttempted: true,
+							treeExitSettled: true,
+							treeExitVerified: true,
+							completionTimedOut: false,
+						},
+					});
+				} finally {
+					settled.push(batchIndex);
+				}
+			},
+		});
+		const observed = preparing.then(
+			() => ({ error: undefined }),
+			error => ({ error }),
+		).finally(() => { preparationSettled = true; });
+
+		await waitFor(() => admitted.length === 3);
+		gates[0]!.resolve();
+		await waitFor(() => admitted.length === 4);
+		gates[2]!.resolve();
+		await waitFor(() => admitted.length === 5);
+		gates[1]!.reject(new Error("first failure"));
+		await waitFor(() => settled.includes(1));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.equal(admitted.length, 5, `${FAILURE_PREFIX}: no batch may be admitted after failure is observed`);
+		assert.equal(preparationSettled, false, `${FAILURE_PREFIX}: preparation must await all already-admitted owners`);
+		gates[3]!.resolve();
+		gates[4]!.reject(new Error("second failure"));
+		const { error } = await observed;
+		assert.ok(error instanceof Error);
+		assert.deepEqual(admitted, [0, 1, 2, 3, 4]);
+		assert.deepEqual([...settled].sort((left, right) => left - right), [0, 1, 2, 3, 4],
+			`${FAILURE_PREFIX}: rejection must wait for every admitted owner to settle`);
+
+		const runRoot = roots.at(-1)!;
+		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+		assert.equal(evidence.error.name, "AggregateError");
+		assert.deepEqual(evidence.error.errors.map((failure: { message: string }) => failure.message), [
+			"cache batch 2 failed",
+			"cache batch 5 failed",
+		]);
+		assert.deepEqual(evidence.error.errors.map((failure: { args: string[] }) => failure.args.at(-1)), ["batch-2", "batch-5"]);
+		assert.ok(evidence.error.errors.every((failure: { shutdown: { treeExitVerified: boolean } }) => failure.shutdown.treeExitVerified),
+			`${FAILURE_PREFIX}: aggregate evidence must preserve each owned command's shutdown proof`);
+		const recordedCache = (evidence.commands as CommandResult[])
+			.filter(command => command.args.includes("cache") && command.args.includes("add"));
+		assert.deepEqual(recordedCache.map(command => command.stdout), ["cache-batch-0", "cache-batch-2", "cache-batch-3"],
+			`${FAILURE_PREFIX}: successful command evidence must remain in batch order`);
+		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json")),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT",
+			`${FAILURE_PREFIX}: partial cache success must not publish a descriptor`);
 	});
 
 	it("materializes independent copied consumers without rerunning package commands", async () => {

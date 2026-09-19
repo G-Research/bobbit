@@ -428,10 +428,11 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		const descriptorPath = resolvePackedConsumerDescriptorPath(process.env, coordinatorRunRoot!);
 		expect(isStrictChild(coordinatorRunRoot!, descriptorPath), "descriptor must be owned by the authoritative coordinator root").toBe(true);
 		const descriptor = await readPreparedPackedConsumerDescriptor(descriptorPath, coordinatorRunRoot!);
+		const repeatedProject = testInfo.project.repeatEach > 1;
 		const materialized = await materializePackedConsumerFixture(descriptor, {
 			coordinatorRunRoot: coordinatorRunRoot!,
-			name: `inline-theme-${testInfo.workerIndex}`,
-			mode: "consume",
+			name: `inline-theme-${testInfo.workerIndex}-${testInfo.repeatEachIndex}`,
+			mode: repeatedProject ? "copy" : "consume",
 		});
 		const consumerDir = materialized.consumerDir;
 		const workspaceDir = join(consumerDir, "workspace");
