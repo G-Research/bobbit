@@ -224,8 +224,10 @@ export async function runOwnedCommand(command, args, {
 	let totalTimer;
 	let completionTimer;
 	let resolveKillRequested;
+	let resolveSpawnDeadline;
 	let resolveCompletionTimeout;
 	const killRequestedResult = new Promise(resolveKill => { resolveKillRequested = resolveKill; });
+	const spawnDeadlineResult = new Promise(resolveDeadline => { resolveSpawnDeadline = resolveDeadline; });
 	const completionTimeoutResult = new Promise(resolveTimeout => { resolveCompletionTimeout = resolveTimeout; });
 	const treeExit = { attempted: false, settled: false, verified: false, error: undefined };
 	let treeExitResult;
@@ -336,6 +338,7 @@ export async function runOwnedCommand(command, args, {
 			if (!terminalError) terminalError = deadlineError;
 			spawnAbort.abort(deadlineError);
 			requestOwnedKill(deadlineError);
+			resolveSpawnDeadline();
 		};
 		if (remainingMs <= 0) expire();
 		else totalTimer = setTimer(expire, remainingMs);
@@ -343,18 +346,46 @@ export async function runOwnedCommand(command, args, {
 
 	let spawnFailure;
 	if (!spawnAbort.signal.aborted) {
+		// Convert both branches to values before racing. If the absolute deadline
+		// wins, a bootstrap/import/custom factory may remain pending indefinitely;
+		// its eventual rejection is still observed and cannot become unhandled.
+		let spawnInvocation;
 		try {
-			const returned = await spawnOwned(command, args, {
+			spawnInvocation = Promise.resolve(spawnOwned(command, args, {
 				cwd,
 				env,
 				repoRoot,
 				ownershipBootstrapRoot,
 				signal: spawnAbort.signal,
 				onSpawned: exposeSpawned,
-			});
-			exposeSpawned(returned);
+			}));
 		} catch (error) {
-			spawnFailure = error instanceof Error ? error : new Error(String(error));
+			spawnInvocation = Promise.reject(error);
+		}
+		const spawnSettlement = spawnInvocation.then(
+			returned => {
+				try {
+					// Keep observing a late return even after the deadline race has
+					// settled. Factories should expose at creation, but a returned
+					// handle is still captured and terminated rather than abandoned.
+					exposeSpawned(returned);
+					return { status: "fulfilled", returned };
+				} catch (error) {
+					return { status: "rejected", error };
+				}
+			},
+			error => ({ status: "rejected", error }),
+		);
+		const spawnBoundary = deadlineError
+			? await Promise.race([
+				spawnSettlement,
+				spawnDeadlineResult.then(() => ({ status: "deadline" })),
+			])
+			: await spawnSettlement;
+		if (spawnBoundary.status === "rejected") {
+			spawnFailure = spawnBoundary.error instanceof Error
+				? spawnBoundary.error
+				: new Error(String(spawnBoundary.error));
 		}
 	}
 	if (!tracked) {
