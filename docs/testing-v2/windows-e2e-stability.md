@@ -32,9 +32,11 @@ These fences matter because deletion retries cannot fix an owner that is still a
 
 Removal uses a no-follow `lstat`/`readdir`/`unlink`/`rmdir` traversal rather than recursive `fs.rm`. Symlinks and Windows junctions are removed as links and are never traversed. Stable identity, type, and link-target checks detect path replacement; uncertainty fails closed without a destructive fallback.
 
-The traversal uses a bounded eight-operation queue and post-order directory completion. Identity validation is proportional to entries: it verifies the operation root, immediate producer, and current entry rather than rewalking every ancestor for every leaf. This keeps large prepared `node_modules` trees practical without weakening containment.
+The traversal uses bounded concurrency and post-order directory completion. Identity validation is proportional to entries: it verifies the operation root, immediate producer, and current entry rather than rewalking every ancestor for every leaf. This keeps large prepared `node_modules` trees practical without weakening containment.
 
 An absent path is success. Only `EBUSY`, `EPERM`, and `ENOTEMPTY` are retried, with capped exponential backoff under both an attempt limit and an absolute monotonic deadline. The same allowlist applies on every platform; unrelated errors fail immediately.
+
+Successful final-root cleanup runs in a tracked, short-lived subprocess so its larger filesystem queue and isolated libuv thread pool do not affect the test processes. Success requires the result, transport `close`, and complete process-tree exit; timeout or protocol failure terminates and joins the tree before the coordinator settles. This prevents deletion from continuing after the reported run and makes incomplete ownership proof a test failure. Failed tests retain the whole run root, while a failed final cleanup retains whatever remains and reports the subprocess lifecycle.
 
 A terminal `OwnedPathCleanupError` includes:
 
@@ -59,9 +61,11 @@ When selection can include the packaged-consumer spec, the coordinator prepares 
 3. Verify that both root and installed-package lock entries are `file:` references resolving to the emitted tarball.
 4. Copy the npm-generated manifest and lock into a same-depth immutable template, then run one `npm ci --offline --ignore-scripts --no-audit --no-fund` with the isolated cache and no package operand.
 5. Validate the installed dependency tree and atomically publish the descriptor.
-6. Copy the template into a unique mutable directory for each consumer. Copies are real directories with independent `node_modules`, workspace, secrets, and agent state; shared or symlinked dependencies are forbidden.
+6. Materialize the template into a unique mutable directory for each consumer. Copied consumers are real directories with independent `node_modules`, workspace, secrets, and agent state; shared or symlinked dependencies are forbidden.
 
-Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation. The browser test materializes a copy without running `npm pack` or npm installation again.
+Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation. Materialization never reruns `npm pack` or npm installation.
+
+Copy remains the default when several consumers need isolated mutable trees. The sole retry-zero packaged browser consumer instead claims the template once with an atomic rename, eliminating both one recursive copy and the duplicate installed tree that final cleanup would otherwise traverse. The source and destination are at equal depth under the same run-owned fixture root, so relative `file:` lock references still resolve to the same packed artifact. A failed test retains the moved consumer in its final diagnostic location; a second consume fails rather than silently rebuilding or sharing it.
 
 ### Provenance and process bounds
 
@@ -71,6 +75,10 @@ Package commands use tracked process-tree ownership. Timeout, output overflow, o
 
 Preparation failure retains the partial fixture and `preparation-failure.json`. Diagnostics include the command, working directory, PID, ownership and kill state, root-close and tree-exit results, and bounded stdout/stderr. This preserves useful npm evidence without allowing an unbounded post-timeout wait.
 
+## Security boundary
+
+The remover is designed for harness-owned paths after every harness-owned writer has been fenced and joined. No-follow traversal and repeated identity checks prevent accidental reparse traversal and detect many pathname replacements, but they do not claim containment against active, malicious code running as the same OS user and racing namespace entries between checks. Strict protection from that attacker requires a native handle-relative deletion backend; the current pathname-based implementation deliberately fails closed when it detects uncertainty but does not present that stronger guarantee.
+
 ## Browser runtime measurement and observability
 
 Browser worker tuning is measured retry-free; it is not inferred from a timed-out run. On the recorded 24-core Windows host, the clean two-worker suite completed 955 passes with 5 skips in 654.2 seconds. A quiet three-worker run produced the same result in 484.8 seconds, 169.4 seconds (25.9%) faster, with no cleanup or resource-owner failure. This supports the ledger's three-worker cap but is not a portable performance guarantee.
@@ -78,6 +86,8 @@ Browser worker tuning is measured retry-free; it is not inferred from a timed-ou
 The Playwright configuration loads the native-ESM worker ledger with an ESM import. `createRequire` cannot load `ledger.mjs`; using it made every direct browser run silently fall back to two workers, which was slow enough for otherwise green 953–954/960 runs to miss the 900-second verification deadline. Real ledger reservations retain parent-grant reuse and release on process exit. A genuine load or reservation failure still uses the bounded two-worker fallback, but logs only a sanitized failure stage and code rather than an exception message that could expose machine paths.
 
 The configuration logs the resolved worker count and its source: explicit measurement override, inherited ledger grant, fresh reservation, or fallback. The wrapper also emits bounded top-ten slow file and spec totals, including retries, from the existing JSON report before successful run-root deletion. These diagnostics explain throughput and host-contention failures without changing scheduling, timeouts, assertions, or retry policy. Use `BOBBIT_V2_PLAYWRIGHT_WORKERS` only for controlled measurement.
+
+Operationally, Browser uses three Playwright project lanes in one invocation: real-MCP specs and special isolated-fixture specs each have a one-worker project, while ordinary canonical journeys use the shared browser worker grant. This lets narrow identities start without allowing real-MCP cases to overlap. The full E2E coordinator runs `A → prebundle → (B ∥ packed preparation) → C → D`: Group A uses two Node files, Playwright Groups B and C default to two workers, and Group D uses at most two Vitest forks. Only packed preparation overlaps Group B; C and D wait for both owners, preserving bounded host load and the shared run-local transform cache.
 
 ## Verification commands
 
@@ -99,17 +109,14 @@ For focused Playwright runs, record the exact grep arguments and whether selecti
 
 ## Qualified reliability and runtime evidence
 
-Before these changes, cleanup policy was split across synchronous removal, fixture-local helpers, and warning-only paths. Owners could outlive deletion, while the packaged-theme path solved its 284-package graph twice and the second lock-free offline install could reach the 600-second timeout.
+Before these changes, cleanup policy was split across synchronous removal, fixture-local helpers, and warning-only paths. Owners could outlive deletion, producing transient `EBUSY`, `EPERM`, and `ENOTEMPTY` failures. The packaged-theme path also repeated dependency preparation, with an offline npm install reaching the 600-second timeout signature.
 
-Recorded Windows evidence after the changes includes:
+One later pre-fix full E2E run passed all assertions in 874.5 seconds but was killed near 903.6 seconds while deleting duplicated packed-consumer trees. A representative installed tree contained 35,479 files and 5,131 directories and occupied 620,922,686 bytes. Secure cleanup of that tree took 16.807 seconds; larger thread-pool or traversal-concurrency variants improved this by at most 0.773%, so final-root cleanup retains traversal concurrency 128 with a 32-thread isolated pool. One-shot consumption removes an entire duplicate tree and its recursive-copy cost instead of relying on marginal deletion tuning.
 
-- a real Node 24/npm 11 preparation against the packed artifact and empty isolated cache: 284 tarballs cached, offline `npm ci` completed in 22.4 seconds, and total preparation excluding the build completed in 108.1 seconds;
-- the retry-free three-worker browser measurement above, plus focused packaged, preview, file-explorer, source-Vite, history, cleanup, admission-fence, runtime-ownership, and foreground-shell coverage;
-- four consecutive Windows packaged-runtime lifecycle runs passing 7/7, followed by the full Group A E2E run, build, and check. The focused regressions prove that root exit or spawn error before ownership rejects without a health fetch and that failure cleanup holds the raw child handle until `close`;
-- focused POSIX finalizer qualification showing that the earlier failure was a test-only liveness misclassification: `kill(pid, 0)` counted a killed zombie or reused PID as live after exact sentinel disappearance. The identity-aware regression distinguishes those states without changing the production finalizer. Its Windows run passed 10 tests with the three POSIX-native cases skipped; a local Linux/macOS execution was unavailable;
-- an isolated browser config/list run logging `Playwright workers=3 source=fresh ledger reservation`, followed after process exit by ledger status `reserved=0/24`. The focused worker-observability unit suite passed 3/3 and `npm run check` passed;
-- full implementation-gate build, check, unit, browser, and E2E commands passing after the final cleanup optimization;
-- one pre-optimization full E2E runner where all groups finished in 688.8 seconds, followed by more than 213 seconds in serial final cleanup. The reparse-safe bounded-concurrent traversal then reduced a synthetic 300-package, 1,801-entry prepared-tree cleanup from 2,489 ms to a 475 ms median (471/475/513 ms), about 5.2× faster;
-- five consecutive focused cleanup runs passing 15/15, and the full unit suite passing 12,266 tests across 1,265 files after that optimization.
+Final implementation verification at `f38508f48` reported:
 
-The 688.8-second result isolates the former tail as cleanup rather than test execution; the synthetic benchmark explains the improvement mechanism. Neither result is a controlled end-to-end before/after benchmark, so no general runtime percentage is claimed. Three complete retry-free Windows repetitions were not recorded, and these results must not be represented as full-suite three-run qualification.
+- Browser passed in 755.664 seconds and full E2E passed in 829.498 seconds under the unchanged 900-second supervisor;
+- build and check passed, as did 46/46 focused reproduction tests and the full unit suite;
+- specification, integrated, and security reviews passed.
+
+These results show the known cleanup and repeated 600-second npm-install signatures were absent in the final qualified run, but they are not a controlled performance benchmark or proof of universal flake elimination. Three complete retry-free Windows repetitions were not recorded and must not be claimed.
