@@ -826,6 +826,47 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		expect(command.kills()).toBe(1);
 	});
 
+	it("acknowledges blocked setup and cannot resurrect state after teardown", async () => {
+		let releaseSetup!: () => void;
+		let observeSetup!: () => void;
+		const setupStarted = new Promise<void>(resolve => { observeSetup = resolve; });
+		const setupBlocked = new Promise<void>(resolve => { releaseSetup = resolve; });
+		const updates: any[] = [];
+		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "setup-shutdown-"));
+		const harness = makeHarness({
+			commandRunner: {
+				execFile: async () => {
+					observeSetup();
+					await setupBlocked;
+					return { stdout: "main\n", stderr: "" };
+				},
+			},
+		}, [], stateDir, {
+			updateSignalVerification: (...args: any[]) => updates.push(args),
+			updateGateStatus: (...args: any[]) => updates.push(args),
+			getGate: () => undefined,
+		} as any);
+		const signal = {
+			id: "signal-shutdown-setup", goalId: "goal-shutdown-setup", gateId: "gate-shutdown-setup",
+			sessionId: "session", timestamp: Date.now(), commitSha: "HEAD", verification: { status: "running", steps: [] },
+		} as any;
+		const gate = {
+			id: signal.gateId, name: "Shutdown setup", dependsOn: [],
+			verify: [{ name: "command", type: "command", run: "echo held" }],
+		} as any;
+
+		const verification = harness.verifyGateSignal(signal, gate, TEST_DIR);
+		await setupStarted;
+		await harness.shutdown();
+		await verification;
+		fs.rmSync(stateDir, { recursive: true, force: true });
+		releaseSetup();
+		await new Promise<void>(resolve => setImmediate(resolve));
+
+		expect(updates).toEqual([]);
+		expect(fs.existsSync(stateDir)).toBe(false);
+	});
+
 	it("fences a semaphore-paused command released after awaited shutdown", async () => {
 		let releaseAcquire!: () => void;
 		let acquired!: () => void;
@@ -861,16 +902,17 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 
 		const verification = harness.verifyGateSignal(signal, gate, TEST_DIR);
 		await acquireObserved;
+		const persistPath = (harness as any)._persistPath as string;
+		const durableBefore = fs.readFileSync(persistPath, "utf8");
 		await harness.shutdown();
-		releaseAcquire();
 		await verification;
+		releaseAcquire();
+		await new Promise<void>(resolve => setImmediate(resolve));
 
 		expect(spawnCalls).toBe(0);
 		expect((harness as any)._trackedCommandChildren.size).toBe(0);
-		const terminal = updates.at(-1);
-		expect(terminal.status).toBe("failed");
-		expect(terminal.steps[0]).toMatchObject({ passed: false, status: "failed" });
-		expect(terminal.steps[0].output).toContain("terminally cancelled because gateway shutdown started");
+		expect(updates).toEqual([]);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(durableBefore);
 	});
 
 	it("fences async command preparation released after awaited shutdown", async () => {
@@ -888,6 +930,10 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		});
 		const signalId = "signal-shutdown-pre-spawn";
 		setActiveCommandVerification(harness, "goal-shutdown-pre-spawn", "gate-shutdown-pre-spawn", signalId);
+		(harness as any)._persistActive();
+		const persistPath = (harness as any)._persistPath as string;
+		const before = fs.statSync(persistPath);
+		const beforeContent = fs.readFileSync(persistPath, "utf8");
 		const step = (harness as any).runCommandStep("echo held", TEST_DIR, 60, false, {
 			goalId: "goal-shutdown-pre-spawn", gateId: "gate-shutdown-pre-spawn", signalId, stepIndex: 0,
 		}) as Promise<{ passed: boolean; output: string }>;
@@ -900,11 +946,102 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		expect(result.output).toContain("terminally cancelled because gateway shutdown started");
 		expect(spawnCalls).toBe(0);
 		expect((harness as any)._trackedCommandChildren.size).toBe(0);
-		const persisted = JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8"));
-		expect(persisted.verifications[0].steps[0]).toMatchObject({
-			status: "failed",
-			output: expect.stringContaining("terminally cancelled because gateway shutdown started"),
-		});
+		const after = fs.statSync(persistPath);
+		expect(after.ino).toBe(before.ino);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
+		expect(JSON.parse(beforeContent).verifications[0].steps[0]).toMatchObject({ status: "running" });
+	});
+
+	it("interrupts an admitted reviewer-result wait without awaiting its session promise", async () => {
+		const harness = makeHarness();
+		setActiveCommandVerification(harness, "goal-review-wait", "gate-review-wait", "signal-review-wait");
+		(harness as any)._persistActive();
+		const persistPath = (harness as any)._persistPath as string;
+		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		let observed!: () => void;
+		const waitStarted = new Promise<void>(resolve => { observed = resolve; });
+		let interruptedVerdict: any;
+		const writer = (harness as any)._admitVerificationWriter("reviewer result wait", async () => {
+			let resolveResult!: (result: any) => void;
+			const result = new Promise<any>(resolve => { resolveResult = resolve; });
+			(harness as any).pendingResults.set("reviewer-wait", resolveResult);
+			observed();
+			interruptedVerdict = await result;
+			(harness as any)._persistActive();
+		}) as Promise<void>;
+		await waitStarted;
+
+		await harness.shutdown();
+		await writer;
+		await new Promise<void>(resolve => setImmediate(resolve));
+
+		expect(interruptedVerdict).toMatchObject({ verdict: false, summary: expect.stringContaining("gateway restart") });
+		expect((harness as any).pendingResults.size).toBe(0);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
+	});
+
+	it("interrupts a seeded resume wait and leaves it for the next harness", async () => {
+		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "resume-shutdown-"));
+		const persistPath = path.join(stateDir, "active-verifications.json");
+		const seeded = {
+			verifications: [{
+				goalId: "goal-resume-shutdown", gateId: "gate-resume-shutdown", signalId: "signal-resume-shutdown",
+				overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+				steps: [{
+					name: "approval", type: "human-signoff", status: "running", phase: 0,
+					startedAt: Date.now(), awaitingHuman: true, humanPrompt: "Approve?", humanLabel: "Approval",
+				}],
+			}],
+		};
+		fs.writeFileSync(persistPath, JSON.stringify(seeded, null, 2));
+		const updates: any[] = [];
+		const harness = makeHarness({}, [], stateDir, {
+			updateSignalVerification: (...args: any[]) => updates.push(args),
+			updateGateStatus: (...args: any[]) => updates.push(args),
+			getGate: () => undefined,
+		} as any);
+
+		const resume = harness.resumeInterruptedVerifications();
+		expect(await poll(() => (harness as any).pendingSignoffs.size === 1, 1_000, 5)).toBe(true);
+		const before = fs.statSync(persistPath);
+		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		await harness.shutdown();
+		await resume;
+		await new Promise<void>(resolve => setImmediate(resolve));
+
+		expect(updates).toEqual([]);
+		expect(fs.statSync(persistPath).ino).toBe(before.ino);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
+	});
+
+	it("rejects late writers without resurrecting a deleted state directory", async () => {
+		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "late-writer-shutdown-"));
+		const updates: any[] = [];
+		const broadcasts: any[] = [];
+		const harness = makeHarness({}, broadcasts, stateDir, {
+			updateSignalVerification: (...args: any[]) => updates.push(args),
+			updateGateStatus: (...args: any[]) => updates.push(args),
+			getGate: () => undefined,
+		} as any);
+		await harness.shutdown();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+		const signal = {
+			id: "signal-late", goalId: "goal-late", gateId: "gate-late", sessionId: "session",
+			timestamp: Date.now(), commitSha: "HEAD", verification: { status: "running", steps: [] },
+		} as any;
+		const gate = {
+			id: signal.gateId, name: "Late", dependsOn: [],
+			verify: [{ name: "command", type: "command", run: "echo no" }],
+		} as any;
+
+		expect(harness.beginVerification(signal, gate)).toEqual([]);
+		await harness.verifyGateSignal(signal, gate, TEST_DIR);
+		await harness.resumeInterruptedVerifications();
+		await Promise.resolve();
+
+		expect(fs.existsSync(stateDir)).toBe(false);
+		expect(updates).toEqual([]);
+		expect(broadcasts).toEqual([]);
 	});
 
 	it("clears a scheduled cleanup retry and preserves its durable row", async () => {
@@ -981,6 +1118,7 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		(harness as any)._persistActive();
 		(harness as any)._scheduleCommandKillCleanupRetry(signalId);
 
+		const persistPath = (harness as any)._persistPath as string;
 		clock.advance(1_000);
 		await retryStarted;
 		let shutdownSettled = false;
@@ -992,18 +1130,17 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		releaseRetry();
 		await shutdown;
 		expect(retryCalls).toBe(1);
-		const persistPath = (harness as any)._persistPath as string;
-		const before = fs.statSync(persistPath);
-		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		const stable = fs.statSync(persistPath);
+		const stableContent = fs.readFileSync(persistPath, "utf8");
 		clock.advance(10_000);
 		await Promise.resolve();
 		const after = fs.statSync(persistPath);
 
 		expect((harness as any)._commandKillRetryTimers.size).toBe(0);
 		expect((harness as any)._commandKillRetryCallbacks.size).toBe(0);
-		expect(after.ino).toBe(before.ino);
-		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
-		expect(JSON.parse(beforeContent).verifications[0]).toMatchObject({
+		expect(after.ino).toBe(stable.ino);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(stableContent);
+		expect(JSON.parse(stableContent).verifications[0]).toMatchObject({
 			signalId,
 			overallStatus: "cancelled",
 			steps: [
