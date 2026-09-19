@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 
+import { VerificationHarness } from "../../../src/server/agent/verification-harness.ts";
 import {
 	buildActive,
 	buildFixture,
@@ -138,5 +140,94 @@ describe("runSubgoalStep — terminal verification shutdown", () => {
 		await new Promise<void>(resolve => setTimeout(resolve, 550));
 
 		expect(fx.calls.some(call => call.kind === "mergeChild" || call.kind === "archiveGoalAfterMerge")).toBe(false);
+	});
+
+	it("replays dependency reconciliation from an archived child after restart without starting its sibling", async () => {
+		const fx = await fixture();
+		const oldTeamStarts: string[] = [];
+		fx.setSetupHook(async childGoalId => { oldTeamStarts.push(childGoalId); });
+
+		const dependent = await fx.goalManager.createGoal("Dependent", fx.tmpRoot, {
+			workflowId: "feature",
+			projectId: "p",
+			parentGoalId: fx.parent.id,
+		});
+		fx.goalStore.update(dependent.id, {
+			spawnedFromPlanId: "B",
+			dependsOnPlanIds: ["A"],
+			state: "blocked",
+		} as any);
+
+		const archived = deferred<void>();
+		const manager = fx.goalManager as any;
+		const originalArchive = manager.archiveGoalAfterMerge.bind(manager);
+		let retirement: Promise<void> | undefined;
+		manager.archiveGoalAfterMerge = async (childGoalId: string) => {
+			const result = await originalArchive(childGoalId);
+			// The latch is synchronous. Starting shutdown here deterministically
+			// models a restart winning immediately after durable archival and before
+			// the old writer reaches its dependency scan.
+			retirement = fx.harness.shutdown();
+			archived.resolve(undefined);
+			return result;
+		};
+
+		const step = buildSubgoalStep({ planId: "A", title: "Dependency" });
+		const oldWriter = admitSubgoalRun(fx, step);
+		await archived.promise;
+		await oldWriter;
+		await retirement;
+
+		const archivedDependency = fx.goalStore.getAll().find(goal => goal.spawnedFromPlanId === "A");
+		assert.ok(archivedDependency);
+		expect(archivedDependency).toMatchObject({ state: "complete", archived: true });
+		expect(fx.goalStore.get(dependent.id)?.state).toBe("blocked");
+		expect(fx.calls.filter(call => call.kind === "updateGoal" && call.id === dependent.id && call.updates.state === "todo")).toHaveLength(0);
+		expect(oldTeamStarts).toEqual([archivedDependency.id]);
+		const retiredSemaphore = (fx.harness as any)._acquireRootSubgoalSemaphore(fx.parent.id, fx.parent.id);
+		expect(retiredSemaphore.available).toBe(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id));
+		expect(retiredSemaphore.waiting).toBe(0);
+
+		const oldHarness = fx.harness as any;
+		const freshTeamStarts: string[] = [];
+		const freshHarness = new VerificationHarness(
+			path.join(fx.tmpRoot, "state"),
+			undefined,
+			() => {},
+			oldHarness.roleStore,
+			oldHarness.preferencesStore,
+			undefined,
+			fx.mockTeamManager as any,
+			undefined,
+			oldHarness.projectContextManager,
+			undefined,
+			{ goalCandidateDeps: oldHarness.goalCandidateDeps },
+		);
+		(freshHarness as any)._subgoalHooks = {
+			waitForReadyToMerge: async () => "passed",
+			setupChildAndStartTeam: async (childGoalId: string) => { freshTeamStarts.push(childGoalId); },
+		};
+
+		try {
+			let recovered: Awaited<ReturnType<VerificationHarness["runSubgoalStep"]>> | undefined;
+			const resume = buildActive(fx.parent.id);
+			await (freshHarness as any)._admitVerificationWriter("restart archived subgoal", async () => {
+				recovered = await freshHarness.runSubgoalStep(step, resume.signal, resume.active, resume.stepIndex);
+			});
+			expect(recovered).toMatchObject({ passed: true });
+			expect(fx.goalStore.get(dependent.id)?.state).toBe("todo");
+			expect(freshTeamStarts).toEqual([]);
+
+			// A second recovery pass is a no-op: reconciliation is durable and
+			// idempotent, and never bypasses semaphore admission to start the team.
+			const replay = buildActive(fx.parent.id);
+			await (freshHarness as any)._admitVerificationWriter("restart archived subgoal replay", async () => {
+				await freshHarness.runSubgoalStep(step, replay.signal, replay.active, replay.stepIndex);
+			});
+			expect(fx.calls.filter(call => call.kind === "updateGoal" && call.id === dependent.id && call.updates.state === "todo")).toHaveLength(1);
+			expect(freshTeamStarts).toEqual([]);
+		} finally {
+			await freshHarness.shutdown();
+		}
 	});
 });

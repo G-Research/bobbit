@@ -8956,7 +8956,23 @@ export class VerificationHarness {
 
 		// ── 4. Success terminal short-circuit ─────────────────────────
 		if (resolved.child && resolved.child.archived === true && resolved.child.state === "complete") {
-			return { passed: true, output: `Subgoal already complete + archived (${resolved.source}): ${resolved.child.id}` };
+			// Archival is durable before dependency reconciliation. A gateway can
+			// therefore stop after archiveGoalAfterMerge but before the original
+			// writer's auto-unblock scan. Replay the idempotent scan on recovery so
+			// a last-dependency sibling cannot remain blocked forever.
+			const archivedChildId = resolved.child.id;
+			const terminalBeforeReconciliation = _terminalAbort(`archived subgoal dependency reconciliation for plan "${planId}"`);
+			if (terminalBeforeReconciliation) return terminalBeforeReconciliation;
+			const reconciled = await this._autoUnblockDependents(parentGoalId, archivedChildId, goalManager);
+			const terminalAfterReconciliation = _terminalAbort(`archived subgoal dependency reconciliation completion for plan "${planId}"`);
+			if (terminalAfterReconciliation) return terminalAfterReconciliation;
+			if (!reconciled) {
+				return {
+					passed: false,
+					output: `Subgoal ${archivedChildId} is complete + archived, but dependent reconciliation failed — re-signal to retry`,
+				};
+			}
+			return { passed: true, output: `Subgoal already complete + archived (${resolved.source}): ${archivedChildId}` };
 		}
 
 		// ── 5. Workflow-less complete-child recovery (workflow-less complete-child recovery — legacy records) ─────
@@ -9449,14 +9465,14 @@ export class VerificationHarness {
 		parentGoalId: string,
 		mergedChildId: string,
 		goalManager: import("./goal-manager.js").GoalManager,
-	): Promise<void> {
+	): Promise<boolean> {
 		try {
-			if (this._terminalShutdownStarted) return;
+			if (this._terminalShutdownStarted) return false;
 			const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
-			if (!ctx) return;
+			if (!ctx) return true;
 			const all = ctx.goalStore.getAll();
 			const mergedPlanId = ctx.goalStore.get(mergedChildId)?.spawnedFromPlanId;
-			if (!mergedPlanId) return;
+			if (!mergedPlanId) return true;
 			const siblings = all.filter(g => g.parentGoalId === parentGoalId && !g.archived && g.id !== mergedChildId);
 			for (const sib of siblings) {
 				const deps = sib.dependsOnPlanIds;
@@ -9469,7 +9485,7 @@ export class VerificationHarness {
 					return !!depSib && depSib.state === "complete";
 				});
 				if (!allResolved) continue;
-				if (this._terminalShutdownStarted) return;
+				if (this._terminalShutdownStarted) return false;
 				// Unblock: flip state='blocked' → 'todo' ONLY. Do NOT start the
 				// team here. Each harness-spawned blocked child is parked in its
 				// own runSubgoalStep `_waitForChildUnblock` poll (it released its
@@ -9483,8 +9499,10 @@ export class VerificationHarness {
 				await goalManager.updateGoal(sib.id, { state: "todo" });
 				this.broadcastFn?.(sib.id, { type: "goal_state_changed", goalId: sib.id });
 			}
+			return true;
 		} catch (err) {
 			console.error(`[verification] auto-unblock scan failed (non-fatal):`, err);
+			return false;
 		}
 	}
 
