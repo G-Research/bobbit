@@ -11,6 +11,9 @@ const DEFAULT_INITIAL_DELAY_MS = 25;
 const DEFAULT_MAX_DELAY_MS = 500;
 const DEFAULT_TRAVERSAL_CONCURRENCY = 8;
 const DEFAULT_SUBPROCESS_THREAD_POOL_SIZE = 32;
+// Give the remover its complete monotonic deadline, then one short window to
+// publish its result and close the IPC channel before the parent intervenes.
+const SUBPROCESS_CLOSE_GRACE_MS = 1_000;
 const CLEANUP_DEADLINE_CODE = "ECLEANUPDEADLINE";
 const CLEANUP_CHILD_ARGUMENT = "--owned-path-cleanup-child";
 
@@ -691,20 +694,94 @@ function serializedCleanupError(error) {
 		message: boundedText(error.message),
 		stack: boundedText(error.stack),
 	};
-	for (const key of ["target", "ownerRoot"]) {
+	for (const key of ["code", "stage", "target", "ownerRoot"]) {
 		if (error[key] !== undefined) serialized[key] = boundedText(error[key]);
 	}
 	for (const key of ["owner", "lifecycle"]) {
 		if (error[key] !== undefined) serialized[key] = boundedPlainValue(error[key]);
 	}
 	if (error.history !== undefined) serialized.history = boundedCleanupHistory(error.history);
-	if (error.elapsedMs !== undefined) serialized.elapsedMs = error.elapsedMs;
+	for (const key of ["attempts", "elapsedMs", "deadlineMs"]) {
+		if (error[key] !== undefined) serialized[key] = error[key];
+	}
 	return serialized;
 }
 
 function cleanupErrorFromPayload(payload) {
 	const error = new Error(payload?.message ?? "Owned cleanup subprocess failed");
-	if (payload && typeof payload === "object") Object.assign(error, payload);
+	for (const key of [
+		"code",
+		"stage",
+		"target",
+		"ownerRoot",
+		"owner",
+		"lifecycle",
+		"history",
+		"attempts",
+		"elapsedMs",
+		"deadlineMs",
+	]) {
+		if (payload?.[key] !== undefined) error[key] = payload[key];
+	}
+	if (payload?.name) error.name = payload.name;
+	if (payload?.stack) error.stack = payload.stack;
+	return error;
+}
+
+function jsonTransportClone(request, target, options) {
+	try {
+		const encoded = JSON.stringify(request);
+		if (encoded === undefined) throw new TypeError("request encoded to undefined");
+		return JSON.parse(encoded);
+	} catch (cause) {
+		const error = new TypeError(
+			`Owned-path cleanup subprocess request is not JSON-compatible for "${target}"`,
+			{ cause },
+		);
+		error.code = "ECLEANUPIPCJSON";
+		error.stage = "serialize-request";
+		error.target = target;
+		error.ownerRoot = options.ownerRoot;
+		error.lifecycle = boundedPlainValue(options.lifecycle);
+		throw error;
+	}
+}
+
+function subprocessLifecycleError({
+	code,
+	summary,
+	cause,
+	target,
+	options,
+	stage,
+	elapsedMs,
+	lifecycleDeadlineMs,
+	childLifecycle,
+}) {
+	const owner = boundedPlainValue(options.owner) ?? null;
+	const lifecycle = {
+		cleanup: boundedPlainValue(options.lifecycle) ?? null,
+		subprocess: childLifecycle,
+	};
+	const details = {
+		target,
+		ownerRoot: options.ownerRoot,
+		owner,
+		stage,
+		elapsedMs,
+		lifecycleDeadlineMs,
+		lifecycle,
+	};
+	const error = new Error(`${summary}: ${diagnosticJson(details)}`, cause === undefined ? undefined : { cause });
+	error.name = "OwnedPathCleanupSubprocessError";
+	error.code = code;
+	error.stage = stage;
+	error.target = target;
+	error.ownerRoot = options.ownerRoot;
+	error.owner = owner;
+	error.elapsedMs = elapsedMs;
+	error.deadlineMs = lifecycleDeadlineMs;
+	error.lifecycle = lifecycle;
 	return error;
 }
 
@@ -731,61 +808,189 @@ export function removeOwnedPathInSubprocess(target, options = {}, seams = {}) {
 			.filter(key => options[key] !== undefined)
 			.map(key => [key, options[key]]),
 	);
-	let request;
-	try {
-		request = structuredClone({ target, options: removeOptions });
-	} catch (error) {
-		throw new TypeError(`removeOwnedPathInSubprocess options must be serializable: ${error instanceof Error ? error.message : String(error)}`);
-	}
+	const cleanupDeadlineMs = nonNegativeNumber(options.deadlineMs, DEFAULT_DEADLINE_MS, "deadlineMs");
+	const lifecycleDeadlineMs = cleanupDeadlineMs + SUBPROCESS_CLOSE_GRACE_MS;
+	// Validate against the transport's real contract before creating a process.
+	// structuredClone accepts values such as BigInt that JSON fork IPC rejects.
+	const request = jsonTransportClone({ target, options: removeOptions }, target, options);
 	const forkProcess = seams.forkProcess ?? fork;
+	const setTimer = seams.setTimer ?? setTimeout;
+	const clearTimer = seams.clearTimer ?? clearTimeout;
+	const now = seams.now ?? (() => performance.now());
 	const modulePath = fileURLToPath(import.meta.url);
+	const startedAt = now();
 
 	return new Promise((resolve, reject) => {
+		let child;
+		try {
+			child = forkProcess(modulePath, [CLEANUP_CHILD_ARGUMENT], {
+				env: { ...process.env, UV_THREADPOOL_SIZE: String(threadPoolSize) },
+				execArgv: [],
+				serialization: "json",
+				stdio: ["ignore", "inherit", "inherit", "ipc"],
+				windowsHide: true,
+			});
+		} catch (cause) {
+			reject(subprocessLifecycleError({
+				code: "ECLEANUPSUBPROCESSSPAWN",
+				summary: "Failed to spawn owned-path cleanup subprocess",
+				cause,
+				target,
+				options,
+				stage: "spawn",
+				elapsedMs: Math.max(0, now() - startedAt),
+				lifecycleDeadlineMs,
+				childLifecycle: { spawned: false },
+			}));
+			return;
+		}
+
+		let stage = "send-request";
 		let response;
-		let transportError;
+		let receivedMessage = false;
+		let sendAcknowledged = false;
+		let terminationRequested = false;
+		let terminationReason;
+		let killResult;
+		let killError;
+		let closed = false;
 		let settled = false;
-		const child = forkProcess(modulePath, [CLEANUP_CHILD_ARGUMENT], {
-			env: { ...process.env, UV_THREADPOOL_SIZE: String(threadPoolSize) },
-			execArgv: [],
-			stdio: ["ignore", "inherit", "inherit", "ipc"],
-			windowsHide: true,
+		let terminalFailure;
+		let closeCode;
+		let closeSignal;
+
+		const elapsed = () => Math.max(0, now() - startedAt);
+		const childLifecycle = () => ({
+			spawned: true,
+			stage,
+			sendAcknowledged,
+			receivedMessage,
+			terminationRequested,
+			...(terminationReason === undefined ? {} : { terminationReason }),
+			...(killResult === undefined ? {} : { killResult }),
+			...(killError === undefined ? {} : { killError: boundedText(killError.message ?? String(killError)) }),
+			closed,
+			...(closeCode === undefined ? {} : { closeCode }),
+			...(closeSignal === undefined ? {} : { closeSignal }),
 		});
-		const settle = (action, value) => {
-			if (settled) return;
-			settled = true;
-			action(value);
+		const recordFailure = (code, summary, failureStage, cause) => {
+			if (terminalFailure === undefined) {
+				terminalFailure = { code, summary, stage: failureStage, cause };
+			}
 		};
+		const terminateOnce = reason => {
+			if (terminationRequested || closed || settled) return;
+			terminationRequested = true;
+			terminationReason = reason;
+			stage = `await-close-after-${reason}`;
+			try {
+				killResult = child.kill("SIGKILL");
+			} catch (error) {
+				killError = error;
+			}
+		};
+		const failAndTerminate = (code, summary, failureStage, cause) => {
+			if (settled || closed) return;
+			recordFailure(code, summary, failureStage, cause);
+			terminateOnce(failureStage);
+		};
+		const remainingLifecycleMs = Math.max(0, lifecycleDeadlineMs - elapsed());
+		const timer = setTimer(() => {
+			if (settled || closed) return;
+			failAndTerminate(
+				"ECLEANUPSUBPROCESSTIMEOUT",
+				"Owned-path cleanup subprocess exceeded its parent lifecycle deadline",
+				stage,
+			);
+		}, remainingLifecycleMs);
+
 		child.once("message", message => {
+			if (settled || closed || terminalFailure !== undefined) return;
+			receivedMessage = true;
 			response = message;
+			if ((message?.ok === true && message?.result?.removed === true)
+				|| (message?.ok === false && typeof message?.error?.message === "string")) {
+				stage = "await-close-after-result";
+				return;
+			}
+			failAndTerminate(
+				"ECLEANUPSUBPROCESSPROTOCOL",
+				"Owned-path cleanup subprocess sent a malformed result",
+				"receive-result",
+			);
 		});
-		child.once("error", error => {
-			// `close` follows `error`; wait for it so the parent never reports
-			// settlement while a partially spawned child could still be alive.
-			transportError = error;
+		child.once("error", cause => {
+			failAndTerminate(
+				"ECLEANUPSUBPROCESSCHILD",
+				"Owned-path cleanup subprocess emitted an error",
+				stage,
+				cause,
+			);
 		});
 		child.once("close", (code, signal) => {
 			if (settled) return;
-			if (code === 0 && response?.ok === true && response.result?.removed === true) {
-				settle(resolve, response.result);
+			closed = true;
+			closeCode = code;
+			closeSignal = signal;
+			clearTimer(timer);
+			settled = true;
+			if (terminalFailure !== undefined) {
+				reject(subprocessLifecycleError({
+					...terminalFailure,
+					target,
+					options,
+					elapsedMs: elapsed(),
+					lifecycleDeadlineMs,
+					childLifecycle: childLifecycle(),
+				}));
 				return;
 			}
-			let failure;
-			if (response?.ok === false && typeof response.error?.message === "string") {
-				failure = cleanupErrorFromPayload(response.error);
-			} else if (transportError) {
-				failure = transportError;
-			} else if (response === undefined) {
-				failure = new Error(`Owned cleanup subprocess exited without a result (code=${code ?? "null"} signal=${signal ?? "none"})`);
-			} else {
-				failure = new Error(`Owned cleanup subprocess returned a malformed result (code=${code ?? "null"} signal=${signal ?? "none"})`);
+			if (response?.ok === true && response?.result?.removed === true && code === 0) {
+				resolve(response.result);
+				return;
 			}
-			settle(reject, failure);
+			if (response?.ok === false && typeof response?.error?.message === "string") {
+				reject(cleanupErrorFromPayload(response.error));
+				return;
+			}
+			const hasResponse = response !== undefined;
+			reject(subprocessLifecycleError({
+				code: hasResponse ? "ECLEANUPSUBPROCESSPROTOCOL" : "ECLEANUPSUBPROCESSNORESULT",
+				summary: hasResponse
+					? "Owned-path cleanup subprocess closed with an invalid result or exit status"
+					: "Owned-path cleanup subprocess exited without a result",
+				target,
+				options,
+				stage: hasResponse ? "close-with-invalid-result" : "close-without-result",
+				elapsedMs: elapsed(),
+				lifecycleDeadlineMs,
+				childLifecycle: childLifecycle(),
+			}));
 		});
-		child.send(request, error => {
-			if (!error) return;
-			transportError = error;
-			child.kill();
-		});
+
+		try {
+			child.send(request, error => {
+				if (settled || closed) return;
+				if (error) {
+					failAndTerminate(
+						"ECLEANUPSUBPROCESSSEND",
+						"Failed to send request to owned-path cleanup subprocess",
+						"send-request-callback",
+						error,
+					);
+					return;
+				}
+				sendAcknowledged = true;
+				if (!receivedMessage) stage = "await-result";
+			});
+		} catch (cause) {
+			failAndTerminate(
+				"ECLEANUPSUBPROCESSSEND",
+				"Failed to send request to owned-path cleanup subprocess",
+				"send-request",
+				cause,
+			);
+		}
 	});
 }
 

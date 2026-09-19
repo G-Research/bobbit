@@ -74,8 +74,11 @@ type CleanupContract = {
 	removeOwnedPathInSubprocess(target: string, options: RemoveOptions, seams?: {
 		forkProcess?: (...args: unknown[]) => EventEmitter & {
 			send(message: unknown, callback: (error?: Error | null) => void): void;
-			kill(): void;
+			kill(signal?: string): boolean | void;
 		};
+		setTimer?: (callback: () => void, delayMs: number) => unknown;
+		clearTimer?: (timer: unknown) => void;
+		now?: () => number;
 	}): Promise<RemoveResult>;
 	shutdownResourcesThenRemove(options: {
 		phases: ShutdownPhase[];
@@ -137,7 +140,7 @@ describe("owned path cleanup contract", () => {
 		const ownerRoot = path.resolve("subprocess-cleanup-owner");
 		const child = new EventEmitter() as EventEmitter & {
 			send(message: unknown, callback: (error?: Error | null) => void): void;
-			kill(): void;
+			kill(signal?: string): boolean | void;
 		};
 		let request: unknown;
 		child.send = (message, callback) => {
@@ -174,6 +177,210 @@ describe("owned path cleanup contract", () => {
 		child.emit("close", 0, null);
 		await expect(running).resolves.toEqual({ removed: true, attempts: 1, history: [] });
 		expect(settled).toBe(true);
+	});
+
+	it("bounds a never-ready child, kills it once, and rejects only after close", async () => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("stalled-subprocess-owner");
+		const child = new EventEmitter() as EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(signal?: string): boolean;
+		};
+		let sendCallback: ((error?: Error | null) => void) | undefined;
+		child.send = (_message, callback) => {
+			sendCallback = callback;
+			callback();
+		};
+		child.kill = vi.fn(() => true);
+		let now = 5_000;
+		let deadlineCallback: (() => void) | undefined;
+		const timerToken = {};
+		const setTimer = vi.fn((callback: () => void, _delayMs: number) => {
+			deadlineCallback = callback;
+			return timerToken;
+		});
+		const clearTimer = vi.fn();
+		let settled = false;
+		const running = removeOwnedPathInSubprocess(ownerRoot, {
+			ownerRoot,
+			deadlineMs: 50,
+			lifecycle: { gateway: "closed", watcher: "awaited" },
+		}, {
+			forkProcess: () => child,
+			setTimer,
+			clearTimer,
+			now: () => now,
+		});
+		void running.then(() => { settled = true; }, () => { settled = true; });
+
+		expect(setTimer).toHaveBeenCalledWith(expect.any(Function), 1_050);
+		now += 1_050;
+		deadlineCallback!();
+		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+		await Promise.resolve();
+		expect(settled, "timeout must not masquerade termination request as process close").toBe(false);
+		deadlineCallback!();
+		child.emit("error", new Error("late child error"));
+		expect(child.kill).toHaveBeenCalledTimes(1);
+
+		child.emit("close", null, "SIGKILL");
+		const failure = await running.then(() => undefined, (error: unknown) => error) as Error & {
+			code: string;
+			stage: string;
+			lifecycle: Record<string, unknown>;
+		};
+		expect(failure).toMatchObject({
+			name: "OwnedPathCleanupSubprocessError",
+			code: "ECLEANUPSUBPROCESSTIMEOUT",
+			stage: "await-result",
+			target: ownerRoot,
+			ownerRoot,
+			deadlineMs: 1_050,
+			lifecycle: {
+				cleanup: { gateway: "closed", watcher: "awaited" },
+				subprocess: expect.objectContaining({
+					terminationRequested: true,
+					terminationReason: "await-result",
+					closed: true,
+					closeSignal: "SIGKILL",
+				}),
+			},
+		});
+		expect(failure.message).toContain(path.basename(ownerRoot));
+		expect(failure.message).toContain("await-result");
+		expect(clearTimer).toHaveBeenCalledWith(timerToken);
+
+		// Even hostile late callbacks cannot act on the child after settlement.
+		sendCallback!(new Error("late send failure"));
+		deadlineCallback!();
+		child.emit("message", { unexpected: "late result" });
+		expect(child.kill).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{ stage: "send-request", acknowledgeSend: false, publishResult: false },
+		{ stage: "await-close-after-result", acknowledgeSend: true, publishResult: true },
+	])("enforces the same deadline when stalled at $stage", async ({ stage, acknowledgeSend, publishResult }) => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve(`stalled-${stage}`);
+		const child = new EventEmitter() as EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(signal?: string): boolean;
+		};
+		child.send = (_message, callback) => {
+			if (acknowledgeSend) callback();
+			if (publishResult) child.emit("message", { ok: true, result: { removed: true, attempts: 1, history: [] } });
+		};
+		child.kill = vi.fn(() => true);
+		let deadlineCallback: (() => void) | undefined;
+		const running = removeOwnedPathInSubprocess(ownerRoot, {
+			ownerRoot,
+			deadlineMs: 0,
+		}, {
+			forkProcess: () => child,
+			setTimer: callback => {
+				deadlineCallback = callback;
+				return {};
+			},
+			clearTimer: () => {},
+			now: () => 0,
+		});
+
+		deadlineCallback!();
+		expect(child.kill).toHaveBeenCalledTimes(1);
+		child.emit("close", null, "SIGKILL");
+		await expect(running).rejects.toMatchObject({
+			code: "ECLEANUPSUBPROCESSTIMEOUT",
+			stage,
+			lifecycle: {
+				subprocess: expect.objectContaining({
+					terminationReason: stage,
+					closed: true,
+				}),
+			},
+		});
+	});
+
+	it.each([
+		{ name: "synchronous send throw", synchronous: true },
+		{ name: "send callback failure", synchronous: false },
+	])("terminates and drains the child after a $name", async ({ synchronous }) => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve(`send-failure-${synchronous ? "throw" : "callback"}`);
+		const child = new EventEmitter() as EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(signal?: string): boolean;
+		};
+		const sendFailure = new Error(`send ${synchronous ? "threw" : "callback failed"}`);
+		child.send = (_message, callback) => {
+			if (synchronous) throw sendFailure;
+			callback(sendFailure);
+		};
+		child.kill = vi.fn(() => true);
+		let settled = false;
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot }, { forkProcess: () => child });
+		void running.then(() => { settled = true; }, () => { settled = true; });
+
+		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		child.emit("close", null, "SIGKILL");
+		await expect(running).rejects.toMatchObject({
+			code: "ECLEANUPSUBPROCESSSEND",
+			stage: synchronous ? "send-request" : "send-request-callback",
+			cause: sendFailure,
+		});
+		expect(child.kill).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{ label: "BigInt", lifecycle: { sequence: 1n } },
+		{ label: "circular data", lifecycle: (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })() },
+	])("rejects JSON-incompatible $label before spawning", async ({ lifecycle }) => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve("json-incompatible-owner");
+		const forkProcess = vi.fn();
+
+		let failure: unknown;
+		try {
+			removeOwnedPathInSubprocess(ownerRoot, { ownerRoot, lifecycle }, { forkProcess });
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toMatchObject({
+			code: "ECLEANUPIPCJSON",
+			stage: "serialize-request",
+			target: ownerRoot,
+		});
+		expect(forkProcess).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ label: "missing", message: undefined, expectsKill: false, expectedCode: "ECLEANUPSUBPROCESSNORESULT" },
+		{ label: "malformed", message: { ok: true, result: { removed: false } }, expectsKill: true, expectedCode: "ECLEANUPSUBPROCESSPROTOCOL" },
+	])("rejects a $label child result with close evidence", async ({ message, expectsKill, expectedCode }) => {
+		const { removeOwnedPathInSubprocess } = await loadCleanupContract();
+		const ownerRoot = path.resolve(`result-${expectedCode}`);
+		const child = new EventEmitter() as EventEmitter & {
+			send(message: unknown, callback: (error?: Error | null) => void): void;
+			kill(signal?: string): boolean;
+		};
+		child.send = (_request, callback) => callback();
+		child.kill = vi.fn(() => true);
+		const running = removeOwnedPathInSubprocess(ownerRoot, { ownerRoot }, { forkProcess: () => child });
+		if (message !== undefined) child.emit("message", message);
+		expect(child.kill).toHaveBeenCalledTimes(expectsKill ? 1 : 0);
+		child.emit("close", expectsKill ? null : 1, expectsKill ? "SIGKILL" : null);
+
+		await expect(running).rejects.toMatchObject({
+			code: expectedCode,
+			target: ownerRoot,
+			lifecycle: {
+				subprocess: expect.objectContaining({ closed: true }),
+			},
+		});
 	});
 
 	it("retries transient Windows removal failures with capped exponential delays", async () => {
