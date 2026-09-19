@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, it } from "vitest";
 import * as packedConsumerModule from "../../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
@@ -42,7 +42,11 @@ type PackedConsumerApi = {
 		repoRoot: string;
 		runRoot: string;
 		baseEnv?: NodeJS.ProcessEnv;
-		ensureDist: () => void | Promise<void>;
+		ensureDist: (options?: {
+			timeoutMs: number;
+			fixtureRoot: string;
+			commands: unknown[];
+		}) => void | Promise<void>;
 		resolveNpm: () => { command: string; argsPrefix: string[] };
 		runCommand: (command: string, args: string[], options: CommandOptions) => Promise<{
 			command: string;
@@ -51,6 +55,8 @@ type PackedConsumerApi = {
 			stdout: string;
 			stderr: string;
 		}>;
+		preparationTimeoutMs?: number;
+		now?: () => number;
 	}) => Promise<PreparedDescriptor>;
 	readPreparedPackedConsumerDescriptor?: (
 		descriptorPath: string,
@@ -275,6 +281,103 @@ describe("prepared packed consumer", () => {
 		);
 		assert.equal(copies, 0, `${FAILURE_PREFIX}: an external template must be rejected before cp`);
 		assert.equal(calls.length, commandCount, `${FAILURE_PREFIX}: rejected materialization must not invoke a package command`);
+	});
+
+	it("passes the shrinking preparation budget through dist locking and the owned build command", async () => {
+		const fixtureRoot = join(await mkdtemp(join(tmpdir(), "bobbit-packed-dist-budget-unit-")), "fixture");
+		roots.push(dirname(fixtureRoot));
+		const remaining = [240, 125];
+		const commands: unknown[] = [];
+		let lockWaitMs: number | undefined;
+		let buildTimeoutMs: number | undefined;
+		await packedConsumerModule.ensurePackedConsumerDist({
+			repoRoot: REPO_ROOT,
+			baseEnv: { PATH: process.env.PATH },
+			npm: { command: "node", argsPrefix: ["npm-cli.js"] },
+			fixtureRoot,
+			commands,
+			remainingPreparationMs: () => remaining.shift()!,
+			ensureDistBuildFn: async (options: { lockWaitMs: number; runBuild: () => Promise<void> }) => {
+				lockWaitMs = options.lockWaitMs;
+				await options.runBuild();
+				return { key: "fixture", cacheHit: false };
+			},
+			runCommand: async (command: string, args: string[], options: CommandOptions) => {
+				buildTimeoutMs = options.timeoutMs;
+				assert.equal(command, "node");
+				assert.deepEqual(args, ["npm-cli.js", "run", "build"]);
+				assert.equal(options.cwd, REPO_ROOT);
+				assert.equal((options as CommandOptions & { ownershipBootstrapRoot?: string }).ownershipBootstrapRoot, fixtureRoot);
+				return { command, args, code: 0, stdout: "built", stderr: "" };
+			},
+		});
+
+		assert.equal(lockWaitMs, 240, `${FAILURE_PREFIX}: dist lock must receive only the first remaining budget`);
+		assert.equal(buildTimeoutMs, 125, `${FAILURE_PREFIX}: build must receive the smaller later remaining budget`);
+		assert.equal(commands.length, 1, `${FAILURE_PREFIX}: build evidence must join the preparation command ledger`);
+	});
+
+	it("retains build-stage deadline evidence and never publishes a descriptor", async () => {
+		const runRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-build-deadline-unit-"));
+		roots.push(runRoot);
+		const ticks = [100, 160, 260];
+		let observedBuildTimeout: number | undefined;
+		const prepare = requireApi("preparePackedConsumerFixture");
+
+		await assert.rejects(prepare({
+			repoRoot: REPO_ROOT,
+			runRoot,
+			preparationTimeoutMs: 120,
+			now: () => ticks.shift() ?? 260,
+			resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+			ensureDist: ({ timeoutMs } = { timeoutMs: 0, fixtureRoot: "", commands: [] }) => {
+				observedBuildTimeout = timeoutMs;
+			},
+			runCommand: async () => { throw new Error("package commands must not start after build deadline exhaustion"); },
+		}), /retained partial fixture and command evidence/);
+
+		assert.equal(observedBuildTimeout, 60, `${FAILURE_PREFIX}: build stage must receive the monotonic remaining budget`);
+		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+		assert.match(evidence.error.message, /deadline exhausted before post-build preparation after 160ms \(limit 120ms\)/);
+		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json"), "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+	});
+
+	it("retains incomplete build shutdown proof and blocks descriptor publication", async () => {
+		const runRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-build-shutdown-unit-"));
+		roots.push(runRoot);
+		const prepare = requireApi("preparePackedConsumerFixture");
+		const shutdown = {
+			ownershipState: "established",
+			killRequested: true,
+			rootCloseObserved: false,
+			treeExitAttempted: true,
+			treeExitSettled: false,
+			treeExitVerified: false,
+			completionTimedOut: true,
+		};
+
+		await assert.rejects(prepare({
+			repoRoot: REPO_ROOT,
+			runRoot,
+			resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
+			ensureDist: () => {
+				throw new packedConsumerModule.OwnedCommandError("build tree remained live", {
+					command: "node",
+					args: ["npm-cli.js", "run", "build"],
+					cwd: REPO_ROOT,
+					shutdown,
+				});
+			},
+			runCommand: async () => { throw new Error("package commands must not start after incomplete build shutdown"); },
+		}), /retained partial fixture and command evidence/);
+
+		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
+		assert.equal(evidence.error.message, "build tree remained live");
+		assert.deepEqual(evidence.error.shutdown, shutdown);
+		assert.deepEqual(evidence.error.args, ["npm-cli.js", "run", "build"]);
+		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json"), "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
 
 	it("reports timeout ownership, tree termination, exit state, cwd, and retained output", async () => {

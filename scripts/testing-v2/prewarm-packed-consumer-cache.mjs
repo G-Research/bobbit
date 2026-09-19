@@ -17,13 +17,15 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
+const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
 const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
-// This bounds the whole package-command sequence. Each owned command receives
-// only the smaller of its command-specific limit and the remaining preparation
-// budget; runOwnedCommand still owns and joins its tree after that timer fires.
+// This bounds dist readiness plus the whole package-command sequence. Each
+// owned command receives only the smaller of its command-specific limit and the
+// remaining preparation budget; runOwnedCommand still owns and joins its tree
+// after that timer fires.
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const DESCRIPTOR_VERSION = 1;
@@ -90,10 +92,27 @@ function isolatedNpmEnv(cwd, cacheDir, baseEnv) {
 }
 
 async function defaultSpawnOwned(command, args, options) {
-	// ensureDistBuild() runs before production preparation, so the built lifecycle
-	// primitive is available without coupling injected unit tests to dist.
-	const spawnTreeUrl = pathToFileURL(join(options.repoRoot, "dist", "server", "agent", "spawn-tree.js")).href;
-	const { spawnTracked } = await import(spawnTreeUrl);
+	let spawnTreePath = join(options.repoRoot, "dist", "server", "agent", "spawn-tree.js");
+	if (!existsSync(spawnTreePath)) {
+		// A clean checkout has no dist primitive yet. Bootstrap the exact source
+		// implementation into the retained fixture root using Node's built-in
+		// erasable-TypeScript support; do not launch an unowned compiler first.
+		if (!options.ownershipBootstrapRoot) {
+			throw new Error("Owned command startup requires an ownershipBootstrapRoot when dist is absent");
+		}
+		const bootstrapDir = join(options.ownershipBootstrapRoot, "ownership-bootstrap");
+		await mkdir(bootstrapDir, { recursive: true });
+		spawnTreePath = join(bootstrapDir, "spawn-tree.ts");
+		if (!existsSync(spawnTreePath)) {
+			const sourcePath = join(options.repoRoot, "src", "server", "agent", "spawn-tree.ts");
+			const clockUrl = pathToFileURL(join(options.repoRoot, "src", "server", "clock.ts")).href;
+			const source = await readFile(sourcePath, "utf8");
+			const rewritten = source.replace('from "../clock.js"', `from ${JSON.stringify(clockUrl)}`);
+			if (rewritten === source) throw new Error(`Unable to bind the source process-tree clock import in ${sourcePath}`);
+			await writeFile(spawnTreePath, rewritten, { flag: "wx" });
+		}
+	}
+	const { spawnTracked } = await import(pathToFileURL(spawnTreePath).href);
 	return spawnTracked(command, args, {
 		cwd: options.cwd,
 		env: options.env,
@@ -158,6 +177,7 @@ export async function runOwnedCommand(command, args, {
 	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	treeExitTimeoutMs = TREE_EXIT_TIMEOUT_MS,
 	repoRoot = REPO_ROOT,
+	ownershipBootstrapRoot,
 	spawnOwned = defaultSpawnOwned,
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
@@ -173,7 +193,12 @@ export async function runOwnedCommand(command, args, {
 	if (!Number.isFinite(treeExitTimeoutMs) || treeExitTimeoutMs <= 0) throw new Error("treeExitTimeoutMs must be a positive number");
 
 	const rendered = displayCommand(command, args);
-	const tracked = await spawnOwned(command, args, { cwd, env, repoRoot });
+	const tracked = await spawnOwned(command, args, {
+		cwd,
+		env,
+		repoRoot,
+		ownershipBootstrapRoot,
+	});
 	const child = tracked.child;
 	const stdout = [];
 	const stderr = [];
@@ -522,10 +547,17 @@ async function writeManifest(directory, manifest) {
 function errorEvidence(error) {
 	if (!(error instanceof Error)) return { message: String(error) };
 	const cause = error.cause;
+	const owned = error instanceof OwnedCommandError ? {
+		command: error.command,
+		args: error.args,
+		cwd: error.cwd,
+		shutdown: error.shutdown,
+	} : {};
 	return {
 		name: error.name,
 		message: error.message,
 		stack: error.stack,
+		...owned,
 		...(cause === undefined ? {} : {
 			cause: cause instanceof Error
 				? { name: cause.name, message: cause.message, stack: cause.stack }
@@ -562,6 +594,35 @@ async function retainPreparationFailure({ fixtureRoot, commands, error }) {
 	throw retained;
 }
 
+/** Ensure dist under the same preparation deadline and owned-tree boundary. */
+export async function ensurePackedConsumerDist({
+	repoRoot,
+	baseEnv,
+	npm,
+	fixtureRoot,
+	commands,
+	runCommand,
+	remainingPreparationMs,
+	ensureDistBuildFn = ensureDistBuild,
+}) {
+	return ensureDistBuildFn({
+		repoRoot,
+		lockWaitMs: remainingPreparationMs("dist build lock"),
+		runBuild: async () => {
+			const args = [...npm.argsPrefix, "run", "build"];
+			const result = await runCommand(npm.command, args, {
+				cwd: repoRoot,
+				env: baseEnv,
+				timeoutMs: Math.min(DIST_BUILD_TIMEOUT_MS, remainingPreparationMs("npm run build")),
+				repoRoot,
+				ownershipBootstrapRoot: fixtureRoot,
+			});
+			commands.push(result);
+			requireSuccess(result);
+		},
+	});
+}
+
 /**
  * Build one immutable packed-consumer template and publish its descriptor only
  * after the actual tarball, lockfile, and installed dependency tree exist.
@@ -570,7 +631,7 @@ export async function preparePackedConsumerFixture({
 	repoRoot = REPO_ROOT,
 	runRoot,
 	baseEnv = process.env,
-	ensureDist = () => ensureDistBuild({ repoRoot }),
+	ensureDist,
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
 	runtime,
@@ -610,15 +671,7 @@ export async function preparePackedConsumerFixture({
 	}
 	if (existsSync(fixtureRoot)) throw new Error(`Packed-consumer fixture was already prepared at ${fixtureRoot}`);
 
-	await measured("build", () => ensureDist());
-	const packageManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-	const packageName = packageManifest.name;
-	if (typeof packageName !== "string" || packageName.length === 0) throw new Error("package.json must declare a package name");
-	const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
-	const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
-	const npm = resolveNpm(baseEnv);
 	const commands = [];
-
 	try {
 		await Promise.all([
 			mkdir(packDir, { recursive: true }),
@@ -627,6 +680,33 @@ export async function preparePackedConsumerFixture({
 			mkdir(cacheDir, { recursive: true }),
 			mkdir(consumersDir, { recursive: true }),
 		]);
+		const npm = resolveNpm(baseEnv);
+		await measured("build", async () => {
+			if (ensureDist) {
+				await ensureDist({
+					timeoutMs: remainingPreparationMs("dist build"),
+					fixtureRoot,
+					commands,
+					runCommand,
+				});
+			} else {
+				await ensurePackedConsumerDist({
+					repoRoot,
+					baseEnv,
+					npm,
+					fixtureRoot,
+					commands,
+					runCommand,
+					remainingPreparationMs,
+				});
+			}
+			remainingPreparationMs("post-build preparation");
+		});
+		const packageManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+		const packageName = packageManifest.name;
+		if (typeof packageName !== "string" || packageName.length === 0) throw new Error("package.json must declare a package name");
+		const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
+		const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
 		const consumerManifest = cleanConsumerManifest(nodeTypesVersion);
 		await Promise.all([writeManifest(resolverDir, consumerManifest), writeManifest(templateDir, consumerManifest)]);
 
