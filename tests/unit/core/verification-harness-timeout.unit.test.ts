@@ -907,6 +907,112 @@ describe("VerificationHarness terminal command-tree barrier", () => {
 		});
 	});
 
+	it("clears a scheduled cleanup retry and preserves its durable row", async () => {
+		const clock = createManualClock(0);
+		let retryCalls = 0;
+		const harness = makeHarness({
+			clock,
+			recoveredSentinelReaper: async () => { retryCalls++; },
+		});
+		const signalId = "signal-scheduled-cleanup-retry";
+		setActiveCommandVerification(harness, "goal-scheduled-cleanup-retry", "gate-scheduled-cleanup-retry", signalId);
+		const active = (harness as any).activeVerifications.get(signalId);
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		Object.assign(active.steps[0], {
+			killRequestedAt: Date.now(),
+			killSignal: "SIGKILL",
+			sentinelFile: path.join(TEST_DIR, "scheduled-retry.sentinel"),
+		});
+		(harness as any)._persistActive();
+		(harness as any)._scheduleCommandKillCleanupRetry(signalId);
+
+		const persistPath = (harness as any)._persistPath as string;
+		const before = fs.statSync(persistPath);
+		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		await harness.shutdown();
+		clock.advance(10_000);
+		await Promise.resolve();
+
+		const after = fs.statSync(persistPath);
+		expect(retryCalls).toBe(0);
+		expect((harness as any)._commandKillRetryTimers.size).toBe(0);
+		expect(after.ino).toBe(before.ino);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
+		expect(JSON.parse(beforeContent).verifications[0]).toMatchObject({
+			signalId,
+			overallStatus: "cancelled",
+			steps: [{ killRequestedAt: expect.any(Number) }],
+		});
+	});
+
+	it("joins a cleanup retry callback that already crossed its timer boundary", async () => {
+		const clock = createManualClock(0);
+		let releaseRetry!: () => void;
+		let observeRetryStart!: () => void;
+		const retryStarted = new Promise<void>(resolve => { observeRetryStart = resolve; });
+		const retryBlocked = new Promise<void>(resolve => { releaseRetry = resolve; });
+		let retryCalls = 0;
+		const harness = makeHarness({
+			clock,
+			platform: "linux",
+			recoveredSentinelReaper: async () => {
+				retryCalls++;
+				observeRetryStart();
+				await retryBlocked;
+			},
+		});
+		const signalId = "signal-running-cleanup-retry";
+		setActiveCommandVerification(harness, "goal-running-cleanup-retry", "gate-running-cleanup-retry", signalId, ["owned", "unproven"]);
+		const active = (harness as any).activeVerifications.get(signalId);
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		Object.assign(active.steps[0], {
+			killRequestedAt: Date.now(),
+			killSignal: "SIGKILL",
+			sentinelFile: path.join(TEST_DIR, "running-retry.sentinel"),
+		});
+		Object.assign(active.steps[1], {
+			killRequestedAt: Date.now(),
+			killSignal: "SIGKILL",
+			restartRecoveryMode: "unsupported",
+			restartRecoveryUnsupportedReason: "retained for the next harness",
+		});
+		(harness as any)._persistActive();
+		(harness as any)._scheduleCommandKillCleanupRetry(signalId);
+
+		clock.advance(1_000);
+		await retryStarted;
+		let shutdownSettled = false;
+		const shutdown = harness.shutdown();
+		void shutdown.then(() => { shutdownSettled = true; });
+		await Promise.resolve();
+		expect(shutdownSettled).toBe(false);
+
+		releaseRetry();
+		await shutdown;
+		expect(retryCalls).toBe(1);
+		const persistPath = (harness as any)._persistPath as string;
+		const before = fs.statSync(persistPath);
+		const beforeContent = fs.readFileSync(persistPath, "utf8");
+		clock.advance(10_000);
+		await Promise.resolve();
+		const after = fs.statSync(persistPath);
+
+		expect((harness as any)._commandKillRetryTimers.size).toBe(0);
+		expect((harness as any)._commandKillRetryCallbacks.size).toBe(0);
+		expect(after.ino).toBe(before.ino);
+		expect(fs.readFileSync(persistPath, "utf8")).toBe(beforeContent);
+		expect(JSON.parse(beforeContent).verifications[0]).toMatchObject({
+			signalId,
+			overallStatus: "cancelled",
+			steps: [
+				{ killCompletedAt: expect.any(Number) },
+				{ killUnsafeReason: "retained for the next harness" },
+			],
+		});
+	});
+
 	it("aggregates false and rejected tree barriers with command diagnostics", async () => {
 		const unverified = trackedCommand({ pid: 920_002, wait: async () => false });
 		const rejected = trackedCommand({ pid: 920_003, wait: async () => { throw new Error("job supervisor failed"); } });

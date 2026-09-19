@@ -3946,7 +3946,10 @@ export class VerificationHarness {
 		return !isPidAlive(pid);
 	}
 
-	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _commandKillRetryTimers = new Map<string, TimerHandle>();
+
+	/** Retry callbacks that crossed their timer boundary and may still persist cleanup state. */
+	private _commandKillRetryCallbacks = new Set<Promise<void>>();
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
@@ -4018,51 +4021,67 @@ export class VerificationHarness {
 	}
 
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
-		if (this._commandKillRetryTimers.has(signalId)) return;
-		const timer = this.clock.setTimeout(async () => {
+		// Terminal shutdown preserves the durable pending row for the next harness;
+		// it must not create another timer owned by this harness.
+		if (this._terminalShutdownStarted || this._commandKillRetryTimers.has(signalId)) return;
+		const timer = this.clock.setTimeout(() => {
 			this._commandKillRetryTimers.delete(signalId);
-			const active = this.activeVerifications.get(signalId);
-			if (!active || !this._hasPendingCommandKillCleanup(active)) return;
-			try {
-				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
-				const signal = pendingStep?.killSignal ?? "SIGKILL";
-				await this._killPersistedCommandSteps(active, signal, { markIntent: false });
-				const containerPayloadsSettled = active.steps
-					.filter(step => step.type === "command" && !!step.containerId)
-					.every(step => !!step.containerPayloadCleanupCompletedAt && !step.containerPayloadCleanupPending);
-				if (containerPayloadsSettled) {
-					// The recovered reaper is restart-only. A live docker-exec transport
-					// must be re-driven through its TrackedChild until its own close barrier
-					// reports settled; a false first wait is pending, not authorization to
-					// use the historical sentinel/PID on this boot.
-					await this._killTrackedForSignal(signalId, step => !!step?.containerId);
-				}
-				if (this._hasPendingCommandKillCleanup(active)) {
-					this._persistActive();
-					this._scheduleCommandKillCleanupRetry(signalId);
-					return;
-				}
-
-				if (active.cancelled || active.overallStatus === "cancelled") {
-					await this._finalizeCancelledVerification(active);
-					return;
-				}
-
-				if (this.activeVerifications.get(signalId) === active) {
-					await this._resumeOneVerification(active);
-					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
-						this.activeVerifications.delete(signalId);
-					}
-					this._persistActive();
-				}
-			} catch (err) {
-				console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
-				this._persistActive();
-				if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
-			}
+			if (this._terminalShutdownStarted) return;
+			const callback = this._runCommandKillCleanupRetry(signalId);
+			this._commandKillRetryCallbacks.add(callback);
+			void callback.finally(() => this._commandKillRetryCallbacks.delete(callback)).catch(() => {});
 		}, 1_000);
 		timer.unref?.();
 		this._commandKillRetryTimers.set(signalId, timer);
+	}
+
+	private async _runCommandKillCleanupRetry(signalId: string): Promise<void> {
+		const active = this.activeVerifications.get(signalId);
+		if (!active || !this._hasPendingCommandKillCleanup(active)) return;
+		try {
+			const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
+			const signal = pendingStep?.killSignal ?? "SIGKILL";
+			await this._killPersistedCommandSteps(active, signal, { markIntent: false });
+			if (this._terminalShutdownStarted) {
+				// Commit only cleanup progress already made by this callback. Restart
+				// owns any remaining cleanup or verification continuation; terminal
+				// shutdown must not publish a gate or create a new command owner.
+				this._persistActive();
+				return;
+			}
+			const containerPayloadsSettled = active.steps
+				.filter(step => step.type === "command" && !!step.containerId)
+				.every(step => !!step.containerPayloadCleanupCompletedAt && !step.containerPayloadCleanupPending);
+			if (containerPayloadsSettled) {
+				// The recovered reaper is restart-only. A live docker-exec transport
+				// must be re-driven through its TrackedChild until its own close barrier
+				// reports settled; a false first wait is pending, not authorization to
+				// use the historical sentinel/PID on this boot.
+				await this._killTrackedForSignal(signalId, step => !!step?.containerId);
+			}
+			if (this._hasPendingCommandKillCleanup(active)) {
+				this._persistActive();
+				this._scheduleCommandKillCleanupRetry(signalId);
+				return;
+			}
+
+			if (active.cancelled || active.overallStatus === "cancelled") {
+				await this._finalizeCancelledVerification(active);
+				return;
+			}
+
+			if (this.activeVerifications.get(signalId) === active) {
+				await this._resumeOneVerification(active);
+				if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
+					this.activeVerifications.delete(signalId);
+				}
+				this._persistActive();
+			}
+		} catch (err) {
+			console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
+			this._persistActive();
+			if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
+		}
 	}
 
 	private async _killPersistedCommandSteps(
@@ -4322,11 +4341,13 @@ export class VerificationHarness {
 	 */
 	shutdown(): Promise<void> {
 		if (!this._shutdownPromise) {
-			// This latch is monotonic and must linearize before the one-time map
-			// snapshot. Work resuming from any earlier await then fails closed at its
-			// next owner boundary instead of escaping a completed shutdown barrier.
+			// This latch is monotonic and must linearize before either owner snapshot.
+			// Clearing scheduled retries preserves their durable rows for restart; any
+			// callback already past its timer boundary is separately joined below.
 			this._terminalShutdownStarted = true;
-			this._shutdownPromise = this._shutdownTrackedCommandTrees();
+			for (const timer of this._commandKillRetryTimers.values()) this.clock.clearTimeout(timer);
+			this._commandKillRetryTimers.clear();
+			this._shutdownPromise = this._shutdownVerificationOwners();
 		}
 		return this._shutdownPromise;
 	}
@@ -4377,6 +4398,31 @@ export class VerificationHarness {
 			status: "cancelled",
 		});
 		this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [result], workflowAligned: steps.length > 0 });
+	}
+
+	private async _shutdownVerificationOwners(): Promise<void> {
+		const results = await Promise.allSettled([
+			this._shutdownTrackedCommandTrees(),
+			this._drainCommandKillRetryCallbacks(),
+		]);
+		const failures = results.flatMap(result => {
+			if (result.status === "fulfilled") return [];
+			return result.reason instanceof AggregateError ? result.reason.errors : [result.reason];
+		});
+		if (failures.length > 0) {
+			const diagnostics = failures.map(failure => failure instanceof Error ? failure.message : String(failure)).join(" | ");
+			throw new AggregateError(failures, `Verification harness shutdown failed for ${failures.length} owner barrier(s): ${diagnostics}`);
+		}
+	}
+
+	private async _drainCommandKillRetryCallbacks(): Promise<void> {
+		// The terminal fence and synchronous timer clearing make this set stable:
+		// callbacks may leave it while settling, but no new callback can enter.
+		const results = await Promise.allSettled([...this._commandKillRetryCallbacks]);
+		const failures = results
+			.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+			.map(result => result.reason);
+		if (failures.length > 0) throw new AggregateError(failures, "Verification command cleanup retry drain failed");
 	}
 
 	private async _shutdownTrackedCommandTrees(): Promise<void> {
