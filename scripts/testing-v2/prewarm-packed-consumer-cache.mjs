@@ -8,9 +8,10 @@
  * immutable template, and atomically publishes a descriptor. Browser workers
  * materialize that template; they never run npm pack/install themselves.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, readFileSync } from "node:fs";
+import { copyFile, cp, link, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
@@ -20,6 +21,12 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
+const require = createRequire(import.meta.url);
+// cacache 20 does not export its content-path resolver from the package root.
+// Use the resolver shipped by the installed package so this direct CAS write
+// follows its exact cache-version and digest segmentation without duplicating
+// that private layout logic here.
+const cacacheContentPath = require("cacache/lib/content/path.js");
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
@@ -33,12 +40,9 @@ export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const CACHE_WORKER_COUNT = 3;
 const CACHE_TRANSFER_WORKER_COUNT = 8;
-// cacache.put.stream() finishes each transfer with an asynchronous content move
-// and index append. A full worker batch can starve together behind concurrent
-// Windows fixture cleanup, even though the same digests transfer quickly alone.
-// Serial Windows transfer adds only a few seconds for the complete locked graph
-// and prevents that filesystem contention from stranding every admitted stream.
-const WINDOWS_CACHE_TRANSFER_WORKER_COUNT = 1;
+// Direct CAS publication avoids cacache's unused per-URL index transaction. Keep
+// Windows concurrency modest because Group B deliberately overlaps this work.
+const WINDOWS_CACHE_TRANSFER_WORKER_COUNT = 3;
 const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
@@ -655,15 +659,21 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 
 const DEFAULT_CONTENT_CACHE = Object.freeze({
 	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
-	createWriteStream: (cache, key, options) => cacache.put.stream(cache, key, options),
+	contentPath: (cache, integrity) => cacacheContentPath(cache, integrity),
+	prepareDestination: directory => mkdir(directory, { recursive: true }),
+	createWriteStream: path => createWriteStream(path, { flags: "wx" }),
+	publishDestination: async (temporaryPath, destinationPath) => {
+		// link() is an atomic, no-overwrite publication boundary on every supported
+		// platform. A pre-existing CAS path is unexpected in this new run-owned cache
+		// and fails closed rather than replacing content we did not write.
+		await link(temporaryPath, destinationPath);
+		await rm(temporaryPath, { force: true });
+	},
+	removeDestination: path => rm(path, { force: true }),
 });
 
 function cacheMiss(error) {
 	return error?.code === "ENOENT" || error?.code === "EINTEGRITY";
-}
-
-function transferKey(artifact) {
-	return `packed-consumer:${artifact.resolved}`;
 }
 
 function streamSettlementError(error) {
@@ -708,6 +718,13 @@ function cacheOperationError(stage, artifact, error, abort, settlements) {
 	return operationError;
 }
 
+function attachTransferProgress(error, progress) {
+	const summary = `total=${progress.total}, admitted=${progress.admitted}, completed=${progress.completed}, ` +
+		`fallback=${progress.fallback}, active=${progress.active}, maxActive=${progress.maxActive}`;
+	if (error?.cacheOperation) error.cacheOperation.progress = Object.freeze({ ...progress });
+	if (error instanceof Error) error.message = `${error.message}; progress=${summary}`;
+}
+
 async function transferArtifact({
 	artifact,
 	sourceContentCache,
@@ -723,12 +740,15 @@ async function transferArtifact({
 	const timer = setTimer(() => abort.abort(new Error(
 		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
 	)), remainingMs);
+	const destinationPath = contentCache.contentPath(destinationContentCache, artifact.integrity);
+	const temporaryPath = `${destinationPath}.packed-consumer-${process.pid}-${randomUUID()}.tmp`;
 	let source;
 	let destination;
 	let sourceError;
 	let operationError;
 	const streamObservers = [];
 	try {
+		await contentCache.prepareDestination(dirname(destinationPath));
 		try {
 			source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
 			streamObservers.push(observeStreamSettlement("source", source));
@@ -737,13 +757,11 @@ async function transferArtifact({
 			throw error;
 		}
 		source.once?.("error", error => { sourceError ??= error; });
-		destination = contentCache.createWriteStream(
-			destinationContentCache,
-			transferKey(artifact),
-			{ integrity: artifact.integrity },
-		);
+		destination = contentCache.createWriteStream(temporaryPath, artifact.integrity);
 		streamObservers.push(observeStreamSettlement("destination", destination));
 		await pipeline(source, destination, { signal: abort.signal });
+		remainingPreparationMs(`pre-publication verification ${artifact.integrity}`);
+		await contentCache.publishDestination(temporaryPath, destinationPath);
 		remainingPreparationMs(`post-transfer verification ${artifact.integrity}`);
 	} catch (error) {
 		operationError = error;
@@ -752,8 +770,18 @@ async function transferArtifact({
 	}
 	if (!operationError) return true;
 	const settlements = await destroyAndSettleStreams(streamObservers);
-	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
-	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
+	let cleanupError;
+	try {
+		await contentCache.removeDestination(temporaryPath);
+	} catch (error) {
+		cleanupError = error;
+	}
+	if (!abort.signal.aborted && cacheMiss(sourceError) && !cleanupError) return false;
+	const failure = cacheOperationError(stage, artifact, operationError, abort, settlements);
+	if (cleanupError) {
+		throw new AggregateError([failure, cleanupError], `Packed-consumer cache transfer and partial-file cleanup failed for ${temporaryPath}`);
+	}
+	throw failure;
 }
 
 async function transferAvailableArtifacts({
@@ -772,10 +800,17 @@ async function transferAvailableArtifacts({
 	const failures = new Array(transferable.length);
 	let nextIndex = 0;
 	let stopAdmission = false;
+	let admitted = 0;
+	let completed = 0;
+	let active = 0;
+	let maxActive = 0;
 	const worker = async () => {
 		while (!stopAdmission) {
 			const index = nextIndex++;
 			if (index >= transferable.length) return;
+			admitted++;
+			active++;
+			maxActive = Math.max(maxActive, active);
 			try {
 				const transferred = await transferArtifact({
 					artifact: transferable[index],
@@ -786,11 +821,14 @@ async function transferAvailableArtifacts({
 					setTimer,
 					clearTimer,
 				});
+				completed++;
 				if (transferred) transferredCount++;
 				else missing.push(transferable[index]);
 			} catch (error) {
 				failures[index] = error;
 				stopAdmission = true;
+			} finally {
+				active--;
 			}
 		}
 	};
@@ -803,6 +841,15 @@ async function transferAvailableArtifacts({
 	));
 	const observed = failures.filter(error => error !== undefined);
 	if (observed.length > 0) {
+		const progress = {
+			total: transferable.length,
+			admitted,
+			completed,
+			fallback: missing.length + artifacts.filter(artifact => !artifact.integrity).length,
+			active,
+			maxActive,
+		};
+		for (const error of observed) attachTransferProgress(error, progress);
 		throw new AggregateError(observed, "Packed-consumer cache transfer failed");
 	}
 	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);

@@ -148,6 +148,12 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /cacache\.get\.stream\.byDigest\(cache, integrity\)/,
 			"only exact integrity-addressed ambient content may be read");
+		assert.match(source, /cacacheContentPath\(cache, integrity\)/,
+			"destination writes must target cacache's packaged integrity-addressed path resolver");
+		assert.doesNotMatch(source, /cacache\.put\.stream/,
+			"exact digest reuse must not pay for an unused custom URL index publication");
+		assert.doesNotMatch(source, /packed-consumer:\$\{artifact\.resolved\}/,
+			"destination cache publication must not invent custom index keys");
 		assert.doesNotMatch(source, /hasContent/,
 			"uncancellable cache probes must not precede deadline-bound digest streams");
 		assert.doesNotMatch(source, /cacache\.ls\(/, "ambient cache entries must never be enumerated wholesale");
@@ -186,7 +192,7 @@ describe("packed-consumer offline install contract", () => {
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
 		const cacheReads: Array<{ cache: string; integrity: string }> = [];
-		const cacheWrites: Array<{ cache: string; key: string; integrity: string }> = [];
+		const cacheWrites: Array<{ path: string; integrity: string }> = [];
 		let nowMs = 0;
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		const selectedIntegrity = "sha512-fixture";
@@ -213,10 +219,14 @@ describe("packed-consumer offline install contract", () => {
 						stream.end("selected artifact bytes");
 						return stream;
 					},
-					createWriteStream: (cache: string, key: string, options: { integrity: string }) => {
-						cacheWrites.push({ cache, key, integrity: options.integrity });
+					contentPath: (cache: string, integrity: string) => join(cache, "content-v2", "fixture", encodeURIComponent(integrity)),
+					prepareDestination: async () => {},
+					createWriteStream: (path: string, integrity: string) => {
+						cacheWrites.push({ path, integrity });
 						return new PassThrough();
 					},
+					publishDestination: async () => {},
+					removeDestination: async () => {},
 				},
 				now: () => nowMs,
 				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
@@ -306,9 +316,9 @@ describe("packed-consumer offline install contract", () => {
 				"late commands must receive only the remaining monotonic preparation budget");
 			assert.deepEqual(cacheReads, [{ cache: join(ambientCache, "_cacache"), integrity: selectedIntegrity }]);
 			assert.equal(cacheWrites.length, 1);
-			assert.equal(cacheWrites[0]?.cache, join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"));
+			assert.ok(cacheWrites[0]?.path.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
 			assert.equal(cacheWrites[0]?.integrity, selectedIntegrity);
-			assert.match(cacheWrites[0]?.key ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.doesNotMatch(cacheWrites[0]?.path ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			const inherited: Record<string, string> = {
 				npm_config_cache: ambientCache,
 				npm_config_registry: "https://registry.example.test/",

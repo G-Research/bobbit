@@ -19,6 +19,7 @@ const cacache = require("cacache") as {
 		hasContent: (cache: string, integrity: string) => Promise<unknown>;
 		stream: { byDigest: (cache: string, integrity: string) => NodeJS.ReadableStream };
 	};
+	ls: (cache: string) => Promise<Record<string, unknown>>;
 };
 const roots: string[] = [];
 
@@ -51,7 +52,11 @@ type CommandCall = {
 
 type ContentCache = {
 	createReadStream: (cache: string, integrity: string) => NodeJS.ReadableStream;
-	createWriteStream: (cache: string, key: string, options: { integrity: string }) => NodeJS.WritableStream;
+	contentPath?: (cache: string, integrity: string) => string;
+	prepareDestination?: (directory: string) => Promise<void>;
+	createWriteStream: (path: string, integrity: string) => NodeJS.WritableStream;
+	publishDestination?: (temporaryPath: string, destinationPath: string) => Promise<void>;
+	removeDestination?: (temporaryPath: string) => Promise<void>;
 };
 
 type PreparedDescriptor = {
@@ -165,6 +170,7 @@ async function prepareFixture({
 	ambientCache = join(tmpdir(), "ambient-cache-read-only"),
 	preparationTimeoutMs,
 	now,
+	useRealContentCache = false,
 }: {
 	registryTarballCount?: number;
 	registryArtifacts?: Array<{ resolved: string; integrity?: string }>;
@@ -177,6 +183,7 @@ async function prepareFixture({
 	ambientCache?: string;
 	preparationTimeoutMs?: number;
 	now?: () => number;
+	useRealContentCache?: boolean;
 } = {}) {
 	const runRoot = await mkdtemp(join(tmpdir(), "bobbit-prepared-consumer-unit-"));
 	roots.push(runRoot);
@@ -190,7 +197,9 @@ async function prepareFixture({
 			PATH: process.env.PATH,
 			npm_config_cache: ambientCache,
 		},
-		contentCache: contentCache ?? {
+		...(!useRealContentCache ? { contentCache: {
+			contentPath: (cache: string, integrity: string) => join(cache, "content-v2", "fixture", encodeURIComponent(integrity)),
+			prepareDestination: async () => {},
 			createReadStream: cache => {
 				const stream = new PassThrough();
 				if (cache === join(ambientCache, "_cacache")) {
@@ -201,7 +210,10 @@ async function prepareFixture({
 				return stream;
 			},
 			createWriteStream: () => new PassThrough(),
-		},
+			publishDestination: async () => {},
+			removeDestination: async () => {},
+			...contentCache,
+		} } : {}),
 		...(setTimer ? { setTimer } : {}),
 		...(clearTimer ? { clearTimer } : {}),
 		...(runtime ? { runtime } : {}),
@@ -321,7 +333,7 @@ describe("prepared packed consumer", () => {
 	it("transfers each exact ambient digest once into only the owned cache", async () => {
 		const integrity = "sha512-shared-exact-digest";
 		const sourceReads: Array<{ cache: string; integrity: string }> = [];
-		const destinationWrites: Array<{ cache: string; key: string; integrity: string }> = [];
+		const destinationWrites: Array<{ path: string; integrity: string }> = [];
 		const { calls, descriptor } = await prepareFixture({
 			registryArtifacts: [
 				{ resolved: "https://registry.example.test/a.tgz", integrity },
@@ -334,8 +346,8 @@ describe("prepared packed consumer", () => {
 					source.end("verified artifact bytes");
 					return source;
 				},
-				createWriteStream: (cache, key, options) => {
-					destinationWrites.push({ cache, key, integrity: options.integrity });
+				createWriteStream: (path, selectedIntegrity) => {
+					destinationWrites.push({ path, integrity: selectedIntegrity });
 					return new PassThrough();
 				},
 			},
@@ -346,15 +358,51 @@ describe("prepared packed consumer", () => {
 		assert.match(sourceReads[0]?.cache ?? "", /ambient-cache-read-only[\\/]_cacache$/,
 			`${FAILURE_PREFIX}: transfer must read only the discovered ambient content store`);
 		assert.deepEqual(destinationWrites.map(write => write.integrity), [integrity]);
-		assert.equal(resolve(destinationWrites[0]?.cache ?? ""), resolve(descriptor.cacheDir, "_cacache"));
-		assert.ok(isStrictChild(descriptor.runRoot, destinationWrites[0]?.cache ?? ""),
+		assert.ok(destinationWrites[0]?.path.startsWith(resolve(descriptor.cacheDir, "_cacache")),
+			`${FAILURE_PREFIX}: direct CAS write must target the isolated content store`);
+		assert.ok(isStrictChild(descriptor.runRoot, destinationWrites[0]?.path ?? ""),
 			`${FAILURE_PREFIX}: transferred content must stay below the run root`);
-		assert.match(destinationWrites[0]?.key ?? "", /packed-consumer:https:\/\/registry\.example\.test\/a\.tgz/);
+		assert.doesNotMatch(destinationWrites[0]?.path ?? "", /packed-consumer:/,
+			`${FAILURE_PREFIX}: transfer must not publish an unused custom URL index key`);
 		assert.equal(calls.filter(call => call.args.includes("cache") && call.args.includes("add")).length, 0,
 			`${FAILURE_PREFIX}: an exact ambient hit must not perform an online fallback`);
 	});
 
-	it("serializes cache writes so filesystem contention cannot strand a full transfer batch", async () => {
+	it("copies many real cacache digests without mutating ambient indexes or creating destination URL indexes", async () => {
+		const ambientCache = await mkdtemp(join(tmpdir(), "bobbit-ambient-cache-unit-"));
+		roots.push(ambientCache);
+		const sourceContentCache = join(ambientCache, "_cacache");
+		const registryArtifacts = await Promise.all(Array.from({ length: 24 }, async (_, index) => ({
+			resolved: `https://registry.example.test/real-${index}.tgz`,
+			integrity: String(await cacache.put(
+				sourceContentCache,
+				`ambient-source-${index}`,
+				Buffer.from(`unique real cacache artifact ${index}`),
+			)),
+		})));
+		const ambientIndexBefore = await cacache.ls(sourceContentCache);
+
+		const { calls, descriptor } = await prepareFixture({
+			ambientCache,
+			registryArtifacts,
+			runtime: { platform: "win32", arch: "x64" },
+			useRealContentCache: true,
+		});
+		const destinationContentCache = join(descriptor.cacheDir, "_cacache");
+
+		for (const artifact of registryArtifacts) {
+			assert.ok(await cacache.get.hasContent(destinationContentCache, artifact.integrity),
+				`${FAILURE_PREFIX}: destination digest must verify after direct CAS publication`);
+		}
+		assert.deepEqual(await cacache.ls(sourceContentCache), ambientIndexBefore,
+			`${FAILURE_PREFIX}: integrity reads must leave the ambient cache index unchanged`);
+		assert.deepEqual(await cacache.ls(destinationContentCache), {},
+			`${FAILURE_PREFIX}: direct CAS publication must not create unused packed-consumer URL index records`);
+		assert.equal(calls.filter(call => call.args.includes("cache") && call.args.includes("add")).length, 0,
+			`${FAILURE_PREFIX}: all exact ambient digests must avoid network fallback`);
+	});
+
+	it("bounds Windows direct CAS writers while joining every admitted transfer", async () => {
 		let activeWrites = 0;
 		let maximumActiveWrites = 0;
 		const transferredIntegrities: string[] = [];
@@ -371,10 +419,10 @@ describe("prepared packed consumer", () => {
 					}
 					return source;
 				},
-				createWriteStream: (_cache, _key, options) => {
+				createWriteStream: (_path, integrity) => {
 					activeWrites++;
 					maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
-					transferredIntegrities.push(options.integrity);
+					transferredIntegrities.push(integrity);
 					const destination = new PassThrough();
 					destination.once("finish", () => { activeWrites--; });
 					return destination;
@@ -382,8 +430,8 @@ describe("prepared packed consumer", () => {
 			},
 		});
 
-		assert.equal(maximumActiveWrites, 1,
-			`${FAILURE_PREFIX}: selective cache writes must not compete with each other under concurrent fixture I/O`);
+		assert.equal(maximumActiveWrites, 3,
+			`${FAILURE_PREFIX}: Windows direct CAS writes must use the accepted bounded concurrency`);
 		assert.equal(activeWrites, 0, `${FAILURE_PREFIX}: every admitted cache write must settle before preparation advances`);
 		assert.equal(transferredIntegrities.length, 12);
 		assert.equal(new Set(transferredIntegrities).size, 12);
@@ -405,10 +453,7 @@ describe("prepared packed consumer", () => {
 
 		await assert.rejects(prepareFixture({
 			ambientCache,
-			contentCache: {
-				createReadStream: (cache, selectedIntegrity) => cacache.get.stream.byDigest(cache, selectedIntegrity),
-				createWriteStream: (cache, key, options) => cacache.put.stream(cache, key, options),
-			},
+			useRealContentCache: true,
 			registryArtifacts: [{
 				resolved: "https://registry.example.test/post-transfer-deadline.tgz",
 				integrity,
@@ -422,14 +467,18 @@ describe("prepared packed consumer", () => {
 		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
 		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
 		const transferFailure = evidence.error.errors[0];
-		assert.match(transferFailure.message, /deadline exhausted before post-transfer verification/);
+		assert.match(transferFailure.message, /deadline exhausted before pre-publication verification/);
 		assert.deepEqual(transferFailure.cacheOperation.streams, ["source:closed", "destination:closed"],
 			`${FAILURE_PREFIX}: completion observers must settle from their pre-armed state`);
 		assert.doesNotMatch(JSON.stringify(transferFailure), /ReferenceError/,
 			`${FAILURE_PREFIX}: late finished attachment must not replace transfer diagnostics`);
-		const temporaryContent = await readdir(join(fixtureRoot, "npm-cache", "_cacache", "tmp"))
+		const destinationContentCache = join(fixtureRoot, "npm-cache", "_cacache");
+		assert.equal(await cacache.get.hasContent(destinationContentCache, integrity), false,
+			`${FAILURE_PREFIX}: deadline failure before publication must not expose CAS content`);
+		const destinationEntries = await readdir(destinationContentCache, { recursive: true })
 			.catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error));
-		assert.deepEqual(temporaryContent, [], `${FAILURE_PREFIX}: failed transfer must not abandon cacache temporary files`);
+		assert.equal(destinationEntries.some(entry => String(entry).includes(".packed-consumer-")), false,
+			`${FAILURE_PREFIX}: failed transfer must remove its completed partial before rejection`);
 	});
 
 	it("falls back by exact URL for source misses, corrupt content, and entries without integrity", async () => {
@@ -536,17 +585,17 @@ describe("prepared packed consumer", () => {
 			error => ({ error }),
 		);
 
-		await waitFor(() => sources.length === 1 && timerCallbacks.length === 1);
+		await waitFor(() => sources.length === 3 && timerCallbacks.length === 3);
 		for (const expire of [...timerCallbacks]) expire();
 		const { error } = await observed;
 		assert.ok(error instanceof Error);
 		assert.match(error.message, /cache transfer failed/);
-		assert.equal(sources.length, 1, `${FAILURE_PREFIX}: a transfer failure must stop later admission`);
-		assert.equal(destinations.length, 1);
+		assert.equal(sources.length, 3, `${FAILURE_PREFIX}: a transfer failure must stop admission beyond the bounded Windows pool`);
+		assert.equal(destinations.length, 3);
 		assert.ok(sources.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted source must be destroyed`);
 		assert.ok(destinations.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted destination must be destroyed`);
-		assert.equal(sourceCloses, 1, `${FAILURE_PREFIX}: rejection must join every admitted source close`);
-		assert.equal(destinationCloses, 1, `${FAILURE_PREFIX}: rejection must join every admitted destination close`);
+		assert.equal(sourceCloses, 3, `${FAILURE_PREFIX}: rejection must join every admitted source close`);
+		assert.equal(destinationCloses, 3, `${FAILURE_PREFIX}: rejection must join every admitted destination close`);
 		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: fallback must not start after transfer expiry`);
 		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after transfer expiry`);
 		const runRoot = roots.at(-1)!;
@@ -557,6 +606,7 @@ describe("prepared packed consumer", () => {
 		assert.match(evidence, /deadline-0\.tgz/);
 		assert.match(evidence, /sha512-deadline-0/);
 		assert.match(evidence, /"deadlineAborted": true/);
+		assert.match(evidence, /"progress":\s*\{[^}]*"total": 12[^}]*"admitted": 3[^}]*"active": 0[^}]*"maxActive": 3/s);
 		assert.match(evidence, /source:closed/);
 		assert.match(evidence, /destination:closed/);
 	});
