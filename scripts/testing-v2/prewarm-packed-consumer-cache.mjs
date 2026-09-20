@@ -257,8 +257,11 @@ export async function runOwnedCommand(command, args, {
 	let resolveCloseResult;
 	const closeResult = new Promise(resolveClose => { resolveCloseResult = resolveClose; });
 	let outputDetached = false;
-	let inputDestroyed = false;
+	let completionTimedOut = false;
+	let transportAdmissionClosed = false;
 	let transportResult = Promise.resolve();
+	const transportStreams = [];
+	const destroyedTransports = new Set();
 
 	const startTreeExitVerification = () => {
 		if (treeExitResult) return treeExitResult;
@@ -278,18 +281,34 @@ export async function runOwnedCommand(command, args, {
 	};
 	const armCompletionTimeout = () => {
 		if (completionTimer !== undefined) return;
-		completionTimer = setCompletionTimer(() => resolveCompletionTimeout(), treeExitTimeoutMs);
+		completionTimer = setCompletionTimer(() => {
+			completionTimedOut = true;
+			const error = new Error(`${rendered} did not complete its process-tree shutdown within ${treeExitTimeoutMs}ms`);
+			requestOwnedKill(error);
+			resolveCompletionTimeout();
+		}, treeExitTimeoutMs);
+	};
+	const closeTransportAdmission = () => {
+		if (!transportAdmissionClosed) {
+			transportAdmissionClosed = true;
+			detachOutputListeners();
+		}
+		for (const { stream, direction } of transportStreams) {
+			if (destroyedTransports.has(stream)) continue;
+			const settled = stream.destroyed || stream.closed
+				|| (direction === "input" ? stream.writableFinished : stream.readableEnded);
+			if (settled) continue;
+			destroyedTransports.add(stream);
+			stream.destroy();
+		}
 	};
 	const requestOwnedKill = (error) => {
 		if (!terminalError) terminalError = error;
+		closeTransportAdmission();
 		if (!tracked || killRequested) return;
 		killRequested = true;
 		armCompletionTimeout();
 		resolveKillRequested();
-		if (inputBuffer && child?.stdin && !inputDestroyed) {
-			inputDestroyed = true;
-			child.stdin.destroy(error);
-		}
 		try {
 			tracked.killTree("SIGKILL");
 		} catch (killFailure) {
@@ -318,11 +337,9 @@ export async function runOwnedCommand(command, args, {
 	const finishClose = result => {
 		if (closeSettled) return;
 		closeSettled = true;
-		child?.off("error", onError);
-		child?.off("close", onClose);
 		resolveCloseResult(result);
 	};
-	const onError = error => finishClose({ spawnError: error, code: null, signal: null });
+	const onError = error => requestOwnedKill(error instanceof Error ? error : new Error(String(error)));
 	const onClose = (code, signal) => finishClose({ code, signal });
 	const exposeSpawned = candidate => {
 		if (tracked && tracked !== candidate) {
@@ -336,44 +353,42 @@ export async function runOwnedCommand(command, args, {
 		child = candidate.child;
 		child.stdout?.on("data", collectStdout);
 		child.stderr?.on("data", collectStderr);
-		child.once("error", onError);
+		child.on("error", onError);
 		child.once("close", onClose);
-		if (inputBuffer) {
-			const settleStream = (stream, label) => stream
-				? finished(stream).catch(error => {
-					requestOwnedKill(new Error(`${rendered} ${label} transport failed`, { cause: error }));
-				})
-				: Promise.resolve(requestOwnedKill(new Error(`${rendered} has no ${label} transport`)));
-			transportResult = Promise.all([
-				settleStream(child.stdin, "stdin"),
-				settleStream(child.stdout, "stdout"),
-				settleStream(child.stderr, "stderr"),
-			]);
-			if (!terminalError) {
-				try {
-					child.stdin.end(inputBuffer);
-				} catch (error) {
-					requestOwnedKill(new Error(`${rendered} stdin transport failed`, { cause: error }));
-				}
+		const settleStream = (stream, label, direction) => {
+			if (!stream) {
+				requestOwnedKill(new Error(`${rendered} has no ${label} transport`));
+				return Promise.resolve();
+			}
+			transportStreams.push({ stream, direction });
+			return finished(stream, { cleanup: true }).catch(error => {
+				requestOwnedKill(new Error(`${rendered} ${label} transport failed`, { cause: error }));
+			});
+		};
+		const transports = [
+			settleStream(child.stdout, "stdout", "output"),
+			settleStream(child.stderr, "stderr", "output"),
+		];
+		if (inputBuffer) transports.push(settleStream(child.stdin, "stdin", "input"));
+		transportResult = Promise.all(transports);
+		if (inputBuffer && !terminalError) {
+			try {
+				child.stdin.end(inputBuffer);
+			} catch (error) {
+				requestOwnedKill(new Error(`${rendered} stdin transport failed`, { cause: error }));
 			}
 		}
 		if (terminalError) requestOwnedKill(terminalError);
 		return tracked;
 	};
-	const closed = { observed: false, code: null, signal: null, spawnError: undefined };
+	const closed = { observed: false, code: null, signal: null };
 	const observedCloseResult = closeResult.then(result => {
 		closed.observed = true;
 		closed.code = result.code;
 		closed.signal = result.signal;
-		closed.spawnError = result.spawnError;
-		detachOutputListeners();
 		if (executionTimer !== undefined) {
 			clearTimer(executionTimer);
 			executionTimer = undefined;
-		}
-		if (totalTimer !== undefined) {
-			clearTimer(totalTimer);
-			totalTimer = undefined;
 		}
 	});
 	const deadlineError = totalTimeoutMs === undefined
@@ -494,7 +509,6 @@ export async function runOwnedCommand(command, args, {
 		}
 	}
 
-	let completionTimedOut = false;
 	const firstBoundary = await Promise.race([
 		observedCloseResult.then(() => "close"),
 		killRequestedResult.then(() => "kill"),
@@ -504,10 +518,16 @@ export async function runOwnedCommand(command, args, {
 		armCompletionTimeout();
 	}
 	const completionResult = Promise.all([observedCloseResult, startTreeExitVerification(), transportResult]);
-	completionTimedOut = await Promise.race([
-		completionResult.then(() => false),
-		completionTimeoutResult.then(() => true),
+	const completionBoundary = await Promise.race([
+		completionResult.then(() => "complete"),
+		completionTimeoutResult.then(() => "timeout"),
 	]);
+	if (completionBoundary === "timeout") {
+		// A bounded shutdown proof may fail closed without an observed root close,
+		// but transport ownership is never abandoned. Failure admission destroys
+		// every still-open pipe and joins those finished settlements before return.
+		await transportResult;
+	}
 
 	child.off("error", onError);
 	child.off("close", onClose);
@@ -563,7 +583,6 @@ export async function runOwnedCommand(command, args, {
 		);
 	}
 	if (terminalError) throw ownedCommandError(`${terminalError.message}\n${diagnostic}`, terminalError);
-	if (closed.spawnError) throw ownedCommandError(`Failed to spawn ${rendered}: ${closed.spawnError.message}\n${diagnostic}`, closed.spawnError);
 	if (closed.signal || closed.code === null) throw ownedCommandError(`${rendered} terminated without an exit code\n${diagnostic}`);
 	return {
 		command,

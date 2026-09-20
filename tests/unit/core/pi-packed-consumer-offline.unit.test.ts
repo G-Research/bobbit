@@ -789,42 +789,104 @@ describe("packed-consumer offline install contract", () => {
 		await assert.rejects(running, /stdin transport failed/);
 		assert.equal(killCount, 1);
 		assert.equal(joins, 1);
-		assert.equal(child.stdout.readableEnded, true);
-		assert.equal(child.stderr.readableEnded, true);
+		assert.equal(child.stdout.destroyed, true);
+		assert.equal(child.stderr.destroyed, true);
 	});
 
-	it("bounds a response stream that remains open after root close", async () => {
+	it("uses the immutable total deadline to close and join an open response transport", async () => {
 		const child = Object.assign(new EventEmitter(), {
 			pid: 7272,
-			stdin: new PassThrough(),
+			stdin: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
 			stdout: new PassThrough(),
 			stderr: new PassThrough(),
 		});
-		let fireCompletionTimeout: (() => void) | undefined;
+		let fireTotalDeadline: (() => void) | undefined;
+		let killCount = 0;
+		let treeExitJoins = 0;
 		const running = runOwnedCommand("node", ["helper.mjs", "fixture-root"], {
 			cwd: REPO_ROOT,
 			timeoutMs: 1_000,
-			treeExitTimeoutMs: 29,
+			totalTimeoutMs: 29,
+			treeExitTimeoutMs: 31,
 			input: "{}\n",
+			now: () => 0,
 			spawnOwned: async () => ({
 				child,
 				ownershipReady: Promise.resolve(),
-				killTree: () => {},
-				waitForTreeExit: async () => true,
+				killTree: () => {
+					killCount++;
+					assert.equal(child.stdout.destroyed, true,
+						"failure admission must destroy stdout before requesting tree termination");
+					assert.equal(child.stderr.destroyed, true,
+						"failure admission must destroy stderr before requesting tree termination");
+					queueMicrotask(() => child.emit("close", null, "SIGKILL"));
+				},
+				waitForTreeExit: async () => { treeExitJoins++; return true; },
 			}),
-			setCompletionTimer: (callback: () => void) => {
-				fireCompletionTimeout = callback;
-				return Symbol("completion-timeout");
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				if (timeoutMs === 29) fireTotalDeadline = callback;
+				return Symbol(`timer-${timeoutMs}`);
 			},
-			clearCompletionTimer: () => {},
+			clearTimer: () => {},
 		});
 		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
-		child.stderr.end();
-		child.emit("close", 0, null);
+		child.stdout.write("response before deadline");
+		invokeTimer(fireTotalDeadline, "open stdout must remain governed by the immutable total deadline");
+		await assert.rejects(running, (error: unknown) => {
+			if (!(error instanceof OwnedCommandError)) return false;
+			const owned = error as Error & { shutdown: Record<string, unknown> };
+			assert.match(owned.message, /29ms total deadline/);
+			assert.equal(owned.shutdown.rootCloseObserved, true);
+			assert.equal(owned.shutdown.treeExitVerified, true);
+			return true;
+		});
+		assert.equal(killCount, 1);
+		assert.equal(treeExitJoins, 1);
+		assert.equal(child.stdout.destroyed, true);
+		assert.equal(child.stderr.destroyed, true);
+	});
+
+	it("keeps an error-before-close command pending until the actual close event", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 7373,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let killCount = 0;
+		let settled = false;
+		const running = runOwnedCommand("node", ["npm-cli.js", "pack"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 1_000,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => { killCount++; },
+				waitForTreeExit: async () => true,
+			}),
+		});
+		const observed = running.then(
+			(value: unknown) => { settled = true; return { value }; },
+			(error: unknown) => { settled = true; return { error }; },
+		);
 		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
-		invokeTimer(fireCompletionTimeout, "open stdout must keep helper completion pending");
-		await assert.rejects(running, /did not complete its process-tree shutdown within 29ms/);
-		child.stdout.end();
+		child.emit("error", new Error("injected process error"));
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(killCount, 1);
+		assert.equal(settled, false,
+			"an error event must not synthesize root close or release command completion");
+		assert.equal(child.listenerCount("close"), 1,
+			"the real close listener must remain admitted after an error event");
+		assert.equal(child.stdout.destroyed, true);
+		assert.equal(child.stderr.destroyed, true);
+
+		child.emit("close", null, "SIGKILL");
+		const result = await observed;
+		assert.ok("error" in result);
+		assert.ok(result.error instanceof OwnedCommandError);
+		assert.match(String(result.error), /injected process error/);
+		assert.equal((result.error as { shutdown: Record<string, unknown> }).shutdown.rootCloseObserved, true);
+		assert.equal(child.listenerCount("error"), 0);
+		assert.equal(child.listenerCount("close"), 0);
 	});
 
 	it("starts the unchanged execution timeout only after prompt ownership readiness", async () => {
@@ -1028,13 +1090,16 @@ describe("packed-consumer offline install contract", () => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			assert.equal(completionJoins, 1, "close must be followed by bounded tree verification");
 			assert.equal(settled, false, "rejection must wait for verified tree completion");
-			assert.equal(child.listenerCount("error"), 0);
+			assert.equal(child.listenerCount("error"), 1,
+				"late child errors must remain observed until every completion barrier settles");
 			assert.equal(child.listenerCount("close"), 0);
 			assert.equal(child.stdout.listenerCount("data"), 0);
 			assert.equal(child.stderr.listenerCount("data"), 0);
 
 			treeExit.resolve(true);
 			const result = await observed;
+			assert.equal(child.listenerCount("error"), 0,
+				"the late-error observer must be removed once command settlement is terminal");
 			assert.ok("error" in result);
 			assert.match(String(result.error), /ownership readiness timed out after 17ms/);
 			assert.ok(result.error instanceof OwnedCommandError);
@@ -1072,32 +1137,64 @@ describe("packed-consumer offline install contract", () => {
 		assert.equal(spawned, false);
 	});
 
-	it("returns normal success only after verified owned-tree completion", async () => {
+	it("returns normal success only after close, transports, and verified tree completion", async () => {
+		const stdin = new PassThrough();
 		const child = Object.assign(new EventEmitter(), {
+			stdin,
 			stdout: new PassThrough(),
 			stderr: new PassThrough(),
 		});
+		const treeExit = deferred<boolean>();
 		let completionJoins = 0;
+		let fireTotalDeadline: (() => void) | undefined;
+		let settled = false;
+		const clearedTimers: symbol[] = [];
+		const totalTimerToken = Symbol("total-timer");
 		const running = runOwnedCommand("node", ["npm-cli.js", "pack"], {
 			cwd: REPO_ROOT,
 			timeoutMs: 1_000,
+			totalTimeoutMs: 100,
+			now: () => 0,
 			spawnOwned: async () => ({
 				child,
 				ownershipReady: Promise.resolve(),
 				killTree: () => { throw new Error("normal close must not request a kill"); },
 				waitForTreeExit: async () => {
 					completionJoins++;
-					return true;
+					return treeExit.promise;
 				},
 			}),
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				if (timeoutMs === 100) {
+					fireTotalDeadline = callback;
+					return totalTimerToken;
+				}
+				return Symbol(`timer-${timeoutMs}`);
+			},
+			clearTimer: (timer: symbol) => { clearedTimers.push(timer); },
 		});
+		const observed = running.finally(() => { settled = true; });
 		await Promise.resolve();
 		child.stdout.write("pack json");
 		child.emit("close", 0, null);
-		const result = await running;
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(settled, false, "root close alone must not admit success");
+		assert.equal(clearedTimers.includes(totalTimerToken), false,
+			"the immutable total timer must remain armed while response transport is open");
+		assert.ok(fireTotalDeadline, "normal success must remain governed by the total deadline until fully joined");
+		child.stdout.end();
+		child.stderr.end();
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(settled, false, "transport settlement must still wait for tree-exit proof");
+		treeExit.resolve(true);
+		const result = await observed;
 		assert.equal(result.code, 0);
 		assert.equal(result.stdout, "pack json");
 		assert.equal(completionJoins, 1, "normal success must join verified tree completion");
+		assert.equal(clearedTimers.includes(totalTimerToken), true,
+			"the total timer may clear only after the whole success barrier settles");
+		assert.equal(stdin.destroyed, false, "a no-input npm command must leave ignored stdin untouched");
+		assert.equal(stdin.writableEnded, false);
 	});
 
 	it("fails closed when normal process close lacks verified tree completion", async () => {
@@ -1116,6 +1213,8 @@ describe("packed-consumer offline install contract", () => {
 			}),
 		});
 		await Promise.resolve();
+		child.stdout.end();
+		child.stderr.end();
 		child.emit("close", 0, null);
 		await assert.rejects(running, /closed without verified process-tree completion/);
 	});
