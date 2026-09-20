@@ -8,7 +8,7 @@
  * immutable template, and atomically publishes a descriptor. Browser workers
  * materialize that template; they never run npm pack/install themselves.
  */
-import { createWriteStream, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, cp, link, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,12 +17,14 @@ import { Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import cacache from "cacache";
 import { ensureDistBuild } from "./ensure-dist.mjs";
+import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const CACHE_PATH_HELPER_NAME = "resolve-packed-consumer-cache-paths.mjs";
-const MAX_CACHE_PATH_REQUEST_BYTES = 4 * 1024 * 1024;
-const MAX_CACHE_PATH_RESULT_BYTES = 8 * 1024 * 1024;
+const CACHE_COPY_HELPER_NAME = "copy-packed-consumer-cache-batch.mjs";
+const MAX_CACHE_HELPER_REQUEST_BYTES = 4 * 1024 * 1024;
+const MAX_CACHE_HELPER_RESULT_BYTES = 8 * 1024 * 1024;
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
@@ -35,10 +37,7 @@ const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const CACHE_WORKER_COUNT = 3;
-const CACHE_TRANSFER_WORKER_COUNT = 8;
-// Direct CAS publication avoids cacache's unused per-URL index transaction. Keep
-// Windows concurrency modest because Group B deliberately overlaps this work.
-const WINDOWS_CACHE_TRANSFER_WORKER_COUNT = 3;
+const CACHE_COPY_WORKER_COUNT = 3;
 const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
@@ -198,7 +197,7 @@ export async function runOwnedCommand(command, args, {
 	totalTimeoutMs,
 	maxOutputBytes = MAX_OUTPUT_BYTES,
 	input,
-	maxInputBytes = MAX_CACHE_PATH_REQUEST_BYTES,
+	maxInputBytes = MAX_CACHE_HELPER_REQUEST_BYTES,
 	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	treeExitTimeoutMs = TREE_EXIT_TIMEOUT_MS,
 	repoRoot = REPO_ROOT,
@@ -711,11 +710,9 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 const DEFAULT_CONTENT_CACHE = Object.freeze({
 	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
 	prepareDestination: directory => mkdir(directory, { recursive: true }),
-	createWriteStream: path => createWriteStream(path, { flags: "wx" }),
 	publishDestination: async (temporaryPath, destinationPath) => {
 		// link() is an atomic, no-overwrite publication boundary on every supported
-		// platform. A pre-existing CAS path is unexpected in this new run-owned cache
-		// and fails closed rather than replacing content we did not write.
+		// platform. A pre-existing CAS path fails closed.
 		await link(temporaryPath, destinationPath);
 		await rm(temporaryPath, { force: true });
 	},
@@ -732,8 +729,7 @@ function streamSettlementError(error) {
 }
 
 // cacache's Minipass streams may replay completion synchronously. Observe them
-// at creation time; attaching finished() only after pipeline failure can throw
-// before Node finishes initializing its own terminal-event listener state.
+// at creation time so verification diagnostics include terminal settlement.
 function observeStreamSettlement(role, stream) {
 	return {
 		role,
@@ -766,154 +762,6 @@ function cacheOperationError(stage, artifact, error, abort, settlements) {
 		streams: settlements,
 	};
 	return operationError;
-}
-
-function attachTransferProgress(error, progress) {
-	const summary = `total=${progress.total}, admitted=${progress.admitted}, completed=${progress.completed}, ` +
-		`fallback=${progress.fallback}, active=${progress.active}, maxActive=${progress.maxActive}`;
-	if (error?.cacheOperation) error.cacheOperation.progress = Object.freeze({ ...progress });
-	if (error instanceof Error) error.message = `${error.message}; progress=${summary}`;
-}
-
-async function transferArtifact({
-	artifact,
-	sourceContentCache,
-	destinationPath,
-	contentCache,
-	remainingPreparationMs,
-	setTimer,
-	clearTimer,
-}) {
-	const stage = "cache transfer";
-	// Resolve and validate every destination before this function is admitted.
-	// Keep all synchronous setup before the long-lived timer so malformed input
-	// cannot strand a live deadline handle.
-	if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
-		throw new Error(`Packed-consumer cache transfer has no absolute destination for ${artifact.integrity}`);
-	}
-	const temporaryPath = `${destinationPath}.packed-consumer-${process.pid}-${randomUUID()}.tmp`;
-	const remainingMs = remainingPreparationMs(`${stage} ${artifact.integrity}`);
-	const abort = new AbortController();
-	const timer = setTimer(() => abort.abort(new Error(
-		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
-	)), remainingMs);
-	let source;
-	let destination;
-	let sourceError;
-	let operationError;
-	const streamObservers = [];
-	try {
-		await contentCache.prepareDestination(dirname(destinationPath));
-		try {
-			source = contentCache.createReadStream(sourceContentCache, artifact.integrity);
-			streamObservers.push(observeStreamSettlement("source", source));
-		} catch (error) {
-			sourceError = error;
-			throw error;
-		}
-		source.once?.("error", error => { sourceError ??= error; });
-		destination = contentCache.createWriteStream(temporaryPath, artifact.integrity);
-		streamObservers.push(observeStreamSettlement("destination", destination));
-		await pipeline(source, destination, { signal: abort.signal });
-		remainingPreparationMs(`pre-publication verification ${artifact.integrity}`);
-		await contentCache.publishDestination(temporaryPath, destinationPath);
-		remainingPreparationMs(`post-transfer verification ${artifact.integrity}`);
-	} catch (error) {
-		operationError = error;
-	} finally {
-		clearTimer(timer);
-	}
-	if (!operationError) return true;
-	const settlements = await destroyAndSettleStreams(streamObservers);
-	let cleanupError;
-	try {
-		await contentCache.removeDestination(temporaryPath);
-	} catch (error) {
-		cleanupError = error;
-	}
-	if (!abort.signal.aborted && cacheMiss(sourceError) && !cleanupError) return false;
-	const failure = cacheOperationError(stage, artifact, operationError, abort, settlements);
-	if (cleanupError) {
-		throw new AggregateError([failure, cleanupError], `Packed-consumer cache transfer and partial-file cleanup failed for ${temporaryPath}`);
-	}
-	throw failure;
-}
-
-async function transferAvailableArtifacts({
-	artifacts,
-	sourceContentCache,
-	destinationPaths,
-	contentCache,
-	remainingPreparationMs,
-	setTimer,
-	clearTimer,
-	platform,
-}) {
-	const transferable = artifacts.filter(artifact => artifact.integrity);
-	const missing = [];
-	let transferredCount = 0;
-	const failures = new Array(transferable.length);
-	let nextIndex = 0;
-	let stopAdmission = false;
-	let admitted = 0;
-	let completed = 0;
-	let active = 0;
-	let maxActive = 0;
-	const worker = async () => {
-		while (!stopAdmission) {
-			const index = nextIndex++;
-			if (index >= transferable.length) return;
-			admitted++;
-			active++;
-			maxActive = Math.max(maxActive, active);
-			try {
-				const transferred = await transferArtifact({
-					artifact: transferable[index],
-					sourceContentCache,
-					destinationPath: destinationPaths.get(transferable[index].integrity),
-					contentCache,
-					remainingPreparationMs,
-					setTimer,
-					clearTimer,
-				});
-				completed++;
-				if (transferred) transferredCount++;
-				else missing.push(transferable[index]);
-			} catch (error) {
-				failures[index] = error;
-				stopAdmission = true;
-			} finally {
-				active--;
-			}
-		}
-	};
-	const workerCount = platform === "win32"
-		? WINDOWS_CACHE_TRANSFER_WORKER_COUNT
-		: CACHE_TRANSFER_WORKER_COUNT;
-	await Promise.allSettled(Array.from(
-		{ length: Math.min(workerCount, transferable.length) },
-		() => worker(),
-	));
-	const observed = failures.filter(error => error !== undefined);
-	if (observed.length > 0) {
-		const progress = {
-			total: transferable.length,
-			admitted,
-			completed,
-			fallback: missing.length + artifacts.filter(artifact => !artifact.integrity).length,
-			active,
-			maxActive,
-		};
-		for (const error of observed) attachTransferProgress(error, progress);
-		throw new AggregateError(observed, "Packed-consumer cache transfer failed");
-	}
-	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
-	return {
-		fallbackArtifacts: [...missing, ...noIntegrity].sort((left, right) => left.resolved.localeCompare(right.resolved)),
-		transferredCount,
-		missingDigestCount: missing.length,
-		noIntegrityCount: noIntegrity.length,
-	};
 }
 
 async function verifyDestinationArtifact({
@@ -1042,8 +890,8 @@ async function resolveDestinationContentPaths({
 		integrities,
 	};
 	const input = `${JSON.stringify(request)}\n`;
-	if (Buffer.byteLength(input) > MAX_CACHE_PATH_REQUEST_BYTES) {
-		throw new Error(`Packed-consumer cache path request exceeds ${MAX_CACHE_PATH_REQUEST_BYTES} bytes`);
+	if (Buffer.byteLength(input) > MAX_CACHE_HELPER_REQUEST_BYTES) {
+		throw new Error(`Packed-consumer cache path request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
 	}
 	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_PATH_HELPER_NAME);
 	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
@@ -1053,15 +901,16 @@ async function resolveDestinationContentPaths({
 		env: helperEnv,
 		timeoutMs: totalTimeoutMs,
 		totalTimeoutMs,
-		maxOutputBytes: MAX_CACHE_PATH_RESULT_BYTES,
+		maxOutputBytes: MAX_CACHE_HELPER_RESULT_BYTES,
+		maxInputBytes: MAX_CACHE_HELPER_REQUEST_BYTES,
 		input,
 		repoRoot,
 		ownershipBootstrapRoot: fixtureRoot,
 	});
 	commands.push(result);
 	requireSuccess(result);
-	if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_PATH_RESULT_BYTES) {
-		throw new Error(`Packed-consumer cache path helper must emit non-empty JSON no larger than ${MAX_CACHE_PATH_RESULT_BYTES} bytes`);
+	if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_HELPER_RESULT_BYTES) {
+		throw new Error(`Packed-consumer cache path helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
 	}
 	let parsed;
 	try {
@@ -1099,6 +948,228 @@ async function resolveDestinationContentPaths({
 		if (!destinationPaths.has(integrity)) throw new Error(`Packed-consumer cache path helper omitted ${integrity}`);
 	}
 	return destinationPaths;
+}
+
+async function removeCacheCopyStaging({
+	stagingParent,
+	fixtureRoot,
+	remainingPreparationMs,
+	removeOwnedPathFn,
+	lifecycle,
+}) {
+	const deadlineMs = remainingPreparationMs("cache copy staging cleanup");
+	await removeOwnedPathFn(stagingParent, {
+		ownerRoot: fixtureRoot,
+		owner: { kind: "fixture", id: "packed-consumer-cache-copy" },
+		deadlineMs,
+		lifecycle,
+	});
+}
+
+function validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingParent }) {
+	if (!exactObjectKeys(parsed, ["version", "stagingRoot", "results", "admitted", "completed", "maxActive"]) || parsed.version !== 1) {
+		throw new Error("Packed-consumer cache copy helper returned a malformed result envelope");
+	}
+	if (typeof parsed.stagingRoot !== "string" || !isAbsolute(parsed.stagingRoot)) {
+		throw new Error("Packed-consumer cache copy helper returned a non-absolute staging root");
+	}
+	const stagingRoot = resolve(parsed.stagingRoot);
+	if (!isStrictChild(stagingParent, stagingRoot) || !isStrictChild(fixtureRoot, stagingRoot)) {
+		throw new Error("Packed-consumer cache copy helper returned an out-of-root staging path");
+	}
+	if (!Array.isArray(parsed.results) || parsed.results.length !== integrities.length) {
+		throw new Error(`Packed-consumer cache copy helper must return exactly ${integrities.length} results`);
+	}
+	if (parsed.admitted !== integrities.length || parsed.completed !== integrities.length ||
+		!Number.isInteger(parsed.maxActive) || parsed.maxActive < 1 || parsed.maxActive > CACHE_COPY_WORKER_COUNT) {
+		throw new Error("Packed-consumer cache copy helper returned invalid admission/completion accounting");
+	}
+	const expected = new Set(integrities);
+	const seen = new Set();
+	const paths = new Set();
+	const results = new Map();
+	for (const entry of parsed.results) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.integrity !== "string" || typeof entry.status !== "string") {
+			throw new Error("Packed-consumer cache copy helper returned a malformed result entry");
+		}
+		if (!expected.has(entry.integrity)) throw new Error(`Packed-consumer cache copy helper returned an unexpected integrity: ${entry.integrity}`);
+		if (seen.has(entry.integrity)) throw new Error(`Packed-consumer cache copy helper returned a duplicate integrity: ${entry.integrity}`);
+		seen.add(entry.integrity);
+		if (entry.status === "missing") {
+			if (!exactObjectKeys(entry, ["integrity", "status"])) throw new Error("Packed-consumer cache copy helper returned a malformed missing result");
+			results.set(entry.integrity, { status: "missing" });
+			continue;
+		}
+		if (entry.status !== "copied" || !exactObjectKeys(entry, ["integrity", "status", "partialPath"]) ||
+			typeof entry.partialPath !== "string" || !isAbsolute(entry.partialPath)) {
+			throw new Error("Packed-consumer cache copy helper returned a malformed copied result");
+		}
+		const partialPath = resolve(entry.partialPath);
+		if (!isStrictChild(stagingRoot, partialPath) || !isStrictChild(fixtureRoot, partialPath)) {
+			throw new Error(`Packed-consumer cache copy helper returned an out-of-root partial path for ${entry.integrity}`);
+		}
+		if (paths.has(partialPath)) throw new Error(`Packed-consumer cache copy helper returned a duplicate partial path: ${partialPath}`);
+		paths.add(partialPath);
+		results.set(entry.integrity, { status: "copied", partialPath });
+	}
+	for (const integrity of integrities) if (!results.has(integrity)) throw new Error(`Packed-consumer cache copy helper omitted ${integrity}`);
+	return { stagingRoot, results };
+}
+
+async function copyAvailableArtifacts({
+	artifacts,
+	sourceContentCache,
+	destinationPaths,
+	contentCache,
+	fixtureRoot,
+	repoRoot,
+	baseEnv,
+	runCommand,
+	commands,
+	remainingPreparationMs,
+	removeOwnedPathFn,
+}) {
+	const transferable = artifacts.filter(artifact => artifact.integrity);
+	const integrities = [...new Set(transferable.map(artifact => artifact.integrity))].sort();
+	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
+	if (integrities.length === 0) {
+		return { fallbackArtifacts: noIntegrity, transferredArtifacts: [], transferredCount: 0, missingDigestCount: 0, noIntegrityCount: noIntegrity.length };
+	}
+	const stagingParent = join(fixtureRoot, "cache-copy-staging");
+	if (!isStrictChild(fixtureRoot, stagingParent)) throw new Error("Packed-consumer cache copy staging parent escaped fixture authority");
+	const request = { version: 1, integrities };
+	const input = `${JSON.stringify(request)}\n`;
+	if (Buffer.byteLength(input) > MAX_CACHE_HELPER_REQUEST_BYTES) {
+		throw new Error(`Packed-consumer cache copy request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
+	}
+	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_COPY_HELPER_NAME);
+	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
+	let result;
+	try {
+		const totalTimeoutMs = remainingPreparationMs("ambient cache digest copy");
+		result = await runCommand(process.execPath, [helperPath, fixtureRoot, sourceContentCache], {
+			cwd: repoRoot,
+			env: helperEnv,
+			timeoutMs: totalTimeoutMs,
+			totalTimeoutMs,
+			maxOutputBytes: MAX_CACHE_HELPER_RESULT_BYTES,
+			maxInputBytes: MAX_CACHE_HELPER_REQUEST_BYTES,
+			input,
+			repoRoot,
+			ownershipBootstrapRoot: fixtureRoot,
+		});
+		commands.push(result);
+		requireSuccess(result);
+	} catch (error) {
+		if (error instanceof OwnedCommandError && !isCompleteOwnedCommandShutdown(error.shutdown)) throw error;
+		try {
+			await removeCacheCopyStaging({
+				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
+				lifecycle: { phase: "after settled cache-copy helper failure" },
+			});
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "Packed-consumer cache copy helper and staging cleanup failed");
+		}
+		throw error;
+	}
+	let validated;
+	try {
+		if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_HELPER_RESULT_BYTES) {
+			throw new Error(`Packed-consumer cache copy helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
+		}
+		let parsed;
+		try {
+			parsed = JSON.parse(result.stdout);
+		} catch (error) {
+			throw new Error(`Packed-consumer cache copy helper emitted malformed JSON: ${error.message}`, { cause: error });
+		}
+		validated = validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingParent });
+		for (const [integrity, entry] of validated.results) {
+			if (entry.status !== "copied") continue;
+			const partial = await stat(entry.partialPath).catch(() => undefined);
+			if (!partial?.isFile()) throw new Error(`Packed-consumer cache copy helper did not create a regular partial for ${integrity}`);
+		}
+	} catch (error) {
+		try {
+			await removeCacheCopyStaging({
+				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
+				lifecycle: { phase: "after cache-copy response rejection" },
+			});
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "Packed-consumer cache copy validation and staging cleanup failed");
+		}
+		throw error;
+	}
+
+	const byIntegrity = new Map(transferable.map(artifact => [artifact.integrity, artifact]));
+	const fallbackArtifacts = [...noIntegrity];
+	const transferredArtifacts = [];
+	try {
+		// Publication begins only after the uncancellable helper has fully settled.
+		// It is deliberately sequential and fails closed on a pre-existing path.
+		for (const integrity of integrities) {
+			const copied = validated.results.get(integrity);
+			const artifact = byIntegrity.get(integrity);
+			if (copied.status === "missing") {
+				fallbackArtifacts.push(artifact);
+				continue;
+			}
+			const destinationPath = destinationPaths.get(integrity);
+			if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
+				throw new Error(`Packed-consumer cache publication has no absolute destination for ${integrity}`);
+			}
+			remainingPreparationMs(`cache publication ${integrity}`);
+			await contentCache.prepareDestination(dirname(destinationPath));
+			await contentCache.publishDestination(copied.partialPath, destinationPath);
+			transferredArtifacts.push(artifact);
+		}
+		await removeCacheCopyStaging({
+			stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
+			lifecycle: { phase: "after sequential cache publication", copied: transferredArtifacts.length },
+		});
+	} catch (error) {
+		try {
+			await removeCacheCopyStaging({
+				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
+				lifecycle: { phase: "after failed sequential cache publication", copied: transferredArtifacts.length },
+			});
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "Packed-consumer cache publication and staging cleanup failed");
+		}
+		throw error;
+	}
+	return {
+		fallbackArtifacts: fallbackArtifacts.sort((left, right) => left.resolved.localeCompare(right.resolved)),
+		transferredArtifacts,
+		transferredCount: transferredArtifacts.length,
+		missingDigestCount: fallbackArtifacts.filter(artifact => artifact.integrity).length,
+		noIntegrityCount: noIntegrity.length,
+	};
+}
+
+async function verifyCopiedArtifactsForFallback({
+	artifacts,
+	destinationPaths,
+	destinationContentCache,
+	contentCache,
+	remainingPreparationMs,
+	setTimer,
+	clearTimer,
+}) {
+	const fallback = [];
+	for (const artifact of artifacts) {
+		const present = await verifyDestinationArtifact({
+			artifact, destinationContentCache, contentCache, remainingPreparationMs, setTimer, clearTimer,
+		});
+		if (present) continue;
+		const destinationPath = destinationPaths.get(artifact.integrity);
+		if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
+			throw new Error(`Packed-consumer corrupt-copy cleanup has no authorized destination for ${artifact.integrity}`);
+		}
+		await contentCache.removeDestination(destinationPath);
+		fallback.push(artifact);
+	}
+	return fallback;
 }
 
 async function measured(label, operation) {
@@ -1227,6 +1298,7 @@ export async function preparePackedConsumerFixture({
 	now = () => performance.now(),
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
+	removeOwnedPathFn = removeOwnedPath,
 } = {}) {
 	if (!runRoot) throw new Error("preparePackedConsumerFixture requires runRoot");
 	if (!Number.isFinite(preparationTimeoutMs) || preparationTimeoutMs <= 0) {
@@ -1381,8 +1453,9 @@ export async function preparePackedConsumerFixture({
 			return result;
 		});
 		const ambientCacheDir = ambientCacheFromOutput(discoveryCommand.stdout);
-		if (ambientCacheDir === resolve(cacheDir) || ambientCacheDir === resolve(fixtureRoot) || isStrictChild(fixtureRoot, ambientCacheDir)) {
-			throw new Error(`Ambient npm cache must lie outside the packed-consumer fixture: ${ambientCacheDir}`);
+		if (ambientCacheDir === resolve(cacheDir) || ambientCacheDir === resolve(fixtureRoot) ||
+			isStrictChild(fixtureRoot, ambientCacheDir) || isStrictChild(ambientCacheDir, fixtureRoot)) {
+			throw new Error(`Ambient npm cache must lie outside and not contain the packed-consumer fixture: ${ambientCacheDir}`);
 		}
 		const sourceContentCache = join(ambientCacheDir, "_cacache");
 		const destinationContentCache = join(cacheDir, "_cacache");
@@ -1400,19 +1473,33 @@ export async function preparePackedConsumerFixture({
 			commands,
 			remainingPreparationMs,
 		}));
-		console.log(`[packed-consumer] cache: selectively transferring ${selectedArtifacts.filter(artifact => artifact.integrity).length} exact digests from ${ambientCacheDir}`);
-		const transferResult = await measured("cache transfer", () => transferAvailableArtifacts({
+		console.log(`[packed-consumer] cache: selectively copying ${selectedArtifacts.filter(artifact => artifact.integrity).length} exact digests from ${ambientCacheDir}`);
+		const transferResult = await measured("cache copy and publication", () => copyAvailableArtifacts({
 			artifacts: selectedArtifacts,
 			sourceContentCache,
 			destinationPaths,
 			contentCache,
+			fixtureRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
+			remainingPreparationMs,
+			removeOwnedPathFn,
+		}));
+		const corruptCopies = await measured("copied digest verification", () => verifyCopiedArtifactsForFallback({
+			artifacts: transferResult.transferredArtifacts,
+			destinationPaths,
+			destinationContentCache,
+			contentCache,
 			remainingPreparationMs,
 			setTimer,
 			clearTimer,
-			platform: runtime?.platform ?? process.platform,
 		}));
-		console.log(`[packed-consumer] cache transfer: ${transferResult.transferredCount} hits, ${transferResult.missingDigestCount} digest misses, ${transferResult.noIntegrityCount} no-integrity fallbacks`);
-		const fallbackUrls = [...new Set(transferResult.fallbackArtifacts.map(artifact => artifact.resolved))].sort();
+		const fallbackArtifacts = [...transferResult.fallbackArtifacts, ...corruptCopies]
+			.sort((left, right) => left.resolved.localeCompare(right.resolved));
+		console.log(`[packed-consumer] cache copy: ${transferResult.transferredCount - corruptCopies.length} verified hits, ${fallbackArtifacts.filter(artifact => artifact.integrity).length} digest fallbacks, ${transferResult.noIntegrityCount} no-integrity fallbacks`);
+		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort();
 		const cacheBatches = [];
 		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) {
 			cacheBatches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));

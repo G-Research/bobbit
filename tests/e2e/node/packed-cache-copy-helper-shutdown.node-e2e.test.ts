@@ -54,7 +54,7 @@ after(async () => {
 	}
 });
 
-test("stalled cache-path helper reaps its descendant before preparation rejects", { timeout: 40_000 }, async () => {
+test("stalled cache-copy helper reaps its descendant before preparation rejects", { timeout: 40_000 }, async () => {
 	const runRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-shutdown-"));
 	roots.push(runRoot);
 	const marker = join(runRoot, "helper-pids.json");
@@ -70,6 +70,7 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 		"setInterval(()=>{},1000);",
 	].join("");
 	let sourceReads = 0;
+	let publicationStarted = false;
 	let offlineInstallStarted = false;
 
 	await assert.rejects(preparePackedConsumerFixture({
@@ -87,11 +88,11 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 			},
 			prepareDestination: async () => {},
 			createWriteStream: () => new PassThrough(),
-			publishDestination: async () => {},
+			publishDestination: async () => { publicationStarted = true; },
 			removeDestination: async () => {},
 		},
 		runCommand: async (command: string, args: string[], options: Record<string, unknown>) => {
-			if (args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")) {
+			if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
 				return runOwnedCommand(process.execPath, ["-e", fixture, marker], {
 					cwd: options.cwd as string,
 					env: options.env as NodeJS.ProcessEnv,
@@ -117,7 +118,13 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 				});
 			}
 			const result = { command, args: [...args], code: 0, stdout: "", stderr: "" };
-			if (args.includes("pack")) {
+			if (args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")) {
+				const request = JSON.parse(String(options.input)) as { destination: string; integrities: string[] };
+				result.stdout = `${JSON.stringify(request.integrities.map((selectedIntegrity, index) => ({
+					integrity: selectedIntegrity,
+					path: join(request.destination, "resolved", `${index}.content`),
+				})))}\n`;
+			} else if (args.includes("pack")) {
 				const packDir = args[args.indexOf("--pack-destination") + 1]!;
 				writeFileSync(join(packDir, "bobbit-fixture.tgz"), "packed bytes");
 				result.stdout = JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-fixture.tgz" }]);
@@ -154,13 +161,16 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 	const pids = JSON.parse(readFileSync(marker, "utf8")) as { root: number; descendant: number };
 	assert.equal(isAlive(pids.root), false, "helper root must be dead before preparation rejects");
 	assert.equal(isAlive(pids.descendant), false, "helper descendant must be dead before preparation rejects");
-	assert.equal(sourceReads, 0, "cache transfer must not start after helper timeout");
+	assert.equal(sourceReads, 0, "cache verification must not start after helper timeout");
+	assert.equal(publicationStarted, false, "cache publication must not start after helper timeout");
 	assert.equal(offlineInstallStarted, false, "offline install must not start after helper timeout");
 	const fixtureRoot = join(runRoot, "prepared-packed-consumer");
 	assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false);
 	const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
-	assert.equal(isCompleteOwnedCommandShutdown(evidence.error.shutdown), true);
-	assert.match(evidence.error.message, /total deadline|timed out/);
+	const helperFailure = evidence.error.shutdown ? evidence.error : evidence.error.errors?.[0];
+	assert.equal(isCompleteOwnedCommandShutdown(helperFailure?.shutdown), true,
+		"preparation must retain complete tree/close/transport proof before rejecting");
+	assert.match(JSON.stringify(evidence.error), /total deadline|timed out/);
 	assert.equal(existsSync(runRoot), true,
 		"failed preparation must retain its authoritative root until async teardown independently re-verifies every owner");
 });

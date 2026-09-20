@@ -40,6 +40,10 @@ const CACHE_PATH_HELPER_SOURCE = readFileSync(
 	new URL("../../../scripts/testing-v2/resolve-packed-consumer-cache-paths.mjs", import.meta.url),
 	"utf8",
 );
+const CACHE_COPY_HELPER_SOURCE = readFileSync(
+	new URL("../../../scripts/testing-v2/copy-packed-consumer-cache-batch.mjs", import.meta.url),
+	"utf8",
+);
 const WORKFLOW_SOURCE = readFileSync(
 	new URL("../../../.github/workflows/build-unit-gate.yml", import.meta.url),
 	"utf8",
@@ -152,9 +156,11 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /copyFile\(join\(repoRoot, "package-lock\.json"\), join\(resolverDir, "package-lock\.json"\)\)/,
 			"the committed lock must seed npm's sole external lock update");
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
-		assert.match(source, /cacache\.get\.stream\.byDigest\(cache, integrity\)/,
-			"only exact integrity-addressed ambient content may be read");
-		assert.doesNotMatch(`${source}\n${CACHE_PATH_HELPER_SOURCE}`, /cacache\/lib\/|content-v\d*/,
+		assert.match(CACHE_COPY_HELPER_SOURCE, /import cacache from "cacache"/,
+			"the batch helper must use only cacache's public root export");
+		assert.match(CACHE_COPY_HELPER_SOURCE, /cacache\.get\.copy\.byDigest/,
+			"only the public exact-digest copy API may read ambient content");
+		assert.doesNotMatch(`${source}\n${CACHE_PATH_HELPER_SOURCE}\n${CACHE_COPY_HELPER_SOURCE}`, /cacache\/lib\/|content-v\d*/,
 			"cache layout must never depend on a private subpath or hand-coded content version");
 		assert.match(CACHE_PATH_HELPER_SOURCE, /import cacache from "cacache"/,
 			"the path helper must use only cacache's public root export");
@@ -164,8 +170,8 @@ describe("packed-consumer offline install contract", () => {
 			"the helper must bind every returned public entry to its requested key");
 		assert.match(CACHE_PATH_HELPER_SOURCE, /entry\.integrity !== integrity/,
 			"the helper must bind every returned public entry to its canonical requested integrity");
-		assert.doesNotMatch(CACHE_PATH_HELPER_SOURCE, /cacache\.put\.stream|cacache\.index\.(?:delete|remove)|cacache\.rm/,
-			"the helper must retain synthetic entries and never start another uncancellable content operation");
+		assert.doesNotMatch(`${CACHE_PATH_HELPER_SOURCE}\n${CACHE_COPY_HELPER_SOURCE}`, /cacache\.put|cacache\.index\.(?:delete|remove)|cacache\.rm|createReadStream|createWriteStream|pipeline\(/,
+			"helpers must neither mutate ambient cache state nor restore the stalled stream pipeline");
 		assert.doesNotMatch(source, /cacache\.put\.stream/,
 			"exact digest reuse must not pay for a second content publication");
 		assert.doesNotMatch(source, /packed-consumer:\$\{artifact\.resolved\}/,
@@ -178,6 +184,8 @@ describe("packed-consumer offline install contract", () => {
 			"cache population must retain the accepted bounded concurrency");
 		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot\]/,
 			"all path resolution must run in one deadline-owned helper with independent root authority");
+		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot, sourceContentCache\]/,
+			"all uncancellable digest copies must run in one tracked helper with fixed root authority");
 		assert.match(source, /input,/,
 			"the untrusted cache-path request must use deadline-owned stdin instead of parent filesystem transport");
 		assert.match(source, /ownershipBootstrapRoot: fixtureRoot/,
@@ -213,8 +221,8 @@ describe("packed-consumer offline install contract", () => {
 		const ambientCache = join(tempParent, "ambient-cache");
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
-		const cacheReads: Array<{ cache: string; integrity: string }> = [];
-		const cacheWrites: Array<{ path: string; integrity: string }> = [];
+		const verificationReads: Array<{ cache: string; integrity: string }> = [];
+		const publications: Array<{ partialPath: string; destinationPath: string }> = [];
 		let nowMs = 0;
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		const selectedIntegrity = "sha512-fixture";
@@ -236,17 +244,15 @@ describe("packed-consumer offline install contract", () => {
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 				contentCache: {
 					createReadStream: (cache: string, integrity: string) => {
-						if (cache === join(ambientCache, "_cacache")) cacheReads.push({ cache, integrity });
+						verificationReads.push({ cache, integrity });
 						const stream = new PassThrough();
 						stream.end("selected artifact bytes");
 						return stream;
 					},
 					prepareDestination: async () => {},
-					createWriteStream: (path: string, integrity: string) => {
-						cacheWrites.push({ path, integrity });
-						return new PassThrough();
+					publishDestination: async (partialPath: string, destinationPath: string) => {
+						publications.push({ partialPath, destinationPath });
 					},
-					publishDestination: async () => {},
 					removeDestination: async () => {},
 				},
 				now: () => nowMs,
@@ -266,6 +272,25 @@ describe("packed-consumer offline install contract", () => {
 							integrity,
 							path: join(request.destination, "resolved", encodeURIComponent(integrity)),
 						})))}\n` });
+					}
+					if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
+						const request = JSON.parse(String(options.input)) as { version: number; integrities: string[] };
+						assert.deepEqual(request, { version: 1, integrities: [selectedIntegrity] });
+						assert.equal(args[1], join(tempParent, "prepared-packed-consumer"));
+						assert.equal(args[2], join(ambientCache, "_cacache"));
+						const stagingRoot = join(args[1]!, "cache-copy-staging", "fixture-batch");
+						mkdirSync(stagingRoot, { recursive: true });
+						const partialPath = join(stagingRoot, "00000.partial");
+						writeFileSync(partialPath, "copied ambient bytes");
+						order.push("copy");
+						return commandResult(command, args, { stdout: `${JSON.stringify({
+							version: 1,
+							stagingRoot,
+							results: [{ integrity: selectedIntegrity, status: "copied", partialPath }],
+							admitted: 1,
+							completed: 1,
+							maxActive: 1,
+						})}\n` });
 					}
 					if (args.includes("pack")) {
 						order.push("pack");
@@ -330,8 +355,8 @@ describe("packed-consumer offline install contract", () => {
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "paths", "install"]);
-			assert.equal(calls.length, 5);
+			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "paths", "copy", "install"]);
+			assert.equal(calls.length, 6);
 			assert.deepEqual(calls[0]?.args.slice(1), [
 				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
 			]);
@@ -341,9 +366,10 @@ describe("packed-consumer offline install contract", () => {
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
 			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "config", "get", "cache"]);
 			assert.ok(calls[3]?.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
-			assert.equal(calls[4]?.args[1], "ci");
-			assert.ok(calls[4]?.args.includes("--offline"));
-			assert.ok(!calls[4]?.args.includes(calls[1]!.args.at(-1)!),
+			assert.ok(calls[4]?.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
+			assert.equal(calls[5]?.args[1], "ci");
+			assert.ok(calls[5]?.args.includes("--offline"));
+			assert.ok(!calls[5]?.args.includes(calls[1]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
 			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
@@ -351,19 +377,24 @@ describe("packed-consumer offline install contract", () => {
 			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000,
 				"the path helper must receive only the remaining absolute preparation budget");
 			assert.equal(calls[4]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 20_000,
+				"the copy helper must receive only the remaining absolute preparation budget");
+			assert.equal(calls[5]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 25_000,
 				"late commands must receive only the remaining monotonic preparation budget");
-			assert.deepEqual(cacheReads, [{ cache: join(ambientCache, "_cacache"), integrity: selectedIntegrity }]);
-			assert.equal(cacheWrites.length, 1);
-			assert.ok(cacheWrites[0]?.path.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
-			assert.equal(cacheWrites[0]?.integrity, selectedIntegrity);
-			assert.doesNotMatch(cacheWrites[0]?.path ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.deepEqual(verificationReads, [
+				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
+				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
+			]);
+			assert.equal(publications.length, 1);
+			assert.ok(publications[0]?.partialPath.startsWith(join(tempParent, "prepared-packed-consumer", "cache-copy-staging")));
+			assert.ok(publications[0]?.destinationPath.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
+			assert.doesNotMatch(publications[0]?.destinationPath ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			const inherited: Record<string, string> = {
 				npm_config_cache: ambientCache,
 				npm_config_registry: "https://registry.example.test/",
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const call of [calls[1]!, calls[4]!]) {
+			for (const call of [calls[1]!, calls[5]!]) {
 				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
 				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
 				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));

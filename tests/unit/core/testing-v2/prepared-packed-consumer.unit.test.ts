@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { afterEach, describe, it } from "vitest";
 import * as packedConsumerModule from "../../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
+import { copyPackedConsumerCacheBatch } from "../../../../scripts/testing-v2/copy-packed-consumer-cache-batch.mjs";
 import { resolvePackedConsumerCachePaths } from "../../../../scripts/testing-v2/resolve-packed-consumer-cache-paths.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../../..");
@@ -20,6 +21,7 @@ const cacache = require("cacache") as {
 	};
 	get: {
 		hasContent: (cache: string, integrity: string) => Promise<unknown>;
+		copy: { byDigest: (cache: string, integrity: string, destination: string) => Promise<void> };
 		stream: { byDigest: (cache: string, integrity: string) => NodeJS.ReadableStream & AsyncIterable<Uint8Array> };
 	};
 	ls: (cache: string) => Promise<Record<string, { key?: string; integrity?: string; path?: string }>>;
@@ -35,6 +37,7 @@ type CommandOptions = {
 	timeoutMs: number;
 	totalTimeoutMs?: number;
 	maxOutputBytes?: number;
+	maxInputBytes?: number;
 	input?: string | Buffer;
 	repoRoot?: string;
 	ownershipBootstrapRoot?: string;
@@ -63,7 +66,7 @@ type CommandCall = {
 type ContentCache = {
 	createReadStream: (cache: string, integrity: string) => NodeJS.ReadableStream;
 	prepareDestination?: (directory: string) => Promise<void>;
-	createWriteStream: (path: string, integrity: string) => NodeJS.WritableStream;
+	createWriteStream?: (path: string, integrity: string) => NodeJS.WritableStream;
 	publishDestination?: (temporaryPath: string, destinationPath: string) => Promise<void>;
 	removeDestination?: (temporaryPath: string) => Promise<void>;
 };
@@ -71,6 +74,12 @@ type ContentCache = {
 type PathHelperCallback = (context: {
 	request: { fixtureRoot: string; destination: string; integrities: string[] };
 	entries: Array<{ integrity: string; path: string }>;
+	options: CommandOptions;
+}) => void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean }>;
+
+type CopyHelperCallback = (context: {
+	request: { version: number; integrities: string[] };
+	response: Record<string, unknown>;
 	options: CommandOptions;
 }) => void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean }>;
 
@@ -111,6 +120,7 @@ type PackedConsumerApi = {
 		now?: () => number;
 		setTimer?: (callback: () => void, timeoutMs: number) => unknown;
 		clearTimer?: (timer: unknown) => void;
+		removeOwnedPathFn?: (path: string, options: object) => Promise<unknown>;
 	}) => Promise<PreparedDescriptor>;
 	readPreparedPackedConsumerDescriptor?: (
 		descriptorPath: string,
@@ -187,6 +197,9 @@ async function prepareFixture({
 	now,
 	useRealContentCache = false,
 	onPathHelper,
+	onCopyHelper,
+	copyDecision = () => "missing",
+	removeOwnedPathFn,
 }: {
 	registryTarballCount?: number;
 	registryArtifacts?: Array<{ resolved: string; integrity?: string }>;
@@ -201,6 +214,9 @@ async function prepareFixture({
 	now?: () => number;
 	useRealContentCache?: boolean;
 	onPathHelper?: PathHelperCallback;
+	onCopyHelper?: CopyHelperCallback;
+	copyDecision?: (integrity: string) => "copied" | "missing";
+	removeOwnedPathFn?: (path: string, options: object) => Promise<unknown>;
 } = {}) {
 	const runRoot = await mkdtemp(join(tmpdir(), "bobbit-prepared-consumer-unit-"));
 	roots.push(runRoot);
@@ -235,6 +251,7 @@ async function prepareFixture({
 		...(runtime ? { runtime } : {}),
 		...(preparationTimeoutMs ? { preparationTimeoutMs } : {}),
 		...(now ? { now } : {}),
+		...(removeOwnedPathFn ? { removeOwnedPathFn } : {}),
 		ensureDist: () => {},
 		resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 		runCommand: async (command, args, options) => {
@@ -270,6 +287,40 @@ async function prepareFixture({
 				const output = decision && "output" in decision ? decision.output : entries;
 				if (!decision?.skipOutput) result.stdout = decision?.rawOutput ?? `${JSON.stringify(output)}\n`;
 				result.code = decision?.code ?? 0;
+				return result;
+			}
+			if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
+				assert.equal(args.length, 3, `${FAILURE_PREFIX}: cache-copy helper receives only script and authoritative roots`);
+				const request = JSON.parse(String(options.input)) as { version: number; integrities: string[] };
+				const fixtureRoot = args[1]!;
+				const sourceContentCache = args[2]!;
+				const stagingRoot = join(fixtureRoot, "cache-copy-staging", "mock-batch");
+				await mkdir(stagingRoot, { recursive: true });
+				const results = [];
+				for (let index = 0; index < request.integrities.length; index++) {
+					const integrity = request.integrities[index]!;
+					const decision = useRealContentCache ? "copied" : copyDecision(integrity);
+					if (decision === "missing") {
+						results.push({ integrity, status: "missing" });
+						continue;
+					}
+					const partialPath = join(stagingRoot, `${String(index).padStart(5, "0")}.partial`);
+					if (useRealContentCache) await cacache.get.copy.byDigest(sourceContentCache, integrity, partialPath);
+					else await writeFile(partialPath, `copied bytes for ${integrity}`);
+					results.push({ integrity, status: "copied", partialPath });
+				}
+				const response = {
+					version: 1,
+					stagingRoot,
+					results,
+					admitted: request.integrities.length,
+					completed: request.integrities.length,
+					maxActive: Math.min(3, request.integrities.length),
+				};
+				const helperDecision = await onCopyHelper?.({ request, response, options });
+				const output = helperDecision && "output" in helperDecision ? helperDecision.output : response;
+				if (!helperDecision?.skipOutput) result.stdout = helperDecision?.rawOutput ?? `${JSON.stringify(output)}\n`;
+				result.code = helperDecision?.code ?? 0;
 				return result;
 			}
 			if (args.includes("pack")) {
@@ -380,42 +431,38 @@ describe("prepared packed consumer", () => {
 		);
 	});
 
-	it("transfers each exact ambient digest once into only the owned cache", async () => {
+	it("copies each exact ambient digest once and publishes it only after the helper settles", async () => {
 		const integrity = "sha512-shared-exact-digest";
-		const sourceReads: Array<{ cache: string; integrity: string }> = [];
-		const destinationWrites: Array<{ path: string; integrity: string }> = [];
+		const publications: Array<{ partialPath: string; destinationPath: string }> = [];
 		const { calls, descriptor } = await prepareFixture({
 			registryArtifacts: [
 				{ resolved: "https://registry.example.test/a.tgz", integrity },
 				{ resolved: "https://registry.example.test/unrelated-alias.tgz", integrity },
 			],
+			copyDecision: () => "copied",
 			contentCache: {
-				createReadStream: (cache, expectedIntegrity) => {
-					if (cache.includes("ambient-cache-read-only")) sourceReads.push({ cache, integrity: expectedIntegrity });
+				createReadStream: () => {
 					const source = new PassThrough();
 					source.end("verified artifact bytes");
 					return source;
 				},
-				createWriteStream: (path, selectedIntegrity) => {
-					destinationWrites.push({ path, integrity: selectedIntegrity });
-					return new PassThrough();
+				publishDestination: async (partialPath, destinationPath) => {
+					publications.push({ partialPath, destinationPath });
 				},
 			},
 		});
 
-		assert.equal(sourceReads.length, 1, `${FAILURE_PREFIX}: duplicate integrities must transfer only once`);
-		assert.equal(sourceReads[0]?.integrity, integrity);
-		assert.match(sourceReads[0]?.cache ?? "", /ambient-cache-read-only[\\/]_cacache$/,
-			`${FAILURE_PREFIX}: transfer must read only the discovered ambient content store`);
-		assert.deepEqual(destinationWrites.map(write => write.integrity), [integrity]);
-		assert.ok(destinationWrites[0]?.path.startsWith(resolve(descriptor.cacheDir, "_cacache")),
-			`${FAILURE_PREFIX}: direct CAS write must target the isolated content store`);
-		assert.ok(isStrictChild(descriptor.runRoot, destinationWrites[0]?.path ?? ""),
-			`${FAILURE_PREFIX}: transferred content must stay below the run root`);
-		assert.doesNotMatch(destinationWrites[0]?.path ?? "", /packed-consumer:/,
-			`${FAILURE_PREFIX}: transfer must not publish an unused custom URL index key`);
+		const copyCalls = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
+		assert.equal(copyCalls.length, 1, `${FAILURE_PREFIX}: all exact identities must use one tracked copy helper`);
+		assert.deepEqual(JSON.parse(String(copyCalls[0]!.options.input)).integrities, [integrity]);
+		assert.equal(publications.length, 1, `${FAILURE_PREFIX}: duplicate integrities must publish only once`);
+		assert.ok(isStrictChild(descriptor.fixtureRoot, publications[0]!.partialPath));
+		assert.ok(publications[0]!.destinationPath.startsWith(resolve(descriptor.cacheDir, "_cacache")));
+		assert.ok(isStrictChild(descriptor.runRoot, publications[0]!.destinationPath));
 		assert.equal(calls.filter(call => call.args.includes("cache") && call.args.includes("add")).length, 0,
-			`${FAILURE_PREFIX}: an exact ambient hit must not perform an online fallback`);
+			`${FAILURE_PREFIX}: a verified exact ambient hit must not perform fallback`);
+		await assert.rejects(readdir(join(descriptor.fixtureRoot, "cache-copy-staging")),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
 
 	it("invokes one isolated path helper with fixed root authority, bounded stdin, and the remaining absolute budget", async () => {
@@ -459,6 +506,17 @@ describe("prepared packed consumer", () => {
 		assert.ok(isStrictChild(descriptor.fixtureRoot, helper.options.env?.TEMP ?? ""));
 		assert.equal(helper.options.env?.TMP, helper.options.env?.TEMP);
 		assert.ok(isStrictChild(runRoot, helper.args[1]!));
+
+		const copyHelpers = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
+		assert.equal(copyHelpers.length, 1);
+		const copyHelper = copyHelpers[0]!;
+		assert.deepEqual(copyHelper.args, [copyHelper.args[0]!, descriptor.fixtureRoot, join(tmpdir(), "ambient-cache-read-only", "_cacache")]);
+		assert.deepEqual(JSON.parse(String(copyHelper.options.input)), { version: 1, integrities: [firstIntegrity, secondIntegrity] });
+		assert.equal(copyHelper.options.timeoutMs, copyHelper.options.totalTimeoutMs);
+		assert.equal(copyHelper.options.maxOutputBytes, 8 * 1024 * 1024);
+		assert.equal(copyHelper.options.maxInputBytes, 4 * 1024 * 1024);
+		assert.equal(copyHelper.options.ownershipBootstrapRoot, descriptor.fixtureRoot);
+		assert.equal(copyHelper.options.env?.npm_config_cache, undefined);
 	});
 
 	it.each([
@@ -518,6 +576,49 @@ describe("prepared packed consumer", () => {
 		const evidence = await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8");
 		assert.doesNotMatch(evidence, /npm-cli\.js[^\n]*cache[^\n]*add/);
 		assert.doesNotMatch(evidence, /npm-cli\.js[^\n]*ci/);
+	});
+
+	it.each([
+		["malformed JSON", async () => ({ rawOutput: "not-json\n" })],
+		["wrong cardinality", async ({ response }: { response: Record<string, unknown> }) => ({ output: { ...response, results: [] } })],
+		["unexpected membership", async ({ response }: { response: Record<string, unknown> }) => ({
+			output: { ...response, results: [{ integrity: "sha512-forged", status: "missing" }] },
+		})],
+		["duplicate membership", async ({ response }: { response: Record<string, unknown> }) => ({
+			output: { ...response, results: [
+				{ integrity: "sha512-a", status: "missing" },
+				{ integrity: "sha512-a", status: "missing" },
+			] },
+		})],
+		["out-of-root staging", async ({ response }: { response: Record<string, unknown> }) => ({
+			output: { ...response, stagingRoot: resolve(tmpdir(), "forged-staging") },
+		})],
+		["out-of-root partial", async ({ response }: { response: Record<string, unknown> }) => ({
+			output: { ...response, results: [{ integrity: "sha512-a", status: "copied", partialPath: resolve(tmpdir(), "forged.partial") }] },
+		})],
+	] as const)("rejects cache-copy result %s before publication", async (_label, onCopyHelper) => {
+		let publications = 0;
+		let installStarted = false;
+		await assert.rejects(prepareFixture({
+			registryArtifacts: _label === "duplicate membership"
+				? [
+					{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a" },
+					{ resolved: "https://registry.example.test/b.tgz", integrity: "sha512-b" },
+				]
+				: [{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a" }],
+			copyDecision: () => "copied",
+			onCopyHelper: onCopyHelper as CopyHelperCallback,
+			contentCache: {
+				createReadStream: () => new PassThrough(),
+				publishDestination: async () => { publications++; },
+			},
+			onOfflineInstall: () => { installStarted = true; },
+		}), /retained partial fixture and command evidence/);
+		assert.equal(publications, 0);
+		assert.equal(installStarted, false);
+		const fixtureRoot = join(roots.at(-1)!, "prepared-packed-consumer");
+		await assert.rejects(readdir(join(fixtureRoot, "cache-copy-staging")),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
 
 	it("runs the public cacache helper and transfers every authoritative path into a by-digest-readable cache", async () => {
@@ -605,6 +706,122 @@ describe("prepared packed consumer", () => {
 			`${FAILURE_PREFIX}: rejected forged authority must not mutate the requested external index`);
 	});
 
+	it("batch copy helper caps concurrency at three and joins out-of-order completions", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-helper-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const integrities = Array.from({ length: 8 }, (_, index) => `sha512-copy-${index}`);
+		const gates = integrities.map(() => deferred());
+		const admitted: number[] = [];
+		const completed: number[] = [];
+		let active = 0;
+		let maxActive = 0;
+		const copying = copyPackedConsumerCacheBatch(fixtureRoot, join(ambientRoot, "_cacache"), {
+			version: 1,
+			integrities,
+		}, {
+			nonce: () => "bounded",
+			copyByDigest: async (_cache: string, integrity: string) => {
+				const index = integrities.indexOf(integrity);
+				admitted.push(index);
+				active++;
+				maxActive = Math.max(maxActive, active);
+				await gates[index]!.promise;
+				completed.push(index);
+				active--;
+			},
+		});
+		await waitFor(() => admitted.length === 3);
+		gates[2]!.resolve();
+		await waitFor(() => admitted.length === 4);
+		gates[1]!.resolve();
+		await waitFor(() => admitted.length === 5);
+		gates[0]!.resolve();
+		await waitFor(() => admitted.length === 6);
+		gates[5]!.resolve();
+		await waitFor(() => admitted.length === 7);
+		gates[4]!.resolve();
+		await waitFor(() => admitted.length === 8);
+		for (const index of [3, 6, 7]) gates[index]!.resolve();
+		const result = await copying;
+		assert.equal(maxActive, 3);
+		assert.equal(result.maxActive, 3);
+		assert.equal(result.admitted, integrities.length);
+		assert.equal(result.completed, integrities.length);
+		assert.equal(active, 0);
+		assert.notDeepEqual(completed, [...completed].sort((left, right) => left - right));
+		assert.deepEqual(result.results.map((entry: { integrity: string }) => entry.integrity), integrities);
+	});
+
+	it("batch copy helper stops fatal admission, joins admitted copies, and aggregates partial cleanup failure", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-fatal-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-fatal-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const integrities = Array.from({ length: 7 }, (_, index) => `sha512-fatal-${index}`);
+		const gates = integrities.map(() => deferred());
+		const admitted: number[] = [];
+		const settled: number[] = [];
+		const removed: string[] = [];
+		const copying = copyPackedConsumerCacheBatch(fixtureRoot, join(ambientRoot, "_cacache"), {
+			version: 1,
+			integrities,
+		}, {
+			nonce: () => "fatal",
+			copyByDigest: async (_cache: string, integrity: string) => {
+				const index = integrities.indexOf(integrity);
+				admitted.push(index);
+				try { await gates[index]!.promise; } finally { settled.push(index); }
+			},
+			removePartial: async (path: string) => {
+				removed.push(path);
+				if (path.endsWith("00001.partial")) throw new Error("injected cleanup failure");
+			},
+		});
+		const observed = copying.then(() => undefined, (error: unknown) => error);
+		await waitFor(() => admitted.length === 3);
+		gates[1]!.reject(Object.assign(new Error("fatal cache read"), { code: "EIO" }));
+		await waitFor(() => settled.includes(1));
+		assert.deepEqual(admitted, [0, 1, 2]);
+		gates[0]!.resolve();
+		gates[2]!.resolve();
+		const error = await observed;
+		assert.ok(error instanceof AggregateError);
+		assert.deepEqual(settled.sort(), [0, 1, 2]);
+		assert.equal(removed.length, 3);
+		const messages = (error as AggregateError).errors.map((failure: Error) => `${failure.message} ${failure.cause instanceof Error ? failure.cause.message : ""}`).join("\n");
+		assert.match(messages, /fatal cache read/);
+		assert.match(messages, /injected cleanup failure/);
+	});
+
+	it("batch copy helper reports ENOENT as an exact miss and rejects forged authority before copy", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-miss-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-copy-miss-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const ambientCache = join(ambientRoot, "_cacache");
+		let copies = 0;
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 1,
+			integrities: ["sha512-missing"],
+		}, {
+			nonce: () => "missing",
+			copyByDigest: async () => {
+				copies++;
+				throw Object.assign(new Error("not present"), { code: "ENOENT" });
+			},
+		});
+		assert.equal(copies, 1);
+		assert.deepEqual(result.results, [{ integrity: "sha512-missing", status: "missing" }]);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, join(fixtureRoot, "_cacache"), {
+			version: 1,
+			integrities: ["sha512-forged"],
+		}, { copyByDigest: async () => { copies++; } }), /must not overlap/);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 1,
+			integrities: ["sha512-z", "sha512-a"],
+		}, { copyByDigest: async () => { copies++; } }), /sorted and unique/);
+		assert.equal(copies, 1, `${FAILURE_PREFIX}: invalid authority and input must fail before copy admission`);
+	});
+
 	it("copies many real cacache digests through public retained destination entries without mutating ambient indexes", async () => {
 		const ambientCache = await mkdtemp(join(tmpdir(), "bobbit-ambient-cache-unit-"));
 		roots.push(ambientCache);
@@ -649,119 +866,73 @@ describe("prepared packed consumer", () => {
 			`${FAILURE_PREFIX}: all exact ambient digests must avoid network fallback`);
 	});
 
-	it("bounds Windows direct CAS writers while joining every admitted transfer", async () => {
-		let activeWrites = 0;
-		let maximumActiveWrites = 0;
-		const transferredIntegrities: string[] = [];
-		const { calls } = await prepareFixture({
-			registryTarballCount: 12,
-			runtime: { platform: "win32", arch: "x64" },
-			contentCache: {
-				createReadStream: (cache, integrity) => {
-					const source = new PassThrough();
-					if (cache.includes("ambient-cache-read-only")) {
-						queueMicrotask(() => source.end(`artifact bytes for ${integrity}`));
-					} else {
-						queueMicrotask(() => source.end("verified transferred bytes"));
-					}
-					return source;
-				},
-				createWriteStream: (_path, integrity) => {
-					activeWrites++;
-					maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
-					transferredIntegrities.push(integrity);
-					const destination = new PassThrough();
-					destination.once("finish", () => { activeWrites--; });
-					return destination;
-				},
-			},
-		});
-
-		assert.equal(maximumActiveWrites, 3,
-			`${FAILURE_PREFIX}: Windows direct CAS writes must use the accepted bounded concurrency`);
-		assert.equal(activeWrites, 0, `${FAILURE_PREFIX}: every admitted cache write must settle before preparation advances`);
-		assert.equal(transferredIntegrities.length, 12);
-		assert.equal(new Set(transferredIntegrities).size, 12);
-		assert.equal(calls.filter(call => call.args.includes("cache") && call.args.includes("add")).length, 0,
-			`${FAILURE_PREFIX}: serialized exact hits must not fall back to network cache population`);
-	});
-
-	it("pre-arms real cacache settlement before a post-transfer deadline failure", async () => {
-		const ambientCache = await mkdtemp(join(tmpdir(), "bobbit-ambient-cache-unit-"));
-		roots.push(ambientCache);
-		const sourceContentCache = join(ambientCache, "_cacache");
-		const integrity = String(await cacache.put(
-			sourceContentCache,
-			"source-artifact",
-			Buffer.from("real cacache transfer bytes"),
-		));
-		assert.ok(await cacache.get.hasContent(sourceContentCache, integrity));
-		const ticks = [0, 0, 0, 0, 0, 0, 0, 0, 1_001];
-
-		await assert.rejects(prepareFixture({
-			ambientCache,
-			useRealContentCache: true,
-			registryArtifacts: [{
-				resolved: "https://registry.example.test/post-transfer-deadline.tgz",
-				integrity,
-			}],
-			runtime: { platform: "win32", arch: "x64" },
-			preparationTimeoutMs: 1_000,
-			now: () => ticks.shift() ?? 1_001,
-		}), /retained partial fixture and command evidence/);
-
-		const runRoot = roots.at(-1)!;
-		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
-		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
-		const transferFailure = evidence.error.errors[0];
-		assert.match(transferFailure.message, /deadline exhausted before pre-publication verification/);
-		assert.deepEqual(transferFailure.cacheOperation.streams, ["source:closed", "destination:closed"],
-			`${FAILURE_PREFIX}: completion observers must settle from their pre-armed state`);
-		assert.doesNotMatch(JSON.stringify(transferFailure), /ReferenceError/,
-			`${FAILURE_PREFIX}: late finished attachment must not replace transfer diagnostics`);
-		const destinationContentCache = join(fixtureRoot, "npm-cache", "_cacache");
-		assert.equal(await cacache.get.hasContent(destinationContentCache, integrity), false,
-			`${FAILURE_PREFIX}: deadline failure before publication must not expose CAS content`);
-		const destinationEntries = await readdir(destinationContentCache, { recursive: true })
-			.catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error));
-		assert.equal(destinationEntries.some(entry => String(entry).includes(".packed-consumer-")), false,
-			`${FAILURE_PREFIX}: failed transfer must remove its completed partial before rejection`);
-	});
-
-	it("falls back by exact URL for source misses, corrupt content, and entries without integrity", async () => {
+	it("falls back by exact URL for helper misses, corrupt copied content, and entries without integrity", async () => {
 		const missingUrl = "https://registry.example.test/missing.tgz";
 		const corruptUrl = "https://registry.example.test/corrupt.tgz";
 		const noIntegrityUrl = "https://registry.example.test/no-integrity.tgz";
-		const sourceIntegrities: string[] = [];
-		const { calls } = await prepareFixture({
+		let corruptVerificationAttempts = 0;
+		const removedFinalPaths: string[] = [];
+		const { calls, descriptor } = await prepareFixture({
 			registryArtifacts: [
 				{ resolved: missingUrl, integrity: "sha512-missing" },
 				{ resolved: corruptUrl, integrity: "sha512-corrupt" },
 				{ resolved: noIntegrityUrl },
 			],
+			copyDecision: integrity => integrity === "sha512-corrupt" ? "copied" : "missing",
 			contentCache: {
-				createReadStream: (cache, integrity) => {
+				createReadStream: (_cache, integrity) => {
 					const source = new PassThrough();
-					if (!cache.includes("ambient-cache-read-only")) {
+					if (integrity === "sha512-corrupt" && corruptVerificationAttempts++ === 0) {
+						queueMicrotask(() => source.destroy(Object.assign(new Error("copied content failed integrity"), { code: "EINTEGRITY" })));
+					} else {
 						source.end("fetched fallback bytes");
-						return source;
 					}
-					sourceIntegrities.push(integrity);
-					const code = integrity === "sha512-missing" ? "ENOENT" : "EINTEGRITY";
-					queueMicrotask(() => source.destroy(Object.assign(new Error("unavailable source"), { code })));
 					return source;
 				},
-				createWriteStream: () => new PassThrough(),
+				removeDestination: async path => { removedFinalPaths.push(path); },
 			},
 		});
 
-		assert.deepEqual(sourceIntegrities, ["sha512-corrupt", "sha512-missing"],
-			`${FAILURE_PREFIX}: every integrity-bearing source is read directly without a preflight probe`);
 		const cacheAdds = calls.filter(call => call.args.includes("cache") && call.args.includes("add"));
 		assert.equal(cacheAdds.length, 1);
 		assert.deepEqual(cacheAdds[0]?.args.slice(cacheAdds[0]!.args.indexOf("--cache") + 2),
 			[corruptUrl, missingUrl, noIntegrityUrl].sort(),
 			`${FAILURE_PREFIX}: fallback must contain only exact locked URLs in deterministic order`);
+		assert.equal(removedFinalPaths.length, 1, `${FAILURE_PREFIX}: corrupt copied content must remove only its authorized final path`);
+		assert.ok(isStrictChild(join(descriptor.cacheDir, "_cacache"), removedFinalPaths[0]!));
+		assert.equal(corruptVerificationAttempts, 2, `${FAILURE_PREFIX}: corrupt digest must pass final verification after exact fallback`);
+	});
+
+	it("aggregates sequential publication and staging cleanup failures without admitting fallback or install", async () => {
+		let cleanupCalls = 0;
+		let cacheStarted = false;
+		let installStarted = false;
+		await assert.rejects(prepareFixture({
+			registryArtifacts: [{
+				resolved: "https://registry.example.test/publication-failure.tgz",
+				integrity: "sha512-publication-failure",
+			}],
+			copyDecision: () => "copied",
+			contentCache: {
+				createReadStream: () => new PassThrough(),
+				publishDestination: async () => { throw new Error("injected link failure"); },
+			},
+			removeOwnedPathFn: async () => {
+				cleanupCalls++;
+				throw new Error("injected staging cleanup failure");
+			},
+			onCacheCommand: async () => { cacheStarted = true; },
+			onOfflineInstall: () => { installStarted = true; },
+		}), /retained partial fixture and command evidence/);
+		assert.equal(cleanupCalls, 1);
+		assert.equal(cacheStarted, false);
+		assert.equal(installStarted, false);
+		const fixtureRoot = join(roots.at(-1)!, "prepared-packed-consumer");
+		const evidence = await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8");
+		assert.match(evidence, /injected link failure/);
+		assert.match(evidence, /injected staging cleanup failure/);
+		assert.equal(existsSync(join(fixtureRoot, "cache-copy-staging")), true,
+			`${FAILURE_PREFIX}: failed staging cleanup must retain evidence`);
 	});
 
 	it("blocks offline install and descriptor publication when a fallback digest is still absent", async () => {
@@ -791,73 +962,6 @@ describe("prepared packed consumer", () => {
 		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing\)/);
 	});
 
-	it("bounds stalled source digest reads and settles every admitted stream before rejection", async () => {
-		const timerCallbacks: Array<() => void> = [];
-		const sources: PassThrough[] = [];
-		const destinations: PassThrough[] = [];
-		let sourceCloses = 0;
-		let destinationCloses = 0;
-		let cacheCommandStarted = false;
-		let offlineStarted = false;
-		const preparing = prepareFixture({
-			registryArtifacts: Array.from({ length: 12 }, (_, index) => ({
-				resolved: `https://registry.example.test/deadline-${index}.tgz`,
-				integrity: `sha512-deadline-${index}`,
-			})),
-			runtime: { platform: "win32", arch: "x64" },
-			contentCache: {
-				createReadStream: () => {
-					const stream = new PassThrough();
-					stream.once("close", () => { sourceCloses++; });
-					sources.push(stream);
-					return stream;
-				},
-				createWriteStream: () => {
-					const stream = new PassThrough();
-					stream.once("close", () => { destinationCloses++; });
-					destinations.push(stream);
-					return stream;
-				},
-			},
-			setTimer: callback => {
-				timerCallbacks.push(callback);
-				return Symbol("cache-transfer-deadline");
-			},
-			clearTimer: () => {},
-			onCacheCommand: async () => { cacheCommandStarted = true; },
-			onOfflineInstall: () => { offlineStarted = true; },
-		});
-		const observed = preparing.then(
-			() => ({ error: undefined }),
-			error => ({ error }),
-		);
-
-		await waitFor(() => sources.length === 3 && timerCallbacks.length === 3);
-		for (const expire of [...timerCallbacks]) expire();
-		const { error } = await observed;
-		assert.ok(error instanceof Error);
-		assert.match(error.message, /cache transfer failed/);
-		assert.equal(sources.length, 3, `${FAILURE_PREFIX}: a transfer failure must stop admission beyond the bounded Windows pool`);
-		assert.equal(destinations.length, 3);
-		assert.ok(sources.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted source must be destroyed`);
-		assert.ok(destinations.every(stream => stream.destroyed), `${FAILURE_PREFIX}: every admitted destination must be destroyed`);
-		assert.equal(sourceCloses, 3, `${FAILURE_PREFIX}: rejection must join every admitted source close`);
-		assert.equal(destinationCloses, 3, `${FAILURE_PREFIX}: rejection must join every admitted destination close`);
-		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: fallback must not start after transfer expiry`);
-		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after transfer expiry`);
-		const runRoot = roots.at(-1)!;
-		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
-			(candidate: NodeJS.ErrnoException) => candidate.code === "ENOENT");
-		const evidence = await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8");
-		assert.match(evidence, /"stage": "cache transfer"/);
-		assert.match(evidence, /deadline-0\.tgz/);
-		assert.match(evidence, /sha512-deadline-0/);
-		assert.match(evidence, /"deadlineAborted": true/);
-		assert.match(evidence, /"progress":\s*\{[^}]*"total": 12[^}]*"admitted": 3[^}]*"active": 0[^}]*"maxActive": 3/s);
-		assert.match(evidence, /source:closed/);
-		assert.match(evidence, /destination:closed/);
-	});
-
 	it("bounds stalled destination digest verification and closes its read and discard streams", async () => {
 		type TimerRecord = { callback: () => void; cleared: boolean };
 		const timers: TimerRecord[] = [];
@@ -869,6 +973,7 @@ describe("prepared packed consumer", () => {
 		const integrity = "sha512-verify-deadline";
 		const preparing = prepareFixture({
 			registryArtifacts: [{ resolved, integrity }],
+			copyDecision: () => "copied",
 			contentCache: {
 				createReadStream: cache => {
 					const stream = new PassThrough();
