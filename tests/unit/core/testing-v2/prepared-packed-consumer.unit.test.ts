@@ -34,6 +34,8 @@ type CommandOptions = {
 	env?: NodeJS.ProcessEnv;
 	timeoutMs: number;
 	totalTimeoutMs?: number;
+	maxOutputBytes?: number;
+	input?: string | Buffer;
 	repoRoot?: string;
 	ownershipBootstrapRoot?: string;
 };
@@ -68,11 +70,9 @@ type ContentCache = {
 
 type PathHelperCallback = (context: {
 	request: { fixtureRoot: string; destination: string; integrities: string[] };
-	requestPath: string;
-	resultPath: string;
 	entries: Array<{ integrity: string; path: string }>;
 	options: CommandOptions;
-}) => void | { output?: unknown; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; code?: number; skipOutput?: boolean }>;
+}) => void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean }>;
 
 type PreparedDescriptor = {
 	version: number;
@@ -241,14 +241,14 @@ async function prepareFixture({
 			calls.push({ command, args: [...args], options: { ...options, env: { ...options.env } } });
 			const result = { command, args: [...args], code: 0, stdout: "", stderr: "" };
 			if (args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")) {
-				assert.equal(args.length, 2, `${FAILURE_PREFIX}: cache-path helper receives only its script and owned request`);
-				const requestPath = args[1]!;
-				const resultPath = `${requestPath}.result.json`;
-				const request = JSON.parse(await readFile(requestPath, "utf8")) as {
+				assert.equal(args.length, 2, `${FAILURE_PREFIX}: cache-path helper receives only its script and authoritative fixture root`);
+				assert.ok(options.input, `${FAILURE_PREFIX}: cache-path helper request must use bounded stdin`);
+				const request = JSON.parse(String(options.input)) as {
 					fixtureRoot: string;
 					destination: string;
 					integrities: string[];
 				};
+				assert.equal(args[1], request.fixtureRoot);
 				let entries: Array<{ integrity: string; path: string }>;
 				if (useRealContentCache) {
 					entries = [];
@@ -266,9 +266,9 @@ async function prepareFixture({
 						path: join(request.destination, "resolved", encodeURIComponent(integrity)),
 					}));
 				}
-				const decision = await onPathHelper?.({ request, requestPath, resultPath, entries, options });
+				const decision = await onPathHelper?.({ request, entries, options });
 				const output = decision && "output" in decision ? decision.output : entries;
-				if (!decision?.skipOutput) await writeFile(resultPath, `${JSON.stringify(output)}\n`);
+				if (!decision?.skipOutput) result.stdout = decision?.rawOutput ?? `${JSON.stringify(output)}\n`;
 				result.code = decision?.code ?? 0;
 				return result;
 			}
@@ -418,7 +418,7 @@ describe("prepared packed consumer", () => {
 			`${FAILURE_PREFIX}: an exact ambient hit must not perform an online fallback`);
 	});
 
-	it("invokes one isolated path helper with only owned request data and the remaining absolute budget", async () => {
+	it("invokes one isolated path helper with fixed root authority, bounded stdin, and the remaining absolute budget", async () => {
 		const firstIntegrity = "sha512-helper-a";
 		const secondIntegrity = "sha512-helper-b";
 		const { runRoot, calls, descriptor } = await prepareFixture({
@@ -441,11 +441,13 @@ describe("prepared packed consumer", () => {
 		const helper = helperCalls[0]!;
 		assert.equal(helper.command, process.execPath);
 		assert.equal(helper.args.length, 2, `${FAILURE_PREFIX}: helper receives no ambient cache or integrity argv payload`);
-		const request = JSON.parse(await readFile(helper.args[1]!, "utf8"));
+		assert.equal(helper.args[1], descriptor.fixtureRoot, `${FAILURE_PREFIX}: argv must carry the independent fixture authority`);
+		const request = JSON.parse(String(helper.options.input));
 		assert.deepEqual(Object.keys(request).sort(), ["destination", "fixtureRoot", "integrities"]);
 		assert.equal(request.fixtureRoot, descriptor.fixtureRoot);
 		assert.equal(request.destination, join(descriptor.cacheDir, "_cacache"));
 		assert.deepEqual(request.integrities, [firstIntegrity, secondIntegrity]);
+		assert.equal(helper.options.maxOutputBytes, 8 * 1024 * 1024);
 		assert.equal(helper.options.cwd, REPO_ROOT);
 		assert.equal(helper.options.repoRoot, REPO_ROOT);
 		assert.equal(helper.options.ownershipBootstrapRoot, descriptor.fixtureRoot);
@@ -460,10 +462,7 @@ describe("prepared packed consumer", () => {
 	});
 
 	it.each([
-		["malformed JSON", async ({ resultPath }: { resultPath: string }) => {
-			await writeFile(resultPath, "not-json\n");
-			return { skipOutput: true };
-		}],
+		["malformed JSON", async () => ({ rawOutput: "not-json\n" })],
 		["missing output", async () => ({ skipOutput: true })],
 		["duplicate integrity", async ({ entries }: { entries: Array<{ integrity: string; path: string }> }) => ({
 			output: [entries[0], { ...entries[0] }],
@@ -477,7 +476,7 @@ describe("prepared packed consumer", () => {
 		["stale integrity", async ({ entries }: { entries: Array<{ integrity: string; path: string }> }) => ({
 			output: [{ ...entries[0], integrity: "sha512-stale" }],
 		})],
-		["failed helper", async () => ({ code: 17 })],
+		["failed helper", async () => ({ code: 17, skipOutput: true })],
 	] as const)("blocks transfer, fallback, install, and descriptor after %s", async (_label, onPathHelper) => {
 		let sourceReads = 0;
 		let offlineStarted = false;
@@ -533,15 +532,13 @@ describe("prepared packed consumer", () => {
 			Buffer.from(`public helper artifact ${index}`),
 		))));
 		const ambientIndexBefore = await cacache.ls(sourceContentCache);
-		const requestPath = join(fixtureRoot, "cache-paths.request.json");
-		await writeFile(requestPath, `${JSON.stringify({
+		const request = {
 			fixtureRoot,
 			destination: destinationContentCache,
 			integrities,
-		})}\n`);
+		};
 
-		await resolvePackedConsumerCachePaths(requestPath);
-		const results = JSON.parse(await readFile(`${requestPath}.result.json`, "utf8")) as Array<{ integrity: string; path: string }>;
+		const results = await resolvePackedConsumerCachePaths(fixtureRoot, request) as Array<{ integrity: string; path: string }>;
 		assert.deepEqual(results.map(result => result.integrity), integrities);
 		assert.equal(new Set(results.map(result => resolve(result.path))).size, integrities.length);
 		for (const result of results) {
@@ -564,8 +561,48 @@ describe("prepared packed consumer", () => {
 		assert.deepEqual(Object.keys(await cacache.ls(destinationContentCache)).sort(), integrities
 			.map(integrity => `bobbit-packed-consumer-path:${integrity}`)
 			.sort());
-		await assert.rejects(resolvePackedConsumerCachePaths(requestPath), /result already exists/,
-			`${FAILURE_PREFIX}: the helper must never replace a stale result file`);
+	});
+
+	it("rejects forged root, nonfixed destination, bounded types, and mismatched public index identity before recording paths", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-authority-unit-"));
+		const externalRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-external-unit-"));
+		roots.push(fixtureRoot, externalRoot);
+		const destination = join(fixtureRoot, "npm-cache", "_cacache");
+		const externalDestination = join(externalRoot, "npm-cache", "_cacache");
+		const integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
+		const valid = { fixtureRoot, destination, integrities: [integrity] };
+		let insertions = 0;
+		const indexInsert = async (_cache: string, key: string, selectedIntegrity: string) => {
+			insertions++;
+			return { key, integrity: selectedIntegrity, path: join(destination, "content", String(insertions)) };
+		};
+
+		await assert.rejects(resolvePackedConsumerCachePaths(fixtureRoot, {
+			...valid,
+			fixtureRoot: externalRoot,
+			destination: externalDestination,
+		}, { indexInsert }), /does not match authoritative fixture root/);
+		await assert.rejects(resolvePackedConsumerCachePaths(fixtureRoot, {
+			...valid,
+			destination: join(fixtureRoot, "other", "_cacache"),
+		}, { indexInsert }), /must equal the authoritative fixture/);
+		await assert.rejects(resolvePackedConsumerCachePaths(fixtureRoot, {
+			...valid,
+			integrities: "not-an-array",
+		} as unknown as typeof valid, { indexInsert }), /must be an array/);
+		assert.equal(insertions, 0, `${FAILURE_PREFIX}: invalid authority and bounded types must fail before index mutation`);
+
+		for (const [label, returned] of [
+			["key", { key: "wrong", integrity, path: join(destination, "content", "a") }],
+			["integrity", { key: `bobbit-packed-consumer-path:${integrity}`, integrity: `${integrity}wrong`, path: join(destination, "content", "b") }],
+			["path", { key: `bobbit-packed-consumer-path:${integrity}`, integrity, path: join(externalRoot, "content") }],
+		] as const) {
+			await assert.rejects(resolvePackedConsumerCachePaths(fixtureRoot, valid, {
+				indexInsert: async () => returned,
+			}), new RegExp(`mismatched(?: canonical)? ${label}|out-of-root`));
+		}
+		assert.deepEqual(await cacache.ls(externalDestination), {},
+			`${FAILURE_PREFIX}: rejected forged authority must not mutate the requested external index`);
 	});
 
 	it("copies many real cacache digests through public retained destination entries without mutating ambient indexes", async () => {

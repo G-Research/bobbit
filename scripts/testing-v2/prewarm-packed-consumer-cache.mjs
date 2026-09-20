@@ -21,7 +21,7 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const CACHE_PATH_HELPER_NAME = "resolve-packed-consumer-cache-paths.mjs";
-const CACHE_PATH_RESULT_SUFFIX = ".result.json";
+const MAX_CACHE_PATH_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CACHE_PATH_RESULT_BYTES = 8 * 1024 * 1024;
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
@@ -133,7 +133,7 @@ async function defaultSpawnOwned(command, args, options) {
 	const tracked = spawnTracked(command, args, {
 		cwd: options.cwd,
 		env: options.env,
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 		windowsHide: true,
 	});
 	// Expose ownership in the same turn as child creation. A caller can then
@@ -197,6 +197,8 @@ export async function runOwnedCommand(command, args, {
 	timeoutMs,
 	totalTimeoutMs,
 	maxOutputBytes = MAX_OUTPUT_BYTES,
+	input,
+	maxInputBytes = MAX_CACHE_PATH_REQUEST_BYTES,
 	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	treeExitTimeoutMs = TREE_EXIT_TIMEOUT_MS,
 	repoRoot = REPO_ROOT,
@@ -214,6 +216,14 @@ export async function runOwnedCommand(command, args, {
 		throw new Error("totalTimeoutMs must be a positive number when provided");
 	}
 	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("maxOutputBytes must be a positive number");
+	if (!Number.isFinite(maxInputBytes) || maxInputBytes <= 0) throw new Error("maxInputBytes must be a positive number");
+	if (input !== undefined && typeof input !== "string" && !Buffer.isBuffer(input)) {
+		throw new Error("input must be a string or Buffer when provided");
+	}
+	const inputBuffer = input === undefined ? undefined : Buffer.isBuffer(input) ? input : Buffer.from(input);
+	if (inputBuffer && inputBuffer.byteLength > maxInputBytes) {
+		throw new Error(`${displayCommand(command, args)} input exceeds the ${maxInputBytes}-byte input limit`);
+	}
 	if (!Number.isFinite(ownershipEstablishmentTimeoutMs) || ownershipEstablishmentTimeoutMs <= 0) {
 		throw new Error("ownershipEstablishmentTimeoutMs must be a positive number");
 	}
@@ -247,6 +257,8 @@ export async function runOwnedCommand(command, args, {
 	let resolveCloseResult;
 	const closeResult = new Promise(resolveClose => { resolveCloseResult = resolveClose; });
 	let outputDetached = false;
+	let inputDestroyed = false;
+	let transportResult = Promise.resolve();
 
 	const startTreeExitVerification = () => {
 		if (treeExitResult) return treeExitResult;
@@ -274,6 +286,10 @@ export async function runOwnedCommand(command, args, {
 		killRequested = true;
 		armCompletionTimeout();
 		resolveKillRequested();
+		if (inputBuffer && child?.stdin && !inputDestroyed) {
+			inputDestroyed = true;
+			child.stdin.destroy(error);
+		}
 		try {
 			tracked.killTree("SIGKILL");
 		} catch (killFailure) {
@@ -322,6 +338,25 @@ export async function runOwnedCommand(command, args, {
 		child.stderr?.on("data", collectStderr);
 		child.once("error", onError);
 		child.once("close", onClose);
+		if (inputBuffer) {
+			const settleStream = (stream, label) => stream
+				? finished(stream).catch(error => {
+					requestOwnedKill(new Error(`${rendered} ${label} transport failed`, { cause: error }));
+				})
+				: Promise.resolve(requestOwnedKill(new Error(`${rendered} has no ${label} transport`)));
+			transportResult = Promise.all([
+				settleStream(child.stdin, "stdin"),
+				settleStream(child.stdout, "stdout"),
+				settleStream(child.stderr, "stderr"),
+			]);
+			if (!terminalError) {
+				try {
+					child.stdin.end(inputBuffer);
+				} catch (error) {
+					requestOwnedKill(new Error(`${rendered} stdin transport failed`, { cause: error }));
+				}
+			}
+		}
 		if (terminalError) requestOwnedKill(terminalError);
 		return tracked;
 	};
@@ -368,6 +403,7 @@ export async function runOwnedCommand(command, args, {
 				env,
 				repoRoot,
 				ownershipBootstrapRoot,
+				input: inputBuffer,
 				signal: spawnAbort.signal,
 				onSpawned: exposeSpawned,
 			}));
@@ -467,7 +503,7 @@ export async function runOwnedCommand(command, args, {
 		startTreeExitVerification();
 		armCompletionTimeout();
 	}
-	const completionResult = Promise.all([observedCloseResult, startTreeExitVerification()]);
+	const completionResult = Promise.all([observedCloseResult, startTreeExitVerification(), transportResult]);
 	completionTimedOut = await Promise.race([
 		completionResult.then(() => false),
 		completionTimeoutResult.then(() => true),
@@ -981,53 +1017,38 @@ async function resolveDestinationContentPaths({
 		.filter(integrity => typeof integrity === "string" && integrity.length > 0))].sort();
 	if (integrities.length === 0) return new Map();
 
-	const nonce = randomUUID();
-	const requestPath = join(fixtureRoot, `cache-paths-${nonce}.request.json`);
-	const resultPath = `${requestPath}${CACHE_PATH_RESULT_SUFFIX}`;
-	assertOwnedPath(runRoot, requestPath, "cache path request");
-	assertOwnedPath(runRoot, resultPath, "cache path result");
 	const request = {
 		fixtureRoot,
 		destination: destinationContentCache,
 		integrities,
 	};
-	await writeFile(requestPath, `${JSON.stringify(request)}\n`, { flag: "wx" });
-	const requestStat = await stat(requestPath);
-	const staleResult = await stat(resultPath).catch(error => error?.code === "ENOENT" ? undefined : Promise.reject(error));
-	if (staleResult) throw new Error(`Packed-consumer cache path result existed before helper invocation: ${resultPath}`);
-
+	const input = `${JSON.stringify(request)}\n`;
+	if (Buffer.byteLength(input) > MAX_CACHE_PATH_REQUEST_BYTES) {
+		throw new Error(`Packed-consumer cache path request exceeds ${MAX_CACHE_PATH_REQUEST_BYTES} bytes`);
+	}
 	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_PATH_HELPER_NAME);
 	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
-	await mkdir(helperEnv.TEMP, { recursive: true });
 	const totalTimeoutMs = remainingPreparationMs("destination cache path resolution");
-	const result = await runCommand(process.execPath, [helperPath, requestPath], {
+	const result = await runCommand(process.execPath, [helperPath, fixtureRoot], {
 		cwd: repoRoot,
 		env: helperEnv,
 		timeoutMs: totalTimeoutMs,
 		totalTimeoutMs,
+		maxOutputBytes: MAX_CACHE_PATH_RESULT_BYTES,
+		input,
 		repoRoot,
 		ownershipBootstrapRoot: fixtureRoot,
 	});
 	commands.push(result);
 	requireSuccess(result);
-	if (result.stdout.length > 0) {
-		throw new Error("Packed-consumer cache path helper must not emit stdout");
-	}
-
-	const resultStat = await stat(resultPath).catch(error => {
-		throw new Error(`Packed-consumer cache path helper did not publish ${resultPath}`, { cause: error });
-	});
-	if (!resultStat.isFile() || resultStat.size <= 0 || resultStat.size > MAX_CACHE_PATH_RESULT_BYTES) {
-		throw new Error(`Packed-consumer cache path result must be a non-empty file no larger than ${MAX_CACHE_PATH_RESULT_BYTES} bytes`);
-	}
-	if (resultStat.mtimeMs < requestStat.mtimeMs) {
-		throw new Error("Packed-consumer cache path helper published a stale result");
+	if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_PATH_RESULT_BYTES) {
+		throw new Error(`Packed-consumer cache path helper must emit non-empty JSON no larger than ${MAX_CACHE_PATH_RESULT_BYTES} bytes`);
 	}
 	let parsed;
 	try {
-		parsed = JSON.parse(await readFile(resultPath, "utf8"));
+		parsed = JSON.parse(result.stdout);
 	} catch (error) {
-		throw new Error(`Packed-consumer cache path helper published malformed JSON: ${error.message}`, { cause: error });
+		throw new Error(`Packed-consumer cache path helper emitted malformed JSON: ${error.message}`, { cause: error });
 	}
 	if (!Array.isArray(parsed) || parsed.length !== integrities.length) {
 		throw new Error(`Packed-consumer cache path helper must return exactly ${integrities.length} results`);

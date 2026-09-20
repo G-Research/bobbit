@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -9,10 +9,12 @@ import {
 	preparePackedConsumerFixture,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
-import { killAllTracked, spawnTracked } from "../../../src/server/agent/spawn-tree.ts";
+import { removeOwnedPath } from "../../../scripts/testing-v2/owned-path-cleanup.mjs";
+import { spawnTracked, type TrackedChild } from "../../../src/server/agent/spawn-tree.ts";
 
 const REPO_ROOT = process.cwd();
 const roots: string[] = [];
+const owners: Array<{ tracked: TrackedChild; closed: Promise<void>; treeExitVerified: boolean }> = [];
 
 function isAlive(pid: number | undefined): boolean {
 	if (!pid || !Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -24,9 +26,32 @@ function isAlive(pid: number | undefined): boolean {
 	}
 }
 
-after(() => {
-	try { killAllTracked("SIGKILL", true); } catch { /* best effort */ }
-	for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
+after(async () => {
+	const shutdownFailures: unknown[] = [];
+	for (const owner of owners) {
+		try { owner.tracked.killTree("SIGKILL"); } catch (error) { shutdownFailures.push(error); }
+		const settled = await Promise.allSettled([
+			owner.closed,
+			owner.tracked.waitForTreeExit(10_000).then(verified => {
+				if (verified !== true) throw new Error("tracked helper tree exit was not verified");
+				owner.treeExitVerified = true;
+			}),
+		]);
+		for (const result of settled) if (result.status === "rejected") shutdownFailures.push(result.reason);
+	}
+	if (shutdownFailures.length > 0) {
+		throw new AggregateError(shutdownFailures, "packed cache helper teardown could not prove every process tree stopped; retained roots");
+	}
+	for (const root of roots) {
+		assert.equal(owners.every(owner => owner.treeExitVerified), true,
+			"owned-root deletion must be admitted only after every helper tree exit is verified");
+		await removeOwnedPath(root, {
+			ownerRoot: root,
+			allowOwnerRoot: true,
+			owner: { kind: "coordinator", id: "packed-cache-path-helper-shutdown-test" },
+			lifecycle: { phase: "after verified helper tree exit", owners: owners.length },
+		});
+	}
 });
 
 test("stalled cache-path helper reaps its descendant before preparation rejects", { timeout: 40_000 }, async () => {
@@ -72,14 +97,23 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 					env: options.env as NodeJS.ProcessEnv,
 					timeoutMs: options.timeoutMs as number,
 					totalTimeoutMs: options.totalTimeoutMs as number,
+					input: options.input as string,
+					maxOutputBytes: options.maxOutputBytes as number,
 					treeExitTimeoutMs: 10_000,
-					spawnOwned: async (ownedCommand: string, ownedArgs: string[], ownedOptions: Record<string, unknown>) =>
-						spawnTracked(ownedCommand, ownedArgs, {
+					spawnOwned: async (ownedCommand: string, ownedArgs: string[], ownedOptions: Record<string, unknown>) => {
+						const tracked = spawnTracked(ownedCommand, ownedArgs, {
 							cwd: ownedOptions.cwd as string,
 							env: ownedOptions.env as NodeJS.ProcessEnv,
-							stdio: ["ignore", "pipe", "pipe"],
+							stdio: ["pipe", "pipe", "pipe"],
 							windowsHide: true,
-						}),
+						});
+						const closed = new Promise<void>((resolve, reject) => {
+							tracked.child.once("error", reject);
+							tracked.child.once("close", () => resolve());
+						});
+						owners.push({ tracked, closed, treeExitVerified: false });
+						return tracked;
+					},
 				});
 			}
 			const result = { command, args: [...args], code: 0, stdout: "", stderr: "" };
@@ -127,4 +161,6 @@ test("stalled cache-path helper reaps its descendant before preparation rejects"
 	const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
 	assert.equal(isCompleteOwnedCommandShutdown(evidence.error.shutdown), true);
 	assert.match(evidence.error.message, /total deadline|timed out/);
+	assert.equal(existsSync(runRoot), true,
+		"failed preparation must retain its authoritative root until async teardown independently re-verifies every owner");
 });

@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
@@ -71,6 +71,8 @@ type RunCommandOptions = {
 	env: NodeJS.ProcessEnv;
 	timeoutMs: number;
 	totalTimeoutMs?: number;
+	input?: string | Buffer;
+	maxOutputBytes?: number;
 };
 
 function commandResult(command: string, args: string[], overrides: Partial<{
@@ -156,8 +158,12 @@ describe("packed-consumer offline install contract", () => {
 			"cache layout must never depend on a private subpath or hand-coded content version");
 		assert.match(CACHE_PATH_HELPER_SOURCE, /import cacache from "cacache"/,
 			"the path helper must use only cacache's public root export");
-		assert.match(CACHE_PATH_HELPER_SOURCE, /cacache\.index\.insert\(destination, `bobbit-packed-consumer-path:\$\{integrity\}`, integrity\)/,
+		assert.match(CACHE_PATH_HELPER_SOURCE, /indexInsert\(destination, key, integrity\)/,
 			"public index insertion must provide cacache's authoritative destination path");
+		assert.match(CACHE_PATH_HELPER_SOURCE, /entry\.key !== key/,
+			"the helper must bind every returned public entry to its requested key");
+		assert.match(CACHE_PATH_HELPER_SOURCE, /entry\.integrity !== integrity/,
+			"the helper must bind every returned public entry to its canonical requested integrity");
 		assert.doesNotMatch(CACHE_PATH_HELPER_SOURCE, /cacache\.put\.stream|cacache\.index\.(?:delete|remove)|cacache\.rm/,
 			"the helper must retain synthetic entries and never start another uncancellable content operation");
 		assert.doesNotMatch(source, /cacache\.put\.stream/,
@@ -170,8 +176,10 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
 		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
 			"cache population must retain the accepted bounded concurrency");
-		assert.match(source, /runCommand\(process\.execPath, \[helperPath, requestPath\]/,
-			"all path resolution must run in one deadline-owned helper process");
+		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot\]/,
+			"all path resolution must run in one deadline-owned helper with independent root authority");
+		assert.match(source, /input,/,
+			"the untrusted cache-path request must use deadline-owned stdin instead of parent filesystem transport");
 		assert.match(source, /ownershipBootstrapRoot: fixtureRoot/,
 			"the helper process must bootstrap ownership only inside the retained fixture root");
 		assert.match(source, /await Promise\.allSettled\([\s\S]{0,200}CACHE_WORKER_COUNT/,
@@ -246,17 +254,18 @@ describe("packed-consumer offline install contract", () => {
 					calls.push({ args: [...args], cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs });
 					nowMs += 5_000;
 					if (args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")) {
-						const requestPath = args[1]!;
-						const request = JSON.parse(readFileSync(requestPath, "utf8")) as {
+						const request = JSON.parse(String(options.input)) as {
+							fixtureRoot: string;
 							destination: string;
 							integrities: string[];
 						};
-						writeFileSync(`${requestPath}.result.json`, `${JSON.stringify(request.integrities.map(integrity => ({
+						assert.equal(args[1], request.fixtureRoot,
+							"cache helper argv must carry authority independently of stdin data");
+						order.push("paths");
+						return commandResult(command, args, { stdout: `${JSON.stringify(request.integrities.map(integrity => ({
 							integrity,
 							path: join(request.destination, "resolved", encodeURIComponent(integrity)),
-						})))}\n`);
-						order.push("paths");
-						return commandResult(command, args);
+						})))}\n` });
 					}
 					if (args.includes("pack")) {
 						order.push("pack");
@@ -703,6 +712,119 @@ describe("packed-consumer offline install contract", () => {
 		await assert.rejects(running, /exceeded the 4-byte output limit/);
 		assert.equal(killCount, 1, "overflow must request one owned kill");
 		assert.equal(completionJoins, 1, "failure must join verified tree completion");
+	});
+
+	it("joins blocked stdin transport under the immutable total deadline and kills once", async () => {
+		const stdin = new Writable({ write() { /* deliberately block drain */ } });
+		const child = Object.assign(new EventEmitter(), {
+			pid: 7070,
+			stdin,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let fireTotalDeadline: (() => void) | undefined;
+		let killCount = 0;
+		let joins = 0;
+		const running = runOwnedCommand("node", ["helper.mjs", "fixture-root"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 100,
+			totalTimeoutMs: 100,
+			now: () => 0,
+			input: JSON.stringify({ bounded: true }),
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => {
+					killCount++;
+					child.stdout.end();
+					child.stderr.end();
+					child.emit("close", null, "SIGKILL");
+				},
+				waitForTreeExit: async () => { joins++; return true; },
+			}),
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				if (timeoutMs === 100) fireTotalDeadline = callback;
+				return Symbol(`timer-${timeoutMs}`);
+			},
+			clearTimer: () => {},
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		invokeTimer(fireTotalDeadline, "total deadline must remain armed while stdin is blocked");
+		await assert.rejects(running, /100ms total deadline/);
+		assert.equal(stdin.destroyed, true, "timeout must destroy the blocked request transport");
+		assert.equal(killCount, 1);
+		assert.equal(joins, 1);
+	});
+
+	it("treats stdin errors as terminal and waits for response streams plus verified tree exit", async () => {
+		const stdin = new Writable({
+			write(_chunk, _encoding, callback) { callback(new Error("injected stdin failure")); },
+		});
+		const child = Object.assign(new EventEmitter(), {
+			pid: 7171,
+			stdin,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let killCount = 0;
+		let joins = 0;
+		const running = runOwnedCommand("node", ["helper.mjs", "fixture-root"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 1_000,
+			input: "{}\n",
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => {
+					killCount++;
+					queueMicrotask(() => {
+						child.stdout.end();
+						child.stderr.end();
+						child.emit("close", null, "SIGKILL");
+					});
+				},
+				waitForTreeExit: async () => { joins++; return true; },
+			}),
+		});
+		await assert.rejects(running, /stdin transport failed/);
+		assert.equal(killCount, 1);
+		assert.equal(joins, 1);
+		assert.equal(child.stdout.readableEnded, true);
+		assert.equal(child.stderr.readableEnded, true);
+	});
+
+	it("bounds a response stream that remains open after root close", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 7272,
+			stdin: new PassThrough(),
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		let fireCompletionTimeout: (() => void) | undefined;
+		const running = runOwnedCommand("node", ["helper.mjs", "fixture-root"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 1_000,
+			treeExitTimeoutMs: 29,
+			input: "{}\n",
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: Promise.resolve(),
+				killTree: () => {},
+				waitForTreeExit: async () => true,
+			}),
+			setCompletionTimer: (callback: () => void) => {
+				fireCompletionTimeout = callback;
+				return Symbol("completion-timeout");
+			},
+			clearCompletionTimer: () => {},
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		child.stderr.end();
+		child.emit("close", 0, null);
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		invokeTimer(fireCompletionTimeout, "open stdout must keep helper completion pending");
+		await assert.rejects(running, /did not complete its process-tree shutdown within 29ms/);
+		child.stdout.end();
 	});
 
 	it("starts the unchanged execution timeout only after prompt ownership readiness", async () => {
