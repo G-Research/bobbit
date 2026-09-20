@@ -11,7 +11,6 @@
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import { copyFile, cp, link, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
@@ -21,12 +20,9 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
-const require = createRequire(import.meta.url);
-// cacache 20 does not export its content-path resolver from the package root.
-// Use the resolver shipped by the installed package so this direct CAS write
-// follows its exact cache-version and digest segmentation without duplicating
-// that private layout logic here.
-const cacacheContentPath = require("cacache/lib/content/path.js");
+const CACHE_PATH_HELPER_NAME = "resolve-packed-consumer-cache-paths.mjs";
+const CACHE_PATH_RESULT_SUFFIX = ".result.json";
+const MAX_CACHE_PATH_RESULT_BYTES = 8 * 1024 * 1024;
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
@@ -659,7 +655,6 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 
 const DEFAULT_CONTENT_CACHE = Object.freeze({
 	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
-	contentPath: (cache, integrity) => cacacheContentPath(cache, integrity),
 	prepareDestination: directory => mkdir(directory, { recursive: true }),
 	createWriteStream: path => createWriteStream(path, { flags: "wx" }),
 	publishDestination: async (temporaryPath, destinationPath) => {
@@ -728,20 +723,25 @@ function attachTransferProgress(error, progress) {
 async function transferArtifact({
 	artifact,
 	sourceContentCache,
-	destinationContentCache,
+	destinationPath,
 	contentCache,
 	remainingPreparationMs,
 	setTimer,
 	clearTimer,
 }) {
 	const stage = "cache transfer";
+	// Resolve and validate every destination before this function is admitted.
+	// Keep all synchronous setup before the long-lived timer so malformed input
+	// cannot strand a live deadline handle.
+	if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
+		throw new Error(`Packed-consumer cache transfer has no absolute destination for ${artifact.integrity}`);
+	}
+	const temporaryPath = `${destinationPath}.packed-consumer-${process.pid}-${randomUUID()}.tmp`;
 	const remainingMs = remainingPreparationMs(`${stage} ${artifact.integrity}`);
 	const abort = new AbortController();
 	const timer = setTimer(() => abort.abort(new Error(
 		`Packed-consumer cache transfer exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
 	)), remainingMs);
-	const destinationPath = contentCache.contentPath(destinationContentCache, artifact.integrity);
-	const temporaryPath = `${destinationPath}.packed-consumer-${process.pid}-${randomUUID()}.tmp`;
 	let source;
 	let destination;
 	let sourceError;
@@ -787,7 +787,7 @@ async function transferArtifact({
 async function transferAvailableArtifacts({
 	artifacts,
 	sourceContentCache,
-	destinationContentCache,
+	destinationPaths,
 	contentCache,
 	remainingPreparationMs,
 	setTimer,
@@ -815,7 +815,7 @@ async function transferAvailableArtifacts({
 				const transferred = await transferArtifact({
 					artifact: transferable[index],
 					sourceContentCache,
-					destinationContentCache,
+					destinationPath: destinationPaths.get(transferable[index].integrity),
 					contentCache,
 					remainingPreparationMs,
 					setTimer,
@@ -945,6 +945,120 @@ function isStrictChild(root, candidate) {
 
 function assertOwnedPath(runRoot, candidate, label) {
 	if (!isStrictChild(runRoot, candidate)) throw new Error(`${label} must be a strict child of the E2E run root`);
+}
+
+function cachePathHelperEnv(baseEnv, fixtureRoot) {
+	const allowed = new Set(["systemroot", "windir", "comspec", "pathext", "path"]);
+	const env = Object.fromEntries(Object.entries(baseEnv).filter(([key, value]) =>
+		allowed.has(key.toLowerCase()) && typeof value === "string"));
+	// PowerShell's Windows Job supervisor and Add-Type need temporary storage.
+	// Keep it run-owned without inheriting ambient npm or credential state.
+	env.TEMP = join(fixtureRoot, "helper-temp");
+	env.TMP = env.TEMP;
+	return env;
+}
+
+function exactObjectKeys(value, expected) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const actual = Object.keys(value).sort();
+	const allowed = [...expected].sort();
+	return actual.length === allowed.length && actual.every((key, index) => key === allowed[index]);
+}
+
+async function resolveDestinationContentPaths({
+	artifacts,
+	destinationContentCache,
+	fixtureRoot,
+	runRoot,
+	repoRoot,
+	baseEnv,
+	runCommand,
+	commands,
+	remainingPreparationMs,
+}) {
+	const integrities = [...new Set(artifacts
+		.map(artifact => artifact.integrity)
+		.filter(integrity => typeof integrity === "string" && integrity.length > 0))].sort();
+	if (integrities.length === 0) return new Map();
+
+	const nonce = randomUUID();
+	const requestPath = join(fixtureRoot, `cache-paths-${nonce}.request.json`);
+	const resultPath = `${requestPath}${CACHE_PATH_RESULT_SUFFIX}`;
+	assertOwnedPath(runRoot, requestPath, "cache path request");
+	assertOwnedPath(runRoot, resultPath, "cache path result");
+	const request = {
+		fixtureRoot,
+		destination: destinationContentCache,
+		integrities,
+	};
+	await writeFile(requestPath, `${JSON.stringify(request)}\n`, { flag: "wx" });
+	const requestStat = await stat(requestPath);
+	const staleResult = await stat(resultPath).catch(error => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+	if (staleResult) throw new Error(`Packed-consumer cache path result existed before helper invocation: ${resultPath}`);
+
+	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_PATH_HELPER_NAME);
+	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
+	await mkdir(helperEnv.TEMP, { recursive: true });
+	const totalTimeoutMs = remainingPreparationMs("destination cache path resolution");
+	const result = await runCommand(process.execPath, [helperPath, requestPath], {
+		cwd: repoRoot,
+		env: helperEnv,
+		timeoutMs: totalTimeoutMs,
+		totalTimeoutMs,
+		repoRoot,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	commands.push(result);
+	requireSuccess(result);
+	if (result.stdout.length > 0) {
+		throw new Error("Packed-consumer cache path helper must not emit stdout");
+	}
+
+	const resultStat = await stat(resultPath).catch(error => {
+		throw new Error(`Packed-consumer cache path helper did not publish ${resultPath}`, { cause: error });
+	});
+	if (!resultStat.isFile() || resultStat.size <= 0 || resultStat.size > MAX_CACHE_PATH_RESULT_BYTES) {
+		throw new Error(`Packed-consumer cache path result must be a non-empty file no larger than ${MAX_CACHE_PATH_RESULT_BYTES} bytes`);
+	}
+	if (resultStat.mtimeMs < requestStat.mtimeMs) {
+		throw new Error("Packed-consumer cache path helper published a stale result");
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(await readFile(resultPath, "utf8"));
+	} catch (error) {
+		throw new Error(`Packed-consumer cache path helper published malformed JSON: ${error.message}`, { cause: error });
+	}
+	if (!Array.isArray(parsed) || parsed.length !== integrities.length) {
+		throw new Error(`Packed-consumer cache path helper must return exactly ${integrities.length} results`);
+	}
+	const expected = new Set(integrities);
+	const paths = new Set();
+	const destinationPaths = new Map();
+	for (const entry of parsed) {
+		if (!exactObjectKeys(entry, ["integrity", "path"]) || typeof entry.integrity !== "string" || typeof entry.path !== "string") {
+			throw new Error("Packed-consumer cache path helper returned a malformed result entry");
+		}
+		if (!expected.has(entry.integrity)) {
+			throw new Error(`Packed-consumer cache path helper returned an unexpected integrity: ${entry.integrity}`);
+		}
+		if (destinationPaths.has(entry.integrity)) {
+			throw new Error(`Packed-consumer cache path helper returned a duplicate integrity: ${entry.integrity}`);
+		}
+		if (!isAbsolute(entry.path) || !isStrictChild(destinationContentCache, entry.path) || !isStrictChild(runRoot, entry.path)) {
+			throw new Error(`Packed-consumer cache path helper returned an out-of-root path for ${entry.integrity}`);
+		}
+		const normalizedPath = resolve(entry.path);
+		if (paths.has(normalizedPath)) {
+			throw new Error(`Packed-consumer cache path helper returned a duplicate path: ${normalizedPath}`);
+		}
+		paths.add(normalizedPath);
+		destinationPaths.set(entry.integrity, normalizedPath);
+	}
+	for (const integrity of integrities) {
+		if (!destinationPaths.has(integrity)) throw new Error(`Packed-consumer cache path helper omitted ${integrity}`);
+	}
+	return destinationPaths;
 }
 
 async function measured(label, operation) {
@@ -1235,11 +1349,22 @@ export async function preparePackedConsumerFixture({
 		assertOwnedPath(absoluteRunRoot, destinationContentCache, "destinationContentCache");
 
 		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
+		const destinationPaths = await measured("destination cache path resolution", () => resolveDestinationContentPaths({
+			artifacts: selectedArtifacts,
+			destinationContentCache,
+			fixtureRoot,
+			runRoot: absoluteRunRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
+			remainingPreparationMs,
+		}));
 		console.log(`[packed-consumer] cache: selectively transferring ${selectedArtifacts.filter(artifact => artifact.integrity).length} exact digests from ${ambientCacheDir}`);
 		const transferResult = await measured("cache transfer", () => transferAvailableArtifacts({
 			artifacts: selectedArtifacts,
 			sourceContentCache,
-			destinationContentCache,
+			destinationPaths,
 			contentCache,
 			remainingPreparationMs,
 			setTimer,

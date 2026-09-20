@@ -36,6 +36,10 @@ const PREWARM_SOURCE = readFileSync(
 	new URL("../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs", import.meta.url),
 	"utf8",
 );
+const CACHE_PATH_HELPER_SOURCE = readFileSync(
+	new URL("../../../scripts/testing-v2/resolve-packed-consumer-cache-paths.mjs", import.meta.url),
+	"utf8",
+);
 const WORKFLOW_SOURCE = readFileSync(
 	new URL("../../../.github/workflows/build-unit-gate.yml", import.meta.url),
 	"utf8",
@@ -148,10 +152,16 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(source, /cacache\.get\.stream\.byDigest\(cache, integrity\)/,
 			"only exact integrity-addressed ambient content may be read");
-		assert.match(source, /cacacheContentPath\(cache, integrity\)/,
-			"destination writes must target cacache's packaged integrity-addressed path resolver");
+		assert.doesNotMatch(`${source}\n${CACHE_PATH_HELPER_SOURCE}`, /cacache\/lib\/|content-v\d*/,
+			"cache layout must never depend on a private subpath or hand-coded content version");
+		assert.match(CACHE_PATH_HELPER_SOURCE, /import cacache from "cacache"/,
+			"the path helper must use only cacache's public root export");
+		assert.match(CACHE_PATH_HELPER_SOURCE, /cacache\.index\.insert\(destination, `bobbit-packed-consumer-path:\$\{integrity\}`, integrity\)/,
+			"public index insertion must provide cacache's authoritative destination path");
+		assert.doesNotMatch(CACHE_PATH_HELPER_SOURCE, /cacache\.put\.stream|cacache\.index\.(?:delete|remove)|cacache\.rm/,
+			"the helper must retain synthetic entries and never start another uncancellable content operation");
 		assert.doesNotMatch(source, /cacache\.put\.stream/,
-			"exact digest reuse must not pay for an unused custom URL index publication");
+			"exact digest reuse must not pay for a second content publication");
 		assert.doesNotMatch(source, /packed-consumer:\$\{artifact\.resolved\}/,
 			"destination cache publication must not invent custom index keys");
 		assert.doesNotMatch(source, /hasContent/,
@@ -160,6 +170,10 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
 		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
 			"cache population must retain the accepted bounded concurrency");
+		assert.match(source, /runCommand\(process\.execPath, \[helperPath, requestPath\]/,
+			"all path resolution must run in one deadline-owned helper process");
+		assert.match(source, /ownershipBootstrapRoot: fixtureRoot/,
+			"the helper process must bootstrap ownership only inside the retained fixture root");
 		assert.match(source, /await Promise\.allSettled\([\s\S]{0,200}CACHE_WORKER_COUNT/,
 			"all admitted cache writers must settle before preparation advances");
 		assert.match(source, /"ci",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir/s);
@@ -219,7 +233,6 @@ describe("packed-consumer offline install contract", () => {
 						stream.end("selected artifact bytes");
 						return stream;
 					},
-					contentPath: (cache: string, integrity: string) => join(cache, "content-v2", "fixture", encodeURIComponent(integrity)),
 					prepareDestination: async () => {},
 					createWriteStream: (path: string, integrity: string) => {
 						cacheWrites.push({ path, integrity });
@@ -232,6 +245,19 @@ describe("packed-consumer offline install contract", () => {
 				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
 					calls.push({ args: [...args], cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs });
 					nowMs += 5_000;
+					if (args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")) {
+						const requestPath = args[1]!;
+						const request = JSON.parse(readFileSync(requestPath, "utf8")) as {
+							destination: string;
+							integrities: string[];
+						};
+						writeFileSync(`${requestPath}.result.json`, `${JSON.stringify(request.integrities.map(integrity => ({
+							integrity,
+							path: join(request.destination, "resolved", encodeURIComponent(integrity)),
+						})))}\n`);
+						order.push("paths");
+						return commandResult(command, args);
+					}
 					if (args.includes("pack")) {
 						order.push("pack");
 						const packDir = args[args.indexOf("--pack-destination") + 1];
@@ -295,8 +321,8 @@ describe("packed-consumer offline install contract", () => {
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "install"]);
-			assert.equal(calls.length, 4);
+			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "paths", "install"]);
+			assert.equal(calls.length, 5);
 			assert.deepEqual(calls[0]?.args.slice(1), [
 				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
 			]);
@@ -305,14 +331,17 @@ describe("packed-consumer offline install contract", () => {
 			]);
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
 			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "config", "get", "cache"]);
-			assert.equal(calls[3]?.args[1], "ci");
-			assert.ok(calls[3]?.args.includes("--offline"));
-			assert.ok(!calls[3]?.args.includes(calls[1]!.args.at(-1)!),
+			assert.ok(calls[3]?.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
+			assert.equal(calls[4]?.args[1], "ci");
+			assert.ok(calls[4]?.args.includes("--offline"));
+			assert.ok(!calls[4]?.args.includes(calls[1]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
 			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
 			assert.equal(calls[2]?.timeoutMs, 30_000);
 			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000,
+				"the path helper must receive only the remaining absolute preparation budget");
+			assert.equal(calls[4]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 20_000,
 				"late commands must receive only the remaining monotonic preparation budget");
 			assert.deepEqual(cacheReads, [{ cache: join(ambientCache, "_cacache"), integrity: selectedIntegrity }]);
 			assert.equal(cacheWrites.length, 1);
@@ -325,7 +354,7 @@ describe("packed-consumer offline install contract", () => {
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const call of [calls[1]!, calls[3]!]) {
+			for (const call of [calls[1]!, calls[4]!]) {
 				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
 				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
 				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));
