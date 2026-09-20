@@ -97,31 +97,27 @@ type PreparedDescriptor = {
 	commands: unknown[];
 };
 
+type PrepareOptions = {
+	repoRoot: string;
+	runRoot: string;
+	baseEnv?: NodeJS.ProcessEnv;
+	ensureDist: (options?: { timeoutMs: number; fixtureRoot: string; commands: unknown[] }) => void | Promise<void>;
+	resolveNpm: () => { command: string; argsPrefix: string[] };
+	runCommand: (command: string, args: string[], options: CommandOptions) => Promise<CommandResult>;
+	contentCache?: ContentCache;
+	preparationTimeoutMs?: number;
+	now?: () => number;
+	setTimer?: (callback: () => void, timeoutMs: number) => unknown;
+	clearTimer?: (timer: unknown) => void;
+	removeOwnedPathFn?: (path: string, options: object) => Promise<unknown>;
+	repositoryLock?: Record<string, unknown>;
+};
+
 type PackedConsumerApi = {
-	preparePackedConsumerFixture?: (options: {
-		repoRoot: string;
-		runRoot: string;
-		baseEnv?: NodeJS.ProcessEnv;
-		ensureDist: (options?: {
-			timeoutMs: number;
-			fixtureRoot: string;
-			commands: unknown[];
-		}) => void | Promise<void>;
-		resolveNpm: () => { command: string; argsPrefix: string[] };
-		runCommand: (command: string, args: string[], options: CommandOptions) => Promise<{
-			command: string;
-			args: string[];
-			code: number;
-			stdout: string;
-			stderr: string;
-		}>;
-		contentCache?: ContentCache;
-		preparationTimeoutMs?: number;
-		now?: () => number;
-		setTimer?: (callback: () => void, timeoutMs: number) => unknown;
-		clearTimer?: (timer: unknown) => void;
-		removeOwnedPathFn?: (path: string, options: object) => Promise<unknown>;
-	}) => Promise<PreparedDescriptor>;
+	preparePackedConsumerFixture?: (options: PrepareOptions) => Promise<PreparedDescriptor>;
+	seedPackedConsumerCache?: (options: PrepareOptions) => Promise<{ deadline: { identity: string; startedAt: number; expiresAt: number }; seedDescriptorPath: string }>;
+	finalizePackedConsumerFixture?: (seed: object) => Promise<PreparedDescriptor>;
+	selectRepositorySeedArtifacts?: (lock: Record<string, unknown>, runtime?: { platform: string; arch: string; libc?: string }) => Array<{ resolved: string; integrity?: string }>;
 	readPreparedPackedConsumerDescriptor?: (
 		descriptorPath: string,
 		coordinatorRunRoot: string,
@@ -186,6 +182,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 async function prepareFixture({
 	registryTarballCount = 0,
 	registryArtifacts,
+	consumerRegistryArtifacts,
 	contentCache,
 	onCacheCommand,
 	onOfflineInstall,
@@ -200,9 +197,12 @@ async function prepareFixture({
 	onCopyHelper,
 	copyDecision = () => "missing",
 	removeOwnedPathFn,
+	split = false,
+	onSeeded,
 }: {
 	registryTarballCount?: number;
 	registryArtifacts?: Array<{ resolved: string; integrity?: string }>;
+	consumerRegistryArtifacts?: Array<{ resolved: string; integrity?: string }>;
 	contentCache?: ContentCache;
 	onCacheCommand?: (batchIndex: number, result: CommandResult, options: CommandOptions) => Promise<void>;
 	onOfflineInstall?: () => void | Promise<void>;
@@ -217,14 +217,32 @@ async function prepareFixture({
 	onCopyHelper?: CopyHelperCallback;
 	copyDecision?: (integrity: string) => "copied" | "missing";
 	removeOwnedPathFn?: (path: string, options: object) => Promise<unknown>;
+	split?: boolean;
+	onSeeded?: (seed: { deadline: { identity: string; startedAt: number; expiresAt: number }; seedDescriptorPath: string }) => void | Promise<void>;
 } = {}) {
 	const runRoot = await mkdtemp(join(tmpdir(), "bobbit-prepared-consumer-unit-"));
 	roots.push(runRoot);
 	const calls: CommandCall[] = [];
 	let cacheBatchIndex = 0;
-	const prepare = requireApi("preparePackedConsumerFixture");
-	const descriptor = await prepare({
+	const selectedRegistryArtifacts = registryArtifacts ?? Array.from({ length: registryTarballCount }, (_, index) => ({
+		resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
+		integrity: `sha512-${index}`,
+	}));
+	const repositoryLock = {
+		name: "bobbit-seed-fixture",
+		version: "1.0.0",
+		lockfileVersion: 3,
+		packages: {
+			"": { name: "bobbit-seed-fixture", version: "1.0.0" },
+			...Object.fromEntries(selectedRegistryArtifacts.map((artifact, index) => [
+				`node_modules/dependency-${String(index).padStart(3, "0")}`,
+				{ version: "1.0.0", ...artifact },
+			])),
+		},
+	};
+	const prepareOptions = {
 		repoRoot: REPO_ROOT,
+		repositoryLock,
 		runRoot,
 		baseEnv: {
 			PATH: process.env.PATH,
@@ -341,11 +359,7 @@ async function prepareFixture({
 				const manifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
 				manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-fixture.tgz" };
 				await writeFile(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
-				const artifacts = registryArtifacts ?? Array.from({ length: registryTarballCount }, (_, index) => ({
-					resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
-					integrity: `sha512-${index}`,
-				}));
-				const registryPackages = Object.fromEntries(artifacts.map((artifact, index) => [
+				const registryPackages = Object.fromEntries((consumerRegistryArtifacts ?? selectedRegistryArtifacts).map((artifact, index) => [
 					`node_modules/dependency-${String(index).padStart(3, "0")}`,
 					{ version: "1.0.0", ...artifact },
 				]));
@@ -386,8 +400,17 @@ async function prepareFixture({
 			}
 			return result;
 		},
-	});
-	return { runRoot, calls, descriptor };
+	} satisfies PrepareOptions;
+	let seedHandle: { deadline: { identity: string; startedAt: number; expiresAt: number }; seedDescriptorPath: string } | undefined;
+	let descriptor: PreparedDescriptor;
+	if (split) {
+		seedHandle = await requireApi("seedPackedConsumerCache")(prepareOptions);
+		await onSeeded?.(seedHandle);
+		descriptor = await requireApi("finalizePackedConsumerFixture")(seedHandle);
+	} else {
+		descriptor = await requireApi("preparePackedConsumerFixture")(prepareOptions);
+	}
+	return { runRoot, calls, descriptor, seedHandle };
 }
 
 afterEach(async () => {
@@ -395,6 +418,76 @@ afterEach(async () => {
 });
 
 describe("prepared packed consumer", () => {
+	it("selects a deterministic runtime-compatible production and optional seed superset", () => {
+		const select = requireApi("selectRepositorySeedArtifacts");
+		const lock = {
+			lockfileVersion: 3,
+			packages: {
+				"": { name: "seed" },
+				"node_modules/prod": { version: "1.0.0", resolved: "https://registry.example.test/prod.tgz", integrity: "sha512-prod" },
+				"node_modules/prod-duplicate": { version: "1.0.0", resolved: "https://registry.example.test/prod.tgz", integrity: "sha512-prod" },
+				"node_modules/optional": { version: "1.0.0", resolved: "https://registry.example.test/optional.tgz", integrity: "sha512-optional", optional: true },
+				"node_modules/no-integrity": { version: "1.0.0", resolved: "https://registry.example.test/no-integrity.tgz" },
+				"node_modules/dev": { version: "1.0.0", resolved: "https://registry.example.test/dev.tgz", integrity: "sha512-dev", dev: true },
+				"node_modules/linux": { version: "1.0.0", resolved: "https://registry.example.test/linux.tgz", integrity: "sha512-linux", os: ["linux"] },
+			},
+		};
+		assert.deepEqual(select(lock, { platform: "win32", arch: "x64" }), [
+			{ resolved: "https://registry.example.test/no-integrity.tgz", integrity: undefined },
+			{ resolved: "https://registry.example.test/optional.tgz", integrity: "sha512-optional" },
+			{ resolved: "https://registry.example.test/prod.tgz", integrity: "sha512-prod" },
+		]);
+	});
+
+	it("carries one immutable deadline identity and expiry from seed through finalization", async () => {
+		let clock = 100;
+		const { calls, descriptor, seedHandle } = await prepareFixture({
+			split: true,
+			preparationTimeoutMs: 300,
+			now: () => clock,
+			onSeeded: () => { clock = 220; },
+		});
+		assert.ok(seedHandle);
+		assert.equal(seedHandle.deadline.startedAt, 100);
+		assert.equal(seedHandle.deadline.expiresAt, 400);
+		assert.equal((descriptor as PreparedDescriptor & { seed: { deadline: typeof seedHandle.deadline } }).seed.deadline.identity, seedHandle.deadline.identity);
+		assert.equal((descriptor as PreparedDescriptor & { seed: { deadline: typeof seedHandle.deadline } }).seed.deadline.expiresAt, 400);
+		const pack = calls.find(call => call.args.includes("pack"));
+		assert.equal(pack?.options.totalTimeoutMs, 180, `${FAILURE_PREFIX}: finalization must receive only the post-seed deadline remainder`);
+		const packIndex = calls.indexOf(pack!);
+		assert.equal(calls.slice(packIndex).some(call => call.args.includes("cache") && call.args.includes("add")), false,
+			`${FAILURE_PREFIX}: finalization must not admit late cache population`);
+	});
+
+	it("rejects a forged persisted seed descriptor before pack or finalization work", async () => {
+		await assert.rejects(prepareFixture({
+			split: true,
+			onSeeded: async seed => {
+				const persisted = JSON.parse(await readFile(seed.seedDescriptorPath, "utf8"));
+				persisted.cacheDir = resolve(tmpdir(), "forged-external-cache");
+				await writeFile(seed.seedDescriptorPath, `${JSON.stringify(persisted)}\n`);
+			},
+		}), /persisted seed descriptor does not match/);
+		const evidence = JSON.parse(await readFile(join(roots.at(-1)!, "prepared-packed-consumer", "preparation-failure.json"), "utf8"));
+		assert.doesNotMatch(JSON.stringify(evidence.commands), /npm-cli\.js[^\n]*pack/);
+	});
+
+	it.each([
+		["extra URL", [{ resolved: "https://registry.example.test/extra.tgz", integrity: "sha512-seeded" }]],
+		["changed integrity", [{ resolved: "https://registry.example.test/seeded.tgz", integrity: "sha512-changed" }]],
+		["missing seeded identity", [{ resolved: "https://registry.example.test/missing.tgz" }]],
+	] as const)("rejects generated consumer lock %s before offline install or descriptor", async (_label, consumerRegistryArtifacts) => {
+		let installed = false;
+		await assert.rejects(prepareFixture({
+			registryArtifacts: [{ resolved: "https://registry.example.test/seeded.tgz", integrity: "sha512-seeded" }],
+			consumerRegistryArtifacts: [...consumerRegistryArtifacts],
+			onOfflineInstall: () => { installed = true; },
+		}), /outside the verified seed/);
+		assert.equal(installed, false);
+		const fixtureRoot = join(roots.at(-1)!, "prepared-packed-consumer");
+		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+	});
+
 	it("packs and installs the actual tarball once with a run-owned cache and deterministic offline flags", async () => {
 		const { runRoot, calls, descriptor } = await prepareFixture();
 		const packCalls = calls.filter(call => call.args.includes("pack"));
@@ -900,7 +993,7 @@ describe("prepared packed consumer", () => {
 			`${FAILURE_PREFIX}: fallback must contain only exact locked URLs in deterministic order`);
 		assert.equal(removedFinalPaths.length, 1, `${FAILURE_PREFIX}: corrupt copied content must remove only its authorized final path`);
 		assert.ok(isStrictChild(join(descriptor.cacheDir, "_cacache"), removedFinalPaths[0]!));
-		assert.equal(corruptVerificationAttempts, 2, `${FAILURE_PREFIX}: corrupt digest must pass final verification after exact fallback`);
+		assert.equal(corruptVerificationAttempts, 3, `${FAILURE_PREFIX}: corrupt digest must pass seed and final authority verification after exact fallback`);
 	});
 
 	it("aggregates sequential publication and staging cleanup failures without admitting fallback or install", async () => {
@@ -1339,7 +1432,7 @@ describe("prepared packed consumer", () => {
 		assert.equal(commands.length, 1, `${FAILURE_PREFIX}: build evidence must join the preparation command ledger`);
 	});
 
-	it("retains build-stage deadline evidence and never publishes a descriptor", async () => {
+	it("charges cache seeding to the shared deadline before build and never publishes a descriptor", async () => {
 		const runRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-build-deadline-unit-"));
 		roots.push(runRoot);
 		const ticks = [100, 160, 260];
@@ -1351,17 +1444,18 @@ describe("prepared packed consumer", () => {
 			runRoot,
 			preparationTimeoutMs: 120,
 			now: () => ticks.shift() ?? 260,
+			repositoryLock: { lockfileVersion: 3, packages: {} },
 			resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 			ensureDist: ({ timeoutMs } = { timeoutMs: 0, fixtureRoot: "", commands: [] }) => {
 				observedBuildTimeout = timeoutMs;
 			},
-			runCommand: async () => { throw new Error("package commands must not start after build deadline exhaustion"); },
+			runCommand: async (command, args) => ({ command, args, code: 0, stdout: `${join(tmpdir(), "ambient-cache-read-only")}\n`, stderr: "" }),
 		}), /retained partial fixture and command evidence/);
 
-		assert.equal(observedBuildTimeout, 60, `${FAILURE_PREFIX}: build stage must receive the monotonic remaining budget`);
+		assert.equal(observedBuildTimeout, undefined, `${FAILURE_PREFIX}: an expired seed must block build admission`);
 		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
 		const evidence = JSON.parse(await readFile(join(fixtureRoot, "preparation-failure.json"), "utf8"));
-		assert.match(evidence.error.message, /deadline exhausted before post-build preparation after 160ms \(limit 120ms\)/);
+		assert.match(evidence.error.message, /deadline exhausted before seed descriptor publication after 160ms \(limit 120ms\)/);
 		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json"), "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
 
@@ -1382,6 +1476,7 @@ describe("prepared packed consumer", () => {
 		await assert.rejects(prepare({
 			repoRoot: REPO_ROOT,
 			runRoot,
+			repositoryLock: { lockfileVersion: 3, packages: {} },
 			resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 			ensureDist: () => {
 				throw new packedConsumerModule.OwnedCommandError("build tree remained live", {
@@ -1391,7 +1486,10 @@ describe("prepared packed consumer", () => {
 					shutdown,
 				});
 			},
-			runCommand: async () => { throw new Error("package commands must not start after incomplete build shutdown"); },
+			runCommand: async (command, args) => {
+				if (args.includes("config")) return { command, args, code: 0, stdout: `${join(tmpdir(), "ambient-cache-read-only")}\n`, stderr: "" };
+				throw new Error("package commands must not start after incomplete build shutdown");
+			},
 		}), /retained partial fixture and command evidence/);
 
 		const fixtureRoot = join(runRoot, "prepared-packed-consumer");

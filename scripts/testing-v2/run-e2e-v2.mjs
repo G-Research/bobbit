@@ -63,8 +63,10 @@ import {
 	OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	OwnedCommandError,
 	PACKED_CONSUMER_DESCRIPTOR_ENV,
+	finalizePackedConsumerFixture,
 	preparePackedConsumerFixture,
 	runOwnedCommand,
+	seedPackedConsumerCache,
 } from "./prewarm-packed-consumer-cache.mjs";
 import { removeOwnedPath, removeOwnedPathInSubprocess } from "./owned-path-cleanup.mjs";
 
@@ -631,7 +633,41 @@ export async function prepareE2EDistServerPrebundle(paths, environment, {
 	}
 }
 
-/** Prepare the real packed consumer once, only when Group C selected its spec. */
+/** Seed the real packed consumer once, only when Group C selected its spec. */
+export async function seedGroupCPackedConsumer(specs, environment, paths, seed = seedPackedConsumerCache) {
+	if (!specs.includes(PACKAGED_CONSUMER_SPEC)) {
+		deleteEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV);
+		return { selected: false, seedHandle: null, wallMs: 0 };
+	}
+	const startedAt = performance.now();
+	const seedHandle = await seed({ repoRoot: REPO_ROOT, runRoot: paths.root, baseEnv: environment });
+	return { selected: true, seedHandle, wallMs: Math.round(performance.now() - startedAt) };
+}
+
+/** Finalize a verified seed and publish its trusted descriptor to Group C. */
+export async function finalizeGroupCPackedConsumer(seedResult, environment, paths, finalize = finalizePackedConsumerFixture) {
+	if (!seedResult.selected) return { selected: false, descriptorPath: null, wallMs: seedResult.wallMs ?? 0 };
+	const startedAt = performance.now();
+	const descriptor = await finalize(seedResult.seedHandle);
+	const descriptorPath = resolvePackedConsumerDescriptorPath(
+		{ [PACKED_CONSUMER_DESCRIPTOR_ENV]: descriptor.descriptorPath },
+		paths.root,
+	);
+	environment[PACKED_CONSUMER_DESCRIPTOR_ENV] = descriptorPath;
+	const finalizationWallMs = Math.round(performance.now() - startedAt);
+	return {
+		selected: true,
+		descriptorPath,
+		tarballPath: descriptor.tarballPath,
+		templateDir: descriptor.templateDir,
+		seedWallMs: seedResult.wallMs,
+		finalizationWallMs,
+		wallMs: seedResult.wallMs + finalizationWallMs,
+		deadline: seedResult.seedHandle.deadline,
+	};
+}
+
+/** Sequential compatibility path for existing direct callers. */
 export async function prepareGroupCPackedConsumer(specs, environment, paths, prepare = preparePackedConsumerFixture) {
 	if (!specs.includes(PACKAGED_CONSUMER_SPEC)) {
 		deleteEnvironmentValue(environment, PACKED_CONSUMER_DESCRIPTOR_ENV);
@@ -666,14 +702,14 @@ function startConcurrentOperation(operation) {
 }
 
 /**
- * Overlap the run-owned packed-consumer preparation with Group B, while keeping
- * one barrier in front of cache fan-out and Group C. B starts first and receives
- * its settlement observer before preparation starts, so neither rejection can
- * become unhandled and profiling can close at B's actual process boundary.
+ * Overlap packed-consumer finalization with Group B after seeding, with one
+ * all-settled barrier in front of cache fan-out and Group C. B receives its
+ * settlement observer before finalization starts, so neither rejection can be
+ * unhandled and profiling closes at B's actual process boundary.
  */
-export async function runGroupBWithPackedConsumerPreparation({
+export async function runGroupBWithPackedConsumerFinalization({
 	runGroupB,
-	preparePackedConsumer,
+	finalizePackedConsumer,
 	onGroupBSettled = () => {},
 }) {
 	const groupBPromise = startConcurrentOperation(runGroupB);
@@ -681,7 +717,7 @@ export async function runGroupBWithPackedConsumerPreparation({
 		onGroupBSettled(groupB);
 		return groupB;
 	});
-	const packedConsumerPromise = startConcurrentOperation(preparePackedConsumer);
+	const packedConsumerPromise = startConcurrentOperation(finalizePackedConsumer);
 	const [groupBSettlement, packedConsumerSettlement] = await Promise.allSettled([
 		observedGroupBPromise,
 		packedConsumerPromise,
@@ -689,13 +725,41 @@ export async function runGroupBWithPackedConsumerPreparation({
 	const failures = [groupBSettlement, packedConsumerSettlement]
 		.filter((settlement) => settlement.status === "rejected")
 		.map((settlement) => settlement.reason);
-	if (failures.length === 2) {
-		throw new AggregateError(failures, "Group B and packed-consumer preparation both failed");
+	if (groupBSettlement.status === "fulfilled" && groupBSettlement.value.code !== 0) {
+		failures.unshift(new Error(`Group B failed with exit code ${groupBSettlement.value.code}; Group C is blocked`));
+	}
+	if (failures.length > 1) {
+		throw new AggregateError(failures, "Group B and packed-consumer finalization both failed");
 	}
 	if (failures.length === 1) throw failures[0];
 	return Object.freeze({
 		groupB: groupBSettlement.value,
 		packedConsumer: packedConsumerSettlement.value,
+	});
+}
+
+/** Await seed success before admitting either Group B or finalization. */
+export async function runSeedThenGroupBWithPackedConsumerFinalization({
+	seedPackedConsumer,
+	runGroupB,
+	finalizePackedConsumer,
+	onGroupBSettled = () => {},
+}) {
+	const seed = await startConcurrentOperation(seedPackedConsumer);
+	const paired = await runGroupBWithPackedConsumerFinalization({
+		runGroupB,
+		finalizePackedConsumer: () => finalizePackedConsumer(seed),
+		onGroupBSettled,
+	});
+	return Object.freeze({ seed, ...paired });
+}
+
+/** Backward-compatible test seam; new scheduling names the finalization phase. */
+export function runGroupBWithPackedConsumerPreparation(options) {
+	return runGroupBWithPackedConsumerFinalization({
+		runGroupB: options.runGroupB,
+		finalizePackedConsumer: options.preparePackedConsumer,
+		onGroupBSettled: options.onGroupBSettled,
 	});
 }
 
@@ -922,10 +986,10 @@ async function main() {
 		}
 		if (only === "D") { results.push(await runGroupD(D, { coordinatorEnv })); captureLatestProfile("D"); }
 	} else {
-		// Hosted runners cannot reliably absorb overlapping test coordinators. The
-		// one run-owned package preparation may overlap B, but C and D still wait
-		// for both owners to settle before they start.
-		console.log("[e2e-v2] schedule: A → prebundle → (B ∥ packed preparation) → C → D (B/C share run-local transform cache)");
+		// Hosted runners cannot reliably absorb cache seeding under Group B load.
+		// Seed first, then overlap only finalization with B; C and D remain behind
+		// the all-settled barrier.
+		console.log("[e2e-v2] schedule: A → prebundle → packed-cache seed → (B ∥ packed finalization) → C → D (B/C share run-local transform cache)");
 		results.push(await runGroupA(A, coordinatorEnv));
 		captureLatestProfile("A");
 		bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv);
@@ -944,9 +1008,10 @@ async function main() {
 		const retries = resolveE2ERetryCount(coordinatorEnv);
 		const groupBWorkers = resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
-		const paired = await runGroupBWithPackedConsumerPreparation({
+		const paired = await runSeedThenGroupBWithPackedConsumerFinalization({
+			seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
 			runGroupB: () => runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries),
-			preparePackedConsumer: () => prepareGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
+			finalizePackedConsumer: (seed) => finalizeGroupCPackedConsumer(seed, sharedPlaywrightEnv, paths),
 			onGroupBSettled: (groupBResult) => {
 				results.push(groupBResult);
 				captureLatestProfile("B");

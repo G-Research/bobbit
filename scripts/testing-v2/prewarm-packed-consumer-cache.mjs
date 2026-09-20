@@ -3,16 +3,16 @@
 /**
  * Prepare the authoritative packed-consumer fixture once inside an E2E run.
  *
- * The coordinator packs Bobbit, resolves a lock-free external consumer into a
- * run-owned npm cache, installs the emitted tarball strictly offline into an
- * immutable template, and atomically publishes a descriptor. Browser workers
- * materialize that template; they never run npm pack/install themselves.
+ * The coordinator first seeds a run-owned cache from the committed production
+ * lock, then packs Bobbit and finalizes a clean consumer strictly offline. The
+ * seed and finalization share one immutable deadline. Browser workers only
+ * materialize the published template; they never run npm pack/install.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, cp, link, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import cacache from "cacache";
@@ -670,14 +670,24 @@ function runtimeLibc(platform = process.platform) {
 	return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
 }
 
-function compatibleRegistryArtifacts(lock, {
+function artifactIdentity(artifact) {
+	return `${artifact.resolved}\u0000${artifact.integrity ?? ""}`;
+}
+
+function runtimeTuple({
 	platform = process.platform,
 	arch = process.arch,
 	libc = runtimeLibc(platform),
 } = {}) {
+	return Object.freeze({ platform, arch, ...(libc ? { libc } : {}) });
+}
+
+function compatibleRegistryArtifacts(lock, runtime = {}, { excludeDev = false } = {}) {
+	const { platform, arch, libc } = runtimeTuple(runtime);
 	const artifacts = new Map();
 	for (const [location, entry] of Object.entries(lock.packages)) {
 		if (!location || !entry || typeof entry !== "object") continue;
+		if (excludeDev && entry.dev === true) continue;
 		const resolved = entry.resolved;
 		if (typeof resolved !== "string" || !/^https:\/\//.test(resolved)) continue;
 		if (typeof entry.version !== "string" || entry.version.length === 0) {
@@ -689,12 +699,18 @@ function compatibleRegistryArtifacts(lock, {
 		const integrity = typeof entry.integrity === "string" && entry.integrity.length > 0
 			? entry.integrity
 			: undefined;
-		const identity = integrity ? `integrity:${integrity}` : `url:${resolved}`;
-		if (!artifacts.has(identity)) artifacts.set(identity, { resolved, integrity });
+		const artifact = { resolved, integrity };
+		const identity = artifactIdentity(artifact);
+		if (!artifacts.has(identity)) artifacts.set(identity, artifact);
 	}
 	return [...artifacts.values()].sort((left, right) =>
-		(left.integrity ?? left.resolved).localeCompare(right.integrity ?? right.resolved) ||
-		left.resolved.localeCompare(right.resolved));
+		left.resolved.localeCompare(right.resolved) ||
+		(left.integrity ?? "").localeCompare(right.integrity ?? ""));
+}
+
+/** Select the deterministic runtime-compatible production seed superset. */
+export function selectRepositorySeedArtifacts(lock, runtime = {}) {
+	return compatibleRegistryArtifacts(lock, runtime, { excludeDev: true });
 }
 
 function compatibleRegistryTarballs(lock, runtime = {}) {
@@ -1281,11 +1297,84 @@ export async function ensurePackedConsumerDist({
 	});
 }
 
-/**
- * Build one immutable packed-consumer template and publish its descriptor only
- * after the actual tarball, lockfile, and installed dependency tree exist.
- */
-export async function preparePackedConsumerFixture({
+const seedAuthorities = new WeakMap();
+const SEED_DESCRIPTOR_VERSION = 1;
+const MAX_SEED_ARTIFACTS = 5_000;
+
+function packedConsumerLayout(runRoot) {
+	const absoluteRunRoot = resolve(runRoot);
+	const fixtureRoot = join(absoluteRunRoot, FIXTURE_DIRECTORY);
+	const packDir = join(fixtureRoot, "pack");
+	const preparationDir = join(fixtureRoot, "preparation");
+	const layout = Object.freeze({
+		absoluteRunRoot,
+		fixtureRoot,
+		packDir,
+		preparationDir,
+		resolverDir: join(preparationDir, "resolver"),
+		templateDir: join(preparationDir, "template"),
+		cacheDir: join(fixtureRoot, "npm-cache"),
+		consumersDir: join(fixtureRoot, "materialized"),
+		descriptorPath: join(fixtureRoot, "descriptor.json"),
+		seedDescriptorPath: join(fixtureRoot, "seed-descriptor.json"),
+	});
+	for (const [label, candidate] of Object.entries(layout)) {
+		if (label !== "absoluteRunRoot") assertOwnedPath(absoluteRunRoot, candidate, label);
+	}
+	return layout;
+}
+
+function createPreparationDeadline(preparationTimeoutMs, now) {
+	if (!Number.isFinite(preparationTimeoutMs) || preparationTimeoutMs <= 0) {
+		throw new Error("preparationTimeoutMs must be a positive number");
+	}
+	const startedAt = now();
+	const deadline = Object.freeze({
+		identity: randomUUID(),
+		startedAt,
+		expiresAt: startedAt + preparationTimeoutMs,
+		timeoutMs: preparationTimeoutMs,
+	});
+	let latestNow = startedAt;
+	const remainingPreparationMs = label => {
+		latestNow = Math.max(latestNow, now());
+		const elapsedMs = latestNow - startedAt;
+		const remainingMs = deadline.expiresAt - latestNow;
+		if (remainingMs <= 0) {
+			throw new Error(`Packed-consumer preparation deadline exhausted before ${label} after ${Math.round(elapsedMs)}ms (limit ${preparationTimeoutMs}ms)`);
+		}
+		return Math.ceil(remainingMs);
+	};
+	return { deadline, remainingPreparationMs };
+}
+
+function seedLockInput(repoRoot, injectedLock) {
+	if (injectedLock !== undefined) {
+		if (!injectedLock || typeof injectedLock !== "object" || injectedLock.lockfileVersion !== 3 ||
+			!injectedLock.packages || typeof injectedLock.packages !== "object") {
+			throw new Error("repositoryLock must be a package-lock v3 document");
+		}
+		return { lock: injectedLock, bytes: Buffer.from(JSON.stringify(injectedLock)) };
+	}
+	const path = join(repoRoot, "package-lock.json");
+	return { lock: readPackageLock(path, "repository package-lock.json"), bytes: readFileSync(path) };
+}
+
+function repositoryLockHash(bytes) {
+	return createHash("sha256").update(bytes).digest("hex");
+}
+
+function assertConsumerSeedSubset(consumerArtifacts, seedArtifacts) {
+	const seeded = new Set(seedArtifacts.map(artifactIdentity));
+	const missing = consumerArtifacts.filter(artifact => !seeded.has(artifactIdentity(artifact)));
+	if (missing.length > 0) {
+		throw new Error(`Generated consumer lock contains registry artifacts outside the verified seed:\n${missing
+			.map(artifact => `${artifact.resolved} (${artifact.integrity ?? "no integrity"})`).join("\n")}`);
+	}
+}
+
+/** Seed the run-owned cache from the committed production lock before Group B. */
+export async function seedPackedConsumerCache({
 	repoRoot = REPO_ROOT,
 	runRoot,
 	baseEnv = process.env,
@@ -1299,55 +1388,193 @@ export async function preparePackedConsumerFixture({
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
 	removeOwnedPathFn = removeOwnedPath,
+	repositoryLock,
 } = {}) {
-	if (!runRoot) throw new Error("preparePackedConsumerFixture requires runRoot");
-	if (!Number.isFinite(preparationTimeoutMs) || preparationTimeoutMs <= 0) {
-		throw new Error("preparationTimeoutMs must be a positive number");
-	}
-	const preparationStartedAt = now();
-	let latestNow = preparationStartedAt;
-	const remainingPreparationMs = (label) => {
-		latestNow = Math.max(latestNow, now());
-		const elapsedMs = latestNow - preparationStartedAt;
-		const remainingMs = preparationTimeoutMs - elapsedMs;
-		if (remainingMs <= 0) {
-			throw new Error(`Packed-consumer preparation deadline exhausted before ${label} after ${Math.round(elapsedMs)}ms (limit ${preparationTimeoutMs}ms)`);
-		}
-		return Math.ceil(remainingMs);
-	};
-	const commandDeadline = (label, commandTimeoutMs) => {
-		const totalTimeoutMs = remainingPreparationMs(label);
-		return {
-			timeoutMs: Math.min(commandTimeoutMs, totalTimeoutMs),
-			totalTimeoutMs,
-		};
-	};
-	const absoluteRunRoot = resolve(runRoot);
-	const fixtureRoot = join(absoluteRunRoot, FIXTURE_DIRECTORY);
-	const packDir = join(fixtureRoot, "pack");
-	// Template and materialized consumers stay at the same directory depth so
-	// npm's saved relative file: reference to the real tarball remains valid.
-	const preparationDir = join(fixtureRoot, "preparation");
-	const resolverDir = join(preparationDir, "resolver");
-	const templateDir = join(preparationDir, "template");
-	const cacheDir = join(fixtureRoot, "npm-cache");
-	const consumersDir = join(fixtureRoot, "materialized");
-	const descriptorPath = join(fixtureRoot, "descriptor.json");
-	for (const [label, candidate] of Object.entries({ fixtureRoot, packDir, preparationDir, resolverDir, templateDir, cacheDir, consumersDir, descriptorPath })) {
-		assertOwnedPath(absoluteRunRoot, candidate, label);
-	}
-	if (existsSync(fixtureRoot)) throw new Error(`Packed-consumer fixture was already prepared at ${fixtureRoot}`);
-
+	if (!runRoot) throw new Error("seedPackedConsumerCache requires runRoot");
+	const wallStartedAt = Date.now();
+	const { deadline, remainingPreparationMs } = createPreparationDeadline(preparationTimeoutMs, now);
+	const layout = packedConsumerLayout(runRoot);
+	if (existsSync(layout.fixtureRoot)) throw new Error(`Packed-consumer fixture was already prepared at ${layout.fixtureRoot}`);
 	const commands = [];
 	try {
 		await Promise.all([
-			mkdir(packDir, { recursive: true }),
-			mkdir(resolverDir, { recursive: true }),
-			mkdir(templateDir, { recursive: true }),
-			mkdir(cacheDir, { recursive: true }),
-			mkdir(consumersDir, { recursive: true }),
+			mkdir(layout.packDir, { recursive: true }),
+			mkdir(layout.resolverDir, { recursive: true }),
+			mkdir(layout.templateDir, { recursive: true }),
+			mkdir(layout.cacheDir, { recursive: true }),
+			mkdir(layout.consumersDir, { recursive: true }),
 		]);
 		const npm = resolveNpm(baseEnv);
+		const lockInput = seedLockInput(repoRoot, repositoryLock);
+		const selectedRuntime = runtimeTuple(runtime);
+		const selectedArtifacts = selectRepositorySeedArtifacts(lockInput.lock, selectedRuntime);
+		if (selectedArtifacts.length > MAX_SEED_ARTIFACTS) throw new Error(`Repository lock seed exceeds ${MAX_SEED_ARTIFACTS} artifacts`);
+		const totalTimeoutMs = remainingPreparationMs("ambient npm cache discovery");
+		const discovery = await measured("seed ambient cache discovery", async () => {
+			const result = await runCommand(npm.command, [...npm.argsPrefix, "config", "get", "cache"], {
+				cwd: repoRoot,
+				env: packedConsumerNpmEnv(repoRoot, baseEnv),
+				timeoutMs: Math.min(CACHE_DISCOVERY_TIMEOUT_MS, totalTimeoutMs),
+				totalTimeoutMs,
+				repoRoot,
+				ownershipBootstrapRoot: layout.fixtureRoot,
+			});
+			commands.push(result);
+			requireSuccess(result);
+			return result;
+		});
+		const ambientCacheDir = ambientCacheFromOutput(discovery.stdout);
+		if (ambientCacheDir === resolve(layout.cacheDir) || ambientCacheDir === resolve(layout.fixtureRoot) ||
+			isStrictChild(layout.fixtureRoot, ambientCacheDir) || isStrictChild(ambientCacheDir, layout.fixtureRoot)) {
+			throw new Error(`Ambient npm cache must lie outside and not contain the packed-consumer fixture: ${ambientCacheDir}`);
+		}
+		const destinationContentCache = join(layout.cacheDir, "_cacache");
+		const destinationPaths = await measured("seed destination cache path resolution", () => resolveDestinationContentPaths({
+			artifacts: selectedArtifacts,
+			destinationContentCache,
+			fixtureRoot: layout.fixtureRoot,
+			runRoot: layout.absoluteRunRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
+			remainingPreparationMs,
+		}));
+		const transfer = await measured("seed cache copy and publication", () => copyAvailableArtifacts({
+			artifacts: selectedArtifacts,
+			sourceContentCache: join(ambientCacheDir, "_cacache"),
+			destinationPaths,
+			contentCache,
+			fixtureRoot: layout.fixtureRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
+			remainingPreparationMs,
+			removeOwnedPathFn,
+		}));
+		const corrupt = await measured("seed copied digest verification", () => verifyCopiedArtifactsForFallback({
+			artifacts: transfer.transferredArtifacts,
+			destinationPaths,
+			destinationContentCache,
+			contentCache,
+			remainingPreparationMs,
+			setTimer,
+			clearTimer,
+		}));
+		const fallbackArtifacts = [...transfer.fallbackArtifacts, ...corrupt]
+			.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
+		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort();
+		const batches = [];
+		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) batches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));
+		const results = new Array(batches.length);
+		const failures = new Array(batches.length);
+		const resolverEnv = isolatedNpmEnv(layout.resolverDir, layout.cacheDir, baseEnv);
+		let next = 0;
+		let stopped = false;
+		const worker = async () => {
+			while (!stopped) {
+				const index = next++;
+				if (index >= batches.length) return;
+				try {
+					const remaining = remainingPreparationMs(`npm cache batch ${index + 1}`);
+					const result = await measured(`seed cache batch ${index + 1}/${batches.length}`, () => runCommand(
+						npm.command,
+						[...npm.argsPrefix, "cache", "add", "--cache", layout.cacheDir, ...batches[index]],
+						{ cwd: layout.resolverDir, env: resolverEnv, timeoutMs: Math.min(CACHE_BATCH_TIMEOUT_MS, remaining), totalTimeoutMs: remaining, repoRoot, ownershipBootstrapRoot: layout.fixtureRoot },
+					));
+					results[index] = result;
+					requireSuccess(result);
+				} catch (error) {
+					failures[index] = error;
+					stopped = true;
+				}
+			}
+		};
+		await Promise.allSettled(Array.from({ length: Math.min(CACHE_WORKER_COUNT, batches.length) }, worker));
+		for (const result of results) if (result) commands.push(result);
+		const failed = failures.map((error, index) => error ? { error, index } : undefined).filter(Boolean);
+		if (failed.length) throw new AggregateError(failed.map(entry => entry.error), `npm cache population failed for ${failed.map(entry => `batch ${entry.index + 1}`).join(", ")}`);
+		await measured("seed cache verification", () => verifyDestinationArtifacts({
+			artifacts: selectedArtifacts,
+			destinationContentCache,
+			contentCache,
+			remainingPreparationMs,
+			setTimer,
+			clearTimer,
+		}));
+		remainingPreparationMs("seed descriptor publication");
+		const identities = selectedArtifacts.map(artifact => Object.freeze({
+			resolved: artifact.resolved,
+			integrity: artifact.integrity ?? null,
+			status: artifact.integrity ? "verified-digest" : "fetched-exact-url",
+		}));
+		const seedDescriptor = Object.freeze({
+			version: SEED_DESCRIPTOR_VERSION,
+			runRoot: layout.absoluteRunRoot,
+			fixtureRoot: layout.fixtureRoot,
+			cacheDir: layout.cacheDir,
+			stagingRoot: join(layout.fixtureRoot, "cache-copy-staging"),
+			seedDescriptorPath: layout.seedDescriptorPath,
+			repositoryLockHash: repositoryLockHash(lockInput.bytes),
+			runtime: selectedRuntime,
+			identities,
+			deadline,
+			lifecycle: Object.freeze({ cacheOwnersSettled: true, helperTransportJoined: true, verifiedArtifacts: identities.length }),
+		});
+		const temporary = `${layout.seedDescriptorPath}.tmp-${process.pid}-${randomUUID()}`;
+		await writeFile(temporary, `${JSON.stringify(seedDescriptor, null, 2)}\n`, { flag: "wx" });
+		remainingPreparationMs("seed descriptor rename");
+		await rename(temporary, layout.seedDescriptorPath);
+		const seedHandle = Object.freeze({ version: SEED_DESCRIPTOR_VERSION, seedDescriptorPath: layout.seedDescriptorPath, deadline, seedWallMs: Date.now() - wallStartedAt });
+		seedAuthorities.set(seedHandle, Object.freeze({
+			layout, wallStartedAt, repoRoot: resolve(repoRoot), baseEnv, ensureDist, runCommand, npm, runtime: selectedRuntime,
+			contentCache, setTimer, clearTimer, remainingPreparationMs, lock: lockInput.lock,
+			lockInjected: repositoryLock !== undefined,
+			lockHash: seedDescriptor.repositoryLockHash, selectedArtifacts, identities, commands, seedDescriptor,
+		}));
+		console.log(`[packed-consumer] seed completed in ${(seedHandle.seedWallMs / 1000).toFixed(1)}s; deadline=${deadline.identity}`);
+		return seedHandle;
+	} catch (error) {
+		await retainPreparationFailure({ fixtureRoot: layout.fixtureRoot, commands, error });
+	}
+}
+
+/**
+ * Complete one seeded packed-consumer template and publish its descriptor only
+ * after the actual tarball, generated lockfile, and installed tree exist.
+ */
+export async function finalizePackedConsumerFixture(seedHandle) {
+	const authority = seedAuthorities.get(seedHandle);
+	if (!authority) throw new Error("Packed-consumer finalization requires an authoritative seed handle from this process");
+	const {
+		layout, wallStartedAt, repoRoot, baseEnv, ensureDist, runCommand, npm, runtime, contentCache,
+		setTimer, clearTimer, remainingPreparationMs, lock: repositoryLock, lockInjected,
+		lockHash, identities, commands, seedDescriptor,
+	} = authority;
+	const finalizationStartedAt = Date.now();
+	const { absoluteRunRoot, fixtureRoot, packDir, preparationDir, resolverDir, templateDir, cacheDir, consumersDir, descriptorPath } = layout;
+	const commandDeadline = (label, commandTimeoutMs) => {
+		const totalTimeoutMs = remainingPreparationMs(label);
+		return { timeoutMs: Math.min(commandTimeoutMs, totalTimeoutMs), totalTimeoutMs };
+	};
+	try {
+		const persistedSeed = JSON.parse(await readFile(layout.seedDescriptorPath, "utf8"));
+		if (JSON.stringify(persistedSeed) !== JSON.stringify(seedDescriptor)) {
+			throw new Error("Packed-consumer persisted seed descriptor does not match its authoritative in-memory seed");
+		}
+		const currentLock = seedLockInput(repoRoot, lockInjected ? repositoryLock : undefined);
+		if (repositoryLockHash(currentLock.bytes) !== lockHash) {
+			throw new Error("Repository package-lock.json changed after packed-consumer cache seeding");
+		}
+		const canonical = packedConsumerLayout(absoluteRunRoot);
+		for (const key of Object.keys(canonical)) {
+			if (resolve(canonical[key]) !== resolve(layout[key])) throw new Error(`Packed-consumer seed ${key} does not match its canonical run-owned path`);
+		}
+		if (seedHandle.deadline.identity !== seedDescriptor.deadline.identity || seedHandle.deadline.expiresAt !== seedDescriptor.deadline.expiresAt) {
+			throw new Error("Packed-consumer seed deadline identity was forged");
+		}
+		remainingPreparationMs("finalization start");
 		await measured("build", async () => {
 			if (ensureDist) {
 				const totalTimeoutMs = remainingPreparationMs("dist build");
@@ -1374,7 +1601,6 @@ export async function preparePackedConsumerFixture({
 		const packageManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 		const packageName = packageManifest.name;
 		if (typeof packageName !== "string" || packageName.length === 0) throw new Error("package.json must declare a package name");
-		const repositoryLock = readPackageLock(join(repoRoot, "package-lock.json"), "repository package-lock.json");
 		const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
 		const consumerManifest = cleanConsumerManifest(nodeTypesVersion);
 		// Seed Arborist with the checkout's exact graph. npm remains authoritative:
@@ -1382,7 +1608,6 @@ export async function preparePackedConsumerFixture({
 		// tarball rather than solving the complete graph online from an empty lock.
 		await Promise.all([
 			writeManifest(resolverDir, consumerManifest),
-			writeManifest(templateDir, consumerManifest),
 			copyFile(join(repoRoot, "package-lock.json"), join(resolverDir, "package-lock.json")),
 		]);
 
@@ -1431,134 +1656,22 @@ export async function preparePackedConsumerFixture({
 		const resolverLockPath = join(resolverDir, "package-lock.json");
 		const consumerLock = readPackageLock(resolverLockPath, "generated consumer package-lock.json");
 		assertPackedArtifactLock(consumerLock, packageName, resolverDir, tarballPath);
-		// `npm install --package-lock-only <tarball>` records the exact local
-		// tarball spec in both package.json and package-lock.json. Stage those
-		// outputs into the same-depth template so `npm ci` only materializes that
-		// resolved graph. Leaving the template manifest empty makes npm 11 solve
-		// the full dependency graph a second time and caused the 600-second Windows hang.
+		// The generated lock is final authority. Its exact URL+integrity identities
+		// must be a subset of the verified repository-lock seed before install.
+		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
+		assertConsumerSeedSubset(selectedArtifacts, identities);
+		await measured("finalization cache verification", () => verifyDestinationArtifacts({
+			artifacts: selectedArtifacts,
+			destinationContentCache: join(cacheDir, "_cacache"),
+			contentCache,
+			remainingPreparationMs,
+			setTimer,
+			clearTimer,
+		}));
 		await Promise.all([
 			copyFile(resolverManifestPath, join(templateDir, "package.json")),
 			copyFile(resolverLockPath, join(templateDir, "package-lock.json")),
 		]);
-		const discoveryArgs = [...npm.argsPrefix, "config", "get", "cache"];
-		const discoveryCommand = await measured("ambient cache discovery", async () => {
-			const result = await runCommand(npm.command, discoveryArgs, {
-				cwd: repoRoot,
-				env: packedConsumerNpmEnv(repoRoot, baseEnv),
-				...commandDeadline("ambient npm cache discovery", CACHE_DISCOVERY_TIMEOUT_MS),
-				repoRoot,
-			});
-			commands.push(result);
-			requireSuccess(result);
-			return result;
-		});
-		const ambientCacheDir = ambientCacheFromOutput(discoveryCommand.stdout);
-		if (ambientCacheDir === resolve(cacheDir) || ambientCacheDir === resolve(fixtureRoot) ||
-			isStrictChild(fixtureRoot, ambientCacheDir) || isStrictChild(ambientCacheDir, fixtureRoot)) {
-			throw new Error(`Ambient npm cache must lie outside and not contain the packed-consumer fixture: ${ambientCacheDir}`);
-		}
-		const sourceContentCache = join(ambientCacheDir, "_cacache");
-		const destinationContentCache = join(cacheDir, "_cacache");
-		assertOwnedPath(absoluteRunRoot, destinationContentCache, "destinationContentCache");
-
-		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
-		const destinationPaths = await measured("destination cache path resolution", () => resolveDestinationContentPaths({
-			artifacts: selectedArtifacts,
-			destinationContentCache,
-			fixtureRoot,
-			runRoot: absoluteRunRoot,
-			repoRoot,
-			baseEnv,
-			runCommand,
-			commands,
-			remainingPreparationMs,
-		}));
-		console.log(`[packed-consumer] cache: selectively copying ${selectedArtifacts.filter(artifact => artifact.integrity).length} exact digests from ${ambientCacheDir}`);
-		const transferResult = await measured("cache copy and publication", () => copyAvailableArtifacts({
-			artifacts: selectedArtifacts,
-			sourceContentCache,
-			destinationPaths,
-			contentCache,
-			fixtureRoot,
-			repoRoot,
-			baseEnv,
-			runCommand,
-			commands,
-			remainingPreparationMs,
-			removeOwnedPathFn,
-		}));
-		const corruptCopies = await measured("copied digest verification", () => verifyCopiedArtifactsForFallback({
-			artifacts: transferResult.transferredArtifacts,
-			destinationPaths,
-			destinationContentCache,
-			contentCache,
-			remainingPreparationMs,
-			setTimer,
-			clearTimer,
-		}));
-		const fallbackArtifacts = [...transferResult.fallbackArtifacts, ...corruptCopies]
-			.sort((left, right) => left.resolved.localeCompare(right.resolved));
-		console.log(`[packed-consumer] cache copy: ${transferResult.transferredCount - corruptCopies.length} verified hits, ${fallbackArtifacts.filter(artifact => artifact.integrity).length} digest fallbacks, ${transferResult.noIntegrityCount} no-integrity fallbacks`);
-		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort();
-		const cacheBatches = [];
-		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) {
-			cacheBatches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));
-		}
-		console.log(`[packed-consumer] cache: fetching ${fallbackUrls.length} exact misses in ${cacheBatches.length} batches`);
-		const cacheResults = new Array(cacheBatches.length);
-		const cacheFailures = new Array(cacheBatches.length);
-		let nextBatchIndex = 0;
-		let stopAdmission = false;
-		const cacheWorker = async () => {
-			while (!stopAdmission) {
-				// JavaScript runs this claim without an await, so workers cannot claim
-				// the same batch. A failure closes admission before this point can run again.
-				const batchIndex = nextBatchIndex++;
-				if (batchIndex >= cacheBatches.length) return;
-				const batch = cacheBatches[batchIndex];
-				try {
-					const result = await measured(`cache batch ${batchIndex + 1}/${cacheBatches.length}`, () =>
-						runCommand(npm.command, [...npm.argsPrefix, "cache", "add", "--cache", cacheDir, ...batch], {
-							cwd: resolverDir,
-							env: resolverEnv,
-							// Calculate this at admission, not while partitioning, so all
-							// children share the unchanged absolute preparation deadline.
-							...commandDeadline(`npm cache batch ${batchIndex + 1}`, CACHE_BATCH_TIMEOUT_MS),
-							repoRoot,
-						}),
-					);
-					cacheResults[batchIndex] = result;
-					requireSuccess(result);
-				} catch (error) {
-					cacheFailures[batchIndex] = error;
-					stopAdmission = true;
-					return;
-				}
-			}
-		};
-		await Promise.allSettled(
-			Array.from({ length: Math.min(CACHE_WORKER_COUNT, cacheBatches.length) }, () => cacheWorker()),
-		);
-		// Evidence is stable even when commands completed out of order.
-		for (const result of cacheResults) if (result !== undefined) commands.push(result);
-		const failedCacheBatches = cacheFailures
-			.map((error, index) => error === undefined ? undefined : { error, index })
-			.filter(Boolean);
-		if (failedCacheBatches.length > 0) {
-			throw new AggregateError(
-				failedCacheBatches.map(failure => failure.error),
-				`npm cache population failed for ${failedCacheBatches.map(failure => `batch ${failure.index + 1}`).join(", ")}`,
-			);
-		}
-		await measured("cache verification", () => verifyDestinationArtifacts({
-			artifacts: selectedArtifacts,
-			destinationContentCache,
-			contentCache,
-			remainingPreparationMs,
-			setTimer,
-			clearTimer,
-		}));
-		remainingPreparationMs("post-cache verification");
 
 		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
 		const installArgs = [
@@ -1590,6 +1703,7 @@ export async function preparePackedConsumerFixture({
 			throw new Error("Offline packed-consumer template validation failed: package-lock.json or node_modules is missing");
 		}
 
+		const finalizationWallMs = Date.now() - finalizationStartedAt;
 		const descriptor = {
 			version: DESCRIPTOR_VERSION,
 			runRoot: absoluteRunRoot,
@@ -1603,12 +1717,15 @@ export async function preparePackedConsumerFixture({
 			packEntry,
 			packReport,
 			commands,
+			seed: { descriptorPath: layout.seedDescriptorPath, repositoryLockHash: lockHash, identities, deadline: seedDescriptor.deadline },
+			timing: { seedWallMs: seedHandle.seedWallMs, finalizationWallMs, totalWallMs: Date.now() - wallStartedAt },
 			preparedAt: new Date().toISOString(),
 		};
 		const temporaryDescriptor = `${descriptorPath}.tmp-${process.pid}-${randomUUID()}`;
 		await writeFile(temporaryDescriptor, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx" });
 		remainingPreparationMs("descriptor publication");
 		await rename(temporaryDescriptor, descriptorPath);
+		console.log(`[packed-consumer] finalization completed in ${(finalizationWallMs / 1000).toFixed(1)}s; total ${(descriptor.timing.totalWallMs / 1000).toFixed(1)}s; deadline=${seedDescriptor.deadline.identity}`);
 		console.log(`[packed-consumer] descriptor: ${descriptorPath}`);
 		return descriptor;
 	} catch (error) {
@@ -1617,6 +1734,12 @@ export async function preparePackedConsumerFixture({
 		// and discarded the exact npm command evidence needed to diagnose failures.
 		await retainPreparationFailure({ fixtureRoot, commands, error });
 	}
+}
+
+/** Sequential compatibility wrapper for direct and focused callers. */
+export async function preparePackedConsumerFixture(options = {}) {
+	const seedHandle = await seedPackedConsumerCache(options);
+	return finalizePackedConsumerFixture(seedHandle);
 }
 
 function assertMatchingPath(actual, expected, label) {

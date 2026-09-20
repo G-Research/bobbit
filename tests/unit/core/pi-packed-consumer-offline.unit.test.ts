@@ -179,7 +179,7 @@ describe("packed-consumer offline install contract", () => {
 		assert.doesNotMatch(source, /hasContent/,
 			"uncancellable cache probes must not precede deadline-bound digest streams");
 		assert.doesNotMatch(source, /cacache\.ls\(/, "ambient cache entries must never be enumerated wholesale");
-		assert.match(source, /"cache", "add", "--cache", cacheDir, \.\.\.batch/);
+		assert.match(source, /"cache", "add", "--cache", layout\.cacheDir, \.\.\.batches\[index\]/);
 		assert.match(source, /const CACHE_WORKER_COUNT = 3;/,
 			"cache population must retain the accepted bounded concurrency");
 		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot\]/,
@@ -230,6 +230,13 @@ describe("packed-consumer offline install contract", () => {
 			const descriptor = await preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
 				runRoot: tempParent,
+				repositoryLock: {
+					lockfileVersion: 3,
+					packages: {
+						"": { name: "seed" },
+						"node_modules/new-dependency": { version: "1.2.3", resolved: selectedUrl, integrity: selectedIntegrity },
+					},
+				},
 				baseEnv: {
 					PATH: process.env.PATH,
 					npm_config_cache: ambientCache,
@@ -355,32 +362,31 @@ describe("packed-consumer offline install contract", () => {
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "discover", "paths", "copy", "install"]);
+			assert.deepEqual(order, ["discover", "paths", "copy", "ensure-dist", "pack", "resolve", "install"]);
 			assert.equal(calls.length, 6);
-			assert.deepEqual(calls[0]?.args.slice(1), [
-				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
+			assert.deepEqual(calls[0]?.args, ["npm-cli.js", "config", "get", "cache"]);
+			assert.ok(calls[1]?.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
+			assert.ok(calls[2]?.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
+			assert.deepEqual(calls[3]?.args.slice(1), [
+				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[3]?.args.at(-1),
 			]);
-			assert.deepEqual(calls[1]?.args.slice(1, 7), [
+			assert.deepEqual(calls[4]?.args.slice(1, 7), [
 				"install", "--package-lock-only", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
 			]);
-			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
-			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "config", "get", "cache"]);
-			assert.ok(calls[3]?.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
-			assert.ok(calls[4]?.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
+			assert.equal(dirname(calls[4]!.args.at(-1)!), calls[3]!.args.at(-1));
 			assert.equal(calls[5]?.args[1], "ci");
 			assert.ok(calls[5]?.args.includes("--offline"));
-			assert.ok(!calls[5]?.args.includes(calls[1]!.args.at(-1)!),
+			assert.ok(!calls[5]?.args.includes(calls[4]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
-			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
+			assert.equal(calls[0]?.timeoutMs, 30_000);
 			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
-			assert.equal(calls[2]?.timeoutMs, 30_000);
-			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000,
-				"the path helper must receive only the remaining absolute preparation budget");
-			assert.equal(calls[4]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 20_000,
-				"the copy helper must receive only the remaining absolute preparation budget");
+			assert.equal(calls[2]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 10_000);
+			assert.equal(calls[3]?.timeoutMs, 3 * 60_000);
+			assert.equal(calls[4]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 20_000);
 			assert.equal(calls[5]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 25_000,
-				"late commands must receive only the remaining monotonic preparation budget");
+				"late commands must receive only the original monotonic preparation deadline remainder");
 			assert.deepEqual(verificationReads, [
+				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
 				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
 				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
 			]);
@@ -394,7 +400,7 @@ describe("packed-consumer offline install contract", () => {
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const call of [calls[1]!, calls[5]!]) {
+			for (const call of [calls[4]!, calls[5]!]) {
 				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
 				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
 				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));
@@ -403,7 +409,7 @@ describe("packed-consumer offline install contract", () => {
 				assert.equal(call.env.npm_package_name, undefined);
 				assert.equal(call.env.INIT_CWD, call.cwd);
 			}
-			assert.equal(calls[2]?.env.npm_config_cache, ambientCache,
+			assert.equal(calls[0]?.env.npm_config_cache, ambientCache,
 				"cache discovery may inspect but must not mutate or pass ambient state to consumer commands");
 			const publishedEvidence = JSON.stringify(descriptor.commands);
 			assert.doesNotMatch(publishedEvidence, /inherited-auth|inherited-userconfig/,
@@ -447,14 +453,14 @@ describe("packed-consumer offline install contract", () => {
 			label: "malformed pack output",
 			pack: { stdout: "[]" },
 			expected: /npm pack must report exactly one result/,
-			expectedCommands: 1,
+			expectedCommands: 2,
 			expectedLastCode: 0,
 		},
 		{
 			label: "lock resolution failure",
 			pack: { stdout: JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-1.0.0.tgz" }]) },
 			expected: /exited 17/,
-			expectedCommands: 2,
+			expectedCommands: 3,
 			expectedLastCode: 17,
 		},
 	])("propagates $label and retains partial fixture command evidence", async ({ pack, expected, expectedCommands, expectedLastCode }) => {
@@ -463,9 +469,11 @@ describe("packed-consumer offline install contract", () => {
 			await assert.rejects(preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
 				runRoot: tempParent,
+				repositoryLock: { lockfileVersion: 3, packages: {} },
 				ensureDist: () => {},
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
 				runCommand: async (command: string, args: string[]) => {
+					if (args.includes("config")) return commandResult(command, args, { stdout: `${join(tempParent, "ambient-cache")}\n` });
 					if (args.includes("pack")) {
 						if (pack.stdout !== "[]") {
 							const packDir = args[args.indexOf("--pack-destination") + 1];
@@ -685,16 +693,16 @@ describe("packed-consumer offline install contract", () => {
 				},
 			}), (error: Error) => {
 				assert.match(error.message, /retained partial fixture and command evidence/);
-				assert.match(error.message, /40ms total deadline \(including ownership readiness\)/);
+				assert.match(error.message, /50ms total deadline \(including ownership readiness\)/);
 				return true;
 			});
 
-			assert.equal(observedTimeoutMs, 40, "npm pack receives only the deadline remainder after build preparation");
+			assert.equal(observedTimeoutMs, 50, "cache seeding receives the original preparation deadline before finalization");
 			assert.equal(killCount, 1, "deadline expiry terminates the one owned process tree");
 			assert.equal(completionJoins, 1, "preparation does not reject until complete tree exit is verified");
 			const fixtureRoot = join(tempParent, "prepared-packed-consumer");
 			const evidence = JSON.parse(readFileSync(join(fixtureRoot, "preparation-failure.json"), "utf8"));
-			assert.match(evidence.error.message, /40ms total deadline \(including ownership readiness\)/);
+			assert.match(evidence.error.message, /50ms total deadline \(including ownership readiness\)/);
 			assert.match(evidence.error.message, /tree exit: verified complete/);
 			assert.deepEqual(evidence.error.shutdown, {
 				ownershipState: "termination requested before readiness",
@@ -1292,7 +1300,7 @@ describe("packed-consumer offline install contract", () => {
 
 	it("retains a clean consumer and the published security assertions", () => {
 		const packedConsumer = PACKED_CONSUMER_SOURCE;
-		assert.match(PREWARM_SOURCE, /const resolverDir = join\(preparationDir, "resolver"\);\s*const templateDir = join\(preparationDir, "template"\);/s,
+		assert.match(PREWARM_SOURCE, /resolverDir: join\(preparationDir, "resolver"\),\s*templateDir: join\(preparationDir, "template"\),/s,
 			"lock-free resolution and the installed template must stay separate");
 		assert.match(PREWARM_SOURCE, /name: "bobbit-inline-theme-clean-consumer",\s*version: "1\.0\.0",\s*private: true,/s,
 			"the prepared consumer must begin as an empty external package");
