@@ -371,11 +371,10 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		// without asserting its position.
 		await setHeadquartersVisible(true);
 		await openDesktop(page);
-		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
-			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
-		);
-		expect(headerIds, "Headquarters should appear in the project list when visible").toContain(HEADQUARTERS_PROJECT_ID);
-		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 20_000 });
+		await expect(
+			projectHeader(page, HEADQUARTERS_PROJECT_ID),
+			"Headquarters should appear in the project list when visible",
+		).toBeVisible({ timeout: 20_000 });
 		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters participates in reorder rows").toHaveCount(1);
 		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters renders a reorder handle like any other project").toHaveCount(1);
 	});
