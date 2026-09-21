@@ -738,20 +738,22 @@ export async function runGroupBWithPackedConsumerFinalization({
 	});
 }
 
-/** Await seed success before admitting either Group B or finalization. */
-export async function runSeedThenGroupBWithPackedConsumerFinalization({
+/**
+ * Seed before admitting Group A, then keep Group A and prebundle sequential.
+ * The returned seed is the original authority, so its immutable deadline keeps
+ * ticking while both intervening phases run and can be handed to finalization.
+ */
+export async function runSeedThenGroupAAndPrebundle({
 	seedPackedConsumer,
-	runGroupB,
-	finalizePackedConsumer,
-	onGroupBSettled = () => {},
+	runGroupA,
+	preparePrebundle,
+	onGroupASettled = () => {},
 }) {
 	const seed = await startConcurrentOperation(seedPackedConsumer);
-	const paired = await runGroupBWithPackedConsumerFinalization({
-		runGroupB,
-		finalizePackedConsumer: () => finalizePackedConsumer(seed),
-		onGroupBSettled,
-	});
-	return Object.freeze({ seed, ...paired });
+	const groupA = await startConcurrentOperation(runGroupA);
+	onGroupASettled(groupA);
+	const prebundle = await startConcurrentOperation(preparePrebundle);
+	return Object.freeze({ seed, groupA, prebundle });
 }
 
 /** Backward-compatible test seam; new scheduling names the finalization phase. */
@@ -986,32 +988,39 @@ async function main() {
 		}
 		if (only === "D") { results.push(await runGroupD(D, { coordinatorEnv })); captureLatestProfile("D"); }
 	} else {
-		// Hosted runners cannot reliably absorb cache seeding under Group B load.
-		// Seed first, then overlap only finalization with B; C and D remain behind
+		// Hosted runners cannot reliably absorb cache seeding under later test or
+		// prebundle load. Seed first, keep its original deadline ticking through A
+		// and prebundle, then overlap only finalization with B. C and D remain behind
 		// the all-settled barrier.
-		console.log("[e2e-v2] schedule: A → prebundle → packed-cache seed → (B ∥ packed finalization) → C → D (B/C share run-local transform cache)");
-		results.push(await runGroupA(A, coordinatorEnv));
-		captureLatestProfile("A");
-		bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv);
-		if (bundle.fallback) {
-			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
-		} else {
-			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
-		}
+		console.log("[e2e-v2] schedule: packed-cache seed → A → prebundle → (B ∥ packed finalization) → C → D (B/C share run-local transform cache)");
 		// Keep B's server selector in a frozen snapshot. The separate C environment
 		// is mutable only while preparation publishes its descriptor, then frozen
 		// before any worker receives it.
 		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
 		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
+		const prerequisites = await runSeedThenGroupAAndPrebundle({
+			seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
+			runGroupA: () => runGroupA(A, coordinatorEnv),
+			onGroupASettled: (groupAResult) => {
+				results.push(groupAResult);
+				captureLatestProfile("A");
+			},
+			preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv),
+		});
+		bundle = prerequisites.prebundle;
+		if (bundle.fallback) {
+			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
+		} else {
+			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
+		}
 		const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(sharedPlaywrightEnv,
 			bundle.bundlePath ? { BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundle.bundlePath } : {}));
 		const retries = resolveE2ERetryCount(coordinatorEnv);
 		const groupBWorkers = resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
-		const paired = await runSeedThenGroupBWithPackedConsumerFinalization({
-			seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
+		const paired = await runGroupBWithPackedConsumerFinalization({
 			runGroupB: () => runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries),
-			finalizePackedConsumer: (seed) => finalizeGroupCPackedConsumer(seed, sharedPlaywrightEnv, paths),
+			finalizePackedConsumer: () => finalizeGroupCPackedConsumer(prerequisites.seed, sharedPlaywrightEnv, paths),
 			onGroupBSettled: (groupBResult) => {
 				results.push(groupBResult);
 				captureLatestProfile("B");

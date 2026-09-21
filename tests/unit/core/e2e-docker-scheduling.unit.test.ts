@@ -11,7 +11,7 @@ import {
 	resolveE2eVitestWorkers,
 	runGroupBWithPackedConsumerFinalization,
 	runGroupBWithPackedConsumerPreparation,
-	runSeedThenGroupBWithPackedConsumerFinalization,
+	runSeedThenGroupAAndPrebundle,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 import {
 	isDockerSandboxAvailable,
@@ -105,17 +105,21 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(groupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 	});
 
-	it("runs A → prebundle → seed → concurrent B/finalization barrier → cache fan-out → C → D with D strictly last", () => {
+	it("runs seed → A → prebundle → concurrent B/finalization barrier → cache fan-out → C → D with D strictly last", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
 		expect(defaultSchedule).toBeDefined();
 
 		const steps = [
-			"await runGroupA(A, coordinatorEnv)",
-			"await prepareE2EDistServerPrebundle(paths, coordinatorEnv)",
 			"createSerialPlaywrightEnvironment(coordinatorEnv)",
+			"const prerequisites = await runSeedThenGroupAAndPrebundle({",
+			"seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths)",
+			"runGroupA: () => runGroupA(A, coordinatorEnv)",
+			"preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv)",
+			"bundle = prerequisites.prebundle",
 			"const groupBEnvironment = Object.freeze(composeE2EChildEnvironment",
-			"const paired = await runSeedThenGroupBWithPackedConsumerFinalization({",
+			"const paired = await runGroupBWithPackedConsumerFinalization({",
+			"finalizePackedConsumer: () => finalizeGroupCPackedConsumer(prerequisites.seed, sharedPlaywrightEnv, paths)",
 			"fanOutSerialTransformCache(paths.cacheRoot, paths.root)",
 			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath)",
 			"await runGroupD(D, { coordinatorEnv })",
@@ -126,18 +130,9 @@ describe("E2E Docker capability and scheduling", () => {
 			expect(position, step).toBeGreaterThan(previous);
 			previous = position;
 		}
-		const barrierStart = defaultSchedule!.indexOf("const paired = await runSeedThenGroupBWithPackedConsumerFinalization({");
-		const barrierEnd = defaultSchedule!.indexOf("});", barrierStart);
-		const barrier = defaultSchedule!.slice(barrierStart, barrierEnd);
-		expect(barrier.indexOf("seedGroupCPackedConsumer(C, sharedPlaywrightEnv")).toBeGreaterThanOrEqual(0);
-		expect(barrier.indexOf("runSerialGroupB(B, groupBEnvironment")).toBeGreaterThan(
-			barrier.indexOf("seedGroupCPackedConsumer(C, sharedPlaywrightEnv"),
-		);
-		expect(barrier.indexOf("finalizeGroupCPackedConsumer(seed, sharedPlaywrightEnv")).toBeGreaterThan(
-			barrier.indexOf("runSerialGroupB(B, groupBEnvironment"),
-		);
-		expect(barrier).toContain("results.push(groupBResult)");
-		expect(barrier).toContain('captureLatestProfile("B")');
+		expect(defaultSchedule!.match(/seedGroupCPackedConsumer\(/g)).toHaveLength(1);
+		expect(defaultSchedule).toContain("results.push(groupBResult)");
+		expect(defaultSchedule).toContain('captureLatestProfile("B")');
 		expect(defaultSchedule).toContain("Object.freeze(sharedPlaywrightEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
 		expect(defaultSchedule).not.toMatch(/Promise\.all[\s\S]*runGroupD/);
@@ -161,7 +156,8 @@ describe("E2E Docker capability and scheduling", () => {
 		);
 		expect(focusedGroupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 		expect(source).not.toContain('process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1');
-		expect(defaultSchedule).toContain("bundle = await prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
+		expect(defaultSchedule).toContain("preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
+		expect(defaultSchedule).toContain("bundle = prerequisites.prebundle");
 		const reportAt = source.indexOf("const report = {");
 		const bundleFieldAt = source.indexOf("\n\t\tbundle,", reportAt);
 		const cleanupAt = source.indexOf("await finalizeE2ERunCleanup({", reportAt);
@@ -223,43 +219,64 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(errors.at(-1)).toContain("terminal cleanup failure");
 	});
 
-	it("blocks B on seed failure and overlaps B with finalization only after seed completes", async () => {
-		const seed = deferred<{ id: string }>();
-		const groupB = deferred<{ code: number }>();
-		const finalization = deferred<{ selected: boolean }>();
+	it("keeps the seed authority across A and prebundle before admitting B/finalization", async () => {
+		const seed = deferred<{ id: string; deadline: Readonly<{ identity: string; expiresAt: number }> }>();
+		const groupA = deferred<{ code: number }>();
+		const prebundle = deferred<{ bundlePath: string }>();
 		const events: string[] = [];
-		const running = runSeedThenGroupBWithPackedConsumerFinalization({
+		const deadline = Object.freeze({ identity: "deadline-300s", expiresAt: 300_000 });
+		const seedHandle = Object.freeze({ id: "verified", deadline });
+		const running = runSeedThenGroupAAndPrebundle({
 			seedPackedConsumer: () => { events.push("seed-start"); return seed.promise; },
-			runGroupB: () => { events.push("b-start"); return groupB.promise; },
-			finalizePackedConsumer: (value: { id: string }) => {
-				events.push(`finalize-start:${value.id}`);
-				return finalization.promise;
-			},
+			runGroupA: () => { events.push("a-start"); return groupA.promise; },
+			onGroupASettled: () => events.push("a-settled"),
+			preparePrebundle: () => { events.push("prebundle-start"); return prebundle.promise; },
 		});
 		expect(events).toEqual(["seed-start"]);
-		seed.resolve({ id: "verified" });
+		seed.resolve(seedHandle);
 		await Promise.resolve();
 		await Promise.resolve();
-		expect(events).toEqual(["seed-start", "b-start", "finalize-start:verified"]);
-		groupB.resolve({ code: 0 });
+		expect(events).toEqual(["seed-start", "a-start"]);
+		groupA.resolve({ code: 0 });
 		await Promise.resolve();
-		let settled = false;
-		void running.finally(() => { settled = true; });
 		await Promise.resolve();
-		expect(settled).toBe(false);
-		finalization.resolve({ selected: true });
-		await expect(running).resolves.toMatchObject({ seed: { id: "verified" }, groupB: { code: 0 }, packedConsumer: { selected: true } });
+		expect(events).toEqual(["seed-start", "a-start", "a-settled", "prebundle-start"]);
+		prebundle.resolve({ bundlePath: "bundle.mjs" });
+		const prerequisites = await running;
+		expect(prerequisites.seed).toBe(seedHandle);
+		expect(prerequisites.seed.deadline).toBe(deadline);
 
-		const failure = new Error("seed failed");
-		let bStarts = 0;
-		let finalizationStarts = 0;
-		await expect(runSeedThenGroupBWithPackedConsumerFinalization({
-			seedPackedConsumer: () => Promise.reject(failure),
-			runGroupB: () => { bStarts++; return Promise.resolve({ code: 0 }); },
-			finalizePackedConsumer: () => { finalizationStarts++; return Promise.resolve({ selected: true }); },
-		})).rejects.toBe(failure);
-		expect(bStarts).toBe(0);
-		expect(finalizationStarts).toBe(0);
+		let finalizedSeed: typeof seedHandle | undefined;
+		await expect(runGroupBWithPackedConsumerFinalization({
+			runGroupB: () => Promise.resolve({ code: 0 }),
+			finalizePackedConsumer: () => {
+				finalizedSeed = prerequisites.seed;
+				return Promise.resolve({ selected: true });
+			},
+		})).resolves.toMatchObject({ groupB: { code: 0 }, packedConsumer: { selected: true } });
+		expect(finalizedSeed).toBe(seedHandle);
+		expect(finalizedSeed?.deadline).toBe(deadline);
+	});
+
+	it("blocks A and prebundle when seeding fails, and blocks prebundle when A throws", async () => {
+		const seedFailure = new Error("seed failed");
+		let aStarts = 0;
+		let prebundleStarts = 0;
+		await expect(runSeedThenGroupAAndPrebundle({
+			seedPackedConsumer: () => Promise.reject(seedFailure),
+			runGroupA: () => { aStarts++; return Promise.resolve({ code: 0 }); },
+			preparePrebundle: () => { prebundleStarts++; return Promise.resolve({ bundlePath: "late" }); },
+		})).rejects.toBe(seedFailure);
+		expect(aStarts).toBe(0);
+		expect(prebundleStarts).toBe(0);
+
+		const groupAFailure = new Error("A threw");
+		await expect(runSeedThenGroupAAndPrebundle({
+			seedPackedConsumer: () => Promise.resolve({ id: "verified" }),
+			runGroupA: () => Promise.reject(groupAFailure),
+			preparePrebundle: () => { prebundleStarts++; return Promise.resolve({ bundlePath: "late" }); },
+		})).rejects.toBe(groupAFailure);
+		expect(prebundleStarts).toBe(0);
 	});
 
 	it.each(["group-b", "preparation"] as const)("waits at the overlap barrier when %s settles first", async (first) => {
