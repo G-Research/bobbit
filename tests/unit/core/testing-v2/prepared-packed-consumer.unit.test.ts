@@ -1176,6 +1176,75 @@ describe("prepared packed consumer", () => {
 		}), (error: unknown) => error instanceof AggregateError && error.errors.some(failure => /destination ancestry/.test(failure.message)));
 	});
 
+	it("accepts an ordinary lexical 8.3-style ancestor alias only when filesystem identity matches", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-short-alias-unit-"));
+		roots.push(fixtureRoot);
+		const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+		await mkdir(destinationCache, { recursive: true });
+		const lexicalAliasRoot = dirname(fixtureRoot);
+		const canonicalAliasRoot = `${lexicalAliasRoot}-expanded-long-spelling`;
+		const remapFromCanonicalAlias = (path: string) => {
+			const absolute = resolve(path);
+			if (absolute === resolve(canonicalAliasRoot) || isStrictChild(canonicalAliasRoot, absolute)) {
+				return join(lexicalAliasRoot, relative(canonicalAliasRoot, absolute));
+			}
+			return absolute;
+		};
+		const canonicalPath = async (path: string) => {
+			const absolute = resolve(path);
+			if (absolute === resolve(lexicalAliasRoot) || isStrictChild(lexicalAliasRoot, absolute)) {
+				return join(canonicalAliasRoot, relative(lexicalAliasRoot, absolute));
+			}
+			return absolute;
+		};
+		let canonicalAliasInspections = 0;
+		const inspectPath = async (path: string) => {
+			const remapped = remapFromCanonicalAlias(path);
+			if (remapped !== resolve(path)) canonicalAliasInspections++;
+			return lstat(remapped);
+		};
+		const artifact = {
+			integrity: "sha512-short-alias",
+			destinationPath: join(destinationCache, "short-alias"),
+		};
+
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, undefined, {
+			version: 4,
+			operation: "verify",
+			artifacts: [artifact],
+		}, {
+			inspectPath,
+			canonicalPath,
+			readDigest: async () => Buffer.from("verified"),
+		});
+
+		assert.deepEqual(result.results, [{ integrity: artifact.integrity, status: "verified" }]);
+		assert.ok(canonicalAliasInspections > 0,
+			`${FAILURE_PREFIX}: a changed canonical spelling must be accepted only after same-entry inspection`);
+	});
+
+	it("rejects canonical spelling changes with mismatched identity and real reparse entries", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-identity-unit-"));
+		const externalRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-external-unit-"));
+		roots.push(fixtureRoot, externalRoot);
+		const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+		await mkdir(destinationCache, { recursive: true });
+		const request = {
+			version: 4,
+			operation: "verify" as const,
+			artifacts: [{ integrity: "sha512-alias-identity", destinationPath: join(destinationCache, "identity") }],
+		};
+
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, undefined, request, {
+			canonicalPath: async (path: string) => resolve(path) === resolve(fixtureRoot) ? externalRoot : resolve(path),
+		}), /authoritative fixture root must not traverse a reparse point/);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, undefined, request, {
+			inspectPath: async (path: string) => resolve(path) === resolve(fixtureRoot)
+				? { isDirectory: () => true, isSymbolicLink: () => true }
+				: lstat(path),
+		}), /authoritative fixture root must be a non-reparse directory/);
+	});
+
 	it("copies many real cacache digests through public retained destination entries without mutating ambient indexes", async () => {
 		const ambientCache = await mkdtemp(join(tmpdir(), "bobbit-ambient-cache-unit-"));
 		roots.push(ambientCache);
@@ -1671,6 +1740,117 @@ describe("prepared packed consumer", () => {
 		assert.deepEqual(evidence.error.shutdown, shutdown);
 		assert.deepEqual(evidence.error.args, ["npm-cli.js", "run", "build"]);
 		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json"), "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+	});
+
+	it("allows cold ownership readiness past 30 seconds while retaining the absolute preparation deadline", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 3131,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		const readiness = deferred();
+		const armedTimeouts: number[] = [];
+		let kills = 0;
+		const running = packedConsumerModule.runOwnedCommand("node", ["cold-owned-helper.mjs"], {
+			cwd: REPO_ROOT,
+			timeoutMs: packedConsumerModule.PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
+			totalTimeoutMs: packedConsumerModule.PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: readiness.promise,
+				killTree: () => { kills++; },
+				waitForTreeExit: async () => true,
+			}),
+			now: () => 100,
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				armedTimeouts.push(timeoutMs);
+				return { callback, timeoutMs };
+			},
+			clearTimer: () => {},
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.ok(armedTimeouts.includes(packedConsumerModule.PACKED_CONSUMER_PREPARATION_TIMEOUT_MS),
+			`${FAILURE_PREFIX}: the unchanged absolute preparation deadline must remain armed`);
+		assert.ok(armedTimeouts.includes(packedConsumerModule.OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS));
+		assert.ok(packedConsumerModule.OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS > 30_000);
+		assert.ok(packedConsumerModule.OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS < packedConsumerModule.PACKED_CONSUMER_PREPARATION_TIMEOUT_MS);
+		assert.equal(armedTimeouts.includes(30_000), false,
+			`${FAILURE_PREFIX}: readiness must not retain the disproven hosted-Windows 30s cap`);
+
+		readiness.resolve();
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		child.stdout.end();
+		child.stderr.end();
+		child.emit("close", 0, null);
+		const result = await running;
+		assert.equal(result.code, 0);
+		assert.equal(result.shutdown.ownershipState, "established");
+		assert.equal(result.shutdown.treeExitVerified, true);
+		assert.equal(kills, 0);
+	});
+
+	it("clamps pending ownership readiness to the absolute deadline and fully joins its killed tree", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 3232,
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		const readiness = deferred();
+		const timers: Array<{ callback: () => void; timeoutMs: number }> = [];
+		let kills = 0;
+		let treeExitAttempts = 0;
+		const running = packedConsumerModule.runOwnedCommand("node", ["deadline-owned-helper.mjs"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 50,
+			totalTimeoutMs: 50,
+			ownershipEstablishmentTimeoutMs: 90_000,
+			treeExitTimeoutMs: 29,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: readiness.promise,
+				killTree: () => {
+					kills++;
+					child.stdout.end();
+					child.stderr.end();
+					child.emit("close", null, "SIGKILL");
+				},
+				waitForTreeExit: async (timeoutMs: number) => {
+					assert.equal(timeoutMs, 29);
+					treeExitAttempts++;
+					return true;
+				},
+			}),
+			now: () => 100,
+			setTimer: (callback: () => void, timeoutMs: number) => {
+				timers.push({ callback, timeoutMs });
+				return Symbol(`timer-${timers.length}`);
+			},
+			clearTimer: () => {},
+		});
+		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+		assert.equal(timers[0]?.timeoutMs, 50, `${FAILURE_PREFIX}: the first timer must remain the absolute deadline`);
+		assert.equal(timers[1]?.timeoutMs, 50, `${FAILURE_PREFIX}: ownership readiness must clamp to the absolute remainder`);
+		timers[0]!.callback();
+
+		await assert.rejects(running, (error: unknown) => {
+			if (!(error instanceof packedConsumerModule.OwnedCommandError)) return false;
+			const ownedError = error as Error & { shutdown: Record<string, unknown> };
+			assert.match(ownedError.message, /exceeded its 50ms total deadline \(including ownership readiness\)/);
+			assert.deepEqual(ownedError.shutdown, {
+				ownershipState: "termination requested before readiness",
+				killRequested: true,
+				rootCloseObserved: true,
+				rootExitCode: null,
+				rootSignal: "SIGKILL",
+				treeExitAttempted: true,
+				treeExitSettled: true,
+				treeExitVerified: true,
+				completionTimedOut: false,
+			});
+			return true;
+		});
+		assert.equal(kills, 1);
+		assert.equal(treeExitAttempts, 1);
 	});
 
 	it("reports timeout ownership, tree termination, exit state, cwd, and retained output", async () => {
