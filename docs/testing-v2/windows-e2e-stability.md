@@ -38,6 +38,8 @@ An absent path is success. Only `EBUSY`, `EPERM`, and `ENOTEMPTY` are retried, w
 
 Successful final-root cleanup runs in a tracked, short-lived subprocess so its larger filesystem queue and isolated libuv thread pool do not affect the test processes. Success requires the result, transport `close`, and complete process-tree exit; timeout or protocol failure terminates and joins the tree before the coordinator settles. This prevents deletion from continuing after the reported run and makes incomplete ownership proof a test failure. Failed tests retain the whole run root, while a failed final cleanup retains whatever remains and reports the subprocess lifecycle.
 
+Focused Playwright and the full E2E coordinator share this final-cleanup policy rather than applying different limits to the same run-root shape: traversal concurrency 128, an isolated 32-thread pool, and a 30-second cleanup deadline. Both paths await the isolated remover, pass coordinator, Playwright, and reporting lifecycle evidence, retain failed roots, and turn terminal cleanup failure after green assertions into a failing run. A single shared policy prevents focused package journeys from failing under the remover's smaller fixture defaults while full E2E succeeds.
+
 A terminal `OwnedPathCleanupError` includes:
 
 - the resolved target and owner root;
@@ -77,11 +79,11 @@ The hosted scheduler settles every phase instead of letting an exception escape 
 Preparation builds one run-owned fixture:
 
 1. Select the runtime-compatible, non-development registry identities from the committed production lock.
-2. Resolve each SRI digest's canonical final path in the run-owned cacache and seed exact ambient hits through cache protocol v4.
-3. Fetch only unresolved exact URLs into that isolated cache, then verify every required digest.
-4. Build the distributable, run one real `npm pack`, and generate the external consumer lock offline against that tarball.
-5. Confirm the consumer lock is a subset of the verified production-lock seed, then verify its required digests again.
-6. Run one `npm ci --offline --ignore-scripts --no-audit --no-fund` against the run-owned cache, validate the installed template, and atomically publish the descriptor.
+2. Resolve each SRI digest's canonical final path in the run-owned cacache and directly publish exact ambient hits with per-blob digest proof.
+3. Fetch only unresolved exact URLs into that isolated cache, then run targeted post-fetch verification for integrity-bearing fallbacks.
+4. Stage the clean external-consumer manifest with the repository lock as the dependency-graph seed, build the distributable, and run one real `npm pack`.
+5. Run one owned `npm install --offline --ignore-scripts --no-audit --no-fund --cache <run-cache> <exact-tarball>` in the template. This single Arborist transaction authors the authoritative pruned external-consumer lock and materializes `node_modules` together.
+6. Validate that the npm-authored lock binds the exact packed artifact, that its registry identities are a subset of the digest-proven seed, and that the lock and installed tree exist before atomically publishing the descriptor.
 7. Materialize a unique mutable consumer for each test without rerunning `npm pack` or npm installation.
 
 Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation.
@@ -96,7 +98,7 @@ Protocol v4 directly publishes canonical final cache paths. It groups determinis
 
 The explicit hardlink authorization is limited to exact, immutable, SRI-addressed blobs in the ambient npm CAS. For such a hit on the same device, the helper creates a no-overwrite hardlink directly at cacache's canonical final content path and verifies it by digest before use. If hardlinks are unsupported or the caches are on different volumes, the helper uses an exclusive physical copy. Permission or I/O errors, collisions, reparse or authority violations, and unresolved integrity failures fail closed. A missing or rejected cache hit can proceed only through the normal exact-URL npm fallback followed by digest verification.
 
-Windows may expose an ordinary directory through its 8.3 short spelling, such as `RUNNER~1`, while `realpath` returns the long spelling. A changed spelling is not a general alias exemption: the helper first validates the full lexical ancestry as directories of the expected type with no symlink or reparse entry. It accepts each short-to-long expansion only when `lstat` also reports the same `dev` and `ino` identity for both spellings. Cache source ancestry is checked component by component under the canonical ambient-cache authority. A junction, mismatched identity, or unavailable identity therefore fails closed.
+Windows may expose an ordinary directory through its 8.3 short spelling, such as `RUNNER~1`, while `realpath` returns the long spelling. A changed spelling is not a general alias exemption: the helper first validates the full lexical ancestry as directories of the expected type with no symlink or reparse entry. Every identity-bearing inspection requests BigInt stats, and the helper accepts a short-to-long expansion only when both spellings expose available, nonzero inode identities with exactly equal BigInt `dev` and `ino` values. Cache source ancestry is checked component by component under the canonical ambient-cache authority. A junction, mismatched identity, zero or unavailable identity, or Number-valued collision therefore fails closed before link, copy, or digest-read admission.
 
 Direct hardlinks were selected as the minimal solution:
 
@@ -104,13 +106,15 @@ Direct hardlinks were selected as the minimal solution:
 - Reflinks are not consistently available across supported filesystems and platforms, and their copy-on-write semantics add another capability-dependent path without improving the immutable-CAS contract.
 - Publishing into a staging tree and then moving or linking into cacache's final tree duplicates namespace work and cleanup surface. Protocol v4 resolves the public cacache final path first and publishes there exactly once.
 
-The helper treats stdin, stdout, the root process `close` event, transport settlement, and verified process-tree exit as one lifecycle. Digest verification is tracked and buffered rather than left in a stream that can outlive command settlement. Each directly published blob is verified before it is accepted instead of sent to fallback. After fallback, every required seed digest is verified before seed publication; the consumer subset is verified again before installation and final descriptor publication.
+The helper treats stdin, stdout, the root process `close` event, transport settlement, and verified process-tree exit as one lifecycle. Digest verification is tracked and buffered rather than left in a stream that can outlive command settlement. Each directly published blob is verified before acceptance, so it is not redundantly traversed by another whole-cache verifier. Only integrity-bearing artifacts written by exact-URL fallback receive targeted post-cache-add verification. Finalization then binds the npm-authored lock to the exact tarball and proves its registry identities are a subset of those direct or fallback seed proofs before descriptor publication.
 
 ### Provenance and process bounds
 
 The descriptor is coordinator output, not trusted ambient configuration. Its only valid location is the fixed prepared-consumer directory below the authoritative `BOBBIT_V2_RUN_ROOT`. Reads and materialization verify run-root, descriptor, fixture/template/cache, tarball, and copy-destination identity before copying or executing the packaged CLI. An inherited or forged descriptor outside that layout fails closed.
 
 Package and helper commands use tracked process-tree ownership. Timeout, output overflow, transport failure, or ownership failure requests one tree termination, then waits concurrently for actual root close and verified descendant-tree exit under a separate completion deadline. A missing close event, stalled verification, failed kill, or unverified tree remains fatal.
+
+The real helper lifecycle regression test removes cold Windows Job bootstrap from its measured timeout without weakening this contract. Fixture setup starts the real root-plus-descendant helper, awaits production ownership readiness and its PID marker, then injects that pre-owned handle into the unchanged 10-second preparation window. The measured deadline must issue one owned-tree kill and await root `close`, descendant exit, and all transports before rejecting; installation stays blocked, the descriptor stays absent, and teardown independently re-verifies the retained root before removal.
 
 The Windows Job ownership-readiness cap is 90 seconds to accommodate cold hosted PowerShell startup, but it is strictly subordinate to the unchanged immutable 300-second preparation deadline. The readiness timer is armed only when it expires strictly before the remaining absolute budget. If the absolute deadline is earlier or equal, it remains the sole timer and authority; no duplicate readiness timer can race it, change the reported failure class, or issue a competing kill request. Ownership waiting still consumes the original preparation budget rather than starting a new one.
 
@@ -178,3 +182,18 @@ At repair head `523cfed7b`, focused local verification passed:
 These tests pin failure-safe phase settlement, Group C blocking with Group D continuation, sampler/report/final-cleanup reachability, 8.3 alias identity and reparse rejection, the 90-second readiness cap's subordination to the 300-second deadline, and full helper-tree joining. The workflow implementation gate also passed at that repair head.
 
 This repair qualification is local workflow evidence. Hosted PR checks were not refreshed for this round, and the round did not add another complete retry-free full E2E repetition; the retry-free evidence therefore remains the single run recorded above.
+
+### Final hosted repair-round qualification
+
+The final repair round addressed the identified hosted failure causes while keeping the phase schedule and the 300-second preparation and 900-second suite limits unchanged. Focused validation passed:
+
+- BigInt alias identity and prepared-consumer coverage: 58 of 58 tests;
+- offline consumer and prepared-consumer coverage: 84 of 84 tests;
+- shared cleanup and scheduling coverage: 69 of 69 tests;
+- the real pre-owned helper lifecycle E2E: 4 of 4 tests in each of three consecutive runs;
+- build and check;
+- the workflow implementation gate.
+
+The real packaged preparation completed in 112.6 seconds under the immutable preparation deadline, including a single 71.5-second strict-offline install, and all four packaged browser assertions passed. After the shared cleanup-policy repair, the exact packaged journey passed again; isolated final cleanup completed in 15.771 seconds and removed its run root.
+
+These are focused local measurements taken in response to hosted failures. They do **not** claim refreshed hosted PR checks or a second complete retry-free full E2E run. The complete retry-free evidence remains the single 888.7-second repetition recorded above.
