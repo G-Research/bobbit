@@ -77,8 +77,14 @@ type PathHelperCallback = (context: {
 	options: CommandOptions;
 }) => void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean }>;
 
+type CopyHelperRequest = {
+	version: number;
+	operation: "publish" | "verify";
+	artifacts: Array<{ candidates?: string[]; integrity: string; destinationPath: string }>;
+};
+
 type CopyHelperCallback = (context: {
-	request: { version: number; artifacts: Array<{ resolved: string; integrity: string; destinationPath: string }> };
+	request: CopyHelperRequest;
 	response: Record<string, unknown>;
 	options: CommandOptions;
 }) => void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean } | Promise<void | { output?: unknown; rawOutput?: string; code?: number; skipOutput?: boolean }>;
@@ -160,6 +166,14 @@ function cachePath(call: CommandCall): string | undefined {
 	return call.options.env?.npm_config_cache ?? call.options.env?.NPM_CONFIG_CACHE;
 }
 
+function publishRequest(artifacts: Array<{ resolved: string; integrity: string; destinationPath: string }>) {
+	return {
+		version: 4,
+		operation: "publish" as const,
+		artifacts: artifacts.map(({ resolved, ...artifact }) => ({ ...artifact, candidates: [resolved] })),
+	};
+}
+
 function deferred(): Deferred {
 	let resolvePromise!: () => void;
 	let rejectPromise!: (error: Error) => void;
@@ -195,6 +209,7 @@ async function prepareFixture({
 	onPathHelper,
 	onCopyHelper,
 	copyDecision = () => "missing",
+	verifyDecision = () => "verified",
 	split = false,
 	onSeeded,
 }: {
@@ -213,7 +228,8 @@ async function prepareFixture({
 	useRealContentCache?: boolean;
 	onPathHelper?: PathHelperCallback;
 	onCopyHelper?: CopyHelperCallback;
-	copyDecision?: (integrity: string) => "copied" | "missing";
+	copyDecision?: (integrity: string) => "linked" | "copied" | "missing" | "corrupt";
+	verifyDecision?: (integrity: string, invocation: number) => "verified" | "missing" | "corrupt";
 	split?: boolean;
 	onSeeded?: (seed: { deadline: { identity: string; startedAt: number; expiresAt: number }; seedDescriptorPath: string }) => void | Promise<void>;
 } = {}) {
@@ -221,6 +237,7 @@ async function prepareFixture({
 	roots.push(runRoot);
 	const calls: CommandCall[] = [];
 	let cacheBatchIndex = 0;
+	let verificationInvocation = 0;
 	const selectedRegistryArtifacts = registryArtifacts ?? Array.from({ length: registryTarballCount }, (_, index) => ({
 		resolved: `https://registry.example.test/dependency-${String(index).padStart(3, "0")}.tgz`,
 		integrity: `sha512-${index}`,
@@ -304,26 +321,35 @@ async function prepareFixture({
 				return result;
 			}
 			if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
-				assert.equal(args.length, 2, `${FAILURE_PREFIX}: cache-copy helper keeps ambient authority out of argv diagnostics`);
-				const request = JSON.parse(String(options.input)) as { version: number; artifacts: Array<{ resolved: string; integrity: string; destinationPath: string }> };
-				const sourceContentCache = options.env?.BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE!;
+				assert.equal(args.length, 2, `${FAILURE_PREFIX}: cache helper keeps authority out of argv diagnostics`);
+				const request = JSON.parse(String(options.input)) as CopyHelperRequest;
+				const sourceContentCache = options.env?.BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE;
 				const results = [];
 				for (const artifact of request.artifacts) {
-					const decision = useRealContentCache ? "linked" : copyDecision(artifact.integrity);
-					if (decision !== "missing") {
-						await mkdir(dirname(artifact.destinationPath), { recursive: true });
-						if (useRealContentCache) await cacache.get.copy.byDigest(sourceContentCache, artifact.integrity, artifact.destinationPath);
-						else await writeFile(artifact.destinationPath, `copied bytes for ${artifact.integrity}`, { flag: "wx" });
+					if (request.operation === "publish") {
+						const decision = useRealContentCache ? "linked" : copyDecision(artifact.integrity);
+						if (decision === "linked" || decision === "copied") {
+							await mkdir(dirname(artifact.destinationPath), { recursive: true });
+							if (useRealContentCache) await cacache.get.copy.byDigest(sourceContentCache!, artifact.integrity, artifact.destinationPath);
+							else await writeFile(artifact.destinationPath, `copied bytes for ${artifact.integrity}`, { flag: "wx" });
+						}
+						results.push({
+							integrity: artifact.integrity,
+							status: decision,
+							candidate: decision === "missing" ? null : artifact.candidates![0],
+						});
+					} else {
+						results.push({ integrity: artifact.integrity, status: verifyDecision(artifact.integrity, verificationInvocation) });
 					}
-					results.push({ resolved: artifact.resolved, integrity: artifact.integrity, status: decision });
 				}
-				const metrics = {
-					linked: results.filter(entry => entry.status === "linked").length,
-					copied: results.filter(entry => entry.status === "copied").length,
-					missing: results.filter(entry => entry.status === "missing").length,
-				};
+				if (request.operation === "verify") verificationInvocation++;
+				const metrics: Record<string, number> = request.operation === "publish"
+					? { linked: 0, copied: 0, missing: 0, corrupt: 0 }
+					: { verified: 0, missing: 0, corrupt: 0 };
+				for (const entry of results) metrics[entry.status]++;
 				const response = {
-					version: 3,
+					version: 4,
+					operation: request.operation,
 					results,
 					metrics,
 					admitted: request.artifacts.length,
@@ -537,12 +563,12 @@ describe("prepared packed consumer", () => {
 		});
 
 		const copyCalls = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
-		assert.equal(copyCalls.length, 1, `${FAILURE_PREFIX}: all exact identities must use one tracked copy helper`);
-		const request = JSON.parse(String(copyCalls[0]!.options.input));
-		assert.equal(request.version, 3);
+		assert.equal(copyCalls.length, 3, `${FAILURE_PREFIX}: publication and both authority verifications must be tracked helpers`);
+		const request = copyCalls.map(call => JSON.parse(String(call.options.input))).find(request => request.operation === "publish");
+		assert.equal(request.version, 4);
 		assert.equal(request.artifacts.length, 1, `${FAILURE_PREFIX}: duplicate integrities must publish only once`);
 		assert.deepEqual(request.artifacts[0], {
-			resolved: "https://registry.example.test/a.tgz",
+			candidates: ["https://registry.example.test/a.tgz", "https://registry.example.test/unrelated-alias.tgz"],
 			integrity,
 			destinationPath: request.artifacts[0].destinationPath,
 		});
@@ -597,15 +623,16 @@ describe("prepared packed consumer", () => {
 		assert.ok(isStrictChild(runRoot, helper.args[1]!));
 
 		const copyHelpers = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
-		assert.equal(copyHelpers.length, 1);
-		const copyHelper = copyHelpers[0]!;
+		assert.equal(copyHelpers.length, 3);
+		const copyHelper = copyHelpers.find(call => JSON.parse(String(call.options.input)).operation === "publish")!;
 		assert.deepEqual(copyHelper.args, [copyHelper.args[0]!, descriptor.fixtureRoot]);
 		assert.equal(copyHelper.options.env?.BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE, join(tmpdir(), "ambient-cache-read-only", "_cacache"));
 		const copyRequest = JSON.parse(String(copyHelper.options.input));
-		assert.equal(copyRequest.version, 3);
-		assert.deepEqual(copyRequest.artifacts.map(({ resolved, integrity }: { resolved: string; integrity: string }) => ({ resolved, integrity })), [
-			{ resolved: "https://registry.example.test/a-alias.tgz", integrity: firstIntegrity },
-			{ resolved: "https://registry.example.test/b.tgz", integrity: secondIntegrity },
+		assert.equal(copyRequest.version, 4);
+		assert.equal(copyRequest.operation, "publish");
+		assert.deepEqual(copyRequest.artifacts.map(({ candidates, integrity }: { candidates: string[]; integrity: string }) => ({ candidates, integrity })), [
+			{ candidates: ["https://registry.example.test/a-alias.tgz", "https://registry.example.test/a.tgz"], integrity: firstIntegrity },
+			{ candidates: ["https://registry.example.test/b.tgz"], integrity: secondIntegrity },
 		]);
 		assert.equal(new Set(copyRequest.artifacts.map((artifact: { destinationPath: string }) => artifact.destinationPath)).size, 2);
 		assert.ok(copyRequest.artifacts.every((artifact: { destinationPath: string }) =>
@@ -817,10 +844,9 @@ describe("prepared packed consumer", () => {
 		const gates = artifacts.map(() => deferred());
 		const admitted: number[] = [];
 		const settled: number[] = [];
-		const copying = copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
-			version: 3,
-			artifacts: artifacts.map(({ resolved, integrity, destinationPath }) => ({ resolved, integrity, destinationPath })),
-		}, {
+		const copying = copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest(
+			artifacts.map(({ resolved, integrity, destinationPath }) => ({ resolved, integrity, destinationPath })),
+		), {
 			lookup: async (_cache: string, key: string) => {
 				const index = artifacts.findIndex(artifact => key.endsWith(artifact.resolved));
 				return { key, integrity: artifacts[index]!.integrity, path: artifacts[index]!.sourcePath };
@@ -834,12 +860,79 @@ describe("prepared packed consumer", () => {
 					await writeFile(destination, `copy-${index}`, { flag: "wx" });
 				} finally { settled.push(index); }
 			},
+			readDigest: async () => Buffer.from("verified"),
 		});
 		const observed = copying.then(() => undefined, (error: unknown) => error);
 		await waitFor(() => admitted.length === 3);
 		gates[1]!.reject(Object.assign(new Error("fatal cache publication"), { code: "EIO" }));
 		await waitFor(() => settled.includes(1));
 		assert.deepEqual([...admitted].sort(), [0, 1, 2]);
+		gates[0]!.resolve();
+		gates[2]!.resolve();
+		const error = await observed;
+		assert.ok(error instanceof AggregateError);
+		assert.deepEqual(settled.sort(), [0, 1, 2]);
+		assert.match(error.message, /admitted=3, completed=3, maxActive=3/);
+	});
+
+	it("returns bounded verify results for present, missing, and corrupt digests", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-verify-unit-"));
+		roots.push(fixtureRoot);
+		await mkdir(join(fixtureRoot, "npm-cache", "_cacache"), { recursive: true });
+		const artifacts = ["sha512-a-present", "sha512-b-missing", "sha512-c-corrupt"].map(integrity => ({
+			integrity,
+			destinationPath: join(fixtureRoot, "npm-cache", "_cacache", integrity),
+		}));
+		const removed: string[] = [];
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, undefined, {
+			version: 4,
+			operation: "verify",
+			artifacts,
+		}, {
+			readDigest: async (_cache: string, integrity: string) => {
+				if (integrity.endsWith("missing")) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+				if (integrity.endsWith("corrupt")) throw Object.assign(new Error("bad bytes"), { code: "EINTEGRITY" });
+				return Buffer.from("present");
+			},
+			removeDestination: async (path: string) => { removed.push(path); },
+		});
+		assert.deepEqual(result.results, [
+			{ integrity: "sha512-a-present", status: "verified" },
+			{ integrity: "sha512-b-missing", status: "missing" },
+			{ integrity: "sha512-c-corrupt", status: "corrupt" },
+		]);
+		assert.deepEqual(result.metrics, { verified: 1, missing: 1, corrupt: 1 });
+		assert.deepEqual(removed, [], `${FAILURE_PREFIX}: final verification reports corruption without deleting caller-selected paths`);
+	});
+
+	it("caps verification at three, stops fatal admission, and joins every admitted read", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-verify-fatal-unit-"));
+		roots.push(fixtureRoot);
+		await mkdir(join(fixtureRoot, "npm-cache", "_cacache"), { recursive: true });
+		const artifacts = Array.from({ length: 7 }, (_, index) => ({
+			integrity: `sha512-${index}`,
+			destinationPath: join(fixtureRoot, "npm-cache", "_cacache", String(index)),
+		}));
+		const gates = artifacts.map(() => deferred());
+		const admitted: number[] = [];
+		const settled: number[] = [];
+		const verifying = copyPackedConsumerCacheBatch(fixtureRoot, undefined, {
+			version: 4,
+			operation: "verify",
+			artifacts,
+		}, {
+			readDigest: async (_cache: string, integrity: string) => {
+				const index = artifacts.findIndex(artifact => artifact.integrity === integrity);
+				admitted.push(index);
+				try { await gates[index]!.promise; } finally { settled.push(index); }
+				return Buffer.from("verified");
+			},
+		});
+		const observed = verifying.then(() => undefined, (error: unknown) => error);
+		await waitFor(() => admitted.length === 3);
+		gates[1]!.reject(Object.assign(new Error("fatal verification I/O"), { code: "EIO" }));
+		await waitFor(() => settled.includes(1));
+		assert.equal(admitted.length, 3);
 		gates[0]!.resolve();
 		gates[2]!.resolve();
 		const error = await observed;
@@ -856,24 +949,108 @@ describe("prepared packed consumer", () => {
 		const destinationPath = join(fixtureRoot, "npm-cache", "_cacache", "content", "missing");
 		const artifact = { resolved: "https://registry.example.test/missing.tgz", integrity: "sha512-missing", destinationPath };
 		let lookups = 0;
-		const missing = await copyPackedConsumerCacheBatch(fixtureRoot, missingCache, { version: 3, artifacts: [artifact] }, {
+		const missing = await copyPackedConsumerCacheBatch(fixtureRoot, missingCache, publishRequest([artifact]), {
 			lookup: async () => { lookups++; },
 		});
 		assert.equal(lookups, 0);
-		assert.deepEqual(missing.results, [{ resolved: artifact.resolved, integrity: artifact.integrity, status: "missing" }]);
-		assert.deepEqual(missing.metrics, { linked: 0, copied: 0, missing: 1 });
+		assert.deepEqual(missing.results, [{ integrity: artifact.integrity, status: "missing", candidate: null }]);
+		assert.deepEqual(missing.metrics, { linked: 0, copied: 0, missing: 1, corrupt: 0 });
 
 		const ambientCache = join(ambientRoot, "present", "_cacache");
 		await mkdir(ambientCache, { recursive: true });
-		const drift = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [artifact] }, {
+		const drift = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([artifact]), {
 			lookup: async () => ({
 				key: `make-fetch-happen:request-cache-v2:${artifact.resolved}`,
 				integrity: artifact.integrity,
 				path: join(ambientCache, "content", "false-hit"),
 			}),
 		});
-		assert.deepEqual(drift.metrics, { linked: 0, copied: 0, missing: 1 });
+		assert.deepEqual(drift.metrics, { linked: 0, copied: 0, missing: 1, corrupt: 0 });
 		assert.equal(existsSync(destinationPath), false);
+	});
+
+	it("tries deterministic aliases until a later exact hit and never falls back to a dead first URL", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const ambientCache = join(ambientRoot, "_cacache");
+		const sourcePath = join(ambientCache, "content", "alias-hit");
+		await mkdir(dirname(sourcePath), { recursive: true });
+		await writeFile(sourcePath, "alias content");
+		const dead = "https://registry.example.test/a-dead.tgz";
+		const hit = "https://registry.example.test/z-hit.tgz";
+		const integrity = "sha512-alias";
+		const destinationPath = join(fixtureRoot, "npm-cache", "_cacache", "content", "alias");
+		const lookedUp: string[] = [];
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 4,
+			operation: "publish",
+			artifacts: [{ candidates: [dead, hit], integrity, destinationPath }],
+		}, {
+			lookup: async (_cache: string, key: string) => {
+				lookedUp.push(key);
+				if (key.endsWith(dead)) return { key, integrity: "sha512-mismatch", path: sourcePath };
+				return { key, integrity, path: sourcePath };
+			},
+			readDigest: async () => Buffer.from("alias content"),
+		});
+		assert.deepEqual(lookedUp, [dead, hit].map(url => `make-fetch-happen:request-cache:${url}`));
+		assert.deepEqual(result.results, [{ integrity, status: "linked", candidate: hit }]);
+		assert.deepEqual(result.metrics, { linked: 1, copied: 0, missing: 0, corrupt: 0 });
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 4,
+			operation: "publish",
+			artifacts: [{ candidates: [hit, dead], integrity: `${integrity}-unsorted`, destinationPath: `${destinationPath}-unsorted` }],
+		}), /candidate URLs must be sorted and unique/);
+	});
+
+	it("returns one bounded miss only after every alias misses or mismatches SRI", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-miss-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-miss-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const ambientCache = join(ambientRoot, "_cacache");
+		await mkdir(ambientCache, { recursive: true });
+		const candidates = ["https://registry.example.test/a.tgz", "https://registry.example.test/b.tgz"];
+		const integrity = "sha512-alias-miss";
+		let lookups = 0;
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 4,
+			operation: "publish",
+			artifacts: [{ candidates, integrity, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "alias-miss") }],
+		}, {
+			lookup: async (_cache: string, key: string) => {
+				lookups++;
+				return key.endsWith("a.tgz") ? null : { key, integrity: "sha512-wrong", path: join(ambientCache, "wrong") };
+			},
+		});
+		assert.equal(lookups, 2);
+		assert.deepEqual(result.results, [{ integrity, status: "missing", candidate: null }]);
+		assert.deepEqual(result.metrics, { linked: 0, copied: 0, missing: 1, corrupt: 0 });
+	});
+
+	it("removes a corrupt direct publication before exact fallback", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-corrupt-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-corrupt-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const ambientCache = join(ambientRoot, "_cacache");
+		const sourcePath = join(ambientCache, "content", "corrupt");
+		await mkdir(dirname(sourcePath), { recursive: true });
+		await writeFile(sourcePath, "corrupt bytes");
+		const artifact = {
+			resolved: "https://registry.example.test/corrupt.tgz",
+			integrity: "sha512-corrupt",
+			destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "corrupt"),
+		};
+		const removed: string[] = [];
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([artifact]), {
+			lookup: async (_cache: string, key: string) => ({ key, integrity: artifact.integrity, path: sourcePath }),
+			readDigest: async () => { throw Object.assign(new Error("bad digest"), { code: "EINTEGRITY" }); },
+			removeDestination: async (path: string) => { removed.push(path); await unlink(path); },
+		});
+		assert.deepEqual(result.results, [{ integrity: artifact.integrity, status: "corrupt", candidate: artifact.resolved }]);
+		assert.deepEqual(result.metrics, { linked: 0, copied: 0, missing: 0, corrupt: 1 });
+		assert.deepEqual(removed, [artifact.destinationPath]);
+		assert.equal(existsSync(artifact.destinationPath), false);
 	});
 
 	it("hardlinks an exact hit directly to its final path and survives ambient unlink without staging", async () => {
@@ -890,10 +1067,11 @@ describe("prepared packed consumer", () => {
 			destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "content", "final"),
 		};
 		const expectedKey = `make-fetch-happen:request-cache:${artifact.resolved}`;
-		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [artifact] }, {
+		const result = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([artifact]), {
 			lookup: async () => ({ key: expectedKey, integrity: artifact.integrity, path: sourcePath }),
+			readDigest: async () => Buffer.from("immutable exact content"),
 		});
-		assert.deepEqual(result.metrics, { linked: 1, copied: 0, missing: 0 });
+		assert.deepEqual(result.metrics, { linked: 1, copied: 0, missing: 0, corrupt: 0 });
 		const [sourceStat, finalStat] = await Promise.all([stat(sourcePath), stat(artifact.destinationPath)]);
 		assert.equal(finalStat.ino, sourceStat.ino);
 		await unlink(sourcePath);
@@ -914,13 +1092,14 @@ describe("prepared packed consumer", () => {
 		for (const code of ["EXDEV", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EISDIR"]) {
 			const artifact = { ...baseArtifact, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "content", code) };
 			let copies = 0;
-			const copied = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [artifact] }, {
+			const copied = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([artifact]), {
 				lookup: async () => ({ key: expectedKey, integrity: artifact.integrity, path: sourcePath }),
 				linkFile: async () => { throw Object.assign(new Error("unsupported"), { code }); },
 				copyPhysical: async (source: string, destination: string) => { copies++; await copyFile(source, destination, 1); },
+				readDigest: async () => Buffer.from("physical bytes"),
 			});
 			assert.equal(copies, 1, `${code} must use one exclusive physical copy`);
-			assert.deepEqual(copied.metrics, { linked: 0, copied: 1, missing: 0 });
+			assert.deepEqual(copied.metrics, { linked: 0, copied: 1, missing: 0, corrupt: 0 });
 		}
 		const crossVolume = { ...baseArtifact, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "content", "different-device") };
 		let crossVolumeLinks = 0;
@@ -933,20 +1112,21 @@ describe("prepared packed consumer", () => {
 				return Reflect.get(target, property, receiver);
 			} });
 		};
-		const crossVolumeResult = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [crossVolume] }, {
+		const crossVolumeResult = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([crossVolume]), {
 			lookup: async () => ({ key: expectedKey, integrity: crossVolume.integrity, path: sourcePath }),
 			inspectPath: inspectWithDifferentSourceDevice,
 			linkFile: async () => { crossVolumeLinks++; },
 			copyPhysical: async (source: string, destination: string) => { crossVolumeCopies++; await copyFile(source, destination, 1); },
+			readDigest: async () => Buffer.from("physical bytes"),
 		});
 		assert.equal(crossVolumeLinks, 0);
 		assert.equal(crossVolumeCopies, 1);
-		assert.deepEqual(crossVolumeResult.metrics, { linked: 0, copied: 1, missing: 0 });
+		assert.deepEqual(crossVolumeResult.metrics, { linked: 0, copied: 1, missing: 0, corrupt: 0 });
 
 		for (const code of ["EACCES", "EPERM", "EIO", "EEXIST", "EINTEGRITY", "UNKNOWN"]) {
 			const artifact = { ...baseArtifact, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "fatal", code) };
 			let copies = 0;
-			await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [artifact] }, {
+			await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([artifact]), {
 				lookup: async () => ({ key: expectedKey, integrity: artifact.integrity, path: sourcePath }),
 				linkFile: async () => { throw Object.assign(new Error(`fatal-${code}`), { code }); },
 				copyPhysical: async () => { copies++; },
@@ -956,7 +1136,7 @@ describe("prepared packed consumer", () => {
 		const collision = { ...baseArtifact, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "collision") };
 		await mkdir(dirname(collision.destinationPath), { recursive: true });
 		await writeFile(collision.destinationPath, "preexisting");
-		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [collision] }, {
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([collision]), {
 			lookup: async () => ({ key: expectedKey, integrity: collision.integrity, path: sourcePath }),
 		}), (error: unknown) => error instanceof AggregateError && error.errors.some(failure => (failure as NodeJS.ErrnoException).code === "EEXIST"));
 		assert.equal(await readFile(collision.destinationPath, "utf8"), "preexisting");
@@ -975,26 +1155,22 @@ describe("prepared packed consumer", () => {
 		await writeFile(sourcePath, "exact");
 		const base = { resolved: "https://registry.example.test/guard.tgz", integrity: "sha512-guard" };
 		const expectedKey = `make-fetch-happen:request-cache:${base.resolved}`;
-		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
-			version: 3,
-			artifacts: [{ ...base, destinationPath: join(externalRoot, "forged") }],
-		}), /strict child/);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([
+			{ ...base, destinationPath: join(externalRoot, "forged") },
+		])), /strict child/);
 		const duplicateDestination = join(fixtureRoot, "npm-cache", "_cacache", "duplicate");
-		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
-			version: 3,
-			artifacts: [
-				{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a", destinationPath: duplicateDestination },
-				{ resolved: "https://registry.example.test/b.tgz", integrity: "sha512-b", destinationPath: duplicateDestination },
-			],
-		}), /destination paths must be unique/);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([
+			{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a", destinationPath: duplicateDestination },
+			{ resolved: "https://registry.example.test/b.tgz", integrity: "sha512-b", destinationPath: duplicateDestination },
+		])), /destination paths must be unique/);
 		const safe = { ...base, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "safe") };
-		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [safe] }, {
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([safe]), {
 			lookup: async () => ({ key: expectedKey, integrity: safe.integrity, path: join(externalRoot, "escaped") }),
 		}), (error: unknown) => error instanceof AggregateError && error.errors.some(failure => /out-of-cache/.test(failure.message)));
 
 		const reparsePath = join(fixtureRoot, "npm-cache");
 		const originalLstat = lstat;
-		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [safe] }, {
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([safe]), {
 			lookup: async () => ({ key: expectedKey, integrity: safe.integrity, path: sourcePath }),
 			inspectPath: async (path: string) => path === reparsePath
 				? { isDirectory: () => true, isSymbolicLink: () => true }
@@ -1053,27 +1229,13 @@ describe("prepared packed consumer", () => {
 		const missingUrl = "https://registry.example.test/missing.tgz";
 		const corruptUrl = "https://registry.example.test/corrupt.tgz";
 		const noIntegrityUrl = "https://registry.example.test/no-integrity.tgz";
-		let corruptVerificationAttempts = 0;
-		const removedFinalPaths: string[] = [];
-		const { calls, descriptor } = await prepareFixture({
+		const { calls } = await prepareFixture({
 			registryArtifacts: [
 				{ resolved: missingUrl, integrity: "sha512-missing" },
 				{ resolved: corruptUrl, integrity: "sha512-corrupt" },
 				{ resolved: noIntegrityUrl },
 			],
-			copyDecision: integrity => integrity === "sha512-corrupt" ? "copied" : "missing",
-			contentCache: {
-				createReadStream: (_cache, integrity) => {
-					const source = new PassThrough();
-					if (integrity === "sha512-corrupt" && corruptVerificationAttempts++ === 0) {
-						queueMicrotask(() => source.destroy(Object.assign(new Error("copied content failed integrity"), { code: "EINTEGRITY" })));
-					} else {
-						source.end("fetched fallback bytes");
-					}
-					return source;
-				},
-				removeDestination: async path => { removedFinalPaths.push(path); },
-			},
+			copyDecision: integrity => integrity === "sha512-corrupt" ? "corrupt" : "missing",
 		});
 
 		const cacheAdds = calls.filter(call => call.args.includes("cache") && call.args.includes("add"));
@@ -1081,9 +1243,10 @@ describe("prepared packed consumer", () => {
 		assert.deepEqual(cacheAdds[0]?.args.slice(cacheAdds[0]!.args.indexOf("--cache") + 2),
 			[corruptUrl, missingUrl, noIntegrityUrl].sort(),
 			`${FAILURE_PREFIX}: fallback must contain only exact locked URLs in deterministic order`);
-		assert.equal(removedFinalPaths.length, 1, `${FAILURE_PREFIX}: corrupt copied content must remove only its authorized final path`);
-		assert.ok(isStrictChild(join(descriptor.cacheDir, "_cacache"), removedFinalPaths[0]!));
-		assert.equal(corruptVerificationAttempts, 3, `${FAILURE_PREFIX}: corrupt digest must pass seed and final authority verification after exact fallback`);
+		const helperRequests = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"))
+			.map(call => JSON.parse(String(call.options.input)) as CopyHelperRequest);
+		assert.deepEqual(helperRequests.map(request => request.operation), ["publish", "verify", "verify"],
+			`${FAILURE_PREFIX}: direct verification plus both final authority points must stay helper-owned`);
 	});
 
 	it("blocks offline install and descriptor publication when a fallback digest is still absent", async () => {
@@ -1093,86 +1256,40 @@ describe("prepared packed consumer", () => {
 				resolved: "https://registry.example.test/still-missing.tgz",
 				integrity: "sha512-still-missing",
 			}],
-			contentCache: {
-				createReadStream: () => {
-					const source = new PassThrough();
-					queueMicrotask(() => source.destroy(Object.assign(new Error("digest absent"), { code: "ENOENT" })));
-					return source;
-				},
-				createWriteStream: () => new PassThrough(),
-			},
+			verifyDecision: () => "missing",
 			onOfflineInstall: () => { offlineStarted = true; },
 		});
 
-		await assert.rejects(preparing, /isolated cache is missing required digests/);
+		await assert.rejects(preparing, /isolated cache is missing or corrupt/);
 		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: verification failure must prevent offline npm ci`);
 		const runRoot = roots.at(-1)!;
 		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
 			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
 		const evidence = JSON.parse(await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8"));
-		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing\)/);
+		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing; missing\)/);
 	});
 
-	it("bounds stalled destination digest verification and closes its read and discard streams", async () => {
-		type TimerRecord = { callback: () => void; cleared: boolean };
-		const timers: TimerRecord[] = [];
-		const verificationSources: PassThrough[] = [];
-		let verificationCloses = 0;
-		let cacheCommandStarted = false;
+	it("fails closed when tracked all-final verification fails before install or descriptor publication", async () => {
 		let offlineStarted = false;
-		const resolved = "https://registry.example.test/verify-deadline.tgz";
-		const integrity = "sha512-verify-deadline";
-		const preparing = prepareFixture({
-			registryArtifacts: [{ resolved, integrity }],
+		let verificationCalls = 0;
+		await assert.rejects(prepareFixture({
+			registryArtifacts: [{
+				resolved: "https://registry.example.test/verify-fatal.tgz",
+				integrity: "sha512-verify-fatal",
+			}],
 			copyDecision: () => "copied",
-			contentCache: {
-				createReadStream: cache => {
-					const stream = new PassThrough();
-					if (cache.includes("ambient-cache-read-only")) {
-						stream.end("verified artifact bytes");
-					} else {
-						stream.once("close", () => { verificationCloses++; });
-						verificationSources.push(stream);
-					}
-					return stream;
-				},
-				createWriteStream: () => new PassThrough(),
+			onCopyHelper: ({ request }) => {
+				if (request.operation !== "verify") return;
+				verificationCalls++;
+				return { code: 17, skipOutput: true };
 			},
-			setTimer: callback => {
-				const record = { callback, cleared: false };
-				timers.push(record);
-				return record;
-			},
-			clearTimer: timer => { (timer as TimerRecord).cleared = true; },
-			onCacheCommand: async () => { cacheCommandStarted = true; },
 			onOfflineInstall: () => { offlineStarted = true; },
-		});
-		const observed = preparing.then(
-			() => ({ error: undefined }),
-			error => ({ error }),
-		);
-
-		await waitFor(() => verificationSources.length === 1 && timers.some(timer => !timer.cleared));
-		const activeTimer = timers.find(timer => !timer.cleared);
-		assert.ok(activeTimer, `${FAILURE_PREFIX}: destination verification must arm its deadline before reading`);
-		activeTimer.callback();
-		const { error } = await observed;
-		assert.ok(error instanceof Error);
-		assert.match(error.message, /destination digest verification/);
-		assert.equal(verificationSources[0]?.destroyed, true);
-		assert.equal(verificationCloses, 1, `${FAILURE_PREFIX}: verification rejection must join the destination digest close`);
-		assert.equal(cacheCommandStarted, false, `${FAILURE_PREFIX}: successful transfer must not start fallback before verification`);
-		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: offline npm ci must not start after verification expiry`);
-		const runRoot = roots.at(-1)!;
-		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
-			(candidate: NodeJS.ErrnoException) => candidate.code === "ENOENT");
-		const evidence = await readFile(join(runRoot, "prepared-packed-consumer", "preparation-failure.json"), "utf8");
-		assert.match(evidence, /"stage": "destination digest verification"/);
-		assert.match(evidence, /verify-deadline\.tgz/);
-		assert.match(evidence, /sha512-verify-deadline/);
-		assert.match(evidence, /"deadlineAborted": true/);
-		assert.match(evidence, /source:closed/);
-		assert.match(evidence, /discard:closed/);
+		}), /retained partial fixture and command evidence/);
+		assert.equal(verificationCalls, 1);
+		assert.equal(offlineStarted, false);
+		const fixtureRoot = join(roots.at(-1)!, "prepared-packed-consumer");
+		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json")),
+			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
 
 	it("fills nine cache batches through a dynamic three-worker pool before offline install", async () => {

@@ -79,7 +79,7 @@ test("real cache-copy helper hardlinks one exact CAS hit and joins its owned pro
 		env: { ...process.env, BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: ambientCache },
 		timeoutMs: 30_000,
 		totalTimeoutMs: 30_000,
-		input: `${JSON.stringify({ version: 3, artifacts: [{ resolved, integrity, destinationPath: destination.path }] })}\n`,
+		input: `${JSON.stringify({ version: 4, operation: "publish", artifacts: [{ candidates: [resolved], integrity, destinationPath: destination.path }] })}\n`,
 		repoRoot: REPO_ROOT,
 		ownershipBootstrapRoot: fixtureRoot,
 	});
@@ -92,7 +92,7 @@ test("real cache-copy helper hardlinks one exact CAS hit and joins its owned pro
 		metrics: { linked: number; copied: number; missing: number };
 		results: Array<{ status: string }>;
 	};
-	assert.deepEqual(response.metrics, { linked: 1, copied: 0, missing: 0 });
+	assert.deepEqual(response.metrics, { linked: 1, copied: 0, missing: 0, corrupt: 0 });
 	assert.equal(response.results[0]?.status, "linked");
 	const source = await cacache.get.info(ambientCache, cacheKey);
 	assert.ok(source?.path);
@@ -124,7 +124,7 @@ test("cache-copy helper redacts JSON-escaped ambient paths from terminal diagnos
 		env: { ...process.env, BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: ambientCache },
 		timeoutMs: 30_000,
 		totalTimeoutMs: 30_000,
-		input: `${JSON.stringify({ version: 3, artifacts: [{ resolved, integrity, destinationPath: destination.path }] })}\n`,
+		input: `${JSON.stringify({ version: 4, operation: "publish", artifacts: [{ candidates: [resolved], integrity, destinationPath: destination.path }] })}\n`,
 		repoRoot: REPO_ROOT,
 		ownershipBootstrapRoot: fixtureRoot,
 	});

@@ -1,21 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Publish exact ambient cacache hits directly into the run-owned cache.
+ * Publish exact ambient cacache hits and verify run-owned cache digests.
  *
- * The fixture argv and dedicated ambient-cache environment value are independent
- * process authority. Stdin may select only exact URL/integrity identities and
- * unique destinations below the fixed fixture npm-cache/_cacache root. The
- * ambient cache is read-only and omitted from command diagnostics.
+ * Both operations run in a tracked helper so no cacache I/O can outlive command
+ * settlement in the coordinator. Ambient cache authority is required only for
+ * publication and is omitted from argv and diagnostics.
  */
 import { COPYFILE_EXCL } from "node:constants";
-import { copyFile, link, lstat, mkdir, realpath } from "node:fs/promises";
+import { copyFile, link, lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import cacache from "cacache";
 
-const REQUEST_VERSION = 3;
-const RESULT_VERSION = 3;
+const REQUEST_VERSION = 4;
+const RESULT_VERSION = 4;
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_ARTIFACTS = 1_000;
 const MAX_INTEGRITY_LENGTH = 2_048;
@@ -39,30 +38,27 @@ function requireExactKeys(value, expected, label) {
 	}
 }
 
-function validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContentCache) {
+function validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContentCache, operation) {
 	if (typeof authoritativeFixtureRoot !== "string" || !isAbsolute(authoritativeFixtureRoot)) {
 		throw new Error("authoritative fixture root must be absolute");
 	}
-	if (typeof authoritativeAmbientContentCache !== "string" || !isAbsolute(authoritativeAmbientContentCache)) {
-		throw new Error("authoritative ambient content cache must be absolute");
-	}
 	const fixtureRoot = resolve(authoritativeFixtureRoot);
-	const ambientContentCache = resolve(authoritativeAmbientContentCache);
 	const destinationContentCache = resolve(fixtureRoot, "npm-cache", "_cacache");
-	if (basename(ambientContentCache) !== "_cacache") {
-		throw new Error("authoritative ambient content cache must identify npm's _cacache directory");
-	}
 	if (!isStrictChild(fixtureRoot, destinationContentCache)) {
 		throw new Error("derived destination content cache escaped the authoritative fixture root");
+	}
+	if (operation !== "publish") return { fixtureRoot, destinationContentCache };
+	if (typeof authoritativeAmbientContentCache !== "string" || !isAbsolute(authoritativeAmbientContentCache)) {
+		throw new Error("publish requires an absolute authoritative ambient content cache");
+	}
+	const ambientContentCache = resolve(authoritativeAmbientContentCache);
+	if (basename(ambientContentCache) !== "_cacache") {
+		throw new Error("authoritative ambient content cache must identify npm's _cacache directory");
 	}
 	if (fixtureRoot === ambientContentCache || isStrictChild(fixtureRoot, ambientContentCache) || isStrictChild(ambientContentCache, fixtureRoot)) {
 		throw new Error("authoritative ambient content cache and fixture root must not overlap");
 	}
 	return { fixtureRoot, ambientContentCache, destinationContentCache };
-}
-
-function artifactIdentity(artifact) {
-	return `${artifact.resolved}\u0000${artifact.integrity}`;
 }
 
 function pathIdentity(path) {
@@ -74,22 +70,46 @@ function npmRequestCacheKey(resolved) {
 	return `make-fetch-happen:request-cache:${resolved}`;
 }
 
+function validateCandidates(value) {
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ARTIFACTS) {
+		throw new Error(`cache-copy candidates must be a non-empty array of at most ${MAX_ARTIFACTS} values`);
+	}
+	let previous;
+	for (const candidate of value) {
+		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_RESOLVED_LENGTH || !/^https:\/\//.test(candidate)) {
+			throw new Error(`cache-copy candidate URL must be an https URL no longer than ${MAX_RESOLVED_LENGTH} characters`);
+		}
+		if (previous !== undefined && candidate.localeCompare(previous) <= 0) {
+			throw new Error("cache-copy candidate URLs must be sorted and unique");
+		}
+		previous = candidate;
+	}
+	return value;
+}
+
 function validateRequest(request, destinationContentCache) {
-	requireExactKeys(request, ["version", "artifacts"], "cache-copy request");
+	requireExactKeys(request, ["version", "operation", "artifacts"], "cache-copy request");
 	if (request.version !== REQUEST_VERSION) throw new Error(`cache-copy request version must be ${REQUEST_VERSION}`);
+	if (request.operation !== "publish" && request.operation !== "verify") {
+		throw new Error("cache-copy operation must be publish or verify");
+	}
 	if (!Array.isArray(request.artifacts) || request.artifacts.length > MAX_ARTIFACTS) {
 		throw new Error(`cache-copy artifacts must be an array of at most ${MAX_ARTIFACTS} values`);
 	}
-	let previous;
+	let previousIntegrity;
 	const destinations = new Set();
 	for (const artifact of request.artifacts) {
-		requireExactKeys(artifact, ["resolved", "integrity", "destinationPath"], "cache-copy artifact");
-		if (typeof artifact.resolved !== "string" || artifact.resolved.length === 0 || artifact.resolved.length > MAX_RESOLVED_LENGTH || !/^https:\/\//.test(artifact.resolved)) {
-			throw new Error(`cache-copy resolved URL must be an https URL no longer than ${MAX_RESOLVED_LENGTH} characters`);
-		}
+		requireExactKeys(artifact,
+			request.operation === "publish" ? ["candidates", "integrity", "destinationPath"] : ["integrity", "destinationPath"],
+			"cache-copy artifact");
+		if (request.operation === "publish") validateCandidates(artifact.candidates);
 		if (typeof artifact.integrity !== "string" || artifact.integrity.length === 0 || artifact.integrity.length > MAX_INTEGRITY_LENGTH) {
 			throw new Error(`cache-copy integrity must be a non-empty string no longer than ${MAX_INTEGRITY_LENGTH} characters`);
 		}
+		if (previousIntegrity !== undefined && artifact.integrity.localeCompare(previousIntegrity) <= 0) {
+			throw new Error("cache-copy artifacts must be sorted and unique by integrity");
+		}
+		previousIntegrity = artifact.integrity;
 		if (typeof artifact.destinationPath !== "string" || !isAbsolute(artifact.destinationPath)) {
 			throw new Error("cache-copy destinationPath must be absolute");
 		}
@@ -101,13 +121,8 @@ function validateRequest(request, destinationContentCache) {
 		if (destinations.has(destinationIdentity)) throw new Error("cache-copy destination paths must be unique");
 		destinations.add(destinationIdentity);
 		artifact.destinationPath = destinationPath;
-		const identity = artifactIdentity(artifact);
-		if (previous !== undefined && identity.localeCompare(previous) <= 0) {
-			throw new Error("cache-copy artifacts must be sorted and unique by resolved URL and integrity");
-		}
-		previous = identity;
 	}
-	return request.artifacts;
+	return { operation: request.operation, artifacts: request.artifacts };
 }
 
 async function readBoundedJson(input) {
@@ -188,44 +203,60 @@ function isExactLookup(info, expectedKey, integrity) {
 	return info && info.key === expectedKey && String(info.integrity ?? "") === integrity;
 }
 
-function resultEnvelope(results, progress) {
-	const metrics = Object.freeze({
-		linked: results.filter(result => result.status === "linked").length,
-		copied: results.filter(result => result.status === "copied").length,
-		missing: results.filter(result => result.status === "missing").length,
-	});
-	return {
-		version: RESULT_VERSION,
-		results,
-		metrics,
-		...progress,
-	};
+function isDigestMiss(error) {
+	return error?.code === "ENOENT" || error?.code === "EINTEGRITY";
 }
 
-/** Publish a validated exact artifact batch, stopping admission on the first fatal error. */
+async function verifyDigest(destinationContentCache, artifact, { readDigest, removeDestination, removeCorrupt = false }) {
+	try {
+		await readDigest(destinationContentCache, artifact.integrity);
+		return "verified";
+	} catch (error) {
+		if (!isDigestMiss(error)) throw error;
+		if (removeCorrupt) await removeDestination(artifact.destinationPath);
+		return error?.code === "EINTEGRITY" ? "corrupt" : "missing";
+	}
+}
+
+function resultEnvelope(operation, results, progress) {
+	const metrics = operation === "publish"
+		? { linked: 0, copied: 0, missing: 0, corrupt: 0 }
+		: { verified: 0, missing: 0, corrupt: 0 };
+	for (const result of results) metrics[result.status]++;
+	return { version: RESULT_VERSION, operation, results, metrics, ...progress };
+}
+
+/** Publish or verify a validated artifact batch, stopping admission on the first fatal error. */
 export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, authoritativeAmbientContentCache, request, {
 	lookup = (cache, key) => cacache.get.info(cache, key, { memoize: false }),
+	readDigest = (cache, integrity) => cacache.get.byDigest(cache, integrity),
 	linkFile = link,
 	copyPhysical = (source, destination) => copyFile(source, destination, COPYFILE_EXCL),
+	removeDestination = path => rm(path, { force: true }),
 	inspectPath = lstat,
 	canonicalPath = realpath,
 	createDirectory = (path, options) => mkdir(path, options),
 	workerCount = MAX_WORKERS,
 } = {}) {
-	const { fixtureRoot, ambientContentCache, destinationContentCache } = validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContentCache);
-	const artifacts = validateRequest(request, destinationContentCache);
+	const provisionalOperation = request?.operation;
+	const authority = validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContentCache, provisionalOperation);
+	const { fixtureRoot, ambientContentCache, destinationContentCache } = authority;
+	const { operation, artifacts } = validateRequest(request, destinationContentCache);
 	if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_WORKERS) {
 		throw new Error(`cache-copy workerCount must be an integer from 1 to ${MAX_WORKERS}`);
 	}
+	await requireCanonicalDirectory(fixtureRoot, inspectPath, canonicalPath, "authoritative fixture root");
 
 	let ambientMissing = false;
 	let ambientCanonical;
-	try {
-		await requireCanonicalDirectory(ambientContentCache, inspectPath, canonicalPath, "authoritative ambient content cache");
-		ambientCanonical = resolve(await canonicalPath(ambientContentCache));
-	} catch (error) {
-		if (error?.code === "ENOENT") ambientMissing = true;
-		else throw error;
+	if (operation === "publish") {
+		try {
+			await requireCanonicalDirectory(ambientContentCache, inspectPath, canonicalPath, "authoritative ambient content cache");
+			ambientCanonical = resolve(await canonicalPath(ambientContentCache));
+		} catch (error) {
+			if (error?.code === "ENOENT") ambientMissing = true;
+			else throw error;
+		}
 	}
 
 	const results = new Array(artifacts.length);
@@ -245,6 +276,11 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 			active++;
 			maxActive = Math.max(maxActive, active);
 			try {
+				if (operation === "verify") {
+					const status = await verifyDigest(destinationContentCache, artifact, { readDigest, removeDestination });
+					results[index] = { integrity: artifact.integrity, status };
+					continue;
+				}
 				const destinationParent = await ensureDestinationParent(fixtureRoot, destinationContentCache, artifact.destinationPath, {
 					inspectPath, canonicalPath, createDirectory,
 				});
@@ -252,20 +288,28 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 					throw Object.assign(new Error("cache-copy destination already exists"), { code: "EEXIST" });
 				}
 				if (ambientMissing) {
-					results[index] = { resolved: artifact.resolved, integrity: artifact.integrity, status: "missing" };
+					results[index] = { integrity: artifact.integrity, status: "missing", candidate: null };
 					continue;
 				}
-				const expectedKey = npmRequestCacheKey(artifact.resolved);
-				let info;
-				try {
-					info = await lookup(ambientContentCache, expectedKey);
-				} catch (error) {
-					if (error?.code !== "ENOENT") throw error;
+				let selected;
+				for (const candidate of artifact.candidates) {
+					const expectedKey = npmRequestCacheKey(candidate);
+					let info;
+					try {
+						info = await lookup(ambientContentCache, expectedKey);
+					} catch (error) {
+						if (error?.code !== "ENOENT") throw error;
+					}
+					if (isExactLookup(info, expectedKey, artifact.integrity)) {
+						selected = { candidate, info };
+						break;
+					}
 				}
-				if (!isExactLookup(info, expectedKey, artifact.integrity)) {
-					results[index] = { resolved: artifact.resolved, integrity: artifact.integrity, status: "missing" };
+				if (!selected) {
+					results[index] = { integrity: artifact.integrity, status: "missing", candidate: null };
 					continue;
 				}
+				const { candidate, info } = selected;
 				if (typeof info.path !== "string" || !isAbsolute(info.path)) throw new Error("exact ambient cache lookup returned a non-absolute content path");
 				const sourcePath = resolve(info.path);
 				if (!isStrictChild(ambientContentCache, sourcePath)) throw new Error("exact ambient cache lookup returned an out-of-cache content path");
@@ -290,14 +334,17 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 					}
 				}
 				const published = await inspectPath(artifact.destinationPath);
-				if (!published?.isFile?.() || published.isSymbolicLink?.()) {
-					throw new Error("cache-copy publication must be a non-reparse regular file");
-				}
+				if (!published?.isFile?.() || published.isSymbolicLink?.()) throw new Error("cache-copy publication must be a non-reparse regular file");
 				if (status === "linked" && source.ino !== undefined && published.ino !== undefined &&
 					(source.dev !== published.dev || source.ino !== published.ino)) {
 					throw new Error("cache-copy hardlink publication did not retain the validated source inode");
 				}
-				results[index] = { resolved: artifact.resolved, integrity: artifact.integrity, status };
+				const verification = await verifyDigest(destinationContentCache, artifact, {
+					readDigest, removeDestination, removeCorrupt: true,
+				});
+				results[index] = verification === "verified"
+					? { integrity: artifact.integrity, status, candidate }
+					: { integrity: artifact.integrity, status: verification, candidate };
 			} catch (error) {
 				failures[index] = error;
 				stopAdmission = true;
@@ -311,22 +358,20 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 	const progress = { total: artifacts.length, admitted, completed, maxActive };
 	const operationFailures = failures.filter(error => error !== undefined).map(error => withProgress(error, progress));
 	if (operationFailures.length > 0) {
-		throw new AggregateError(
-			operationFailures,
-			`Packed-consumer cache seed failed; total=${progress.total}, admitted=${admitted}, completed=${completed}, maxActive=${maxActive}`,
-		);
+		throw new AggregateError(operationFailures,
+			`Packed-consumer cache ${operation} failed; total=${progress.total}, admitted=${admitted}, completed=${completed}, maxActive=${maxActive}`);
 	}
-	return resultEnvelope(results, { admitted, completed, maxActive });
+	return resultEnvelope(operation, results, { admitted, completed, maxActive });
 }
 
 async function main() {
-	if (process.argv.length !== 3) {
-		throw new Error("usage: copy-packed-consumer-cache-batch.mjs <authoritative-fixture-root>");
-	}
-	const ambientContentCache = process.env[AMBIENT_CACHE_ENV];
-	if (!ambientContentCache) throw new Error(`missing ${AMBIENT_CACHE_ENV} authority`);
+	if (process.argv.length !== 3) throw new Error("usage: copy-packed-consumer-cache-batch.mjs <authoritative-fixture-root>");
 	const request = await readBoundedJson(process.stdin);
-	const result = await copyPackedConsumerCacheBatch(process.argv[2], ambientContentCache, request);
+	const result = await copyPackedConsumerCacheBatch(
+		process.argv[2],
+		process.env[AMBIENT_CACHE_ENV],
+		request,
+	);
 	process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
@@ -346,9 +391,7 @@ function redactDiagnostic(value, secret) {
 	if (!secret) return value;
 	if (typeof value === "string") return value.split(secret).join("<ambient npm cache>");
 	if (Array.isArray(value)) return value.map(entry => redactDiagnostic(entry, secret));
-	if (value && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactDiagnostic(entry, secret)]));
-	}
+	if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactDiagnostic(entry, secret)]));
 	return value;
 }
 

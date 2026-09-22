@@ -9,13 +9,11 @@
  * materialize the published template; they never run npm pack/install.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { Writable } from "node:stream";
-import { finished, pipeline } from "node:stream/promises";
-import cacache from "cacache";
+import { finished } from "node:stream/promises";
 import { ensureDistBuild } from "./ensure-dist.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -722,124 +720,6 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 	return [...required].filter(url => !alreadyCached.has(url)).sort();
 }
 
-const DEFAULT_CONTENT_CACHE = Object.freeze({
-	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
-	removeDestination: path => rm(path, { force: true }),
-});
-
-function cacheMiss(error) {
-	return error?.code === "ENOENT" || error?.code === "EINTEGRITY";
-}
-
-function streamSettlementError(error) {
-	if (!error) return "unknown";
-	return error.code ?? error.name ?? "error";
-}
-
-// cacache's Minipass streams may replay completion synchronously. Observe them
-// at creation time so verification diagnostics include terminal settlement.
-function observeStreamSettlement(role, stream) {
-	return {
-		role,
-		stream,
-		settlement: finished(stream, { cleanup: true }).then(
-			() => `${role}:closed`,
-			error => `${role}:closed:${streamSettlementError(error)}`,
-		),
-	};
-}
-
-async function destroyAndSettleStreams(observers) {
-	for (const { stream } of observers) stream.destroy?.();
-	return Promise.all(observers.map(({ settlement }) => settlement));
-}
-
-function cacheOperationError(stage, artifact, error, abort, settlements) {
-	const deadlineAborted = abort.signal.aborted;
-	const cause = deadlineAborted && abort.signal.reason instanceof Error ? abort.signal.reason : error;
-	const operationError = new Error(
-		`Packed-consumer ${stage} failed for ${artifact.resolved} (${artifact.integrity}); ` +
-		`deadlineAborted=${deadlineAborted}; streams=${settlements.join(",")}: ${cause instanceof Error ? cause.message : String(cause)}`,
-		{ cause },
-	);
-	operationError.cacheOperation = {
-		stage,
-		resolved: artifact.resolved,
-		integrity: artifact.integrity,
-		deadlineAborted,
-		streams: settlements,
-	};
-	return operationError;
-}
-
-async function verifyDestinationArtifact({
-	artifact,
-	destinationContentCache,
-	contentCache,
-	remainingPreparationMs,
-	setTimer,
-	clearTimer,
-}) {
-	const stage = "destination digest verification";
-	const remainingMs = remainingPreparationMs(`${stage} ${artifact.integrity}`);
-	const abort = new AbortController();
-	const timer = setTimer(() => abort.abort(new Error(
-		`Packed-consumer destination verification exceeded the preparation deadline for ${artifact.resolved} (${artifact.integrity})`,
-	)), remainingMs);
-	let source;
-	let discard;
-	let sourceError;
-	let operationError;
-	const streamObservers = [];
-	try {
-		try {
-			source = contentCache.createReadStream(destinationContentCache, artifact.integrity);
-			streamObservers.push(observeStreamSettlement("source", source));
-		} catch (error) {
-			sourceError = error;
-			throw error;
-		}
-		source.once?.("error", error => { sourceError ??= error; });
-		discard = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
-		streamObservers.push(observeStreamSettlement("discard", discard));
-		await pipeline(source, discard, { signal: abort.signal });
-		remainingPreparationMs(`post-${stage} ${artifact.integrity}`);
-	} catch (error) {
-		operationError = error;
-	} finally {
-		clearTimer(timer);
-	}
-	if (!operationError) return true;
-	const settlements = await destroyAndSettleStreams(streamObservers);
-	if (!abort.signal.aborted && cacheMiss(sourceError)) return false;
-	throw cacheOperationError(stage, artifact, operationError, abort, settlements);
-}
-
-async function verifyDestinationArtifacts({
-	artifacts,
-	destinationContentCache,
-	contentCache,
-	remainingPreparationMs,
-	setTimer,
-	clearTimer,
-}) {
-	const missing = [];
-	for (const artifact of artifacts) {
-		if (!artifact.integrity) continue;
-		const present = await verifyDestinationArtifact({
-			artifact,
-			destinationContentCache,
-			contentCache,
-			remainingPreparationMs,
-			setTimer,
-			clearTimer,
-		});
-		if (!present) missing.push(`${artifact.resolved} (${artifact.integrity})`);
-	}
-	if (missing.length > 0) {
-		throw new Error(`Packed-consumer isolated cache is missing required digests after transfer/fetch:\n${missing.join("\n")}`);
-	}
-}
 
 function ambientCacheFromOutput(stdout) {
 	const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -958,85 +838,75 @@ async function resolveDestinationContentPaths({
 	return destinationPaths;
 }
 
-function validateCacheCopyResult(parsed, artifacts) {
-	if (!exactObjectKeys(parsed, ["version", "results", "metrics", "admitted", "completed", "maxActive"]) || parsed.version !== 3) {
-		throw new Error("Packed-consumer cache copy helper returned a malformed result envelope");
+function validateCacheHelperResult(parsed, operation, artifacts) {
+	if (!exactObjectKeys(parsed, ["version", "operation", "results", "metrics", "admitted", "completed", "maxActive"]) ||
+		parsed.version !== 4 || parsed.operation !== operation) {
+		throw new Error("Packed-consumer cache helper returned a malformed result envelope");
 	}
 	if (!Array.isArray(parsed.results) || parsed.results.length !== artifacts.length) {
-		throw new Error(`Packed-consumer cache copy helper must return exactly ${artifacts.length} results`);
+		throw new Error(`Packed-consumer cache helper must return exactly ${artifacts.length} results`);
 	}
 	if (parsed.admitted !== artifacts.length || parsed.completed !== artifacts.length ||
 		!Number.isInteger(parsed.maxActive) || parsed.maxActive < 1 || parsed.maxActive > 3) {
-		throw new Error("Packed-consumer cache copy helper returned invalid admission/completion accounting");
+		throw new Error("Packed-consumer cache helper returned invalid admission/completion accounting");
 	}
-	if (!exactObjectKeys(parsed.metrics, ["linked", "copied", "missing"]) ||
-		![parsed.metrics.linked, parsed.metrics.copied, parsed.metrics.missing].every(Number.isInteger) ||
-		parsed.metrics.linked < 0 || parsed.metrics.copied < 0 || parsed.metrics.missing < 0 ||
-		parsed.metrics.linked + parsed.metrics.copied + parsed.metrics.missing !== artifacts.length) {
-		throw new Error("Packed-consumer cache copy helper returned invalid deterministic metrics");
+	const allowedStatuses = operation === "publish"
+		? ["linked", "copied", "missing", "corrupt"]
+		: ["verified", "missing", "corrupt"];
+	if (!exactObjectKeys(parsed.metrics, allowedStatuses) ||
+		Object.keys(parsed.metrics).some(status => !allowedStatuses.includes(status)) ||
+		Object.values(parsed.metrics).some(value => !Number.isInteger(value) || value < 0) ||
+		Object.values(parsed.metrics).reduce((sum, value) => sum + value, 0) !== artifacts.length) {
+		throw new Error("Packed-consumer cache helper returned invalid deterministic metrics");
 	}
-	const expected = new Set(artifacts.map(artifactIdentity));
+	const expected = new Map(artifacts.map(artifact => [artifact.integrity, artifact]));
 	const results = new Map();
-	const observedMetrics = { linked: 0, copied: 0, missing: 0 };
+	const observedMetrics = Object.fromEntries(allowedStatuses.map(status => [status, 0]));
 	for (const entry of parsed.results) {
-		if (!exactObjectKeys(entry, ["resolved", "integrity", "status"]) ||
-			typeof entry.resolved !== "string" || typeof entry.integrity !== "string" ||
-			!(["linked", "copied", "missing"].includes(entry.status))) {
-			throw new Error("Packed-consumer cache copy helper returned a malformed result entry");
+		const validKeys = operation === "publish" ? ["integrity", "status", "candidate"] : ["integrity", "status"];
+		if (!exactObjectKeys(entry, validKeys) || typeof entry.integrity !== "string" || !allowedStatuses.includes(entry.status)) {
+			throw new Error("Packed-consumer cache helper returned a malformed result entry");
 		}
-		const identity = artifactIdentity(entry);
-		if (!expected.has(identity)) throw new Error("Packed-consumer cache copy helper returned an unexpected exact artifact identity");
-		if (results.has(identity)) throw new Error("Packed-consumer cache copy helper returned a duplicate exact artifact identity");
-		results.set(identity, entry.status);
-		observedMetrics[entry.status]++;
+		const requested = expected.get(entry.integrity);
+		if (!requested) throw new Error("Packed-consumer cache helper returned an unexpected integrity");
+		if (results.has(entry.integrity)) throw new Error("Packed-consumer cache helper returned a duplicate integrity");
+		if (operation === "publish") {
+			const validCandidate = entry.candidate === null ||
+				(typeof entry.candidate === "string" && requested.candidates.includes(entry.candidate));
+			if (!validCandidate || (entry.candidate === null && entry.status !== "missing")) {
+				throw new Error("Packed-consumer cache helper returned an invalid alias selection");
+			}
+		}
+		results.set(entry.integrity, entry);
+		observedMetrics[entry.status] = (observedMetrics[entry.status] ?? 0) + 1;
 	}
-	for (const artifact of artifacts) if (!results.has(artifactIdentity(artifact))) throw new Error("Packed-consumer cache copy helper omitted an exact artifact identity");
-	if (JSON.stringify(observedMetrics) !== JSON.stringify(parsed.metrics)) throw new Error("Packed-consumer cache copy helper metrics do not match its results");
+	for (const artifact of artifacts) if (!results.has(artifact.integrity)) throw new Error("Packed-consumer cache helper omitted an integrity");
+	if (JSON.stringify(observedMetrics) !== JSON.stringify(parsed.metrics)) throw new Error("Packed-consumer cache helper metrics do not match its results");
 	return { results, metrics: Object.freeze({ ...observedMetrics }) };
 }
 
-async function copyAvailableArtifacts({
+async function runCacheHelper({
+	operation,
 	artifacts,
 	sourceContentCache,
-	destinationPaths,
 	fixtureRoot,
 	repoRoot,
 	baseEnv,
 	runCommand,
 	commands,
 	remainingPreparationMs,
+	label,
 }) {
-	const transferable = artifacts.filter(artifact => artifact.integrity)
-		.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
-	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
-	if (transferable.length === 0) {
-		return {
-			fallbackArtifacts: noIntegrity, transferredArtifacts: [], transferredCount: 0,
-			linkedCount: 0, copiedCount: 0, missingDigestCount: 0, noIntegrityCount: noIntegrity.length,
-		};
-	}
-	const byIntegrity = new Map();
-	for (const artifact of transferable) {
-		const group = byIntegrity.get(artifact.integrity) ?? [];
-		group.push(artifact);
-		byIntegrity.set(artifact.integrity, group);
-	}
-	const helperArtifacts = [...byIntegrity.entries()].map(([integrity, group]) => {
-		const destinationPath = destinationPaths.get(integrity);
-		if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
-			throw new Error(`Packed-consumer cache publication has no absolute destination for ${integrity}`);
-		}
-		return { resolved: group[0].resolved, integrity, destinationPath };
-	}).sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
-	const request = { version: 3, artifacts: helperArtifacts };
+	if (artifacts.length === 0) return { results: new Map(), metrics: Object.freeze({}) };
+	const request = { version: 4, operation, artifacts };
 	const input = `${JSON.stringify(request)}\n`;
 	if (Buffer.byteLength(input) > MAX_CACHE_HELPER_REQUEST_BYTES) {
-		throw new Error(`Packed-consumer cache copy request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
+		throw new Error(`Packed-consumer cache ${operation} request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
 	}
 	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_COPY_HELPER_NAME);
 	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
-	helperEnv[CACHE_COPY_AMBIENT_ENV] = sourceContentCache;
-	const totalTimeoutMs = remainingPreparationMs("ambient cache direct publication");
+	if (operation === "publish") helperEnv[CACHE_COPY_AMBIENT_ENV] = sourceContentCache;
+	const totalTimeoutMs = remainingPreparationMs(label);
 	const result = await runCommand(process.execPath, [helperPath, fixtureRoot], {
 		cwd: repoRoot,
 		env: helperEnv,
@@ -1051,56 +921,86 @@ async function copyAvailableArtifacts({
 	commands.push(result);
 	requireSuccess(result);
 	if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_HELPER_RESULT_BYTES) {
-		throw new Error(`Packed-consumer cache copy helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
+		throw new Error(`Packed-consumer cache helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
 	}
 	let parsed;
 	try {
 		parsed = JSON.parse(result.stdout);
 	} catch (error) {
-		throw new Error(`Packed-consumer cache copy helper emitted malformed JSON: ${error.message}`, { cause: error });
+		throw new Error(`Packed-consumer cache helper emitted malformed JSON: ${error.message}`, { cause: error });
 	}
-	const validated = validateCacheCopyResult(parsed, helperArtifacts);
+	return validateCacheHelperResult(parsed, operation, artifacts);
+}
+
+function destinationArtifact(integrity, destinationPaths) {
+	const destinationPath = destinationPaths.get(integrity);
+	if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
+		throw new Error(`Packed-consumer cache operation has no absolute destination for ${integrity}`);
+	}
+	return { integrity, destinationPath };
+}
+
+async function copyAvailableArtifacts(options) {
+	const { artifacts, destinationPaths } = options;
+	const transferable = artifacts.filter(artifact => artifact.integrity)
+		.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
+	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
+	if (transferable.length === 0) {
+		return { fallbackArtifacts: noIntegrity, linkedCount: 0, copiedCount: 0, missingDigestCount: 0, corruptDigestCount: 0 };
+	}
+	const byIntegrity = new Map();
+	for (const artifact of transferable) {
+		const group = byIntegrity.get(artifact.integrity) ?? [];
+		group.push(artifact);
+		byIntegrity.set(artifact.integrity, group);
+	}
+	const helperArtifacts = [...byIntegrity.entries()].map(([integrity, group]) => ({
+		...destinationArtifact(integrity, destinationPaths),
+		candidates: [...new Set(group.map(artifact => artifact.resolved))]
+			.sort((left, right) => left.localeCompare(right)),
+	})).sort((left, right) => left.integrity.localeCompare(right.integrity));
+	const validated = await runCacheHelper({
+		...options,
+		operation: "publish",
+		artifacts: helperArtifacts,
+		label: "ambient cache direct publication",
+	});
 	const fallbackArtifacts = [...noIntegrity];
-	const transferredArtifacts = [];
 	for (const helperArtifact of helperArtifacts) {
-		const group = byIntegrity.get(helperArtifact.integrity);
-		if (validated.results.get(artifactIdentity(helperArtifact)) === "missing") fallbackArtifacts.push(...group);
-		else transferredArtifacts.push(...group);
+		const result = validated.results.get(helperArtifact.integrity);
+		if (result.status === "missing" || result.status === "corrupt") fallbackArtifacts.push(...byIntegrity.get(helperArtifact.integrity));
 	}
 	return {
 		fallbackArtifacts: fallbackArtifacts.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right))),
-		transferredArtifacts,
-		transferredCount: transferredArtifacts.length,
-		linkedCount: validated.metrics.linked,
-		copiedCount: validated.metrics.copied,
-		missingDigestCount: validated.metrics.missing,
-		noIntegrityCount: noIntegrity.length,
+		linkedCount: validated.metrics.linked ?? 0,
+		copiedCount: validated.metrics.copied ?? 0,
+		missingDigestCount: validated.metrics.missing ?? 0,
+		corruptDigestCount: validated.metrics.corrupt ?? 0,
 	};
 }
 
-async function verifyCopiedArtifactsForFallback({
-	artifacts,
-	destinationPaths,
-	destinationContentCache,
-	contentCache,
-	remainingPreparationMs,
-	setTimer,
-	clearTimer,
-}) {
-	const fallback = [];
-	for (const artifact of artifacts) {
-		const present = await verifyDestinationArtifact({
-			artifact, destinationContentCache, contentCache, remainingPreparationMs, setTimer, clearTimer,
-		});
-		if (present) continue;
-		const destinationPath = destinationPaths.get(artifact.integrity);
-		if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
-			throw new Error(`Packed-consumer corrupt-copy cleanup has no authorized destination for ${artifact.integrity}`);
-		}
-		await contentCache.removeDestination(destinationPath);
-		fallback.push(artifact);
+async function verifyDestinationArtifacts({ artifacts, destinationPaths, ...options }) {
+	const byIntegrity = new Map();
+	for (const artifact of artifacts) if (artifact.integrity) {
+		const group = byIntegrity.get(artifact.integrity) ?? [];
+		group.push(artifact);
+		byIntegrity.set(artifact.integrity, group);
 	}
-	return fallback;
+	const helperArtifacts = [...byIntegrity.keys()]
+		.sort((left, right) => left.localeCompare(right))
+		.map(integrity => destinationArtifact(integrity, destinationPaths));
+	const verified = await runCacheHelper({
+		...options,
+		operation: "verify",
+		artifacts: helperArtifacts,
+		label: options.label ?? "destination cache verification",
+	});
+	const invalid = helperArtifacts.filter(artifact => verified.results.get(artifact.integrity).status !== "verified");
+	if (invalid.length > 0) {
+		throw new Error(`Packed-consumer isolated cache is missing or corrupt after transfer/fetch:\n${invalid.flatMap(artifact =>
+			byIntegrity.get(artifact.integrity).map(candidate => `${candidate.resolved} (${artifact.integrity}; ${verified.results.get(artifact.integrity).status})`)).join("\n")}`);
+	}
+	return verified;
 }
 
 async function measured(label, operation) {
@@ -1297,11 +1197,8 @@ export async function seedPackedConsumerCache({
 	runCommand = runOwnedCommand,
 	resolveNpm = npmInvocation,
 	runtime,
-	contentCache = DEFAULT_CONTENT_CACHE,
 	preparationTimeoutMs = PACKED_CONSUMER_PREPARATION_TIMEOUT_MS,
 	now = () => performance.now(),
-	setTimer = setTimeout,
-	clearTimer = clearTimeout,
 	repositoryLock,
 } = {}) {
 	if (!runRoot) throw new Error("seedPackedConsumerCache requires runRoot");
@@ -1365,18 +1262,8 @@ export async function seedPackedConsumerCache({
 			commands,
 			remainingPreparationMs,
 		}));
-		console.log(`[packed-consumer] exact cache seed metrics: linked=${transfer.linkedCount}, copied=${transfer.copiedCount}, missing=${transfer.missingDigestCount}`);
-		const corrupt = await measured("seed copied digest verification", () => verifyCopiedArtifactsForFallback({
-			artifacts: transfer.transferredArtifacts,
-			destinationPaths,
-			destinationContentCache,
-			contentCache,
-			remainingPreparationMs,
-			setTimer,
-			clearTimer,
-		}));
-		const fallbackArtifacts = [...transfer.fallbackArtifacts, ...corrupt]
-			.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
+		console.log(`[packed-consumer] exact cache seed metrics: linked=${transfer.linkedCount}, copied=${transfer.copiedCount}, missing=${transfer.missingDigestCount}, corrupt=${transfer.corruptDigestCount}`);
+		const fallbackArtifacts = transfer.fallbackArtifacts;
 		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort();
 		const batches = [];
 		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) batches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));
@@ -1410,11 +1297,14 @@ export async function seedPackedConsumerCache({
 		if (failed.length) throw new AggregateError(failed.map(entry => entry.error), `npm cache population failed for ${failed.map(entry => `batch ${entry.index + 1}`).join(", ")}`);
 		await measured("seed cache verification", () => verifyDestinationArtifacts({
 			artifacts: selectedArtifacts,
-			destinationContentCache,
-			contentCache,
+			destinationPaths,
+			fixtureRoot: layout.fixtureRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
 			remainingPreparationMs,
-			setTimer,
-			clearTimer,
+			label: "seed cache verification",
 		}));
 		remainingPreparationMs("seed descriptor publication");
 		const identities = selectedArtifacts.map(artifact => Object.freeze({
@@ -1436,6 +1326,7 @@ export async function seedPackedConsumerCache({
 				linked: transfer.linkedCount,
 				copied: transfer.copiedCount,
 				missing: transfer.missingDigestCount,
+				corrupt: transfer.corruptDigestCount,
 			}),
 			lifecycle: Object.freeze({ cacheOwnersSettled: true, helperTransportJoined: true, verifiedArtifacts: identities.length }),
 		});
@@ -1446,9 +1337,9 @@ export async function seedPackedConsumerCache({
 		const seedHandle = Object.freeze({ version: SEED_DESCRIPTOR_VERSION, seedDescriptorPath: layout.seedDescriptorPath, deadline, seedWallMs: Date.now() - wallStartedAt });
 		seedAuthorities.set(seedHandle, Object.freeze({
 			layout, wallStartedAt, repoRoot: resolve(repoRoot), baseEnv, ensureDist, runCommand, npm, runtime: selectedRuntime,
-			contentCache, setTimer, clearTimer, remainingPreparationMs, lock: lockInput.lock,
+			remainingPreparationMs, lock: lockInput.lock,
 			lockInjected: repositoryLock !== undefined,
-			lockHash: seedDescriptor.repositoryLockHash, selectedArtifacts, identities, commands, seedDescriptor,
+			lockHash: seedDescriptor.repositoryLockHash, selectedArtifacts, destinationPaths, identities, commands, seedDescriptor,
 		}));
 		console.log(`[packed-consumer] seed completed in ${(seedHandle.seedWallMs / 1000).toFixed(1)}s; deadline=${deadline.identity}`);
 		return seedHandle;
@@ -1465,9 +1356,9 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 	const authority = seedAuthorities.get(seedHandle);
 	if (!authority) throw new Error("Packed-consumer finalization requires an authoritative seed handle from this process");
 	const {
-		layout, wallStartedAt, repoRoot, baseEnv, ensureDist, runCommand, npm, runtime, contentCache,
-		setTimer, clearTimer, remainingPreparationMs, lock: repositoryLock, lockInjected,
-		lockHash, identities, commands, seedDescriptor,
+		layout, wallStartedAt, repoRoot, baseEnv, ensureDist, runCommand, npm, runtime,
+		remainingPreparationMs, lock: repositoryLock, lockInjected,
+		lockHash, destinationPaths, identities, commands, seedDescriptor,
 	} = authority;
 	const finalizationStartedAt = Date.now();
 	const { absoluteRunRoot, fixtureRoot, packDir, preparationDir, resolverDir, templateDir, cacheDir, consumersDir, descriptorPath } = layout;
@@ -1579,11 +1470,14 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 		assertConsumerSeedSubset(selectedArtifacts, identities);
 		await measured("finalization cache verification", () => verifyDestinationArtifacts({
 			artifacts: selectedArtifacts,
-			destinationContentCache: join(cacheDir, "_cacache"),
-			contentCache,
+			destinationPaths,
+			fixtureRoot,
+			repoRoot,
+			baseEnv,
+			runCommand,
+			commands,
 			remainingPreparationMs,
-			setTimer,
-			clearTimer,
+			label: "finalization cache verification",
 		}));
 		await Promise.all([
 			copyFile(resolverManifestPath, join(templateDir, "package.json")),
