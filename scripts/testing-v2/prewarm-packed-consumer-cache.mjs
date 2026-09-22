@@ -23,6 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const CACHE_PATH_HELPER_NAME = "resolve-packed-consumer-cache-paths.mjs";
 const CACHE_COPY_HELPER_NAME = "copy-packed-consumer-cache-batch.mjs";
+const CACHE_COPY_AMBIENT_ENV = "BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE";
 const MAX_CACHE_HELPER_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CACHE_HELPER_RESULT_BYTES = 8 * 1024 * 1024;
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
@@ -982,8 +983,31 @@ async function removeCacheCopyStaging({
 	});
 }
 
-function validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingParent }) {
-	if (!exactObjectKeys(parsed, ["version", "stagingRoot", "results", "admitted", "completed", "maxActive"]) || parsed.version !== 1) {
+async function runBoundedCacheTasks(items, operation, label) {
+	const results = new Array(items.length);
+	const failures = new Array(items.length);
+	let next = 0;
+	let stopped = false;
+	const worker = async () => {
+		while (!stopped) {
+			const index = next++;
+			if (index >= items.length) return;
+			try {
+				results[index] = await operation(items[index], index);
+			} catch (error) {
+				failures[index] = error;
+				stopped = true;
+			}
+		}
+	};
+	await Promise.allSettled(Array.from({ length: Math.min(CACHE_COPY_WORKER_COUNT, items.length) }, worker));
+	const rejected = failures.filter(Boolean);
+	if (rejected.length > 0) throw new AggregateError(rejected, `${label} failed`);
+	return results;
+}
+
+function validateCacheCopyResult(parsed, { artifacts, fixtureRoot, stagingParent }) {
+	if (!exactObjectKeys(parsed, ["version", "stagingRoot", "results", "metrics", "admitted", "completed", "maxActive"]) || parsed.version !== 2) {
 		throw new Error("Packed-consumer cache copy helper returned a malformed result envelope");
 	}
 	if (typeof parsed.stagingRoot !== "string" || !isAbsolute(parsed.stagingRoot)) {
@@ -993,32 +1017,42 @@ function validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingPare
 	if (!isStrictChild(stagingParent, stagingRoot) || !isStrictChild(fixtureRoot, stagingRoot)) {
 		throw new Error("Packed-consumer cache copy helper returned an out-of-root staging path");
 	}
-	if (!Array.isArray(parsed.results) || parsed.results.length !== integrities.length) {
-		throw new Error(`Packed-consumer cache copy helper must return exactly ${integrities.length} results`);
+	if (!Array.isArray(parsed.results) || parsed.results.length !== artifacts.length) {
+		throw new Error(`Packed-consumer cache copy helper must return exactly ${artifacts.length} results`);
 	}
-	if (parsed.admitted !== integrities.length || parsed.completed !== integrities.length ||
+	if (parsed.admitted !== artifacts.length || parsed.completed !== artifacts.length ||
 		!Number.isInteger(parsed.maxActive) || parsed.maxActive < 1 || parsed.maxActive > CACHE_COPY_WORKER_COUNT) {
 		throw new Error("Packed-consumer cache copy helper returned invalid admission/completion accounting");
 	}
-	const expected = new Set(integrities);
+	if (!exactObjectKeys(parsed.metrics, ["linked", "copied", "missing"]) ||
+		![parsed.metrics.linked, parsed.metrics.copied, parsed.metrics.missing].every(Number.isInteger) ||
+		parsed.metrics.linked < 0 || parsed.metrics.copied < 0 || parsed.metrics.missing < 0 ||
+		parsed.metrics.linked + parsed.metrics.copied + parsed.metrics.missing !== artifacts.length) {
+		throw new Error("Packed-consumer cache copy helper returned invalid deterministic metrics");
+	}
+	const expected = new Set(artifacts.map(artifactIdentity));
 	const seen = new Set();
 	const paths = new Set();
 	const results = new Map();
+	const observedMetrics = { linked: 0, copied: 0, missing: 0 };
 	for (const entry of parsed.results) {
-		if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.integrity !== "string" || typeof entry.status !== "string") {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.resolved !== "string" || typeof entry.integrity !== "string" || typeof entry.status !== "string") {
 			throw new Error("Packed-consumer cache copy helper returned a malformed result entry");
 		}
-		if (!expected.has(entry.integrity)) throw new Error(`Packed-consumer cache copy helper returned an unexpected integrity: ${entry.integrity}`);
-		if (seen.has(entry.integrity)) throw new Error(`Packed-consumer cache copy helper returned a duplicate integrity: ${entry.integrity}`);
-		seen.add(entry.integrity);
+		const identity = artifactIdentity(entry);
+		if (!expected.has(identity)) throw new Error("Packed-consumer cache copy helper returned an unexpected exact artifact identity");
+		if (seen.has(identity)) throw new Error("Packed-consumer cache copy helper returned a duplicate exact artifact identity");
+		seen.add(identity);
 		if (entry.status === "missing") {
-			if (!exactObjectKeys(entry, ["integrity", "status"])) throw new Error("Packed-consumer cache copy helper returned a malformed missing result");
-			results.set(entry.integrity, { status: "missing" });
+			if (!exactObjectKeys(entry, ["resolved", "integrity", "status"])) throw new Error("Packed-consumer cache copy helper returned a malformed missing result");
+			results.set(identity, { status: "missing" });
+			observedMetrics.missing++;
 			continue;
 		}
-		if (entry.status !== "copied" || !exactObjectKeys(entry, ["integrity", "status", "partialPath"]) ||
+		if ((entry.status !== "linked" && entry.status !== "copied") ||
+			!exactObjectKeys(entry, ["resolved", "integrity", "status", "partialPath"]) ||
 			typeof entry.partialPath !== "string" || !isAbsolute(entry.partialPath)) {
-			throw new Error("Packed-consumer cache copy helper returned a malformed copied result");
+			throw new Error("Packed-consumer cache copy helper returned a malformed transferred result");
 		}
 		const partialPath = resolve(entry.partialPath);
 		if (!isStrictChild(stagingRoot, partialPath) || !isStrictChild(fixtureRoot, partialPath)) {
@@ -1026,10 +1060,12 @@ function validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingPare
 		}
 		if (paths.has(partialPath)) throw new Error(`Packed-consumer cache copy helper returned a duplicate partial path: ${partialPath}`);
 		paths.add(partialPath);
-		results.set(entry.integrity, { status: "copied", partialPath });
+		results.set(identity, { status: entry.status, partialPath });
+		observedMetrics[entry.status]++;
 	}
-	for (const integrity of integrities) if (!results.has(integrity)) throw new Error(`Packed-consumer cache copy helper omitted ${integrity}`);
-	return { stagingRoot, results };
+	for (const artifact of artifacts) if (!results.has(artifactIdentity(artifact))) throw new Error("Packed-consumer cache copy helper omitted an exact artifact identity");
+	if (JSON.stringify(observedMetrics) !== JSON.stringify(parsed.metrics)) throw new Error("Packed-consumer cache copy helper metrics do not match its results");
+	return { stagingRoot, results, metrics: Object.freeze({ ...observedMetrics }) };
 }
 
 async function copyAvailableArtifacts({
@@ -1045,25 +1081,30 @@ async function copyAvailableArtifacts({
 	remainingPreparationMs,
 	removeOwnedPathFn,
 }) {
-	const transferable = artifacts.filter(artifact => artifact.integrity);
+	const transferable = artifacts.filter(artifact => artifact.integrity)
+		.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
 	const integrities = [...new Set(transferable.map(artifact => artifact.integrity))].sort();
 	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
-	if (integrities.length === 0) {
-		return { fallbackArtifacts: noIntegrity, transferredArtifacts: [], transferredCount: 0, missingDigestCount: 0, noIntegrityCount: noIntegrity.length };
+	if (transferable.length === 0) {
+		return {
+			fallbackArtifacts: noIntegrity, transferredArtifacts: [], transferredCount: 0,
+			linkedCount: 0, copiedCount: 0, missingDigestCount: 0, noIntegrityCount: noIntegrity.length,
+		};
 	}
 	const stagingParent = join(fixtureRoot, "cache-copy-staging");
 	if (!isStrictChild(fixtureRoot, stagingParent)) throw new Error("Packed-consumer cache copy staging parent escaped fixture authority");
-	const request = { version: 1, integrities };
+	const request = { version: 2, artifacts: transferable.map(({ resolved, integrity }) => ({ resolved, integrity })) };
 	const input = `${JSON.stringify(request)}\n`;
 	if (Buffer.byteLength(input) > MAX_CACHE_HELPER_REQUEST_BYTES) {
 		throw new Error(`Packed-consumer cache copy request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
 	}
 	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_COPY_HELPER_NAME);
 	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
+	helperEnv[CACHE_COPY_AMBIENT_ENV] = sourceContentCache;
 	let result;
 	try {
 		const totalTimeoutMs = remainingPreparationMs("ambient cache digest copy");
-		result = await runCommand(process.execPath, [helperPath, fixtureRoot, sourceContentCache], {
+		result = await runCommand(process.execPath, [helperPath, fixtureRoot], {
 			cwd: repoRoot,
 			env: helperEnv,
 			timeoutMs: totalTimeoutMs,
@@ -1099,12 +1140,12 @@ async function copyAvailableArtifacts({
 		} catch (error) {
 			throw new Error(`Packed-consumer cache copy helper emitted malformed JSON: ${error.message}`, { cause: error });
 		}
-		validated = validateCacheCopyResult(parsed, { integrities, fixtureRoot, stagingParent });
-		for (const [integrity, entry] of validated.results) {
-			if (entry.status !== "copied") continue;
+		validated = validateCacheCopyResult(parsed, { artifacts: transferable, fixtureRoot, stagingParent });
+		const transferredEntries = [...validated.results].filter(([, entry]) => entry.status !== "missing");
+		await runBoundedCacheTasks(transferredEntries, async ([identity, entry]) => {
 			const partial = await stat(entry.partialPath).catch(() => undefined);
-			if (!partial?.isFile()) throw new Error(`Packed-consumer cache copy helper did not create a regular partial for ${integrity}`);
-		}
+			if (!partial?.isFile()) throw new Error(`Packed-consumer cache copy helper did not create a regular partial for ${identity}`);
+		}, "Packed-consumer cache partial validation");
 	} catch (error) {
 		try {
 			await removeCacheCopyStaging({
@@ -1117,37 +1158,52 @@ async function copyAvailableArtifacts({
 		throw error;
 	}
 
-	const byIntegrity = new Map(transferable.map(artifact => [artifact.integrity, artifact]));
+	const byIntegrity = new Map();
+	for (const artifact of transferable) {
+		const group = byIntegrity.get(artifact.integrity) ?? [];
+		group.push(artifact);
+		byIntegrity.set(artifact.integrity, group);
+	}
 	const fallbackArtifacts = [...noIntegrity];
-	const transferredArtifacts = [];
+	let transferredArtifacts = [];
 	try {
 		// Publication begins only after the uncancellable helper has fully settled.
-		// It is deliberately sequential and fails closed on a pre-existing path.
+		// A bounded three-worker pool preserves the same-cache atomic link boundary
+		// without serializing hundreds of independent immutable digests. Admission
+		// stops on the first failure and every already-admitted publication settles
+		// before staging cleanup.
+		const publicationTasks = [];
 		for (const integrity of integrities) {
-			const copied = validated.results.get(integrity);
-			const artifact = byIntegrity.get(integrity);
-			if (copied.status === "missing") {
-				fallbackArtifacts.push(artifact);
+			const group = byIntegrity.get(integrity);
+			const available = group
+				.map(artifact => ({ artifact, result: validated.results.get(artifactIdentity(artifact)) }))
+				.find(entry => entry.result.status !== "missing");
+			if (!available) {
+				fallbackArtifacts.push(...group);
 				continue;
 			}
 			const destinationPath = destinationPaths.get(integrity);
 			if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
 				throw new Error(`Packed-consumer cache publication has no absolute destination for ${integrity}`);
 			}
-			remainingPreparationMs(`cache publication ${integrity}`);
-			await contentCache.prepareDestination(dirname(destinationPath));
-			await contentCache.publishDestination(copied.partialPath, destinationPath);
-			transferredArtifacts.push(artifact);
+			publicationTasks.push({ integrity, group, partialPath: available.result.partialPath, destinationPath });
 		}
+		const published = await runBoundedCacheTasks(publicationTasks, async task => {
+			remainingPreparationMs(`cache publication ${task.integrity}`);
+			await contentCache.prepareDestination(dirname(task.destinationPath));
+			await contentCache.publishDestination(task.partialPath, task.destinationPath);
+			return task.group;
+		}, "Packed-consumer cache publication");
+		transferredArtifacts = published.flat();
 		await removeCacheCopyStaging({
 			stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-			lifecycle: { phase: "after sequential cache publication", copied: transferredArtifacts.length },
+			lifecycle: { phase: "after bounded cache publication", transferred: transferredArtifacts.length, ...validated.metrics },
 		});
 	} catch (error) {
 		try {
 			await removeCacheCopyStaging({
 				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-				lifecycle: { phase: "after failed sequential cache publication", copied: transferredArtifacts.length },
+				lifecycle: { phase: "after failed bounded cache publication", transferred: transferredArtifacts.length, ...validated.metrics },
 			});
 		} catch (cleanupError) {
 			throw new AggregateError([error, cleanupError], "Packed-consumer cache publication and staging cleanup failed");
@@ -1155,10 +1211,12 @@ async function copyAvailableArtifacts({
 		throw error;
 	}
 	return {
-		fallbackArtifacts: fallbackArtifacts.sort((left, right) => left.resolved.localeCompare(right.resolved)),
+		fallbackArtifacts: fallbackArtifacts.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right))),
 		transferredArtifacts,
 		transferredCount: transferredArtifacts.length,
-		missingDigestCount: fallbackArtifacts.filter(artifact => artifact.integrity).length,
+		linkedCount: validated.metrics.linked,
+		copiedCount: validated.metrics.copied,
+		missingDigestCount: validated.metrics.missing,
 		noIntegrityCount: noIntegrity.length,
 	};
 }
@@ -1453,6 +1511,7 @@ export async function seedPackedConsumerCache({
 			remainingPreparationMs,
 			removeOwnedPathFn,
 		}));
+		console.log(`[packed-consumer] exact cache seed metrics: linked=${transfer.linkedCount}, copied=${transfer.copiedCount}, missing=${transfer.missingDigestCount}`);
 		const corrupt = await measured("seed copied digest verification", () => verifyCopiedArtifactsForFallback({
 			artifacts: transfer.transferredArtifacts,
 			destinationPaths,
@@ -1520,6 +1579,11 @@ export async function seedPackedConsumerCache({
 			runtime: selectedRuntime,
 			identities,
 			deadline,
+			transferMetrics: Object.freeze({
+				linked: transfer.linkedCount,
+				copied: transfer.copiedCount,
+				missing: transfer.missingDigestCount,
+			}),
 			lifecycle: Object.freeze({ cacheOwnersSettled: true, helperTransportJoined: true, verifiedArtifacts: identities.length }),
 		});
 		const temporary = `${layout.seedDescriptorPath}.tmp-${process.pid}-${randomUUID()}`;

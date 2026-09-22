@@ -3,23 +3,27 @@
 /**
  * Copy exact ambient cacache digests into a run-owned staging directory.
  *
- * The two argv paths are independent process authority. Stdin contains only a
- * bounded, versioned list of exact integrity identities; callers cannot choose
- * source or destination paths. The ambient cache is read-only.
+ * The fixture argv and dedicated ambient-cache environment value are independent
+ * process authority. Stdin contains only a bounded, versioned list of exact
+ * URL/integrity identities; callers cannot choose source or destination paths.
+ * The ambient cache is read-only and omitted from command diagnostics.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { link, lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import cacache from "cacache";
 
-const REQUEST_VERSION = 1;
-const RESULT_VERSION = 1;
+const REQUEST_VERSION = 2;
+const RESULT_VERSION = 2;
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
-const MAX_INTEGRITIES = 1_000;
+const MAX_ARTIFACTS = 1_000;
 const MAX_INTEGRITY_LENGTH = 2_048;
+const MAX_RESOLVED_LENGTH = 16_384;
+const PHYSICAL_COPY_LINK_ERRORS = new Set(["EXDEV", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"]);
 const MAX_WORKERS = 3;
 const MAX_DIAGNOSTIC_BYTES = 8_000;
+const AMBIENT_CACHE_ENV = "BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE";
 
 function isStrictChild(root, candidate) {
 	const child = relative(resolve(root), resolve(candidate));
@@ -53,23 +57,36 @@ function validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContent
 	return { fixtureRoot, ambientContentCache };
 }
 
+function artifactIdentity(artifact) {
+	return `${artifact.resolved}\u0000${artifact.integrity}`;
+}
+
+function npmRequestCacheKey(resolved) {
+	return `make-fetch-happen:request-cache:${resolved}`;
+}
+
 function validateRequest(request) {
-	requireExactKeys(request, ["version", "integrities"], "cache-copy request");
+	requireExactKeys(request, ["version", "artifacts"], "cache-copy request");
 	if (request.version !== REQUEST_VERSION) throw new Error(`cache-copy request version must be ${REQUEST_VERSION}`);
-	if (!Array.isArray(request.integrities) || request.integrities.length > MAX_INTEGRITIES) {
-		throw new Error(`cache-copy integrities must be an array of at most ${MAX_INTEGRITIES} values`);
+	if (!Array.isArray(request.artifacts) || request.artifacts.length > MAX_ARTIFACTS) {
+		throw new Error(`cache-copy artifacts must be an array of at most ${MAX_ARTIFACTS} values`);
 	}
 	let previous;
-	for (const integrity of request.integrities) {
-		if (typeof integrity !== "string" || integrity.length === 0 || integrity.length > MAX_INTEGRITY_LENGTH) {
+	for (const artifact of request.artifacts) {
+		requireExactKeys(artifact, ["resolved", "integrity"], "cache-copy artifact");
+		if (typeof artifact.resolved !== "string" || artifact.resolved.length === 0 || artifact.resolved.length > MAX_RESOLVED_LENGTH || !/^https:\/\//.test(artifact.resolved)) {
+			throw new Error(`cache-copy resolved URL must be an https URL no longer than ${MAX_RESOLVED_LENGTH} characters`);
+		}
+		if (typeof artifact.integrity !== "string" || artifact.integrity.length === 0 || artifact.integrity.length > MAX_INTEGRITY_LENGTH) {
 			throw new Error(`cache-copy integrity must be a non-empty string no longer than ${MAX_INTEGRITY_LENGTH} characters`);
 		}
-		if (previous !== undefined && integrity <= previous) {
-			throw new Error("cache-copy integrities must be sorted and unique");
+		const identity = artifactIdentity(artifact);
+		if (previous !== undefined && identity.localeCompare(previous) <= 0) {
+			throw new Error("cache-copy artifacts must be sorted and unique by resolved URL and integrity");
 		}
-		previous = integrity;
+		previous = identity;
 	}
-	return request.integrities;
+	return request.artifacts;
 }
 
 async function readBoundedJson(input) {
@@ -94,16 +111,20 @@ function withProgress(error, progress) {
 	return error;
 }
 
-/** Copy a validated batch, stopping admission on the first non-ENOENT error. */
+/** Seed a validated exact artifact batch, stopping admission on the first fatal error. */
 export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, authoritativeAmbientContentCache, request, {
+	lookup = (cache, resolved) => cacache.get.info(cache, npmRequestCacheKey(resolved), { memoize: false }),
 	copyByDigest = cacache.get.copy.byDigest,
+	linkFile = link,
+	inspectPath = lstat,
+	canonicalPath = realpath,
 	removePartial = path => rm(path, { force: true }),
 	createDirectory = (path, options) => mkdir(path, options),
 	nonce = () => `${process.pid}-${randomUUID()}`,
 	workerCount = MAX_WORKERS,
 } = {}) {
 	const { fixtureRoot, ambientContentCache } = validateAuthority(authoritativeFixtureRoot, authoritativeAmbientContentCache);
-	const integrities = validateRequest(request);
+	const artifacts = validateRequest(request);
 	if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_WORKERS) {
 		throw new Error(`cache-copy workerCount must be an integer from 1 to ${MAX_WORKERS}`);
 	}
@@ -114,59 +135,96 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 	}
 	await createDirectory(stagingParent, { recursive: true });
 	await createDirectory(stagingRoot, { recursive: false });
+	const staging = await inspectPath(stagingRoot);
+	if (!staging?.isDirectory?.() || staging.isSymbolicLink?.()) throw new Error("cache-copy staging root must be a non-reparse directory");
+	const ambientCanonical = resolve(await canonicalPath(ambientContentCache));
 
-	const results = new Array(integrities.length);
-	const partialPaths = integrities.map((_, index) => join(stagingRoot, `${String(index).padStart(5, "0")}.partial`));
+	const results = new Array(artifacts.length);
+	const partialPaths = artifacts.map((_, index) => join(stagingRoot, `${String(index).padStart(5, "0")}.partial`));
 	let nextIndex = 0;
 	let stopAdmission = false;
 	let admitted = 0;
 	let completed = 0;
 	let active = 0;
 	let maxActive = 0;
-	const failures = new Array(integrities.length);
+	const failures = new Array(artifacts.length);
 	const worker = async () => {
 		while (!stopAdmission) {
 			const index = nextIndex++;
-			if (index >= integrities.length) return;
-			const integrity = integrities[index];
+			if (index >= artifacts.length) return;
+			const artifact = artifacts[index];
 			const partialPath = partialPaths[index];
 			admitted++;
 			active++;
 			maxActive = Math.max(maxActive, active);
 			try {
-				await copyByDigest(ambientContentCache, integrity, partialPath);
-				results[index] = { integrity, status: "copied", partialPath };
-			} catch (error) {
-				if (error?.code === "ENOENT") results[index] = { integrity, status: "missing" };
-				else {
-					failures[index] = error;
-					stopAdmission = true;
+				let info;
+				try {
+					info = await lookup(ambientContentCache, artifact.resolved);
+				} catch (error) {
+					if (error?.code !== "ENOENT") throw error;
 				}
+				if (!info || String(info.integrity ?? "") !== artifact.integrity) {
+					results[index] = { ...artifact, status: "missing" };
+					continue;
+				}
+				if (typeof info.path !== "string" || !isAbsolute(info.path)) throw new Error("exact ambient cache lookup returned a non-absolute content path");
+				const sourcePath = resolve(info.path);
+				if (!isStrictChild(ambientContentCache, sourcePath)) throw new Error("exact ambient cache lookup returned an out-of-cache content path");
+				const source = await inspectPath(sourcePath);
+				if (!source?.isFile?.() || source.isSymbolicLink?.()) throw new Error("exact ambient cache lookup source must be a non-reparse regular file");
+				const sourceCanonical = resolve(await canonicalPath(sourcePath));
+				if (relative(sourcePath, sourceCanonical) !== "" || !isStrictChild(ambientCanonical, sourceCanonical)) {
+					throw new Error("exact ambient cache lookup source must not traverse a reparse point or escape cache authority");
+				}
+				let status = "linked";
+				if (source.dev !== staging.dev) {
+					await copyByDigest(ambientContentCache, artifact.integrity, partialPath);
+					status = "copied";
+				} else {
+					try {
+						await linkFile(sourcePath, partialPath);
+					} catch (error) {
+						if (!PHYSICAL_COPY_LINK_ERRORS.has(error?.code)) throw error;
+						await copyByDigest(ambientContentCache, artifact.integrity, partialPath);
+						status = "copied";
+					}
+				}
+				results[index] = { ...artifact, status, partialPath };
+			} catch (error) {
+				failures[index] = error;
+				stopAdmission = true;
 			} finally {
 				completed++;
 				active--;
 			}
 		}
 	};
-	await Promise.allSettled(Array.from({ length: Math.min(workerCount, integrities.length) }, () => worker()));
-	const progress = { total: integrities.length, admitted, completed, maxActive };
+	await Promise.allSettled(Array.from({ length: Math.min(workerCount, artifacts.length) }, () => worker()));
+	const progress = { total: artifacts.length, admitted, completed, maxActive };
 	const operationFailures = failures.filter(error => error !== undefined).map(error => withProgress(error, progress));
 	if (operationFailures.length > 0) {
 		const cleanupSettlements = await Promise.allSettled(partialPaths.slice(0, admitted).map(path => removePartial(path)));
 		const cleanupFailures = cleanupSettlements
 			.map((settlement, index) => settlement.status === "rejected"
-				? new Error(`cache-copy partial cleanup failed for ${partialPaths[index]}: ${settlement.reason instanceof Error ? settlement.reason.message : String(settlement.reason)}`, { cause: settlement.reason })
+				? new Error(`cache-copy partial cleanup failed for admitted partial ${index}: ${settlement.reason instanceof Error ? settlement.reason.message : String(settlement.reason)}`, { cause: settlement.reason })
 				: undefined)
 			.filter(Boolean);
 		throw new AggregateError(
 			[...operationFailures, ...cleanupFailures],
-			`Packed-consumer cache copy failed; total=${progress.total}, admitted=${admitted}, completed=${completed}, maxActive=${maxActive}`,
+			`Packed-consumer cache seed failed; total=${progress.total}, admitted=${admitted}, completed=${completed}, maxActive=${maxActive}`,
 		);
 	}
+	const metrics = Object.freeze({
+		linked: results.filter(result => result.status === "linked").length,
+		copied: results.filter(result => result.status === "copied").length,
+		missing: results.filter(result => result.status === "missing").length,
+	});
 	return {
 		version: RESULT_VERSION,
 		stagingRoot,
 		results,
+		metrics,
 		admitted,
 		completed,
 		maxActive,
@@ -174,11 +232,13 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 }
 
 async function main() {
-	if (process.argv.length !== 4) {
-		throw new Error("usage: copy-packed-consumer-cache-batch.mjs <authoritative-fixture-root> <authoritative-ambient-_cacache>");
+	if (process.argv.length !== 3) {
+		throw new Error("usage: copy-packed-consumer-cache-batch.mjs <authoritative-fixture-root>");
 	}
+	const ambientContentCache = process.env[AMBIENT_CACHE_ENV];
+	if (!ambientContentCache) throw new Error(`missing ${AMBIENT_CACHE_ENV} authority`);
 	const request = await readBoundedJson(process.stdin);
-	const result = await copyPackedConsumerCacheBatch(process.argv[2], process.argv[3], request);
+	const result = await copyPackedConsumerCacheBatch(process.argv[2], ambientContentCache, request);
 	process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
@@ -196,8 +256,10 @@ function diagnosticError(error) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	main().catch(error => {
+		const ambientContentCache = process.env[AMBIENT_CACHE_ENV];
 		const diagnostic = JSON.stringify(diagnosticError(error));
-		console.error(`[packed-consumer-copy] failed: ${diagnostic.slice(0, MAX_DIAGNOSTIC_BYTES)}`);
+		const redacted = ambientContentCache ? diagnostic.split(ambientContentCache).join("<ambient npm cache>") : diagnostic;
+		console.error(`[packed-consumer-copy] failed: ${redacted.slice(0, MAX_DIAGNOSTIC_BYTES)}`);
 		process.exitCode = 1;
 	});
 }

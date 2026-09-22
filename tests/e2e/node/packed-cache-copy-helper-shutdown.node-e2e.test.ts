@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +14,11 @@ import { removeOwnedPath } from "../../../scripts/testing-v2/owned-path-cleanup.
 import { spawnTracked, type TrackedChild } from "../../../src/server/agent/spawn-tree.ts";
 
 const REPO_ROOT = process.cwd();
+const require = createRequire(import.meta.url);
+const cacache = require("cacache") as {
+	put: (cache: string, key: string, data: Buffer) => Promise<{ toString(): string }>;
+	get: { info: (cache: string, key: string) => Promise<{ integrity: string; path: string } | null> };
+};
 const roots: string[] = [];
 const owners: Array<{ tracked: TrackedChild; closed: Promise<void>; treeExitVerified: boolean }> = [];
 
@@ -52,6 +58,43 @@ after(async () => {
 			lifecycle: { phase: "after verified helper tree exit", owners: owners.length },
 		});
 	}
+});
+
+test("real cache-copy helper hardlinks one exact CAS hit and joins its owned process tree", { timeout: 40_000 }, async () => {
+	const runRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-link-e2e-"));
+	const ambientRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-ambient-e2e-"));
+	roots.push(runRoot, ambientRoot);
+	const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+	mkdirSync(fixtureRoot, { recursive: true });
+	const ambientCache = join(ambientRoot, "_cacache");
+	const resolved = "https://registry.example.test/helper-exact.tgz";
+	const cacheKey = `make-fetch-happen:request-cache:${resolved}`;
+	const integrity = String(await cacache.put(ambientCache, cacheKey, Buffer.from("real helper immutable content")));
+	const helperPath = join(REPO_ROOT, "scripts", "testing-v2", "copy-packed-consumer-cache-batch.mjs");
+	const result = await runOwnedCommand(process.execPath, [helperPath, fixtureRoot], {
+		cwd: REPO_ROOT,
+		env: { ...process.env, BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: ambientCache },
+		timeoutMs: 30_000,
+		totalTimeoutMs: 30_000,
+		input: `${JSON.stringify({ version: 2, artifacts: [{ resolved, integrity }] })}\n`,
+		repoRoot: REPO_ROOT,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(isCompleteOwnedCommandShutdown(result.shutdown), true);
+	assert.doesNotMatch(JSON.stringify({ args: result.args, stdout: result.stdout, stderr: result.stderr }),
+		new RegExp(ambientRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+		"published helper command evidence must not expose the ambient absolute path");
+	const response = JSON.parse(result.stdout) as {
+		metrics: { linked: number; copied: number; missing: number };
+		results: Array<{ status: string; partialPath: string }>;
+	};
+	assert.deepEqual(response.metrics, { linked: 1, copied: 0, missing: 0 });
+	assert.equal(response.results[0]?.status, "linked");
+	const source = await cacache.get.info(ambientCache, cacheKey);
+	assert.ok(source?.path);
+	assert.equal(statSync(response.results[0]!.partialPath).ino, statSync(source.path).ino,
+		"the helper result must be a hardlink to the exact immutable ambient CAS inode");
 });
 
 test("stalled cache-copy helper reaps its descendant before preparation rejects", { timeout: 40_000 }, async () => {
