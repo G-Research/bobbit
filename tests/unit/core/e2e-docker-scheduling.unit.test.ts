@@ -11,6 +11,7 @@ import {
 	resolveE2eVitestWorkers,
 	runGroupBWithPackedConsumerFinalization,
 	runGroupBWithPackedConsumerPreparation,
+	runHostedE2ESchedule,
 	runSeedThenGroupAAndPrebundle,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 import {
@@ -105,24 +106,22 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(groupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 	});
 
-	it("runs seed → A → prebundle → concurrent B/finalization barrier → cache fan-out → C → D with D strictly last", () => {
+	it("wires seed → A → prebundle → concurrent B/finalization → C → D through the reporting-safe scheduler", () => {
 		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
 		const defaultSchedule = source.match(/\} else \{\n\t\t\/\/ Hosted runners[\s\S]*?\n\t\}\n\n\tconst sample/)?.[0];
 		expect(defaultSchedule).toBeDefined();
 
 		const steps = [
 			"createSerialPlaywrightEnvironment(coordinatorEnv)",
-			"const prerequisites = await runSeedThenGroupAAndPrebundle({",
+			"const schedule = await runHostedE2ESchedule({",
 			"seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths)",
 			"runGroupA: () => runGroupA(A, coordinatorEnv)",
 			"preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv)",
-			"bundle = prerequisites.prebundle",
-			"const groupBEnvironment = Object.freeze(composeE2EChildEnvironment",
-			"const paired = await runGroupBWithPackedConsumerFinalization({",
-			"finalizePackedConsumer: () => finalizeGroupCPackedConsumer(prerequisites.seed, sharedPlaywrightEnv, paths)",
+			"runGroupB: ({ prebundle }) => {",
+			"finalizePackedConsumer: ({ seed }) => finalizeGroupCPackedConsumer(seed, sharedPlaywrightEnv, paths)",
 			"fanOutSerialTransformCache(paths.cacheRoot, paths.root)",
-			"await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath)",
-			"await runGroupD(D, { coordinatorEnv })",
+			"return runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath)",
+			"runGroupD: () => runGroupD(D, { coordinatorEnv })",
 		];
 		let previous = -1;
 		for (const step of steps) {
@@ -131,8 +130,8 @@ describe("E2E Docker capability and scheduling", () => {
 			previous = position;
 		}
 		expect(defaultSchedule!.match(/seedGroupCPackedConsumer\(/g)).toHaveLength(1);
-		expect(defaultSchedule).toContain("results.push(groupBResult)");
-		expect(defaultSchedule).toContain('captureLatestProfile("B")');
+		expect(defaultSchedule).toContain("results.push(result)");
+		expect(defaultSchedule).toContain("captureLatestProfile(group)");
 		expect(defaultSchedule).toContain("Object.freeze(sharedPlaywrightEnv)");
 		expect(defaultSchedule).not.toContain("groupDRun");
 		expect(defaultSchedule).not.toMatch(/Promise\.all[\s\S]*runGroupD/);
@@ -157,8 +156,13 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(focusedGroupD).toContain("VITEST_MAX_WORKERS: String(resolveE2eVitestWorkers(coordinatorEnv))");
 		expect(source).not.toContain('process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1');
 		expect(defaultSchedule).toContain("preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv)");
-		expect(defaultSchedule).toContain("bundle = prerequisites.prebundle");
-		const reportAt = source.indexOf("const report = {");
+		expect(defaultSchedule).toContain("if (schedule.prebundle) bundle = schedule.prebundle");
+		expect(defaultSchedule).toContain("results.push({ label: phaseLabels[phase] ?? phase, code: 1");
+		const scheduleAt = source.indexOf("const schedule = await runHostedE2ESchedule({");
+		const samplerStopAt = source.indexOf("const sample = sampler.stop();", scheduleAt);
+		const reportAt = source.indexOf("const report = {", samplerStopAt);
+		expect(samplerStopAt).toBeGreaterThan(scheduleAt);
+		expect(reportAt).toBeGreaterThan(samplerStopAt);
 		const bundleFieldAt = source.indexOf("\n\t\tbundle,", reportAt);
 		const cleanupAt = source.indexOf("await finalizeE2ERunCleanup({", reportAt);
 		expect(bundleFieldAt).toBeGreaterThan(reportAt);
@@ -352,6 +356,87 @@ describe("E2E Docker capability and scheduling", () => {
 			expect((error as AggregateError).errors[1]).toBe(finalizationFailure);
 			return true;
 		});
+	});
+
+	it("blocks C after nonzero B but still runs D and returns the finalization result", async () => {
+		const events: string[] = [];
+		const groups: Array<{ group: string; code: number }> = [];
+		const blocked: string[] = [];
+		const outcome = await runHostedE2ESchedule({
+			seedPackedConsumer: () => { events.push("seed"); return { id: "seed" }; },
+			runGroupA: () => { events.push("A"); return { code: 0 }; },
+			preparePrebundle: () => { events.push("prebundle"); return { bundlePath: "bundle.mjs" }; },
+			runGroupB: () => { events.push("B"); return { code: 7 }; },
+			finalizePackedConsumer: () => { events.push("finalize"); return { selected: true }; },
+			runGroupC: () => { events.push("C"); return { code: 0 }; },
+			runGroupD: () => { events.push("D"); return { code: 0 }; },
+			onGroupSettled: (group: string, result: { code: number }) => groups.push({ group, code: result.code }),
+			onGroupBlocked: (group: string, reason: string) => blocked.push(`${group}: ${reason}`),
+		});
+
+		expect(events).toEqual(["seed", "A", "prebundle", "B", "finalize", "D"]);
+		expect(groups).toEqual([
+			{ group: "A", code: 0 },
+			{ group: "B", code: 7 },
+			{ group: "D", code: 0 },
+		]);
+		expect(blocked).toEqual(["C: Group B exit code 7"]);
+		expect(outcome.packedConsumer).toEqual({ selected: true });
+		expect(outcome.failures).toEqual([]);
+	});
+
+	it("reports finalization exceptions, skips C, and continues to D", async () => {
+		const finalizationFailure = new Error("descriptor publication failed");
+		const events: string[] = [];
+		const failures: Array<{ phase: string; error: unknown }> = [];
+		const outcome = await runHostedE2ESchedule({
+			seedPackedConsumer: () => { events.push("seed"); return { id: "seed" }; },
+			runGroupA: () => { events.push("A"); return { code: 0 }; },
+			preparePrebundle: () => { events.push("prebundle"); return { bundlePath: "bundle.mjs" }; },
+			runGroupB: () => { events.push("B"); return { code: 0 }; },
+			finalizePackedConsumer: () => { events.push("finalize"); throw finalizationFailure; },
+			runGroupC: () => { events.push("C"); return { code: 0 }; },
+			runGroupD: () => { events.push("D"); return { code: 0 }; },
+			onPhaseFailure: (failure: { phase: string; error: unknown }) => failures.push(failure),
+		});
+
+		expect(events).toEqual(["seed", "A", "prebundle", "B", "finalize", "D"]);
+		expect(failures).toEqual([expect.objectContaining({
+			phase: "packed-consumer-finalization",
+			error: finalizationFailure,
+		})]);
+		expect(outcome.blockedBy).toBe("packed-consumer finalization failure");
+		expect(outcome.groupD).toEqual({ code: 0 });
+	});
+
+	it.each([
+		["packed-cache-seed", "seed"],
+		["prebundle", "prebundle"],
+	] as const)("captures a %s exception instead of escaping the reporting path", async (expectedPhase, failingOperation) => {
+		const phaseFailure = new Error(`${failingOperation} failed`);
+		const events: string[] = [];
+		const failures: string[] = [];
+		const outcome = await runHostedE2ESchedule({
+			seedPackedConsumer: () => {
+				events.push("seed");
+				if (failingOperation === "seed") throw phaseFailure;
+				return { id: "seed" };
+			},
+			runGroupA: () => { events.push("A"); return { code: 0 }; },
+			preparePrebundle: () => { events.push("prebundle"); throw phaseFailure; },
+			runGroupB: () => { events.push("B"); return { code: 0 }; },
+			finalizePackedConsumer: () => { events.push("finalize"); return { selected: true }; },
+			runGroupC: () => { events.push("C"); return { code: 0 }; },
+			runGroupD: () => { events.push("D"); return { code: 0 }; },
+			onPhaseFailure: ({ phase }: { phase: string }) => failures.push(phase),
+		});
+
+		expect(failures).toEqual([expectedPhase]);
+		expect(events.at(-1)).toBe("D");
+		expect(events).not.toContain("B");
+		expect(events).not.toContain("C");
+		expect(outcome.failures[0]).toMatchObject({ phase: expectedPhase, error: phaseFailure });
+		expect(outcome.groupD).toEqual({ code: 0 });
 	});
 
 	it("aggregates simultaneous B and preparation exceptions", async () => {
