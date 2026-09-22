@@ -223,11 +223,33 @@ describe("packed-consumer offline install contract", () => {
 		const ambientCache = join(tempParent, "ambient-cache");
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
-		const verificationReads: Array<{ cache: string; integrity: string }> = [];
+		const cacheHelperRequests: Array<{
+			version: number;
+			operation: "publish" | "verify";
+			artifacts: Array<{ candidates?: string[]; integrity: string; destinationPath: string }>;
+		}> = [];
+		const cacheHelperResults: Array<{
+			version: number;
+			operation: "publish" | "verify";
+			results: Array<{ integrity: string; status: string; candidate?: string | null }>;
+			metrics: Record<string, number>;
+			admitted: number;
+			completed: number;
+			maxActive: number;
+		}> = [];
 		let directDestinationPath = "";
 		let nowMs = 0;
+		const selectedAliasUrl = "https://registry.example.test/alias/-/alias-1.2.3.tgz";
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		const selectedIntegrity = "sha512-fixture";
+		const expectedDestinationPath = join(
+			tempParent,
+			"prepared-packed-consumer",
+			"npm-cache",
+			"_cacache",
+			"resolved",
+			encodeURIComponent(selectedIntegrity),
+		);
 		try {
 			const descriptor = await preparePackedConsumerFixture({
 				repoRoot: REPO_ROOT,
@@ -236,6 +258,7 @@ describe("packed-consumer offline install contract", () => {
 					lockfileVersion: 3,
 					packages: {
 						"": { name: "seed" },
+						"node_modules/alias": { version: "1.2.3", resolved: selectedAliasUrl, integrity: selectedIntegrity },
 						"node_modules/new-dependency": { version: "1.2.3", resolved: selectedUrl, integrity: selectedIntegrity },
 					},
 				},
@@ -251,15 +274,6 @@ describe("packed-consumer offline install contract", () => {
 				},
 				ensureDist: () => { order.push("ensure-dist"); },
 				resolveNpm: () => ({ command: "node", argsPrefix: ["npm-cli.js"] }),
-				contentCache: {
-					createReadStream: (cache: string, integrity: string) => {
-						verificationReads.push({ cache, integrity });
-						const stream = new PassThrough();
-						stream.end("selected artifact bytes");
-						return stream;
-					},
-					removeDestination: async () => {},
-				},
 				now: () => nowMs,
 				runCommand: async (command: string, args: string[], options: RunCommandOptions) => {
 					calls.push({ args: [...args], cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs });
@@ -281,27 +295,52 @@ describe("packed-consumer offline install contract", () => {
 					if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
 						const request = JSON.parse(String(options.input)) as {
 							version: number;
-							artifacts: Array<{ resolved: string; integrity: string; destinationPath: string }>;
+							operation: "publish" | "verify";
+							artifacts: Array<{ candidates?: string[]; integrity: string; destinationPath: string }>;
 						};
-						assert.equal(request.version, 3);
-						assert.deepEqual(request.artifacts.map(({ resolved, integrity }) => ({ resolved, integrity })), [{
-							resolved: selectedUrl,
-							integrity: selectedIntegrity,
-						}]);
+						cacheHelperRequests.push(request);
+						assert.equal(request.version, 4);
 						assert.equal(args[1], join(tempParent, "prepared-packed-consumer"));
 						assert.equal(args.length, 2);
-						directDestinationPath = request.artifacts[0]!.destinationPath;
-						mkdirSync(dirname(directDestinationPath), { recursive: true });
-						writeFileSync(directDestinationPath, "copied ambient bytes", { flag: "wx" });
-						order.push("copy");
-						return commandResult(command, args, { stdout: `${JSON.stringify({
-							version: 3,
-							results: [{ resolved: selectedUrl, integrity: selectedIntegrity, status: "copied" }],
-							metrics: { linked: 0, copied: 1, missing: 0 },
-							admitted: 1,
-							completed: 1,
-							maxActive: 1,
-						})}\n` });
+						assert.deepEqual(request.artifacts.map(({ integrity, destinationPath }) => ({ integrity, destinationPath })), [{
+							integrity: selectedIntegrity,
+							destinationPath: expectedDestinationPath,
+						}], "every helper phase must use the path resolved for the canonical destination digest");
+
+						let response: (typeof cacheHelperResults)[number];
+						if (request.operation === "publish") {
+							assert.deepEqual(request.artifacts[0]?.candidates, [selectedAliasUrl, selectedUrl],
+								"protocol-v4 publication must group and code-unit-sort every URL for the selected digest");
+							directDestinationPath = request.artifacts[0]!.destinationPath;
+							mkdirSync(dirname(directDestinationPath), { recursive: true });
+							writeFileSync(directDestinationPath, "copied ambient bytes", { flag: "wx" });
+							order.push("publish");
+							response = {
+								version: 4,
+								operation: "publish",
+								results: [{ integrity: selectedIntegrity, status: "copied", candidate: selectedUrl }],
+								metrics: { linked: 0, copied: 1, missing: 0, corrupt: 0 },
+								admitted: 1,
+								completed: 1,
+								maxActive: 1,
+							};
+						} else {
+							assert.deepEqual(request.artifacts[0]?.candidates, undefined,
+								"protocol-v4 verification must carry only digest and canonical destination authority");
+							assert.equal(readFileSync(expectedDestinationPath, "utf8"), "copied ambient bytes");
+							order.push("verify");
+							response = {
+								version: 4,
+								operation: "verify",
+								results: [{ integrity: selectedIntegrity, status: "verified" }],
+								metrics: { verified: 1, missing: 0, corrupt: 0 },
+								admitted: 1,
+								completed: 1,
+								maxActive: 1,
+							};
+						}
+						cacheHelperResults.push(response);
+						return commandResult(command, args, { stdout: `${JSON.stringify(response)}\n` });
 					}
 					if (args.includes("pack")) {
 						order.push("pack");
@@ -366,35 +405,60 @@ describe("packed-consumer offline install contract", () => {
 				},
 			});
 
-			assert.deepEqual(order, ["discover", "paths", "copy", "ensure-dist", "pack", "resolve", "install"]);
-			assert.equal(calls.length, 6);
+			assert.deepEqual(order, [
+				"discover", "paths", "publish", "verify", "ensure-dist", "pack", "resolve", "verify", "install",
+			], "publication and both all-final verifications must complete before the offline install");
+			assert.equal(calls.length, 8);
 			assert.deepEqual(calls[0]?.args, ["npm-cli.js", "config", "get", "cache"]);
 			assert.ok(calls[1]?.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
-			assert.ok(calls[2]?.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
-			assert.deepEqual(calls[3]?.args.slice(1), [
-				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[3]?.args.at(-1),
+			for (const index of [2, 3, 6]) {
+				assert.ok(calls[index]?.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"),
+					`command ${index} must be a tracked buffered cache helper`);
+			}
+			assert.deepEqual(cacheHelperRequests.map(request => request.operation), ["publish", "verify", "verify"],
+				"seed and finalization must each perform their required tracked all-final verification");
+			assert.deepEqual(cacheHelperResults, [
+				{
+					version: 4,
+					operation: "publish",
+					results: [{ integrity: selectedIntegrity, status: "copied", candidate: selectedUrl }],
+					metrics: { linked: 0, copied: 1, missing: 0, corrupt: 0 },
+					admitted: 1,
+					completed: 1,
+					maxActive: 1,
+				},
+				...Array.from({ length: 2 }, () => ({
+					version: 4,
+					operation: "verify" as const,
+					results: [{ integrity: selectedIntegrity, status: "verified" }],
+					metrics: { verified: 1, missing: 0, corrupt: 0 },
+					admitted: 1,
+					completed: 1,
+					maxActive: 1,
+				})),
 			]);
-			assert.deepEqual(calls[4]?.args.slice(1, 7), [
+			assert.deepEqual(calls[4]?.args.slice(1), [
+				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[4]?.args.at(-1),
+			]);
+			assert.deepEqual(calls[5]?.args.slice(1, 7), [
 				"install", "--package-lock-only", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
 			]);
-			assert.equal(dirname(calls[4]!.args.at(-1)!), calls[3]!.args.at(-1));
-			assert.equal(calls[5]?.args[1], "ci");
-			assert.ok(calls[5]?.args.includes("--offline"));
-			assert.ok(!calls[5]?.args.includes(calls[4]!.args.at(-1)!),
+			assert.equal(dirname(calls[5]!.args.at(-1)!), calls[4]!.args.at(-1));
+			assert.equal(calls[7]?.args[1], "ci");
+			assert.ok(calls[7]?.args.includes("--offline"));
+			assert.ok(!calls[7]?.args.includes(calls[5]!.args.at(-1)!),
 				"offline npm ci must not trigger a second lock-free packed-artifact solve");
 			assert.equal(calls[0]?.timeoutMs, 30_000);
 			assert.equal(calls[1]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 5_000);
 			assert.equal(calls[2]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 10_000);
-			assert.equal(calls[3]?.timeoutMs, 3 * 60_000);
-			assert.equal(calls[4]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 20_000);
-			assert.equal(calls[5]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 25_000,
+			assert.equal(calls[3]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 15_000);
+			assert.equal(calls[4]?.timeoutMs, 3 * 60_000);
+			assert.equal(calls[5]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 25_000);
+			assert.equal(calls[6]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 30_000);
+			assert.equal(calls[7]?.timeoutMs, PACKED_CONSUMER_PREPARATION_TIMEOUT_MS - 35_000,
 				"late commands must receive only the original monotonic preparation deadline remainder");
-			assert.deepEqual(verificationReads, [
-				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
-				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
-				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
-			]);
-			assert.ok(directDestinationPath.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
+			assert.equal(directDestinationPath, expectedDestinationPath,
+				"the exact selected ambient digest must publish directly to its canonical isolated-cache path");
 			assert.equal(readFileSync(directDestinationPath, "utf8"), "copied ambient bytes");
 			assert.equal(existsSync(join(tempParent, "prepared-packed-consumer", "cache-copy-staging")), false);
 			assert.doesNotMatch(directDestinationPath, new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -404,7 +468,7 @@ describe("packed-consumer offline install contract", () => {
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const call of [calls[4]!, calls[5]!]) {
+			for (const call of [calls[5]!, calls[7]!]) {
 				for (const [key, value] of Object.entries(inherited).filter(([key]) => key !== "npm_config_cache")) assert.equal(call.env[key], value);
 				assert.notEqual(call.env.npm_config_cache, inherited.npm_config_cache);
 				assert.ok(call.env.npm_config_cache?.startsWith(tempParent));
