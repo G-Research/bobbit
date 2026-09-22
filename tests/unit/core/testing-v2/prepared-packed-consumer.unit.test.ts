@@ -63,14 +63,6 @@ type CommandCall = {
 	options: CommandOptions;
 };
 
-type ContentCache = {
-	createReadStream: (cache: string, integrity: string) => NodeJS.ReadableStream;
-	prepareDestination?: (directory: string) => Promise<void>;
-	createWriteStream?: (path: string, integrity: string) => NodeJS.WritableStream;
-	publishDestination?: (temporaryPath: string, destinationPath: string) => Promise<void>;
-	removeDestination?: (temporaryPath: string) => Promise<void>;
-};
-
 type PathHelperCallback = (context: {
 	request: { fixtureRoot: string; destination: string; integrities: string[] };
 	entries: Array<{ integrity: string; path: string }>;
@@ -110,11 +102,8 @@ type PrepareOptions = {
 	ensureDist: (options?: { timeoutMs: number; fixtureRoot: string; commands: unknown[] }) => void | Promise<void>;
 	resolveNpm: () => { command: string; argsPrefix: string[] };
 	runCommand: (command: string, args: string[], options: CommandOptions) => Promise<CommandResult>;
-	contentCache?: ContentCache;
 	preparationTimeoutMs?: number;
 	now?: () => number;
-	setTimer?: (callback: () => void, timeoutMs: number) => unknown;
-	clearTimer?: (timer: unknown) => void;
 	repositoryLock?: Record<string, unknown>;
 };
 
@@ -174,6 +163,12 @@ function publishRequest(artifacts: Array<{ resolved: string; integrity: string; 
 	};
 }
 
+function validSha512Integrity(firstByte: number): string {
+	const digest = Buffer.alloc(64);
+	digest[0] = firstByte;
+	return `sha512-${digest.toString("base64")}`;
+}
+
 function deferred(): Deferred {
 	let resolvePromise!: () => void;
 	let rejectPromise!: (error: Error) => void;
@@ -196,11 +191,8 @@ async function prepareFixture({
 	registryTarballCount = 0,
 	registryArtifacts,
 	consumerRegistryArtifacts,
-	contentCache,
 	onCacheCommand,
 	onOfflineInstall,
-	setTimer,
-	clearTimer,
 	runtime,
 	ambientCache = join(tmpdir(), "ambient-cache-read-only"),
 	preparationTimeoutMs,
@@ -216,11 +208,8 @@ async function prepareFixture({
 	registryTarballCount?: number;
 	registryArtifacts?: Array<{ resolved: string; integrity?: string }>;
 	consumerRegistryArtifacts?: Array<{ resolved: string; integrity?: string }>;
-	contentCache?: ContentCache;
 	onCacheCommand?: (batchIndex: number, result: CommandResult, options: CommandOptions) => Promise<void>;
 	onOfflineInstall?: () => void | Promise<void>;
-	setTimer?: (callback: () => void, timeoutMs: number) => unknown;
-	clearTimer?: (timer: unknown) => void;
 	runtime?: { platform: NodeJS.Platform; arch: string; libc?: string };
 	ambientCache?: string;
 	preparationTimeoutMs?: number;
@@ -261,25 +250,9 @@ async function prepareFixture({
 		baseEnv: {
 			PATH: process.env.PATH,
 			npm_config_cache: ambientCache,
+			LANG: "tr_TR.UTF-8",
+			LC_ALL: "tr_TR.UTF-8",
 		},
-		...(!useRealContentCache ? { contentCache: {
-			prepareDestination: async () => {},
-			createReadStream: cache => {
-				const stream = new PassThrough();
-				if (cache === join(ambientCache, "_cacache")) {
-					queueMicrotask(() => stream.destroy(Object.assign(new Error("source absent"), { code: "ENOENT" })));
-				} else {
-					stream.end("verified fallback bytes");
-				}
-				return stream;
-			},
-			createWriteStream: () => new PassThrough(),
-			publishDestination: async () => {},
-			removeDestination: async () => {},
-			...contentCache,
-		} } : {}),
-		...(setTimer ? { setTimer } : {}),
-		...(clearTimer ? { clearTimer } : {}),
 		...(runtime ? { runtime } : {}),
 		...(preparationTimeoutMs ? { preparationTimeoutMs } : {}),
 		...(now ? { now } : {}),
@@ -553,13 +526,6 @@ describe("prepared packed consumer", () => {
 				{ resolved: "https://registry.example.test/unrelated-alias.tgz", integrity },
 			],
 			copyDecision: () => "copied",
-			contentCache: {
-				createReadStream: () => {
-					const source = new PassThrough();
-					source.end("verified artifact bytes");
-					return source;
-				},
-			},
 		});
 
 		const copyCalls = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
@@ -589,14 +555,6 @@ describe("prepared packed consumer", () => {
 				{ resolved: "https://registry.example.test/b.tgz", integrity: secondIntegrity },
 				{ resolved: "https://registry.example.test/a-alias.tgz", integrity: firstIntegrity },
 			],
-			contentCache: {
-				createReadStream: cache => {
-					const source = new PassThrough();
-					source.end(cache.includes("ambient-cache-read-only") ? "ambient bytes" : "destination bytes");
-					return source;
-				},
-				createWriteStream: () => new PassThrough(),
-			},
 		});
 		const helperCalls = calls.filter(call => call.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs"));
 		assert.equal(helperCalls.length, 1);
@@ -617,6 +575,8 @@ describe("prepared packed consumer", () => {
 		assert.ok(helper.options.totalTimeoutMs! > 0 && helper.options.totalTimeoutMs! <= 5 * 60_000);
 		assert.equal(helper.options.env?.npm_config_cache, undefined);
 		assert.equal(helper.options.env?.NODE_AUTH_TOKEN, undefined);
+		assert.equal(helper.options.env?.LANG, undefined);
+		assert.equal(helper.options.env?.LC_ALL, undefined);
 		assert.equal(helper.options.env?.PATH, process.env.PATH);
 		assert.ok(isStrictChild(descriptor.fixtureRoot, helper.options.env?.TEMP ?? ""));
 		assert.equal(helper.options.env?.TMP, helper.options.env?.TEMP);
@@ -642,6 +602,34 @@ describe("prepared packed consumer", () => {
 		assert.equal(copyHelper.options.maxInputBytes, 4 * 1024 * 1024);
 		assert.equal(copyHelper.options.ownershipBootstrapRoot, descriptor.fixtureRoot);
 		assert.equal(copyHelper.options.env?.npm_config_cache, undefined);
+		assert.equal(copyHelper.options.env?.LANG, undefined);
+		assert.equal(copyHelper.options.env?.LC_ALL, undefined);
+	});
+
+	it("orders protocol-v4 URLs, SRI integrities, and aliases by exact code units", async () => {
+		const upperIntegrity = validSha512Integrity(0x20);
+		const lowerIntegrity = validSha512Integrity(0x88);
+		const upperUrl = "https://registry.example.test/I.tgz";
+		const lowerUrl = "https://registry.example.test/i.tgz";
+		assert.match(upperIntegrity, /^sha512-I/);
+		assert.match(lowerIntegrity, /^sha512-i/);
+
+		const { calls } = await prepareFixture({
+			registryArtifacts: [
+				{ resolved: lowerUrl, integrity: upperIntegrity },
+				{ resolved: "https://registry.example.test/z.tgz", integrity: lowerIntegrity },
+				{ resolved: upperUrl, integrity: upperIntegrity },
+			],
+		});
+		const pathRequest = calls
+			.map(call => call.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs") ? JSON.parse(String(call.options.input)) : undefined)
+			.find(Boolean);
+		assert.deepEqual(pathRequest.integrities, [upperIntegrity, lowerIntegrity]);
+		const publish = calls
+			.map(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs") ? JSON.parse(String(call.options.input)) as CopyHelperRequest : undefined)
+			.find(request => request?.operation === "publish")!;
+		assert.deepEqual(publish.artifacts.map(artifact => artifact.integrity), [upperIntegrity, lowerIntegrity]);
+		assert.deepEqual(publish.artifacts[0]?.candidates, [upperUrl, lowerUrl]);
 	});
 
 	it.each([
@@ -661,9 +649,7 @@ describe("prepared packed consumer", () => {
 		})],
 		["failed helper", async () => ({ code: 17, skipOutput: true })],
 	] as const)("blocks transfer, fallback, install, and descriptor after %s", async (_label, onPathHelper) => {
-		let sourceReads = 0;
 		let offlineStarted = false;
-		let cacheDeadlineTimers = 0;
 		const registryArtifacts = _label === "duplicate integrity"
 			? [
 				{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a" },
@@ -674,25 +660,8 @@ describe("prepared packed consumer", () => {
 			registryArtifacts,
 			onPathHelper: onPathHelper as PathHelperCallback,
 			onOfflineInstall: () => { offlineStarted = true; },
-			setTimer: () => {
-				cacheDeadlineTimers++;
-				return Symbol("unexpected-cache-deadline");
-			},
-			clearTimer: () => {},
-			contentCache: {
-				createReadStream: () => {
-					sourceReads++;
-					const source = new PassThrough();
-					source.end("must not be read");
-					return source;
-				},
-				createWriteStream: () => new PassThrough(),
-			},
 		}), /retained partial fixture and command evidence/);
 
-		assert.equal(sourceReads, 0, `${FAILURE_PREFIX}: invalid helper output must block source stream admission`);
-		assert.equal(cacheDeadlineTimers, 0,
-			`${FAILURE_PREFIX}: malformed helper paths must fail before a long-lived transfer timer is armed`);
 		assert.equal(offlineStarted, false);
 		const runRoot = roots.at(-1)!;
 		const fixtureRoot = join(runRoot, "prepared-packed-consumer");
@@ -729,7 +698,6 @@ describe("prepared packed consumer", () => {
 				: [{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a" }],
 			copyDecision: () => "copied",
 			onCopyHelper: onCopyHelper as CopyHelperCallback,
-			contentCache: { createReadStream: () => new PassThrough() },
 			onOfflineInstall: () => { installStarted = true; },
 		}), /retained partial fixture and command evidence/);
 		assert.equal(installStarted, false);
@@ -967,6 +935,36 @@ describe("prepared packed consumer", () => {
 		});
 		assert.deepEqual(drift.metrics, { linked: 0, copied: 0, missing: 1, corrupt: 0 });
 		assert.equal(existsSync(destinationPath), false);
+	});
+
+	it("accepts binary mixed-case protocol order and rejects reversed URLs or SRI integrities", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-binary-order-unit-"));
+		const ambientRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-binary-order-ambient-unit-"));
+		roots.push(fixtureRoot, ambientRoot);
+		const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+		const upperIntegrity = validSha512Integrity(0x20);
+		const lowerIntegrity = validSha512Integrity(0x88);
+		const upperUrl = "https://registry.example.test/I.tgz";
+		const lowerUrl = "https://registry.example.test/i.tgz";
+		const binaryRequest = {
+			version: 4,
+			operation: "publish" as const,
+			artifacts: [
+				{ candidates: [upperUrl, lowerUrl], integrity: upperIntegrity, destinationPath: join(destinationCache, "upper") },
+				{ candidates: ["https://registry.example.test/z.tgz"], integrity: lowerIntegrity, destinationPath: join(destinationCache, "lower") },
+			],
+		};
+		const accepted = await copyPackedConsumerCacheBatch(fixtureRoot, join(ambientRoot, "missing", "_cacache"), binaryRequest);
+		assert.deepEqual(accepted.metrics, { linked: 0, copied: 0, missing: 2, corrupt: 0 });
+
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, join(ambientRoot, "missing", "_cacache"), {
+			...binaryRequest,
+			artifacts: [{ ...binaryRequest.artifacts[0]!, candidates: [lowerUrl, upperUrl] }],
+		}), /candidate URLs must be sorted and unique/);
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, join(ambientRoot, "missing", "_cacache"), {
+			...binaryRequest,
+			artifacts: [...binaryRequest.artifacts].reverse(),
+		}), /artifacts must be sorted and unique by integrity/);
 	});
 
 	it("tries deterministic aliases until a later exact hit and never falls back to a dead first URL", async () => {

@@ -667,6 +667,10 @@ function runtimeLibc(platform = process.platform) {
 	return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
 }
 
+function compareCodeUnits(left, right) {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function artifactIdentity(artifact) {
 	return `${artifact.resolved}\u0000${artifact.integrity ?? ""}`;
 }
@@ -701,8 +705,8 @@ function compatibleRegistryArtifacts(lock, runtime = {}, { excludeDev = false } 
 		if (!artifacts.has(identity)) artifacts.set(identity, artifact);
 	}
 	return [...artifacts.values()].sort((left, right) =>
-		left.resolved.localeCompare(right.resolved) ||
-		(left.integrity ?? "").localeCompare(right.integrity ?? ""));
+		compareCodeUnits(left.resolved, right.resolved) ||
+		compareCodeUnits(left.integrity ?? "", right.integrity ?? ""));
 }
 
 /** Select the deterministic runtime-compatible production seed superset. */
@@ -717,7 +721,7 @@ function compatibleRegistryTarballs(lock, runtime = {}) {
 export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock, runtime = {}) {
 	const required = compatibleRegistryTarballs(consumerLock, runtime);
 	const alreadyCached = compatibleRegistryTarballs(repositoryLock, runtime);
-	return [...required].filter(url => !alreadyCached.has(url)).sort();
+	return [...required].filter(url => !alreadyCached.has(url)).sort(compareCodeUnits);
 }
 
 
@@ -769,7 +773,7 @@ async function resolveDestinationContentPaths({
 }) {
 	const integrities = [...new Set(artifacts
 		.map(artifact => artifact.integrity)
-		.filter(integrity => typeof integrity === "string" && integrity.length > 0))].sort();
+		.filter(integrity => typeof integrity === "string" && integrity.length > 0))].sort(compareCodeUnits);
 	if (integrities.length === 0) return new Map();
 
 	const request = {
@@ -943,7 +947,7 @@ function destinationArtifact(integrity, destinationPaths) {
 async function copyAvailableArtifacts(options) {
 	const { artifacts, destinationPaths } = options;
 	const transferable = artifacts.filter(artifact => artifact.integrity)
-		.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
+		.sort((left, right) => compareCodeUnits(artifactIdentity(left), artifactIdentity(right)));
 	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
 	if (transferable.length === 0) {
 		return { fallbackArtifacts: noIntegrity, linkedCount: 0, copiedCount: 0, missingDigestCount: 0, corruptDigestCount: 0 };
@@ -957,8 +961,8 @@ async function copyAvailableArtifacts(options) {
 	const helperArtifacts = [...byIntegrity.entries()].map(([integrity, group]) => ({
 		...destinationArtifact(integrity, destinationPaths),
 		candidates: [...new Set(group.map(artifact => artifact.resolved))]
-			.sort((left, right) => left.localeCompare(right)),
-	})).sort((left, right) => left.integrity.localeCompare(right.integrity));
+			.sort(compareCodeUnits),
+	})).sort((left, right) => compareCodeUnits(left.integrity, right.integrity));
 	const validated = await runCacheHelper({
 		...options,
 		operation: "publish",
@@ -971,7 +975,7 @@ async function copyAvailableArtifacts(options) {
 		if (result.status === "missing" || result.status === "corrupt") fallbackArtifacts.push(...byIntegrity.get(helperArtifact.integrity));
 	}
 	return {
-		fallbackArtifacts: fallbackArtifacts.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right))),
+		fallbackArtifacts: fallbackArtifacts.sort((left, right) => compareCodeUnits(artifactIdentity(left), artifactIdentity(right))),
 		linkedCount: validated.metrics.linked ?? 0,
 		copiedCount: validated.metrics.copied ?? 0,
 		missingDigestCount: validated.metrics.missing ?? 0,
@@ -987,7 +991,7 @@ async function verifyDestinationArtifacts({ artifacts, destinationPaths, ...opti
 		byIntegrity.set(artifact.integrity, group);
 	}
 	const helperArtifacts = [...byIntegrity.keys()]
-		.sort((left, right) => left.localeCompare(right))
+		.sort(compareCodeUnits)
 		.map(integrity => destinationArtifact(integrity, destinationPaths));
 	const verified = await runCacheHelper({
 		...options,
@@ -1264,7 +1268,7 @@ export async function seedPackedConsumerCache({
 		}));
 		console.log(`[packed-consumer] exact cache seed metrics: linked=${transfer.linkedCount}, copied=${transfer.copiedCount}, missing=${transfer.missingDigestCount}, corrupt=${transfer.corruptDigestCount}`);
 		const fallbackArtifacts = transfer.fallbackArtifacts;
-		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort();
+		const fallbackUrls = [...new Set(fallbackArtifacts.map(artifact => artifact.resolved))].sort(compareCodeUnits);
 		const batches = [];
 		for (let offset = 0; offset < fallbackUrls.length; offset += CACHE_BATCH_SIZE) batches.push(fallbackUrls.slice(offset, offset + CACHE_BATCH_SIZE));
 		const results = new Array(batches.length);

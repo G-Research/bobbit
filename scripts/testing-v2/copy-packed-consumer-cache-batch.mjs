@@ -24,6 +24,10 @@ const MAX_WORKERS = 3;
 const MAX_DIAGNOSTIC_BYTES = 8_000;
 const AMBIENT_CACHE_ENV = "BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE";
 
+function compareCodeUnits(left, right) {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function isStrictChild(root, candidate) {
 	const child = relative(resolve(root), resolve(candidate));
 	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
@@ -79,7 +83,7 @@ function validateCandidates(value) {
 		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_RESOLVED_LENGTH || !/^https:\/\//.test(candidate)) {
 			throw new Error(`cache-copy candidate URL must be an https URL no longer than ${MAX_RESOLVED_LENGTH} characters`);
 		}
-		if (previous !== undefined && candidate.localeCompare(previous) <= 0) {
+		if (previous !== undefined && compareCodeUnits(candidate, previous) <= 0) {
 			throw new Error("cache-copy candidate URLs must be sorted and unique");
 		}
 		previous = candidate;
@@ -106,7 +110,7 @@ function validateRequest(request, destinationContentCache) {
 		if (typeof artifact.integrity !== "string" || artifact.integrity.length === 0 || artifact.integrity.length > MAX_INTEGRITY_LENGTH) {
 			throw new Error(`cache-copy integrity must be a non-empty string no longer than ${MAX_INTEGRITY_LENGTH} characters`);
 		}
-		if (previousIntegrity !== undefined && artifact.integrity.localeCompare(previousIntegrity) <= 0) {
+		if (previousIntegrity !== undefined && compareCodeUnits(artifact.integrity, previousIntegrity) <= 0) {
 			throw new Error("cache-copy artifacts must be sorted and unique by integrity");
 		}
 		previousIntegrity = artifact.integrity;

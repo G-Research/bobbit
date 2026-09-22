@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSy
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { after, test } from "node:test";
 import {
 	isCompleteOwnedCommandShutdown,
@@ -22,6 +21,12 @@ const cacache = require("cacache") as {
 };
 const roots: string[] = [];
 const owners: Array<{ tracked: TrackedChild; closed: Promise<void>; treeExitVerified: boolean }> = [];
+
+function validSha512Integrity(firstByte: number): string {
+	const digest = Buffer.alloc(64);
+	digest[0] = firstByte;
+	return `sha512-${digest.toString("base64")}`;
+}
 
 function isAlive(pid: number | undefined): boolean {
 	if (!pid || !Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -105,6 +110,61 @@ test("real cache-copy helper hardlinks one exact CAS hit and joins its owned pro
 		"direct publication must not create a staging tree");
 });
 
+test("cache-copy helper accepts binary mixed-case protocol order under an alternate locale", { timeout: 40_000 }, async () => {
+	const runRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-order-e2e-"));
+	const ambientRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-order-ambient-e2e-"));
+	roots.push(runRoot, ambientRoot);
+	const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+	mkdirSync(fixtureRoot, { recursive: true });
+	const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+	const upperIntegrity = validSha512Integrity(0x20);
+	const lowerIntegrity = validSha512Integrity(0x88);
+	const upperUrl = "https://registry.example.test/I.tgz";
+	const lowerUrl = "https://registry.example.test/i.tgz";
+	const helperPath = join(REPO_ROOT, "scripts", "testing-v2", "copy-packed-consumer-cache-batch.mjs");
+	const parentLocale = Intl.Collator().resolvedOptions().locale;
+	const alternateLocale = parentLocale.toLowerCase().startsWith("tr") ? "en_US.UTF-8" : "tr_TR.UTF-8";
+	const helperEnv = {
+		...process.env,
+		LANG: alternateLocale,
+		LC_ALL: alternateLocale,
+		BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: join(ambientRoot, "missing", "_cacache"),
+	};
+	const localeProbe = await runOwnedCommand(process.execPath, ["-e", "process.stdout.write(Intl.Collator().resolvedOptions().locale)"], {
+		cwd: REPO_ROOT,
+		env: helperEnv,
+		timeoutMs: 30_000,
+		totalTimeoutMs: 30_000,
+		repoRoot: REPO_ROOT,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	if (process.platform !== "win32") assert.notEqual(localeProbe.stdout, parentLocale,
+		"POSIX child locale override must differ from the parent for this regression");
+	const request = {
+		version: 4,
+		operation: "publish",
+		artifacts: [
+			{ candidates: [upperUrl, lowerUrl], integrity: upperIntegrity, destinationPath: join(destinationCache, "upper") },
+			{ candidates: ["https://registry.example.test/z.tgz"], integrity: lowerIntegrity, destinationPath: join(destinationCache, "lower") },
+		],
+	};
+	const result = await runOwnedCommand(process.execPath, [helperPath, fixtureRoot], {
+		cwd: REPO_ROOT,
+		env: helperEnv,
+		timeoutMs: 30_000,
+		totalTimeoutMs: 30_000,
+		input: `${JSON.stringify(request)}\n`,
+		repoRoot: REPO_ROOT,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(isCompleteOwnedCommandShutdown(result.shutdown), true);
+	const response = JSON.parse(result.stdout) as { version: number; operation: string; metrics: Record<string, number> };
+	assert.equal(response.version, 4);
+	assert.equal(response.operation, "publish");
+	assert.deepEqual(response.metrics, { linked: 0, copied: 0, missing: 2, corrupt: 0 });
+});
+
 test("cache-copy helper redacts JSON-escaped ambient paths from terminal diagnostics", { timeout: 40_000 }, async () => {
 	const runRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-redaction-e2e-"));
 	const ambientRoot = mkdtempSync(join(tmpdir(), "bobbit packed cache redaction e2e-"));
@@ -152,8 +212,6 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 		"fs.renameSync(marker+'.tmp',marker);",
 		"setInterval(()=>{},1000);",
 	].join("");
-	let sourceReads = 0;
-	let publicationStarted = false;
 	let offlineInstallStarted = false;
 
 	await assert.rejects(preparePackedConsumerFixture({
@@ -162,18 +220,6 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 		preparationTimeoutMs: 10_000,
 		ensureDist: () => {},
 		resolveNpm: () => ({ command: process.execPath, argsPrefix: ["npm-cli.js"] }),
-		contentCache: {
-			createReadStream: () => {
-				sourceReads++;
-				const stream = new PassThrough();
-				stream.end("must not be read");
-				return stream;
-			},
-			prepareDestination: async () => {},
-			createWriteStream: () => new PassThrough(),
-			publishDestination: async () => { publicationStarted = true; },
-			removeDestination: async () => {},
-		},
 		runCommand: async (command: string, args: string[], options: Record<string, unknown>) => {
 			if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
 				return runOwnedCommand(process.execPath, ["-e", fixture, marker], {
@@ -244,8 +290,6 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 	const pids = JSON.parse(readFileSync(marker, "utf8")) as { root: number; descendant: number };
 	assert.equal(isAlive(pids.root), false, "helper root must be dead before preparation rejects");
 	assert.equal(isAlive(pids.descendant), false, "helper descendant must be dead before preparation rejects");
-	assert.equal(sourceReads, 0, "cache verification must not start after helper timeout");
-	assert.equal(publicationStarted, false, "cache publication must not start after helper timeout");
 	assert.equal(offlineInstallStarted, false, "offline install must not start after helper timeout");
 	const fixtureRoot = join(runRoot, "prepared-packed-consumer");
 	assert.equal(existsSync(join(fixtureRoot, "descriptor.json")), false);
