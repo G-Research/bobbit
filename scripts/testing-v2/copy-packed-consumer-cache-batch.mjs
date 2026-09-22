@@ -160,11 +160,66 @@ async function inspectOptional(path, inspectPath) {
 	}
 }
 
+function sameFilesystemIdentity(left, right) {
+	return left?.dev !== undefined && left?.ino !== undefined &&
+		right?.dev !== undefined && right?.ino !== undefined &&
+		left.dev === right.dev && left.ino === right.ino;
+}
+
+async function requireCanonicalEntry(path, inspectPath, canonicalPath, label, kind) {
+	const absolute = resolve(path);
+	const entry = await inspectPath(absolute);
+	const hasExpectedKind = kind === "directory" ? entry?.isDirectory?.() : entry?.isFile?.();
+	if (!hasExpectedKind || entry.isSymbolicLink?.()) throw new Error(`${label} must be a non-reparse ${kind}`);
+	const canonical = resolve(await canonicalPath(absolute));
+	if (pathIdentity(absolute) !== pathIdentity(canonical)) {
+		// Windows realpath expands an ordinary 8.3 component (for example
+		// RUNNER~1) to its long spelling. Accept that alias only when lstat proves
+		// both names identify the same entry; a junction/symlink is rejected above.
+		const canonicalEntry = await inspectPath(canonical);
+		const canonicalHasExpectedKind = kind === "directory"
+			? canonicalEntry?.isDirectory?.()
+			: canonicalEntry?.isFile?.();
+		if (!canonicalHasExpectedKind || canonicalEntry.isSymbolicLink?.() || !sameFilesystemIdentity(entry, canonicalEntry)) {
+			throw new Error(`${label} must not traverse a reparse point`);
+		}
+	}
+	return entry;
+}
+
 async function requireCanonicalDirectory(path, inspectPath, canonicalPath, label) {
-	const entry = await inspectPath(path);
-	if (!entry?.isDirectory?.() || entry.isSymbolicLink?.()) throw new Error(`${label} must be a non-reparse directory`);
-	const canonical = resolve(await canonicalPath(path));
-	if (relative(resolve(path), canonical) !== "") throw new Error(`${label} must not traverse a reparse point`);
+	return requireCanonicalEntry(path, inspectPath, canonicalPath, label, "directory");
+}
+
+async function requireLexicalDirectoryChain(path, inspectPath, canonicalPath, label) {
+	const ancestors = [];
+	let current = resolve(path);
+	while (true) {
+		ancestors.push(current);
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	for (const ancestor of ancestors.reverse()) {
+		await requireCanonicalDirectory(ancestor, inspectPath, canonicalPath, label);
+	}
+}
+
+async function requireNonReparseFileBelow(root, path, inspectPath, canonicalPath, label) {
+	if (!isStrictChild(root, path)) throw new Error(`${label} escaped its authoritative root`);
+	const components = relative(root, path).split(sep).filter(Boolean);
+	let current = resolve(root);
+	let entry;
+	for (let index = 0; index < components.length; index++) {
+		current = join(current, components[index]);
+		entry = await requireCanonicalEntry(
+			current,
+			inspectPath,
+			canonicalPath,
+			label,
+			index === components.length - 1 ? "file" : "directory",
+		);
+	}
 	return entry;
 }
 
@@ -190,15 +245,13 @@ async function ensureDestinationParent(fixtureRoot, destinationContentCache, des
 			} catch (error) {
 				if (error?.code !== "EEXIST") throw error;
 			}
-			entry = await inspectPath(current);
 		}
-		if (!entry?.isDirectory?.() || entry.isSymbolicLink?.()) {
-			throw new Error("cache-copy destination ancestry must contain only non-reparse directories");
-		}
-		const canonical = resolve(await canonicalPath(current));
-		if (relative(resolve(current), canonical) !== "") {
-			throw new Error("cache-copy destination ancestry must not traverse a reparse point");
-		}
+		entry = await requireCanonicalDirectory(
+			current,
+			inspectPath,
+			canonicalPath,
+			"cache-copy destination ancestry",
+		);
 	}
 	return inspectPath(targetParent);
 }
@@ -249,13 +302,13 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 	if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_WORKERS) {
 		throw new Error(`cache-copy workerCount must be an integer from 1 to ${MAX_WORKERS}`);
 	}
-	await requireCanonicalDirectory(fixtureRoot, inspectPath, canonicalPath, "authoritative fixture root");
+	await requireLexicalDirectoryChain(fixtureRoot, inspectPath, canonicalPath, "authoritative fixture root");
 
 	let ambientMissing = false;
 	let ambientCanonical;
 	if (operation === "publish") {
 		try {
-			await requireCanonicalDirectory(ambientContentCache, inspectPath, canonicalPath, "authoritative ambient content cache");
+			await requireLexicalDirectoryChain(ambientContentCache, inspectPath, canonicalPath, "authoritative ambient content cache");
 			ambientCanonical = resolve(await canonicalPath(ambientContentCache));
 		} catch (error) {
 			if (error?.code === "ENOENT") ambientMissing = true;
@@ -317,10 +370,15 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 				if (typeof info.path !== "string" || !isAbsolute(info.path)) throw new Error("exact ambient cache lookup returned a non-absolute content path");
 				const sourcePath = resolve(info.path);
 				if (!isStrictChild(ambientContentCache, sourcePath)) throw new Error("exact ambient cache lookup returned an out-of-cache content path");
-				const source = await inspectPath(sourcePath);
-				if (!source?.isFile?.() || source.isSymbolicLink?.()) throw new Error("exact ambient cache lookup source must be a non-reparse regular file");
+				const source = await requireNonReparseFileBelow(
+					ambientContentCache,
+					sourcePath,
+					inspectPath,
+					canonicalPath,
+					"exact ambient cache lookup source",
+				);
 				const sourceCanonical = resolve(await canonicalPath(sourcePath));
-				if (relative(sourcePath, sourceCanonical) !== "" || !isStrictChild(ambientCanonical, sourceCanonical)) {
+				if (!isStrictChild(ambientCanonical, sourceCanonical)) {
 					throw new Error("exact ambient cache lookup source must not traverse a reparse point or escape cache authority");
 				}
 				let status = "linked";

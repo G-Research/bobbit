@@ -39,10 +39,11 @@ const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
 export const PACKED_CONSUMER_DESCRIPTOR_ENV = "BOBBIT_PACKED_CONSUMER_DESCRIPTOR";
-// Hosted Windows may spend more than 10 seconds establishing the Job-backed
-// ownership handshake under concurrent runner load. This remains a setup cap,
-// but an optional command-wide deadline can expire sooner and includes setup.
-export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;
+// Hosted Windows can spend well over 30 seconds establishing the Job-backed
+// ownership handshake during a cold PowerShell start. Readiness may use this
+// larger internal cap, but runOwnedCommand also clamps it to the unchanged
+// command-wide absolute preparation deadline.
+export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 90_000;
 const TREE_EXIT_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
 
@@ -471,13 +472,17 @@ export async function runOwnedCommand(command, args, {
 		requestOwnedKill(new Error(`${rendered} spawn factory failed after exposing its owned process tree`, { cause: spawnFailure }));
 	}
 
-	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`);
+	const remainingOwnershipBudgetMs = totalTimeoutMs === undefined
+		? Number.POSITIVE_INFINITY
+		: Math.max(1, Math.ceil(totalTimeoutMs - Math.max(0, now() - totalStartedAt)));
+	const ownershipReadinessTimeoutMs = Math.min(ownershipEstablishmentTimeoutMs, remainingOwnershipBudgetMs);
+	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipReadinessTimeoutMs}ms`);
 	const terminationDuringOwnership = Symbol("termination-during-ownership");
 	try {
 		await Promise.race([
 			tracked.ownershipReady,
 			new Promise((_, reject) => {
-				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipEstablishmentTimeoutMs);
+				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipReadinessTimeoutMs);
 			}),
 			killRequestedResult.then(() => { throw terminationDuringOwnership; }),
 		]);
