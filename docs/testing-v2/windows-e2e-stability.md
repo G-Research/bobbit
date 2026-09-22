@@ -64,30 +64,49 @@ The inline-HTML/theme journey verifies a clean external consumer of the actual `
 
 ### Preparation and reuse
 
-When selection can include the packaged-consumer spec, the coordinator prepares one run-owned fixture before its browser group:
+The full coordinator follows this order:
 
-1. Build the distributable and run one real `npm pack` into the run root.
-2. Use npm once to generate the consumer manifest and lock while populating a dedicated run-owned cache.
-3. Verify that both root and installed-package lock entries are `file:` references resolving to the emitted tarball.
-4. Copy the npm-generated manifest and lock into a same-depth immutable template.
-5. Sort the compatible registry tarball URLs, retain the existing 32-item batches, and populate the fresh run-owned cache through a dynamic worker pool capped at three commands.
-6. After every admitted cache writer settles successfully, run one `npm ci --offline --ignore-scripts --no-audit --no-fund` with the isolated cache and no package operand.
-7. Validate the installed dependency tree and atomically publish the descriptor.
-8. Materialize the template into a unique mutable directory for each consumer. Copied consumers are real directories with independent `node_modules`, workspace, secrets, and agent state; shared or symlinked dependencies are forbidden.
+```text
+packed-cache seed → A → prebundle → (B ∥ packed finalization) → C → D
+```
 
-Each worker claims the next batch synchronously. The first observed failure closes admission, but preparation still awaits every already-admitted owned command and retains all failures. Results and failures are recorded by batch index rather than completion order, keeping descriptor and failure evidence deterministic. Neither offline `npm ci` nor descriptor publication can begin while a cache writer is active or after any writer fails.
+Cache seeding starts before test load. Group A and prebundle then run while the seed's original deadline continues to elapse. Group B overlaps only packed finalization; Groups C and D wait for both sides of that all-settled barrier. Seed and finalization share one immutable 300-second preparation deadline, while the complete suite keeps its fixed 900-second budget. This placement avoids asking a loaded Windows host to begin cache seeding late without increasing either deadline.
 
-Concurrent use of this one cache is deliberately narrow. The cacache directory is fresh and owned by the current run, the sorted deduplicated URL set is divided into disjoint batches, and cacache publishes integrity-keyed content through atomic temporary files. No cache clean, verification, or reader overlaps the writers. The all-writer barrier precedes offline installation, whose generated lock verifies content integrity; a missing or corrupt object therefore fails preparation instead of producing a false pass.
+Preparation builds one run-owned fixture:
 
-Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation. Materialization never reruns `npm pack` or npm installation.
+1. Select the runtime-compatible, non-development registry identities from the committed production lock.
+2. Resolve each SRI digest's canonical final path in the run-owned cacache and seed exact ambient hits through cache protocol v4.
+3. Fetch only unresolved exact URLs into that isolated cache, then verify every required digest.
+4. Build the distributable, run one real `npm pack`, and generate the external consumer lock offline against that tarball.
+5. Confirm the consumer lock is a subset of the verified production-lock seed, then verify its required digests again.
+6. Run one `npm ci --offline --ignore-scripts --no-audit --no-fund` against the run-owned cache, validate the installed template, and atomically publish the descriptor.
+7. Materialize a unique mutable consumer for each test without rerunning `npm pack` or npm installation.
 
-Copy remains the default when several consumers need isolated mutable trees. With ordinary `repeatEach=1`, the retry-zero packaged browser consumer claims the template once with an atomic rename, eliminating both one recursive copy and the duplicate installed tree that final cleanup would otherwise traverse. With `repeatEach>1`, every possibly overlapping iteration instead receives an independent copy, and its materialization name includes the repeat index; all iterations still share the single preparation. The source and destinations stay at equal depth under the same run-owned fixture root, so relative `file:` lock references still resolve to the same packed artifact. A failed test retains its materialized consumer in the final diagnostic location; a second one-shot consume fails rather than silently rebuilding or sharing it.
+Both the grouped coordinator and direct Playwright wrapper use this preparation path. A matching title grep prepares exactly once. An ambiguous selector also prepares, because skipping could silently weaken coverage; only a selector proved not to match the packaged test identity skips preparation.
+
+With ordinary `repeatEach=1`, the retry-zero packaged browser consumer claims the template once with an atomic rename. With `repeatEach>1`, every possibly overlapping iteration receives an independent physical directory copy whose name includes the repeat index. Consumers never share or symlink `node_modules`; each has independent mutable workspace, secrets, and agent state. The source and destinations stay at equal depth so relative `file:` lock references still resolve to the same packed artifact. Failed tests retain their materialized consumer, and a second one-shot claim fails rather than silently rebuilding or sharing it.
+
+### Exact CAS seeding
+
+The run-owned npm cache keeps its own namespace. The ambient npm cache is a read-only source of exact content-addressed blobs: its path is passed only to the tracked publication helper, never to npm or a persisted descriptor. All npm fallback, lock, and install commands receive only the run-owned cache.
+
+Protocol v4 directly publishes canonical final cache paths. It groups deterministic same-digest URL aliases and orders digests and URLs by locale-independent JavaScript code-unit comparison. It uses public cacache operations for exact URL lookup, canonical destination resolution, and buffered `cacache.get.byDigest` verification. Work is limited to three workers. The first fatal error stops new admission, while `Promise.allSettled` joins already-admitted work and preserves deterministic accounting.
+
+The explicit hardlink authorization is limited to exact, immutable, SRI-addressed blobs in the ambient npm CAS. For such a hit on the same device, the helper creates a no-overwrite hardlink directly at cacache's canonical final content path and verifies it by digest before use. If hardlinks are unsupported or the caches are on different volumes, the helper uses an exclusive physical copy. Permission or I/O errors, collisions, reparse or authority violations, and unresolved integrity failures fail closed. A missing or rejected cache hit can proceed only through the normal exact-URL npm fallback followed by digest verification.
+
+Direct hardlinks were selected as the minimal solution:
+
+- Making physical copies the primary path rewrites every cached tarball, consuming most of the preparation budget and adding files that cleanup must traverse. Physical copy remains only the portability fallback.
+- Reflinks are not consistently available across supported filesystems and platforms, and their copy-on-write semantics add another capability-dependent path without improving the immutable-CAS contract.
+- Publishing into a staging tree and then moving or linking into cacache's final tree duplicates namespace work and cleanup surface. Protocol v4 resolves the public cacache final path first and publishes there exactly once.
+
+The helper treats stdin, stdout, the root process `close` event, transport settlement, and verified process-tree exit as one lifecycle. Digest verification is tracked and buffered rather than left in a stream that can outlive command settlement. Each directly published blob is verified before it is accepted instead of sent to fallback. After fallback, every required seed digest is verified before seed publication; the consumer subset is verified again before installation and final descriptor publication.
 
 ### Provenance and process bounds
 
 The descriptor is coordinator output, not trusted ambient configuration. Its only valid location is the fixed prepared-consumer directory below the authoritative `BOBBIT_V2_RUN_ROOT`. Reads and materialization verify run-root, descriptor, fixture/template/cache, tarball, and copy-destination identity before copying or executing the packaged CLI. An inherited or forged descriptor outside that layout fails closed.
 
-Package commands use tracked process-tree ownership. Timeout, output overflow, or ownership failure requests one tree termination, then waits concurrently for root close and verified descendant-tree exit under a separate completion deadline. A missing close event, stalled verification, failed kill, or unverified tree remains fatal.
+Package and helper commands use tracked process-tree ownership. Timeout, output overflow, transport failure, or ownership failure requests one tree termination, then waits concurrently for actual root close and verified descendant-tree exit under a separate completion deadline. A missing close event, stalled verification, failed kill, or unverified tree remains fatal.
 
 Preparation failure retains the partial fixture and `preparation-failure.json`. Diagnostics include the command, working directory, PID, ownership and kill state, root-close and tree-exit results, and bounded stdout/stderr. This preserves useful npm evidence without allowing an unbounded post-timeout wait.
 
@@ -103,7 +122,7 @@ The Playwright configuration loads the native-ESM worker ledger with an ESM impo
 
 The configuration logs the resolved worker count and its source: explicit measurement override, inherited ledger grant, fresh reservation, or fallback. The wrapper also emits bounded top-ten slow file and spec totals, including retries, from the existing JSON report before successful run-root deletion. These diagnostics explain throughput and host-contention failures without changing scheduling, timeouts, assertions, or retry policy. Use `BOBBIT_V2_PLAYWRIGHT_WORKERS` only for controlled measurement.
 
-Operationally, Browser uses three Playwright project lanes in one invocation: real-MCP specs and special isolated-fixture specs each have a one-worker project, while ordinary canonical journeys use the shared browser worker grant. This lets narrow identities start without allowing real-MCP cases to overlap. The full E2E coordinator runs `A → prebundle → (B ∥ packed preparation) → C → D`: Group A uses two Node files, Playwright Groups B and C default to two workers, and Group D uses at most two Vitest forks. Only packed preparation overlaps Group B; C and D wait for both owners, preserving bounded host load and the shared run-local transform cache.
+Operationally, Browser uses three Playwright project lanes in one invocation: real-MCP specs and special isolated-fixture specs each have a one-worker project, while ordinary canonical journeys use the shared browser worker grant. This lets narrow identities start without allowing real-MCP cases to overlap. In the full E2E coordinator, Group A uses two Node files, Playwright Groups B and C default to two workers, and Group D uses at most two Vitest forks. The packed-cache seed completes before Group A; only packed finalization overlaps Group B. Groups C and D wait for both owners, preserving bounded host load and the shared run-local transform cache.
 
 ## Verification commands
 
@@ -129,16 +148,14 @@ Before these changes, cleanup policy was split across synchronous removal, fixtu
 
 One later pre-fix full E2E run passed all assertions in 874.5 seconds but was killed near 903.6 seconds while deleting duplicated packed-consumer trees. A representative installed tree contained 35,479 files and 5,131 directories and occupied 620,922,686 bytes. Secure cleanup of that tree took 16.807 seconds; larger thread-pool or traversal-concurrency variants improved this by at most 0.773%, so final-root cleanup retains traversal concurrency 128 with a 32-thread isolated pool. One-shot consumption removes an entire duplicate tree and its recursive-copy cost instead of relying on marginal deletion tuning.
 
-Earlier implementation verification at `f38508f48` reported:
+At final implementation commit `a60becc6e`, a focused production-lock seed passed in 24.071 seconds:
 
-- Browser passed in 755.664 seconds and full E2E passed in 829.498 seconds under the unchanged 900-second supervisor;
-- build and check passed, as did 46/46 focused reproduction tests and the full unit suite;
-- specification, integrated, and security reviews passed.
+- 287 selected identities;
+- 282 exact CAS hardlinks;
+- no physical copies, misses, or corrupt digests;
+- five identities populated through exact-URL fallback;
+- final tracked verification completed in 4.1 seconds.
 
-After the final PR-check repairs at `5646b9553`, local Windows verification reported:
+One independent full Windows E2E repetition at the same commit passed with `BOBBIT_V2_RETRY_FREE=1` and retry count zero. The fixed 900-second suite completed in 888.7 seconds: Group A took 70.5 seconds, B 337.2 seconds, C 336.4 seconds, and D 93.4 seconds. Packed seed plus finalization consumed 180.638 seconds of active preparation time, and successful shared root cleanup took 23.132 seconds. The log contained no `EBUSY`, `EPERM`, `ENOTEMPTY`, `cleanup-deferred`, or `timed out after 600000ms` npm signature.
 
-- 48/48 focused reproduction tests and the full unit suite passed;
-- Browser passed in 792.319 seconds and full E2E passed in 829.151 seconds under the unchanged 900-second supervisor;
-- build and check passed, and all requested code and systems reviews passed.
-
-These results show the known cleanup and repeated 600-second npm-install signatures were absent in the recorded local qualified runs, but they are not a controlled performance benchmark, proof of universal flake elimination, or evidence that hosted GitHub checks passed. Three complete retry-free Windows repetitions were not recorded and must not be claimed.
+This is **one** independent retry-free repetition, not three. Earlier full or qualifying runs that were not retry-free, and failed runs affected by host starvation, remain useful historical evidence only; they do not satisfy or combine into three retry-free repetitions. The final result demonstrates removal of the known signatures in the recorded run, not universal flake elimination or a portable performance guarantee.
