@@ -1082,12 +1082,12 @@ describe("packed-consumer offline install contract", () => {
 		});
 
 		await new Promise<void>(resolve => setImmediate(resolve));
-		assert.deepEqual(timerDurations, [100, 1_000],
-			"the total deadline must arm before waiting for ownership, alongside the independent setup cap");
+		assert.deepEqual(timerDurations, [100],
+			"a setup cap beyond the remaining budget must not compete with the absolute deadline");
 		nowMs = 80;
 		ownership.resolve(undefined);
 		await new Promise<void>(resolve => setImmediate(resolve));
-		assert.deepEqual(timerDurations, [100, 1_000],
+		assert.deepEqual(timerDurations, [100],
 			"ownership readiness must not restart a full execution budget; only the original 20ms remainder remains");
 		nowMs = 100;
 		invokeTimer(fireTotalDeadline, "the original total deadline must stay armed across ownership readiness");
