@@ -25,7 +25,6 @@ const MAX_CACHE_HELPER_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CACHE_HELPER_RESULT_BYTES = 8 * 1024 * 1024;
 const DIST_BUILD_TIMEOUT_MS = 5 * 60_000;
 const PACK_TIMEOUT_MS = 3 * 60_000;
-const LOCK_RESOLUTION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_TIMEOUT_MS = 3 * 60_000;
 const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 // This bounds dist readiness plus the whole package-command sequence. Each
@@ -1311,8 +1310,12 @@ export async function seedPackedConsumerCache({
 		for (const result of results) if (result) commands.push(result);
 		const failed = failures.map((error, index) => error ? { error, index } : undefined).filter(Boolean);
 		if (failed.length) throw new AggregateError(failed.map(entry => entry.error), `npm cache population failed for ${failed.map(entry => `batch ${entry.index + 1}`).join(", ")}`);
-		await measured("seed cache verification", () => verifyDestinationArtifacts({
-			artifacts: selectedArtifacts,
+		// Direct publication verifies each selected digest while copying it. Only
+		// fallback artifacts written by npm cache add still need a digest proof.
+		// Avoid traversing every direct hit again on the preparation deadline.
+		const integrityFallbackArtifacts = fallbackArtifacts.filter(artifact => artifact.integrity);
+		await measured("fallback cache verification", () => verifyDestinationArtifacts({
+			artifacts: integrityFallbackArtifacts,
 			destinationPaths,
 			fixtureRoot: layout.fixtureRoot,
 			repoRoot,
@@ -1320,7 +1323,7 @@ export async function seedPackedConsumerCache({
 			runCommand,
 			commands,
 			remainingPreparationMs,
-			label: "seed cache verification",
+			label: "fallback cache verification",
 		}));
 		remainingPreparationMs("seed descriptor publication");
 		const identities = selectedArtifacts.map(artifact => Object.freeze({
@@ -1374,10 +1377,10 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 	const {
 		layout, wallStartedAt, repoRoot, baseEnv, ensureDist, runCommand, npm, runtime,
 		remainingPreparationMs, lock: repositoryLock, lockInjected,
-		lockHash, destinationPaths, identities, commands, seedDescriptor,
+		lockHash, identities, commands, seedDescriptor,
 	} = authority;
 	const finalizationStartedAt = Date.now();
-	const { absoluteRunRoot, fixtureRoot, packDir, preparationDir, resolverDir, templateDir, cacheDir, consumersDir, descriptorPath } = layout;
+	const { absoluteRunRoot, fixtureRoot, packDir, templateDir, cacheDir, consumersDir, descriptorPath } = layout;
 	const commandDeadline = (label, commandTimeoutMs) => {
 		const totalTimeoutMs = remainingPreparationMs(label);
 		return { timeoutMs: Math.min(commandTimeoutMs, totalTimeoutMs), totalTimeoutMs };
@@ -1428,11 +1431,11 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 		const nodeTypesVersion = repositoryLock.packages?.["node_modules/@types/node"]?.version;
 		const consumerManifest = cleanConsumerManifest(nodeTypesVersion);
 		// Seed Arborist with the checkout's exact graph. npm remains authoritative:
-		// it prunes this lock to the minimal external manifest and adds the emitted
-		// tarball rather than solving the complete graph online from an empty lock.
+		// one strict-offline install prunes this lock to the external manifest,
+		// binds the emitted tarball, and materializes node_modules in one transaction.
 		await Promise.all([
-			writeManifest(resolverDir, consumerManifest),
-			copyFile(join(repoRoot, "package-lock.json"), join(resolverDir, "package-lock.json")),
+			writeManifest(templateDir, consumerManifest),
+			copyFile(join(repoRoot, "package-lock.json"), join(templateDir, "package-lock.json")),
 		]);
 
 		const packArgs = [...npm.argsPrefix, "pack", "--ignore-scripts", "--json", "--pack-destination", packDir];
@@ -1453,11 +1456,10 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 		const tarball = await stat(tarballPath).catch(() => undefined);
 		if (!tarball?.isFile()) throw new Error(`npm pack did not create ${tarballPath}`);
 
-		const resolverEnv = isolatedNpmEnv(resolverDir, cacheDir, baseEnv);
-		const resolveArgs = [
+		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
+		const installArgs = [
 			...npm.argsPrefix,
 			"install",
-			"--package-lock-only",
 			"--offline",
 			"--ignore-scripts",
 			"--no-audit",
@@ -1465,56 +1467,11 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 			"--cache", cacheDir,
 			tarballPath,
 		];
-		const resolveCommand = await measured("resolve lock", async () => {
-			const result = await runCommand(npm.command, resolveArgs, {
-				cwd: resolverDir,
-				env: resolverEnv,
-				...commandDeadline("npm lock resolution", LOCK_RESOLUTION_TIMEOUT_MS),
-				repoRoot,
-			});
-			commands.push(result);
-			requireSuccess(result);
-			return result;
-		});
-		const resolverManifestPath = join(resolverDir, "package.json");
-		const resolverLockPath = join(resolverDir, "package-lock.json");
-		const consumerLock = readPackageLock(resolverLockPath, "generated consumer package-lock.json");
-		assertPackedArtifactLock(consumerLock, packageName, resolverDir, tarballPath);
-		// The generated lock is final authority. Its exact URL+integrity identities
-		// must be a subset of the verified repository-lock seed before install.
-		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
-		assertConsumerSeedSubset(selectedArtifacts, identities);
-		await measured("finalization cache verification", () => verifyDestinationArtifacts({
-			artifacts: selectedArtifacts,
-			destinationPaths,
-			fixtureRoot,
-			repoRoot,
-			baseEnv,
-			runCommand,
-			commands,
-			remainingPreparationMs,
-			label: "finalization cache verification",
-		}));
-		await Promise.all([
-			copyFile(resolverManifestPath, join(templateDir, "package.json")),
-			copyFile(resolverLockPath, join(templateDir, "package-lock.json")),
-		]);
-
-		const templateEnv = isolatedNpmEnv(templateDir, cacheDir, baseEnv);
-		const installArgs = [
-			...npm.argsPrefix,
-			"ci",
-			"--offline",
-			"--ignore-scripts",
-			"--no-audit",
-			"--no-fund",
-			"--cache", cacheDir,
-		];
 		const installCommand = await measured("offline template install", async () => {
 			const result = await runCommand(npm.command, installArgs, {
 				cwd: templateDir,
 				env: templateEnv,
-				...commandDeadline("offline npm ci", OFFLINE_INSTALL_TIMEOUT_MS),
+				...commandDeadline("offline npm install", OFFLINE_INSTALL_TIMEOUT_MS),
 				repoRoot,
 			});
 			commands.push(result);
@@ -1529,6 +1486,12 @@ export async function finalizePackedConsumerFixture(seedHandle) {
 		if (!templateLock?.isFile() || !templateModules?.isDirectory()) {
 			throw new Error("Offline packed-consumer template validation failed: package-lock.json or node_modules is missing");
 		}
+		const consumerLock = readPackageLock(join(templateDir, "package-lock.json"), "generated consumer package-lock.json");
+		assertPackedArtifactLock(consumerLock, packageName, templateDir, tarballPath);
+		// The npm-authored lock is final authority. Every selected registry identity
+		// must belong to the direct-publication or verified-fallback seed.
+		const selectedArtifacts = compatibleRegistryArtifacts(consumerLock, runtime);
+		assertConsumerSeedSubset(selectedArtifacts, identities);
 
 		const finalizationWallMs = Date.now() - finalizationStartedAt;
 		const descriptor = {

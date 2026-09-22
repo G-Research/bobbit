@@ -304,8 +304,8 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 }
 
 test.describe("packed Bobbit inline HTML runtime", () => {
-	// A retry repeats npm pack + a clean dependency install and can hide a real
-	// packaging regression behind a second independently-built consumer.
+	// Keep the clean external-consumer contract first-attempt only: retrying from
+	// another materialization can hide a packaging or isolation regression.
 	test.describe.configure({ retries: 0 });
 
 	test("teardown escalates an unresponsive packaged runtime without leaking its pipes", async () => {
@@ -489,23 +489,20 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expect(isStrictChild(coordinatorRunRoot!, tarballPath), "packed tarball must be owned by the authoritative coordinator root").toBe(true);
 			expect(existsSync(tarballPath), `prepared npm pack tarball is missing at ${tarballPath}`).toBe(true);
 			const packCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("pack"));
-			const offlineCiCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("ci") && command.args.includes("--offline"));
+			const offlineInstallCommands = descriptor.commands.filter((command: CommandResult) => command.args.includes("install") && command.args.includes("--offline"));
 			expect(packCommands, "coordinator must execute npm pack exactly once").toHaveLength(1);
-			expect(offlineCiCommands, "coordinator must execute one strict-offline npm ci").toHaveLength(1);
-			const offlineCi = offlineCiCommands[0]!;
+			expect(offlineInstallCommands, "coordinator must execute one strict-offline npm install").toHaveLength(1);
+			expect(descriptor.commands.some((command: CommandResult) => command.args.includes("--package-lock-only") || command.args.includes("ci")),
+				"coordinator must not retain the former lock-only plus npm ci double pass").toBe(false);
+			const offlineInstall = offlineInstallCommands[0]!;
 			for (const required of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache"]) {
-				expect(offlineCi.args, `prepared npm ci must pass ${required}`).toContain(required);
+				expect(offlineInstall.args, `prepared npm install must pass ${required}`).toContain(required);
 			}
-			const cacheFlagIndex = offlineCi.args.indexOf("--cache");
-			expect(resolve(offlineCi.args[cacheFlagIndex + 1]!), "prepared npm ci must use the descriptor's isolated cache")
+			const cacheFlagIndex = offlineInstall.args.indexOf("--cache");
+			expect(resolve(offlineInstall.args[cacheFlagIndex + 1]!), "prepared npm install must use the descriptor's isolated cache")
 				.toBe(resolve(descriptor.cacheDir));
-			const ciIndex = offlineCi.args.indexOf("ci");
-			const ciArgs = offlineCi.args.slice(ciIndex + 1);
-			const packageOperands = ciArgs.filter((argument: string, index: number) =>
-				!argument.startsWith("-") && ciArgs[index - 1] !== "--cache");
-			expect(packageOperands, "offline npm ci must not receive a package operand").toEqual([]);
-			expect(offlineCi.args.map((argument: string) => resolve(argument)), "offline npm ci must consume the lock instead of the tarball operand")
-				.not.toContain(tarballPath);
+			expect(offlineInstall.args.map((argument: string) => resolve(argument)),
+				"the sole offline npm install must consume the exact packed tarball").toContain(tarballPath);
 
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runPiPackedConsumerNpm(
