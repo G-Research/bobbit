@@ -209,7 +209,7 @@ describe("packed-consumer offline install contract", () => {
 			"the former 600-second install budget must be capped by the preparation-wide deadline");
 		assert.match(source, /totalTimeoutMs - Math\.max\(0, now\(\) - totalStartedAt\)/,
 			"the owned-command lifetime must debit ownership readiness from its absolute budget");
-		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
+		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 90_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
 			"spawn-time ownership must retain its independent setup cap inside the total deadline");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
