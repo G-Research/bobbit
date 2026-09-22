@@ -158,8 +158,10 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /"install",\s*"--package-lock-only",\s*"--offline",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*"--cache", cacheDir,\s*tarballPath/s);
 		assert.match(CACHE_COPY_HELPER_SOURCE, /import cacache from "cacache"/,
 			"the batch helper must use only cacache's public root export");
-		assert.match(CACHE_COPY_HELPER_SOURCE, /cacache\.get\.copy\.byDigest/,
-			"only the public exact-digest copy API may read ambient content");
+		assert.match(CACHE_COPY_HELPER_SOURCE, /cacache\.get\.info/,
+			"the helper must use the public exact-key lookup API for ambient authority");
+		assert.match(CACHE_COPY_HELPER_SOURCE, /copyFile\(source, destination, COPYFILE_EXCL\)/,
+			"unsupported hardlinks must fall back to one direct exclusive physical copy");
 		assert.doesNotMatch(`${source}\n${CACHE_PATH_HELPER_SOURCE}\n${CACHE_COPY_HELPER_SOURCE}`, /cacache\/lib\/|content-v\d*/,
 			"cache layout must never depend on a private subpath or hand-coded content version");
 		assert.match(CACHE_PATH_HELPER_SOURCE, /import cacache from "cacache"/,
@@ -184,8 +186,8 @@ describe("packed-consumer offline install contract", () => {
 			"cache population must retain the accepted bounded concurrency");
 		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot\]/,
 			"all path resolution must run in one deadline-owned helper with independent root authority");
-		assert.match(source, /runCommand\(process\.execPath, \[helperPath, fixtureRoot, sourceContentCache\]/,
-			"all uncancellable digest copies must run in one tracked helper with fixed root authority");
+		assert.match(source, /helperEnv\[CACHE_COPY_AMBIENT_ENV\] = sourceContentCache;[\s\S]{0,500}runCommand\(process\.execPath, \[helperPath, fixtureRoot\]/,
+			"direct publication must run in one tracked helper with independent destination and ambient authority");
 		assert.match(source, /input,/,
 			"the untrusted cache-path request must use deadline-owned stdin instead of parent filesystem transport");
 		assert.match(source, /ownershipBootstrapRoot: fixtureRoot/,
@@ -222,7 +224,7 @@ describe("packed-consumer offline install contract", () => {
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
 		const verificationReads: Array<{ cache: string; integrity: string }> = [];
-		const publications: Array<{ partialPath: string; destinationPath: string }> = [];
+		let directDestinationPath = "";
 		let nowMs = 0;
 		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		const selectedIntegrity = "sha512-fixture";
@@ -256,10 +258,6 @@ describe("packed-consumer offline install contract", () => {
 						stream.end("selected artifact bytes");
 						return stream;
 					},
-					prepareDestination: async () => {},
-					publishDestination: async (partialPath: string, destinationPath: string) => {
-						publications.push({ partialPath, destinationPath });
-					},
 					removeDestination: async () => {},
 				},
 				now: () => nowMs,
@@ -281,19 +279,25 @@ describe("packed-consumer offline install contract", () => {
 						})))}\n` });
 					}
 					if (args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs")) {
-						const request = JSON.parse(String(options.input)) as { version: number; integrities: string[] };
-						assert.deepEqual(request, { version: 1, integrities: [selectedIntegrity] });
+						const request = JSON.parse(String(options.input)) as {
+							version: number;
+							artifacts: Array<{ resolved: string; integrity: string; destinationPath: string }>;
+						};
+						assert.equal(request.version, 3);
+						assert.deepEqual(request.artifacts.map(({ resolved, integrity }) => ({ resolved, integrity })), [{
+							resolved: selectedUrl,
+							integrity: selectedIntegrity,
+						}]);
 						assert.equal(args[1], join(tempParent, "prepared-packed-consumer"));
-						assert.equal(args[2], join(ambientCache, "_cacache"));
-						const stagingRoot = join(args[1]!, "cache-copy-staging", "fixture-batch");
-						mkdirSync(stagingRoot, { recursive: true });
-						const partialPath = join(stagingRoot, "00000.partial");
-						writeFileSync(partialPath, "copied ambient bytes");
+						assert.equal(args.length, 2);
+						directDestinationPath = request.artifacts[0]!.destinationPath;
+						mkdirSync(dirname(directDestinationPath), { recursive: true });
+						writeFileSync(directDestinationPath, "copied ambient bytes", { flag: "wx" });
 						order.push("copy");
 						return commandResult(command, args, { stdout: `${JSON.stringify({
-							version: 1,
-							stagingRoot,
-							results: [{ integrity: selectedIntegrity, status: "copied", partialPath }],
+							version: 3,
+							results: [{ resolved: selectedUrl, integrity: selectedIntegrity, status: "copied" }],
+							metrics: { linked: 0, copied: 1, missing: 0 },
 							admitted: 1,
 							completed: 1,
 							maxActive: 1,
@@ -390,10 +394,10 @@ describe("packed-consumer offline install contract", () => {
 				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
 				{ cache: join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache"), integrity: selectedIntegrity },
 			]);
-			assert.equal(publications.length, 1);
-			assert.ok(publications[0]?.partialPath.startsWith(join(tempParent, "prepared-packed-consumer", "cache-copy-staging")));
-			assert.ok(publications[0]?.destinationPath.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
-			assert.doesNotMatch(publications[0]?.destinationPath ?? "", new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.ok(directDestinationPath.startsWith(join(tempParent, "prepared-packed-consumer", "npm-cache", "_cacache")));
+			assert.equal(readFileSync(directDestinationPath, "utf8"), "copied ambient bytes");
+			assert.equal(existsSync(join(tempParent, "prepared-packed-consumer", "cache-copy-staging")), false);
+			assert.doesNotMatch(directDestinationPath, new RegExp(selectedUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			const inherited: Record<string, string> = {
 				npm_config_cache: ambientCache,
 				npm_config_registry: "https://registry.example.test/",

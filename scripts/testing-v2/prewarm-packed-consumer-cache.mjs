@@ -9,7 +9,7 @@
  * materialize the published template; they never run npm pack/install.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, cp, link, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -17,7 +17,6 @@ import { Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import cacache from "cacache";
 import { ensureDistBuild } from "./ensure-dist.mjs";
-import { removeOwnedPath } from "./owned-path-cleanup.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -38,7 +37,6 @@ const OFFLINE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 export const PACKED_CONSUMER_PREPARATION_TIMEOUT_MS = 5 * 60_000;
 const CACHE_BATCH_SIZE = 32;
 const CACHE_WORKER_COUNT = 3;
-const CACHE_COPY_WORKER_COUNT = 3;
 const CACHE_DISCOVERY_TIMEOUT_MS = 30_000;
 const DESCRIPTOR_VERSION = 1;
 const FIXTURE_DIRECTORY = "prepared-packed-consumer";
@@ -726,13 +724,6 @@ export function lockedTarballsMissingFromRepository(consumerLock, repositoryLock
 
 const DEFAULT_CONTENT_CACHE = Object.freeze({
 	createReadStream: (cache, integrity) => cacache.get.stream.byDigest(cache, integrity),
-	prepareDestination: directory => mkdir(directory, { recursive: true }),
-	publishDestination: async (temporaryPath, destinationPath) => {
-		// link() is an atomic, no-overwrite publication boundary on every supported
-		// platform. A pre-existing CAS path fails closed.
-		await link(temporaryPath, destinationPath);
-		await rm(temporaryPath, { force: true });
-	},
 	removeDestination: path => rm(path, { force: true }),
 });
 
@@ -967,61 +958,15 @@ async function resolveDestinationContentPaths({
 	return destinationPaths;
 }
 
-async function removeCacheCopyStaging({
-	stagingParent,
-	fixtureRoot,
-	remainingPreparationMs,
-	removeOwnedPathFn,
-	lifecycle,
-}) {
-	const deadlineMs = remainingPreparationMs("cache copy staging cleanup");
-	await removeOwnedPathFn(stagingParent, {
-		ownerRoot: fixtureRoot,
-		owner: { kind: "fixture", id: "packed-consumer-cache-copy" },
-		deadlineMs,
-		lifecycle,
-	});
-}
-
-async function runBoundedCacheTasks(items, operation, label) {
-	const results = new Array(items.length);
-	const failures = new Array(items.length);
-	let next = 0;
-	let stopped = false;
-	const worker = async () => {
-		while (!stopped) {
-			const index = next++;
-			if (index >= items.length) return;
-			try {
-				results[index] = await operation(items[index], index);
-			} catch (error) {
-				failures[index] = error;
-				stopped = true;
-			}
-		}
-	};
-	await Promise.allSettled(Array.from({ length: Math.min(CACHE_COPY_WORKER_COUNT, items.length) }, worker));
-	const rejected = failures.filter(Boolean);
-	if (rejected.length > 0) throw new AggregateError(rejected, `${label} failed`);
-	return results;
-}
-
-function validateCacheCopyResult(parsed, { artifacts, fixtureRoot, stagingParent }) {
-	if (!exactObjectKeys(parsed, ["version", "stagingRoot", "results", "metrics", "admitted", "completed", "maxActive"]) || parsed.version !== 2) {
+function validateCacheCopyResult(parsed, artifacts) {
+	if (!exactObjectKeys(parsed, ["version", "results", "metrics", "admitted", "completed", "maxActive"]) || parsed.version !== 3) {
 		throw new Error("Packed-consumer cache copy helper returned a malformed result envelope");
-	}
-	if (typeof parsed.stagingRoot !== "string" || !isAbsolute(parsed.stagingRoot)) {
-		throw new Error("Packed-consumer cache copy helper returned a non-absolute staging root");
-	}
-	const stagingRoot = resolve(parsed.stagingRoot);
-	if (!isStrictChild(stagingParent, stagingRoot) || !isStrictChild(fixtureRoot, stagingRoot)) {
-		throw new Error("Packed-consumer cache copy helper returned an out-of-root staging path");
 	}
 	if (!Array.isArray(parsed.results) || parsed.results.length !== artifacts.length) {
 		throw new Error(`Packed-consumer cache copy helper must return exactly ${artifacts.length} results`);
 	}
 	if (parsed.admitted !== artifacts.length || parsed.completed !== artifacts.length ||
-		!Number.isInteger(parsed.maxActive) || parsed.maxActive < 1 || parsed.maxActive > CACHE_COPY_WORKER_COUNT) {
+		!Number.isInteger(parsed.maxActive) || parsed.maxActive < 1 || parsed.maxActive > 3) {
 		throw new Error("Packed-consumer cache copy helper returned invalid admission/completion accounting");
 	}
 	if (!exactObjectKeys(parsed.metrics, ["linked", "copied", "missing"]) ||
@@ -1031,59 +976,38 @@ function validateCacheCopyResult(parsed, { artifacts, fixtureRoot, stagingParent
 		throw new Error("Packed-consumer cache copy helper returned invalid deterministic metrics");
 	}
 	const expected = new Set(artifacts.map(artifactIdentity));
-	const seen = new Set();
-	const paths = new Set();
 	const results = new Map();
 	const observedMetrics = { linked: 0, copied: 0, missing: 0 };
 	for (const entry of parsed.results) {
-		if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.resolved !== "string" || typeof entry.integrity !== "string" || typeof entry.status !== "string") {
+		if (!exactObjectKeys(entry, ["resolved", "integrity", "status"]) ||
+			typeof entry.resolved !== "string" || typeof entry.integrity !== "string" ||
+			!(["linked", "copied", "missing"].includes(entry.status))) {
 			throw new Error("Packed-consumer cache copy helper returned a malformed result entry");
 		}
 		const identity = artifactIdentity(entry);
 		if (!expected.has(identity)) throw new Error("Packed-consumer cache copy helper returned an unexpected exact artifact identity");
-		if (seen.has(identity)) throw new Error("Packed-consumer cache copy helper returned a duplicate exact artifact identity");
-		seen.add(identity);
-		if (entry.status === "missing") {
-			if (!exactObjectKeys(entry, ["resolved", "integrity", "status"])) throw new Error("Packed-consumer cache copy helper returned a malformed missing result");
-			results.set(identity, { status: "missing" });
-			observedMetrics.missing++;
-			continue;
-		}
-		if ((entry.status !== "linked" && entry.status !== "copied") ||
-			!exactObjectKeys(entry, ["resolved", "integrity", "status", "partialPath"]) ||
-			typeof entry.partialPath !== "string" || !isAbsolute(entry.partialPath)) {
-			throw new Error("Packed-consumer cache copy helper returned a malformed transferred result");
-		}
-		const partialPath = resolve(entry.partialPath);
-		if (!isStrictChild(stagingRoot, partialPath) || !isStrictChild(fixtureRoot, partialPath)) {
-			throw new Error(`Packed-consumer cache copy helper returned an out-of-root partial path for ${entry.integrity}`);
-		}
-		if (paths.has(partialPath)) throw new Error(`Packed-consumer cache copy helper returned a duplicate partial path: ${partialPath}`);
-		paths.add(partialPath);
-		results.set(identity, { status: entry.status, partialPath });
+		if (results.has(identity)) throw new Error("Packed-consumer cache copy helper returned a duplicate exact artifact identity");
+		results.set(identity, entry.status);
 		observedMetrics[entry.status]++;
 	}
 	for (const artifact of artifacts) if (!results.has(artifactIdentity(artifact))) throw new Error("Packed-consumer cache copy helper omitted an exact artifact identity");
 	if (JSON.stringify(observedMetrics) !== JSON.stringify(parsed.metrics)) throw new Error("Packed-consumer cache copy helper metrics do not match its results");
-	return { stagingRoot, results, metrics: Object.freeze({ ...observedMetrics }) };
+	return { results, metrics: Object.freeze({ ...observedMetrics }) };
 }
 
 async function copyAvailableArtifacts({
 	artifacts,
 	sourceContentCache,
 	destinationPaths,
-	contentCache,
 	fixtureRoot,
 	repoRoot,
 	baseEnv,
 	runCommand,
 	commands,
 	remainingPreparationMs,
-	removeOwnedPathFn,
 }) {
 	const transferable = artifacts.filter(artifact => artifact.integrity)
 		.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
-	const integrities = [...new Set(transferable.map(artifact => artifact.integrity))].sort();
 	const noIntegrity = artifacts.filter(artifact => !artifact.integrity);
 	if (transferable.length === 0) {
 		return {
@@ -1091,9 +1015,20 @@ async function copyAvailableArtifacts({
 			linkedCount: 0, copiedCount: 0, missingDigestCount: 0, noIntegrityCount: noIntegrity.length,
 		};
 	}
-	const stagingParent = join(fixtureRoot, "cache-copy-staging");
-	if (!isStrictChild(fixtureRoot, stagingParent)) throw new Error("Packed-consumer cache copy staging parent escaped fixture authority");
-	const request = { version: 2, artifacts: transferable.map(({ resolved, integrity }) => ({ resolved, integrity })) };
+	const byIntegrity = new Map();
+	for (const artifact of transferable) {
+		const group = byIntegrity.get(artifact.integrity) ?? [];
+		group.push(artifact);
+		byIntegrity.set(artifact.integrity, group);
+	}
+	const helperArtifacts = [...byIntegrity.entries()].map(([integrity, group]) => {
+		const destinationPath = destinationPaths.get(integrity);
+		if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
+			throw new Error(`Packed-consumer cache publication has no absolute destination for ${integrity}`);
+		}
+		return { resolved: group[0].resolved, integrity, destinationPath };
+	}).sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right)));
+	const request = { version: 3, artifacts: helperArtifacts };
 	const input = `${JSON.stringify(request)}\n`;
 	if (Buffer.byteLength(input) > MAX_CACHE_HELPER_REQUEST_BYTES) {
 		throw new Error(`Packed-consumer cache copy request exceeds ${MAX_CACHE_HELPER_REQUEST_BYTES} bytes`);
@@ -1101,114 +1036,36 @@ async function copyAvailableArtifacts({
 	const helperPath = join(repoRoot, "scripts", "testing-v2", CACHE_COPY_HELPER_NAME);
 	const helperEnv = cachePathHelperEnv(baseEnv, fixtureRoot);
 	helperEnv[CACHE_COPY_AMBIENT_ENV] = sourceContentCache;
-	let result;
+	const totalTimeoutMs = remainingPreparationMs("ambient cache direct publication");
+	const result = await runCommand(process.execPath, [helperPath, fixtureRoot], {
+		cwd: repoRoot,
+		env: helperEnv,
+		timeoutMs: totalTimeoutMs,
+		totalTimeoutMs,
+		maxOutputBytes: MAX_CACHE_HELPER_RESULT_BYTES,
+		maxInputBytes: MAX_CACHE_HELPER_REQUEST_BYTES,
+		input,
+		repoRoot,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	commands.push(result);
+	requireSuccess(result);
+	if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_HELPER_RESULT_BYTES) {
+		throw new Error(`Packed-consumer cache copy helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
+	}
+	let parsed;
 	try {
-		const totalTimeoutMs = remainingPreparationMs("ambient cache digest copy");
-		result = await runCommand(process.execPath, [helperPath, fixtureRoot], {
-			cwd: repoRoot,
-			env: helperEnv,
-			timeoutMs: totalTimeoutMs,
-			totalTimeoutMs,
-			maxOutputBytes: MAX_CACHE_HELPER_RESULT_BYTES,
-			maxInputBytes: MAX_CACHE_HELPER_REQUEST_BYTES,
-			input,
-			repoRoot,
-			ownershipBootstrapRoot: fixtureRoot,
-		});
-		commands.push(result);
-		requireSuccess(result);
+		parsed = JSON.parse(result.stdout);
 	} catch (error) {
-		if (error instanceof OwnedCommandError && !isCompleteOwnedCommandShutdown(error.shutdown)) throw error;
-		try {
-			await removeCacheCopyStaging({
-				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-				lifecycle: { phase: "after settled cache-copy helper failure" },
-			});
-		} catch (cleanupError) {
-			throw new AggregateError([error, cleanupError], "Packed-consumer cache copy helper and staging cleanup failed");
-		}
-		throw error;
+		throw new Error(`Packed-consumer cache copy helper emitted malformed JSON: ${error.message}`, { cause: error });
 	}
-	let validated;
-	try {
-		if (Buffer.byteLength(result.stdout) <= 0 || Buffer.byteLength(result.stdout) > MAX_CACHE_HELPER_RESULT_BYTES) {
-			throw new Error(`Packed-consumer cache copy helper must emit non-empty JSON no larger than ${MAX_CACHE_HELPER_RESULT_BYTES} bytes`);
-		}
-		let parsed;
-		try {
-			parsed = JSON.parse(result.stdout);
-		} catch (error) {
-			throw new Error(`Packed-consumer cache copy helper emitted malformed JSON: ${error.message}`, { cause: error });
-		}
-		validated = validateCacheCopyResult(parsed, { artifacts: transferable, fixtureRoot, stagingParent });
-		const transferredEntries = [...validated.results].filter(([, entry]) => entry.status !== "missing");
-		await runBoundedCacheTasks(transferredEntries, async ([identity, entry]) => {
-			const partial = await stat(entry.partialPath).catch(() => undefined);
-			if (!partial?.isFile()) throw new Error(`Packed-consumer cache copy helper did not create a regular partial for ${identity}`);
-		}, "Packed-consumer cache partial validation");
-	} catch (error) {
-		try {
-			await removeCacheCopyStaging({
-				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-				lifecycle: { phase: "after cache-copy response rejection" },
-			});
-		} catch (cleanupError) {
-			throw new AggregateError([error, cleanupError], "Packed-consumer cache copy validation and staging cleanup failed");
-		}
-		throw error;
-	}
-
-	const byIntegrity = new Map();
-	for (const artifact of transferable) {
-		const group = byIntegrity.get(artifact.integrity) ?? [];
-		group.push(artifact);
-		byIntegrity.set(artifact.integrity, group);
-	}
+	const validated = validateCacheCopyResult(parsed, helperArtifacts);
 	const fallbackArtifacts = [...noIntegrity];
-	let transferredArtifacts = [];
-	try {
-		// Publication begins only after the uncancellable helper has fully settled.
-		// A bounded three-worker pool preserves the same-cache atomic link boundary
-		// without serializing hundreds of independent immutable digests. Admission
-		// stops on the first failure and every already-admitted publication settles
-		// before staging cleanup.
-		const publicationTasks = [];
-		for (const integrity of integrities) {
-			const group = byIntegrity.get(integrity);
-			const available = group
-				.map(artifact => ({ artifact, result: validated.results.get(artifactIdentity(artifact)) }))
-				.find(entry => entry.result.status !== "missing");
-			if (!available) {
-				fallbackArtifacts.push(...group);
-				continue;
-			}
-			const destinationPath = destinationPaths.get(integrity);
-			if (typeof destinationPath !== "string" || !isAbsolute(destinationPath)) {
-				throw new Error(`Packed-consumer cache publication has no absolute destination for ${integrity}`);
-			}
-			publicationTasks.push({ integrity, group, partialPath: available.result.partialPath, destinationPath });
-		}
-		const published = await runBoundedCacheTasks(publicationTasks, async task => {
-			remainingPreparationMs(`cache publication ${task.integrity}`);
-			await contentCache.prepareDestination(dirname(task.destinationPath));
-			await contentCache.publishDestination(task.partialPath, task.destinationPath);
-			return task.group;
-		}, "Packed-consumer cache publication");
-		transferredArtifacts = published.flat();
-		await removeCacheCopyStaging({
-			stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-			lifecycle: { phase: "after bounded cache publication", transferred: transferredArtifacts.length, ...validated.metrics },
-		});
-	} catch (error) {
-		try {
-			await removeCacheCopyStaging({
-				stagingParent, fixtureRoot, remainingPreparationMs, removeOwnedPathFn,
-				lifecycle: { phase: "after failed bounded cache publication", transferred: transferredArtifacts.length, ...validated.metrics },
-			});
-		} catch (cleanupError) {
-			throw new AggregateError([error, cleanupError], "Packed-consumer cache publication and staging cleanup failed");
-		}
-		throw error;
+	const transferredArtifacts = [];
+	for (const helperArtifact of helperArtifacts) {
+		const group = byIntegrity.get(helperArtifact.integrity);
+		if (validated.results.get(artifactIdentity(helperArtifact)) === "missing") fallbackArtifacts.push(...group);
+		else transferredArtifacts.push(...group);
 	}
 	return {
 		fallbackArtifacts: fallbackArtifacts.sort((left, right) => artifactIdentity(left).localeCompare(artifactIdentity(right))),
@@ -1445,7 +1302,6 @@ export async function seedPackedConsumerCache({
 	now = () => performance.now(),
 	setTimer = setTimeout,
 	clearTimer = clearTimeout,
-	removeOwnedPathFn = removeOwnedPath,
 	repositoryLock,
 } = {}) {
 	if (!runRoot) throw new Error("seedPackedConsumerCache requires runRoot");
@@ -1498,18 +1354,16 @@ export async function seedPackedConsumerCache({
 			commands,
 			remainingPreparationMs,
 		}));
-		const transfer = await measured("seed cache copy and publication", () => copyAvailableArtifacts({
+		const transfer = await measured("seed cache direct publication", () => copyAvailableArtifacts({
 			artifacts: selectedArtifacts,
 			sourceContentCache: join(ambientCacheDir, "_cacache"),
 			destinationPaths,
-			contentCache,
 			fixtureRoot: layout.fixtureRoot,
 			repoRoot,
 			baseEnv,
 			runCommand,
 			commands,
 			remainingPreparationMs,
-			removeOwnedPathFn,
 		}));
 		console.log(`[packed-consumer] exact cache seed metrics: linked=${transfer.linkedCount}, copied=${transfer.copiedCount}, missing=${transfer.missingDigestCount}`);
 		const corrupt = await measured("seed copied digest verification", () => verifyCopiedArtifactsForFallback({
@@ -1573,7 +1427,6 @@ export async function seedPackedConsumerCache({
 			runRoot: layout.absoluteRunRoot,
 			fixtureRoot: layout.fixtureRoot,
 			cacheDir: layout.cacheDir,
-			stagingRoot: join(layout.fixtureRoot, "cache-copy-staging"),
 			seedDescriptorPath: layout.seedDescriptorPath,
 			repositoryLockHash: repositoryLockHash(lockInput.bytes),
 			runtime: selectedRuntime,

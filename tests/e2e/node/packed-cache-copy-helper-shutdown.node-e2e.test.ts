@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ const require = createRequire(import.meta.url);
 const cacache = require("cacache") as {
 	put: (cache: string, key: string, data: Buffer) => Promise<{ toString(): string }>;
 	get: { info: (cache: string, key: string) => Promise<{ integrity: string; path: string } | null> };
+	index: { insert: (cache: string, key: string, integrity: string) => Promise<{ path: string }> };
 };
 const roots: string[] = [];
 const owners: Array<{ tracked: TrackedChild; closed: Promise<void>; treeExitVerified: boolean }> = [];
@@ -70,13 +71,15 @@ test("real cache-copy helper hardlinks one exact CAS hit and joins its owned pro
 	const resolved = "https://registry.example.test/helper-exact.tgz";
 	const cacheKey = `make-fetch-happen:request-cache:${resolved}`;
 	const integrity = String(await cacache.put(ambientCache, cacheKey, Buffer.from("real helper immutable content")));
+	const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+	const destination = await cacache.index.insert(destinationCache, `bobbit-packed-consumer-path:${integrity}`, integrity);
 	const helperPath = join(REPO_ROOT, "scripts", "testing-v2", "copy-packed-consumer-cache-batch.mjs");
 	const result = await runOwnedCommand(process.execPath, [helperPath, fixtureRoot], {
 		cwd: REPO_ROOT,
 		env: { ...process.env, BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: ambientCache },
 		timeoutMs: 30_000,
 		totalTimeoutMs: 30_000,
-		input: `${JSON.stringify({ version: 2, artifacts: [{ resolved, integrity }] })}\n`,
+		input: `${JSON.stringify({ version: 3, artifacts: [{ resolved, integrity, destinationPath: destination.path }] })}\n`,
 		repoRoot: REPO_ROOT,
 		ownershipBootstrapRoot: fixtureRoot,
 	});
@@ -87,14 +90,51 @@ test("real cache-copy helper hardlinks one exact CAS hit and joins its owned pro
 		"published helper command evidence must not expose the ambient absolute path");
 	const response = JSON.parse(result.stdout) as {
 		metrics: { linked: number; copied: number; missing: number };
-		results: Array<{ status: string; partialPath: string }>;
+		results: Array<{ status: string }>;
 	};
 	assert.deepEqual(response.metrics, { linked: 1, copied: 0, missing: 0 });
 	assert.equal(response.results[0]?.status, "linked");
 	const source = await cacache.get.info(ambientCache, cacheKey);
 	assert.ok(source?.path);
-	assert.equal(statSync(response.results[0]!.partialPath).ino, statSync(source.path).ino,
-		"the helper result must be a hardlink to the exact immutable ambient CAS inode");
+	assert.equal(statSync(destination.path).ino, statSync(source.path).ino,
+		"the helper must directly hardlink the exact immutable ambient CAS inode to the canonical final path");
+	unlinkSync(source.path);
+	assert.equal(readFileSync(destination.path, "utf8"), "real helper immutable content",
+		"the canonical final hardlink must survive unlinking the ambient cache name");
+	assert.equal(existsSync(join(fixtureRoot, "cache-copy-staging")), false,
+		"direct publication must not create a staging tree");
+});
+
+test("cache-copy helper redacts JSON-escaped ambient paths from terminal diagnostics", { timeout: 40_000 }, async () => {
+	const runRoot = mkdtempSync(join(tmpdir(), "bobbit-packed-cache-helper-redaction-e2e-"));
+	const ambientRoot = mkdtempSync(join(tmpdir(), "bobbit packed cache redaction e2e-"));
+	roots.push(runRoot, ambientRoot);
+	const fixtureRoot = join(runRoot, "prepared-packed-consumer");
+	mkdirSync(fixtureRoot, { recursive: true });
+	const ambientCache = join(ambientRoot, "_cacache");
+	const resolved = "https://registry.example.test/helper-redaction.tgz";
+	const cacheKey = `make-fetch-happen:request-cache:${resolved}`;
+	const integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
+	await cacache.index.insert(ambientCache, cacheKey, integrity);
+	const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+	const destination = await cacache.index.insert(destinationCache, `bobbit-packed-consumer-path:${integrity}`, integrity);
+	const helperPath = join(REPO_ROOT, "scripts", "testing-v2", "copy-packed-consumer-cache-batch.mjs");
+	const result = await runOwnedCommand(process.execPath, [helperPath, fixtureRoot], {
+		cwd: REPO_ROOT,
+		env: { ...process.env, BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE: ambientCache },
+		timeoutMs: 30_000,
+		totalTimeoutMs: 30_000,
+		input: `${JSON.stringify({ version: 3, artifacts: [{ resolved, integrity, destinationPath: destination.path }] })}\n`,
+		repoRoot: REPO_ROOT,
+		ownershipBootstrapRoot: fixtureRoot,
+	});
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /<ambient npm cache>/);
+	assert.doesNotMatch(result.stderr, new RegExp(ambientRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+	const escaped = JSON.stringify(ambientRoot).slice(1, -1);
+	assert.equal(result.stderr.toLowerCase().includes(escaped.toLowerCase()), false,
+		"JSON escaping must not bypass ambient-path redaction");
+	assert.equal(isCompleteOwnedCommandShutdown(result.shutdown), true);
 });
 
 test("stalled cache-copy helper reaps its descendant before preparation rejects", { timeout: 40_000 }, async () => {
