@@ -28,6 +28,8 @@ import {
   createIsolatedE2EEnvironment,
   createPlaywrightE2EInvocation,
   directRunnerPackedConsumerDecision,
+  E2E_FINAL_CLEANUP_POLICY,
+  finalizePlaywrightE2ERunCleanup,
   isE2EAmbientRuntimeEnvKey,
   prepareDirectRunnerPackedConsumer,
   resolvePackedConsumerDescriptorPath,
@@ -47,6 +49,7 @@ import {
   createSerialPlaywrightPhaseInvocation,
   fanOutSerialTransformCache,
   finalizeE2ERunCleanup,
+  E2E_FINAL_CLEANUP_POLICY as COORDINATOR_FINAL_CLEANUP_POLICY,
   groupDVitestArgs,
   prepareGroupCPackedConsumer,
   resolveE2ERetryCount,
@@ -586,6 +589,95 @@ describe("unit run isolation", () => {
     } finally {
       rmSync(runRoot, { recursive: true, force: true });
     }
+  });
+
+  it("uses the shared subprocess policy for focused cleanup and retains diagnostics", async () => {
+    expect(COORDINATOR_FINAL_CLEANUP_POLICY).toBe(E2E_FINAL_CLEANUP_POLICY);
+    expect(E2E_FINAL_CLEANUP_POLICY).toEqual({
+      traversalConcurrency: 128,
+      subprocessThreadPoolSize: 32,
+      deadlineMs: 30_000,
+    });
+
+    const root = resolve("injected-focused-e2e-root");
+    const paths = { root, runId: "injected-focused-run" };
+    const info: string[] = [];
+    const errors: string[] = [];
+    let observedOptions: Record<string, unknown> | undefined;
+    let clock = 10;
+    const successCode = await finalizePlaywrightE2ERunCleanup({
+      paths,
+      result: { status: 0, signal: null },
+      remove: async (_target: string, options: Record<string, unknown>) => {
+        observedOptions = options;
+        clock = 42;
+      },
+      logInfo: (message: string) => info.push(message),
+      logError: (message: string) => errors.push(message),
+      now: () => clock,
+    });
+    expect(successCode).toBe(0);
+    expect(observedOptions).toEqual(expect.objectContaining({
+      ...E2E_FINAL_CLEANUP_POLICY,
+      ownerRoot: root,
+      allowOwnerRoot: true,
+      owner: { kind: "coordinator", id: paths.runId },
+      lifecycle: expect.objectContaining({
+        coordinator: { pid: process.pid, state: "playwright-settled" },
+        playwright: { state: "closed", status: 0, signal: null },
+        reporting: { state: "closed-with-playwright-process" },
+      }),
+    }));
+    expect(info).toEqual([
+      expect.stringContaining("cleanup start"),
+      expect.stringContaining("cleanup success in 32.0ms"),
+    ]);
+    expect(errors).toEqual([]);
+
+    let attempts = 0;
+    clock = 100;
+    const terminalCode = await finalizePlaywrightE2ERunCleanup({
+      paths,
+      result: { status: 0, signal: null },
+      remove: (target: string, options: Record<string, unknown>) => removeOwnedPath(target, {
+        ...options,
+        platform: "win32",
+        maxAttempts: 2,
+        initialDelayMs: 0,
+        seams: {
+          remove: async () => {
+            attempts++;
+            const code = attempts === 1 ? "EBUSY" : "ENOTEMPTY";
+            throw Object.assign(new Error(`injected focused ${code}`), { code, path: target });
+          },
+          sleep: async () => {},
+        },
+      }),
+      logInfo: (message: string) => info.push(message),
+      logError: (message: string) => errors.push(message),
+      now: () => clock,
+    });
+    expect(terminalCode).toBe(1);
+    expect(attempts).toBe(2);
+    expect(errors.at(-1)).toContain(root);
+    expect(errors.at(-1)).toContain("EBUSY");
+    expect(errors.at(-1)).toContain("ENOTEMPTY");
+    expect(errors.at(-1)).toContain("playwright-settled");
+
+    let failedRunRemovalAttempted = false;
+    const failedCode = await finalizePlaywrightE2ERunCleanup({
+      paths,
+      result: { status: 1, signal: null },
+      remove: async () => {
+        failedRunRemovalAttempted = true;
+        throw new Error("failed focused runs must be retained");
+      },
+      logInfo: (message: string) => info.push(message),
+      logError: (message: string) => errors.push(message),
+    });
+    expect(failedCode).toBe(1);
+    expect(failedRunRemovalAttempted).toBe(false);
+    expect(errors.at(-1)).toContain("retained failure diagnostics");
   });
 
   it("retries transient coordinator cleanup and reports terminal history while retaining failed runs", async () => {

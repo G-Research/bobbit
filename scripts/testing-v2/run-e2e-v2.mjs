@@ -49,8 +49,10 @@ import {
 	createE2ERunPaths,
 	createIsolatedE2EEnvironment,
 	createPlaywrightE2EInvocation,
+	E2E_FINAL_CLEANUP_POLICY,
 	resolvePackedConsumerDescriptorPath,
 } from "../run-playwright-e2e.mjs";
+export { E2E_FINAL_CLEANUP_POLICY };
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 import { discoverTests } from "./test-discovery.mjs";
 import { seedTransformCache } from "./pwtest-cache.ts";
@@ -76,14 +78,6 @@ const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "sampl
 const CACHE_BOOTSTRAP = join(REPO_ROOT, "scripts", "playwright-e2e-cache-bootstrap.cjs");
 const CHILD_PROFILE_PRELOAD = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
 const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
-export const E2E_FINAL_CLEANUP_POLICY = Object.freeze({
-	// Keep high-cardinality package trees below the coordinator's outer timeout.
-	// The short-lived cleanup process gets its own bounded libuv filesystem pool;
-	// test subprocesses retain Node's default pool throughout the actual suite.
-	traversalConcurrency: 128,
-	subprocessThreadPoolSize: 32,
-	deadlineMs: 30_000,
-});
 
 function currentGitSha() {
 	try {
