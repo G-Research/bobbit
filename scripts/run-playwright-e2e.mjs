@@ -25,7 +25,7 @@ import {
   sanitizeTestEnvironment,
   setEnvironmentValue,
 } from "./testing-v2/environment-policy.mjs";
-import { removeOwnedPath } from "./testing-v2/owned-path-cleanup.mjs";
+import { removeOwnedPathInSubprocess } from "./testing-v2/owned-path-cleanup.mjs";
 import {
   PACKED_CONSUMER_DESCRIPTOR_ENV,
   preparePackedConsumerFixture,
@@ -41,6 +41,14 @@ const projectRoot = resolve(__dirname, "..");
 const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const PLAYWRIGHT_CLI = join(projectRoot, "node_modules", "playwright", "cli.js");
+export const E2E_FINAL_CLEANUP_POLICY = Object.freeze({
+  // Large prepared-consumer trees need wider traversal than the remover's
+  // fixture-scale defaults. Isolation keeps this filesystem pool out of the
+  // runner while the parent awaits both cleanup result and process-tree exit.
+  traversalConcurrency: 128,
+  subprocessThreadPoolSize: 32,
+  deadlineMs: 30_000,
+});
 const PACKAGED_CONSUMER_SPEC = "tests/e2e/browser/packaged-inline-html-theme.browser-e2e.spec.ts";
 const PACKAGED_CONSUMER_PROJECT = "browser-canonical";
 const PACKAGED_CONSUMER_TITLE_HIERARCHY = "packed Bobbit inline HTML runtime clean consumer serves dist UI and executes the bundled canonical theme bridge";
@@ -410,6 +418,52 @@ export async function prepareDirectRunnerPackedConsumer(
   return Object.freeze({ prepare: true, reason: decision.reason, descriptorPath });
 }
 
+/** Retain failed runs, but fail a green focused run when final cleanup fails. */
+export async function finalizePlaywrightE2ERunCleanup({
+  paths,
+  result,
+  retainSuccessfulRoot = false,
+  remove = removeOwnedPathInSubprocess,
+  logInfo = (message) => console.log(message),
+  logError = (message) => console.error(message),
+  now = () => Date.now(),
+}) {
+  const failed = result.status !== 0 || Boolean(result.signal) || Boolean(result.error);
+  if (failed || retainSuccessfulRoot) {
+    logError(`[e2e] retained ${failed ? "failure diagnostics" : "successful run root by request"}: ${paths.root}`);
+    return failed ? 1 : 0;
+  }
+
+  const lifecycle = {
+    coordinator: { pid: process.pid, state: "playwright-settled" },
+    playwright: {
+      state: "closed",
+      status: result.status,
+      signal: result.signal ?? null,
+      ...(result.error ? { error: result.error instanceof Error ? result.error.message : String(result.error) } : {}),
+    },
+    reporting: { state: "closed-with-playwright-process" },
+  };
+  const startedAt = now();
+  logInfo(`[e2e] cleanup start: ${paths.root} (concurrency=${E2E_FINAL_CLEANUP_POLICY.traversalConcurrency}, threadPoolSize=${E2E_FINAL_CLEANUP_POLICY.subprocessThreadPoolSize}, deadlineMs=${E2E_FINAL_CLEANUP_POLICY.deadlineMs})`);
+  try {
+    await remove(paths.root, {
+      ownerRoot: paths.root,
+      allowOwnerRoot: true,
+      owner: { kind: "coordinator", id: paths.runId },
+      lifecycle,
+      ...E2E_FINAL_CLEANUP_POLICY,
+    });
+    const elapsedMs = Math.max(0, now() - startedAt);
+    logInfo(`[e2e] cleanup success in ${elapsedMs.toFixed(1)}ms: ${paths.root}`);
+    return 0;
+  } catch (error) {
+    const elapsedMs = Math.max(0, now() - startedAt);
+    logError(`[e2e] cleanup failed in ${elapsedMs.toFixed(1)}ms; could not remove successful run root: ${paths.root}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    return 1;
+  }
+}
+
 export async function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
 const invocation = createPlaywrightE2EInvocation(forwardedArgs);
 const paths = createE2ERunPaths(coordinatorTempDirectory());
@@ -450,33 +504,18 @@ const result = spawnSync(invocation.command, invocation.args, {
   shell: false,
 });
 
-let cleanupFailed = false;
-if (result.status === 0 && !result.signal && process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1") {
-  try {
-    // Never sweep a shared temp parent: this coordinator owns exactly paths.root.
-    await removeOwnedPath(paths.root, {
-      ownerRoot: paths.root,
-      allowOwnerRoot: true,
-      owner: { kind: "coordinator", id: paths.runId },
-      lifecycle: {
-        playwright: { state: "closed", status: result.status, signal: result.signal },
-        reporters: "closed with Playwright process",
-      },
-    });
-  } catch (error) {
-    cleanupFailed = true;
-    console.error(`[e2e] could not remove successful run root: ${paths.root}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-  }
-} else {
-  console.error(`[e2e] retained failure diagnostics: ${paths.root}`);
-}
+const cleanupCode = await finalizePlaywrightE2ERunCleanup({
+  paths,
+  result,
+  retainSuccessfulRoot: process.env.BOBBIT_KEEP_PWTEST_CACHE === "1",
+});
 
 if (result.error) throw result.error;
 if (result.signal) {
   process.kill(process.pid, result.signal);
   return 1;
 }
-if (cleanupFailed) return 1;
+if (cleanupCode !== 0) return cleanupCode;
 return result.status ?? 1;
 }
 
