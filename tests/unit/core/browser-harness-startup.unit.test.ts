@@ -381,7 +381,7 @@ describe("browser harness startup", () => {
 		const focusedBranch = runner.match(/if \(only\) \{[\s\S]*?\n\t\} else \{/)?.[0] ?? "";
 		assert.doesNotMatch(focusedBranch, /prepareE2EDistServerPrebundle|BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE/);
 		const removeAt = runner.indexOf('deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE")');
-		const cAt = runner.indexOf("await runSerialGroupC(C, sharedPlaywrightEnv");
+		const cAt = runner.indexOf("return runSerialGroupC(C, sharedPlaywrightEnv");
 		assert.ok(removeAt > 0 && cAt > removeAt, "the bundle setting must be removed before C starts");
 		for (const file of [
 			"tests/e2e/browser/stories-resilience.browser-e2e.spec.ts",
