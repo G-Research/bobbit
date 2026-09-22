@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, watch } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { finished } from "node:stream/promises";
 import { after, test } from "node:test";
 import {
 	isCompleteOwnedCommandShutdown,
@@ -35,6 +36,54 @@ function isAlive(pid: number | undefined): boolean {
 		return true;
 	} catch (error: unknown) {
 		return (error as NodeJS.ErrnoException)?.code === "EPERM";
+	}
+}
+
+type HelperPids = { root: number; descendant: number };
+
+function waitForAtomicHelperPids(marker: string, signal: AbortSignal): Promise<HelperPids> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let watcher: ReturnType<typeof watch> | undefined;
+		const finish = (error?: Error, pids?: HelperPids) => {
+			if (settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			watcher?.close();
+			if (error) reject(error); else resolve(pids!);
+		};
+		const read = () => {
+			try {
+				const pids = JSON.parse(readFileSync(marker, "utf8")) as HelperPids;
+				if (Number.isSafeInteger(pids.root) && pids.root > 0 &&
+					Number.isSafeInteger(pids.descendant) && pids.descendant > 0) finish(undefined, pids);
+			} catch { /* marker has not been atomically published yet */ }
+		};
+		const onAbort = () => finish(signal.reason instanceof Error
+			? signal.reason
+			: new Error("tracked helper setup was aborted"));
+		if (signal.aborted) return onAbort();
+		watcher = watch(dirname(marker), { persistent: false }, read);
+		watcher.once("error", error => finish(error));
+		signal.addEventListener("abort", onAbort, { once: true });
+		read();
+	});
+}
+
+async function awaitTrackedHelperReady(tracked: TrackedChild, marker: string, timeoutMs: number): Promise<HelperPids> {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(
+		new Error(`tracked helper did not establish ownership and publish its PID marker within ${timeoutMs}ms`),
+	), timeoutMs);
+	try {
+		const [, pids] = await Promise.all([
+			tracked.ownershipReady,
+			waitForAtomicHelperPids(marker, controller.signal),
+		]);
+		return pids;
+	} finally {
+		clearTimeout(timeout);
+		if (!controller.signal.aborted) controller.abort(new Error("tracked helper setup observation completed"));
 	}
 }
 
@@ -212,7 +261,68 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 		"fs.renameSync(marker+'.tmp',marker);",
 		"setInterval(()=>{},1000);",
 	].join("");
+	const tracked = spawnTracked(process.execPath, ["-e", fixture, marker], {
+		cwd: REPO_ROOT,
+		env: process.env,
+		stdio: ["pipe", "pipe", "pipe"],
+		windowsHide: true,
+	});
+	let rootCloseObserved = false;
+	const closed = new Promise<void>((resolve, reject) => {
+		tracked.child.once("error", reject);
+		tracked.child.once("close", () => {
+			rootCloseObserved = true;
+			resolve();
+		});
+	});
+	let transportSettled = false;
+	const transportSettlement = Promise.allSettled([
+		finished(tracked.child.stdin!, { cleanup: true }),
+		finished(tracked.child.stdout!, { cleanup: true }),
+		finished(tracked.child.stderr!, { cleanup: true }),
+	]).then(() => { transportSettled = true; });
+	const owner = { tracked, closed, treeExitVerified: false };
+	owners.push(owner);
+
+	let pids: HelperPids;
+	try {
+		pids = await awaitTrackedHelperReady(tracked, marker, 20_000);
+	} catch (setupError) {
+		try { tracked.killTree("SIGKILL"); } catch { /* reported by the bounded joins below */ }
+		const cleanup = await Promise.allSettled([
+			closed,
+			tracked.waitForTreeExit(10_000).then(verified => {
+				if (verified !== true) throw new Error("setup cleanup did not verify tracked helper tree exit");
+				owner.treeExitVerified = true;
+			}),
+			transportSettlement,
+		]);
+		const cleanupFailures = cleanup
+			.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+			.map(result => result.reason);
+		throw cleanupFailures.length > 0
+			? new AggregateError([setupError, ...cleanupFailures], "tracked helper setup and cleanup failed")
+			: setupError;
+	}
+	assert.equal(isAlive(tracked.child.pid), true, "tracked ownership process must be live before the measured preparation call");
+	assert.equal(isAlive(pids.root), true, "pre-owned helper root must be live before the measured preparation call");
+	assert.equal(isAlive(pids.descendant), true, "pre-owned helper descendant must be live before the measured preparation call");
+
+	let killRequests = 0;
+	let spawnInjections = 0;
 	let offlineInstallStarted = false;
+	const measuredTracked: TrackedChild = {
+		child: tracked.child,
+		ownershipReady: tracked.ownershipReady,
+		killTree: (signal, graceMsOverride) => {
+			killRequests++;
+			tracked.killTree(signal, graceMsOverride);
+		},
+		waitForTreeExit: timeoutMs => tracked.waitForTreeExit(timeoutMs),
+		killed: () => tracked.killed(),
+		timedOut: () => tracked.timedOut(),
+		markSurvival: () => tracked.markSurvival(),
+	};
 
 	await assert.rejects(preparePackedConsumerFixture({
 		repoRoot: REPO_ROOT,
@@ -230,19 +340,10 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 					input: options.input as string,
 					maxOutputBytes: options.maxOutputBytes as number,
 					treeExitTimeoutMs: 10_000,
-					spawnOwned: async (ownedCommand: string, ownedArgs: string[], ownedOptions: Record<string, unknown>) => {
-						const tracked = spawnTracked(ownedCommand, ownedArgs, {
-							cwd: ownedOptions.cwd as string,
-							env: ownedOptions.env as NodeJS.ProcessEnv,
-							stdio: ["pipe", "pipe", "pipe"],
-							windowsHide: true,
-						});
-						const closed = new Promise<void>((resolve, reject) => {
-							tracked.child.once("error", reject);
-							tracked.child.once("close", () => resolve());
-						});
-						owners.push({ tracked, closed, treeExitVerified: false });
-						return tracked;
+					spawnOwned: async (_ownedCommand: string, _ownedArgs: string[], ownedOptions: Record<string, unknown>) => {
+						spawnInjections++;
+						(ownedOptions.onSpawned as ((candidate: TrackedChild) => void) | undefined)?.(measuredTracked);
+						return measuredTracked;
 					},
 				});
 			}
@@ -286,8 +387,11 @@ test("stalled cache-copy helper reaps its descendant before preparation rejects"
 		},
 	}), /retained partial fixture and command evidence/);
 
-	assert.equal(existsSync(marker), true, "fake helper must publish both PIDs before its deadline");
-	const pids = JSON.parse(readFileSync(marker, "utf8")) as { root: number; descendant: number };
+	await Promise.all([closed, transportSettlement]);
+	assert.equal(spawnInjections, 1, "the measured helper command must reuse exactly one pre-owned handle");
+	assert.equal(killRequests, 1, "the measured timeout must request exactly one owned-tree kill");
+	assert.equal(rootCloseObserved, true, "pre-owned helper root close must settle before preparation rejects");
+	assert.equal(transportSettled, true, "all pre-owned helper transports must settle before preparation rejects");
 	assert.equal(isAlive(pids.root), false, "helper root must be dead before preparation rejects");
 	assert.equal(isAlive(pids.descendant), false, "helper descendant must be dead before preparation rejects");
 	assert.equal(offlineInstallStarted, false, "offline install must not start after helper timeout");
