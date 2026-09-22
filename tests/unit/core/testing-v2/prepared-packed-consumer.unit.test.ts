@@ -354,7 +354,8 @@ async function prepareFixture({
 				}]);
 				return result;
 			}
-			if (args.includes("--package-lock-only")) {
+			if (args.includes("install") && args.includes("--offline")) {
+				await onOfflineInstall?.();
 				const manifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
 				manifest.dependencies = { "@gresearch/bobbit": "file:../../pack/bobbit-fixture.tgz" };
 				await writeFile(join(options.cwd, "package.json"), `${JSON.stringify(manifest)}\n`);
@@ -375,6 +376,9 @@ async function prepareFixture({
 						...registryPackages,
 					},
 				}));
+				const fixtureModule = join(options.cwd, "node_modules", "fixture-dependency");
+				await mkdir(fixtureModule, { recursive: true });
+				await writeFile(join(fixtureModule, "marker.txt"), "installed-template");
 				return result;
 			}
 			if (args.includes("config") && args.includes("get") && args.includes("cache")) {
@@ -386,16 +390,6 @@ async function prepareFixture({
 				result.stdout = `cache-batch-${batchIndex}`;
 				await onCacheCommand?.(batchIndex, result, options);
 				return result;
-			}
-			if (args.includes("ci") && args.includes("--offline")) {
-				await onOfflineInstall?.();
-				const stagedManifest = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
-				const stagedLock = JSON.parse(await readFile(join(options.cwd, "package-lock.json"), "utf8"));
-				assert.deepEqual(stagedLock.packages[""].dependencies, stagedManifest.dependencies,
-					`${FAILURE_PREFIX}: offline install must consume the already-resolved packed-artifact lock`);
-				const fixtureModule = join(options.cwd, "node_modules", "fixture-dependency");
-				await mkdir(fixtureModule, { recursive: true });
-				await writeFile(join(fixtureModule, "marker.txt"), "installed-template");
 			}
 			return result;
 		},
@@ -475,14 +469,14 @@ describe("prepared packed consumer", () => {
 		["extra URL", [{ resolved: "https://registry.example.test/extra.tgz", integrity: "sha512-seeded" }]],
 		["changed integrity", [{ resolved: "https://registry.example.test/seeded.tgz", integrity: "sha512-changed" }]],
 		["missing seeded identity", [{ resolved: "https://registry.example.test/missing.tgz" }]],
-	] as const)("rejects generated consumer lock %s before offline install or descriptor", async (_label, consumerRegistryArtifacts) => {
-		let installed = false;
+	] as const)("rejects generated consumer lock %s before descriptor publication", async (_label, consumerRegistryArtifacts) => {
+		let installCount = 0;
 		await assert.rejects(prepareFixture({
 			registryArtifacts: [{ resolved: "https://registry.example.test/seeded.tgz", integrity: "sha512-seeded" }],
 			consumerRegistryArtifacts: [...consumerRegistryArtifacts],
-			onOfflineInstall: () => { installed = true; },
+			onOfflineInstall: () => { installCount++; },
 		}), /outside the verified seed/);
-		assert.equal(installed, false);
+		assert.equal(installCount, 1, `${FAILURE_PREFIX}: npm must author the lock and installed tree in the sole transaction before validation`);
 		const fixtureRoot = join(roots.at(-1)!, "prepared-packed-consumer");
 		await assert.rejects(readFile(join(fixtureRoot, "descriptor.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	});
@@ -490,12 +484,12 @@ describe("prepared packed consumer", () => {
 	it("packs and installs the actual tarball once with a run-owned cache and deterministic offline flags", async () => {
 		const { runRoot, calls, descriptor } = await prepareFixture();
 		const packCalls = calls.filter(call => call.args.includes("pack"));
-		const lockOnlyInstalls = calls.filter(call => call.args.includes("install") && call.args.includes("--package-lock-only"));
-		const offlineMaterializations = calls.filter(call => call.args.includes("ci") && call.args.includes("--offline"));
+		const offlineInstalls = calls.filter(call => call.args.includes("install") && call.args.includes("--offline"));
 
 		assert.equal(packCalls.length, 1, `${FAILURE_PREFIX}: preparation must run npm pack exactly once`);
-		assert.equal(lockOnlyInstalls.length, 1, `${FAILURE_PREFIX}: preparation must resolve the packed artifact exactly once`);
-		assert.equal(offlineMaterializations.length, 1, `${FAILURE_PREFIX}: preparation must run one offline npm ci`);
+		assert.equal(offlineInstalls.length, 1, `${FAILURE_PREFIX}: preparation must run one strict-offline npm install`);
+		assert.equal(calls.some(call => call.args.includes("--package-lock-only") || call.args.includes("ci")), false,
+			`${FAILURE_PREFIX}: preparation must not retain the former lock-only plus npm ci double pass`);
 		assert.equal(calls.filter(call => call.args[0]?.endsWith("resolve-packed-consumer-cache-paths.mjs")).length, 0,
 			`${FAILURE_PREFIX}: an empty integrity set must skip cache-path helper startup`);
 		assert.ok(isStrictChild(runRoot, descriptor.tarballPath), `${FAILURE_PREFIX}: tarball must stay below the run root`);
@@ -503,13 +497,13 @@ describe("prepared packed consumer", () => {
 		assert.ok(isStrictChild(runRoot, descriptor.cacheDir), `${FAILURE_PREFIX}: npm cache must stay below the run root`);
 		assert.equal(await readFile(descriptor.tarballPath, "utf8"), "actual packed bytes");
 
-		const install = offlineMaterializations[0]!;
+		const install = offlineInstalls[0]!;
 		for (const flag of ["--offline", "--ignore-scripts", "--no-audit", "--no-fund"]) {
 			assert.ok(install.args.includes(flag), `${FAILURE_PREFIX}: prepared install must pass ${flag}`);
 		}
 		assert.ok(
-			!install.args.some(argument => resolve(argument) === resolve(descriptor.tarballPath)),
-			`${FAILURE_PREFIX}: offline npm ci must consume the validated lock without a second package operand`,
+			install.args.some(argument => resolve(argument) === resolve(descriptor.tarballPath)),
+			`${FAILURE_PREFIX}: the sole offline npm install must consume the exact packed artifact`,
 		);
 		assert.equal(
 			resolve(cachePath(install) ?? ""),
@@ -534,7 +528,7 @@ describe("prepared packed consumer", () => {
 		});
 
 		const copyCalls = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
-		assert.equal(copyCalls.length, 3, `${FAILURE_PREFIX}: publication and both authority verifications must be tracked helpers`);
+		assert.equal(copyCalls.length, 1, `${FAILURE_PREFIX}: digest-proving direct publication must not be redundantly verified`);
 		const request = copyCalls.map(call => JSON.parse(String(call.options.input))).find(request => request.operation === "publish");
 		assert.equal(request.version, 4);
 		assert.equal(request.artifacts.length, 1, `${FAILURE_PREFIX}: duplicate integrities must publish only once`);
@@ -588,7 +582,7 @@ describe("prepared packed consumer", () => {
 		assert.ok(isStrictChild(runRoot, helper.args[1]!));
 
 		const copyHelpers = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"));
-		assert.equal(copyHelpers.length, 3);
+		assert.equal(copyHelpers.length, 2, `${FAILURE_PREFIX}: only publication and integrity-bearing fallback verification may run`);
 		const copyHelper = copyHelpers.find(call => JSON.parse(String(call.options.input)).operation === "publish")!;
 		assert.deepEqual(copyHelper.args, [copyHelper.args[0]!, descriptor.fixtureRoot]);
 		assert.equal(copyHelper.options.env?.BOBBIT_PACKED_CONSUMER_AMBIENT_CACACHE, join(tmpdir(), "ambient-cache-read-only", "_cacache"));
@@ -1375,8 +1369,10 @@ describe("prepared packed consumer", () => {
 			`${FAILURE_PREFIX}: fallback must contain only exact locked URLs in deterministic order`);
 		const helperRequests = calls.filter(call => call.args[0]?.endsWith("copy-packed-consumer-cache-batch.mjs"))
 			.map(call => JSON.parse(String(call.options.input)) as CopyHelperRequest);
-		assert.deepEqual(helperRequests.map(request => request.operation), ["publish", "verify", "verify"],
-			`${FAILURE_PREFIX}: direct verification plus both final authority points must stay helper-owned`);
+		assert.deepEqual(helperRequests.map(request => request.operation), ["publish", "verify"],
+			`${FAILURE_PREFIX}: only integrity-bearing fallback artifacts may receive post-cache-add verification`);
+		assert.deepEqual(helperRequests[1]?.artifacts.map(artifact => artifact.integrity), ["sha512-corrupt", "sha512-missing"],
+			`${FAILURE_PREFIX}: no-integrity fallback and digest-proven direct hits must be excluded from verification`);
 	});
 
 	it("blocks offline install and descriptor publication when a fallback digest is still absent", async () => {
@@ -1391,7 +1387,7 @@ describe("prepared packed consumer", () => {
 		});
 
 		await assert.rejects(preparing, /isolated cache is missing or corrupt/);
-		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: verification failure must prevent offline npm ci`);
+		assert.equal(offlineStarted, false, `${FAILURE_PREFIX}: fallback verification failure must prevent offline npm install`);
 		const runRoot = roots.at(-1)!;
 		await assert.rejects(readFile(join(runRoot, "prepared-packed-consumer", "descriptor.json")),
 			(error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -1399,7 +1395,7 @@ describe("prepared packed consumer", () => {
 		assert.match(evidence.error.message, /still-missing\.tgz \(sha512-still-missing; missing\)/);
 	});
 
-	it("fails closed when tracked all-final verification fails before install or descriptor publication", async () => {
+	it("fails closed when targeted fallback verification fails before install or descriptor publication", async () => {
 		let offlineStarted = false;
 		let verificationCalls = 0;
 		await assert.rejects(prepareFixture({
@@ -1407,7 +1403,7 @@ describe("prepared packed consumer", () => {
 				resolved: "https://registry.example.test/verify-fatal.tgz",
 				integrity: "sha512-verify-fatal",
 			}],
-			copyDecision: () => "copied",
+			copyDecision: () => "missing",
 			onCopyHelper: ({ request }) => {
 				if (request.operation !== "verify") return;
 				verificationCalls++;
@@ -1478,7 +1474,7 @@ describe("prepared packed consumer", () => {
 		assert.deepEqual(recordedCache.map(command => command.stdout),
 			Array.from({ length: 9 }, (_, index) => `cache-batch-${index}`),
 			`${FAILURE_PREFIX}: descriptor evidence must be ordered by batch index, not completion`);
-		const offlineIndex = calls.findIndex(call => call.args.includes("ci") && call.args.includes("--offline"));
+		const offlineIndex = calls.findIndex(call => call.args.includes("install") && call.args.includes("--offline"));
 		assert.ok(offlineIndex > Math.max(...cacheCalls.map(call => calls.indexOf(call))),
 			`${FAILURE_PREFIX}: offline install must start only after all cache writers settle successfully`);
 	});
