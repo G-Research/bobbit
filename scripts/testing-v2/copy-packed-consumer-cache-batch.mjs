@@ -65,6 +65,11 @@ function artifactIdentity(artifact) {
 	return `${artifact.resolved}\u0000${artifact.integrity}`;
 }
 
+function pathIdentity(path) {
+	const absolute = resolve(path);
+	return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
 function npmRequestCacheKey(resolved) {
 	return `make-fetch-happen:request-cache:${resolved}`;
 }
@@ -92,8 +97,9 @@ function validateRequest(request, destinationContentCache) {
 		if (!isStrictChild(destinationContentCache, destinationPath)) {
 			throw new Error("cache-copy destinationPath must be a strict child of the authoritative fixture npm-cache/_cacache root");
 		}
-		if (destinations.has(destinationPath)) throw new Error("cache-copy destination paths must be unique");
-		destinations.add(destinationPath);
+		const destinationIdentity = pathIdentity(destinationPath);
+		if (destinations.has(destinationIdentity)) throw new Error("cache-copy destination paths must be unique");
+		destinations.add(destinationIdentity);
 		artifact.destinationPath = destinationPath;
 		const identity = artifactIdentity(artifact);
 		if (previous !== undefined && identity.localeCompare(previous) <= 0) {

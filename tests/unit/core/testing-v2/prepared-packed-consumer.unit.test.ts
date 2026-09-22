@@ -979,6 +979,14 @@ describe("prepared packed consumer", () => {
 			version: 3,
 			artifacts: [{ ...base, destinationPath: join(externalRoot, "forged") }],
 		}), /strict child/);
+		const duplicateDestination = join(fixtureRoot, "npm-cache", "_cacache", "duplicate");
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, {
+			version: 3,
+			artifacts: [
+				{ resolved: "https://registry.example.test/a.tgz", integrity: "sha512-a", destinationPath: duplicateDestination },
+				{ resolved: "https://registry.example.test/b.tgz", integrity: "sha512-b", destinationPath: duplicateDestination },
+			],
+		}), /destination paths must be unique/);
 		const safe = { ...base, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "safe") };
 		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, { version: 3, artifacts: [safe] }, {
 			lookup: async () => ({ key: expectedKey, integrity: safe.integrity, path: join(externalRoot, "escaped") }),
