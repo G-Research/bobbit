@@ -70,7 +70,9 @@ The full coordinator follows this order:
 packed-cache seed → A → prebundle → (B ∥ packed finalization) → C → D
 ```
 
-Cache seeding starts before test load. Group A and prebundle then run while the seed's original deadline continues to elapse. Group B overlaps only packed finalization; Groups C and D wait for both sides of that all-settled barrier. Seed and finalization share one immutable 300-second preparation deadline, while the complete suite keeps its fixed 900-second budget. This placement avoids asking a loaded Windows host to begin cache seeding late without increasing either deadline.
+Cache seeding starts before test load. Group A and prebundle then run while the seed's original deadline continues to elapse. Group B overlaps only packed finalization, and dependent Group C starts only if both succeed. Independent Group D remains strictly last and still runs when an earlier phase fails. Seed and finalization share one immutable 300-second preparation deadline, while the complete suite keeps its fixed 900-second budget. This placement avoids asking a loaded Windows host to begin cache seeding late without increasing either deadline.
+
+The hosted scheduler settles every phase instead of letting an exception escape the coordinator. A nonzero or throwing Group B, or a packed-finalization failure, blocks Group C without masking the failure. Seed, Group A, and prebundle failures likewise block phases whose inputs are unavailable. Group D still settles, after which the sampler stops, the report records failures and blocked work, and final owned-root cleanup or diagnostic retention runs. This makes the full schedule failure-safe without retrying product assertions.
 
 Preparation builds one run-owned fixture:
 
@@ -94,6 +96,8 @@ Protocol v4 directly publishes canonical final cache paths. It groups determinis
 
 The explicit hardlink authorization is limited to exact, immutable, SRI-addressed blobs in the ambient npm CAS. For such a hit on the same device, the helper creates a no-overwrite hardlink directly at cacache's canonical final content path and verifies it by digest before use. If hardlinks are unsupported or the caches are on different volumes, the helper uses an exclusive physical copy. Permission or I/O errors, collisions, reparse or authority violations, and unresolved integrity failures fail closed. A missing or rejected cache hit can proceed only through the normal exact-URL npm fallback followed by digest verification.
 
+Windows may expose an ordinary directory through its 8.3 short spelling, such as `RUNNER~1`, while `realpath` returns the long spelling. A changed spelling is not a general alias exemption: the helper first validates the full lexical ancestry as directories of the expected type with no symlink or reparse entry. It accepts each short-to-long expansion only when `lstat` also reports the same `dev` and `ino` identity for both spellings. Cache source ancestry is checked component by component under the canonical ambient-cache authority. A junction, mismatched identity, or unavailable identity therefore fails closed.
+
 Direct hardlinks were selected as the minimal solution:
 
 - Making physical copies the primary path rewrites every cached tarball, consuming most of the preparation budget and adding files that cleanup must traverse. Physical copy remains only the portability fallback.
@@ -107,6 +111,8 @@ The helper treats stdin, stdout, the root process `close` event, transport settl
 The descriptor is coordinator output, not trusted ambient configuration. Its only valid location is the fixed prepared-consumer directory below the authoritative `BOBBIT_V2_RUN_ROOT`. Reads and materialization verify run-root, descriptor, fixture/template/cache, tarball, and copy-destination identity before copying or executing the packaged CLI. An inherited or forged descriptor outside that layout fails closed.
 
 Package and helper commands use tracked process-tree ownership. Timeout, output overflow, transport failure, or ownership failure requests one tree termination, then waits concurrently for actual root close and verified descendant-tree exit under a separate completion deadline. A missing close event, stalled verification, failed kill, or unverified tree remains fatal.
+
+The Windows Job ownership-readiness cap is 90 seconds to accommodate cold hosted PowerShell startup, but it is strictly subordinate to the unchanged immutable 300-second preparation deadline. The readiness timer is armed only when it expires strictly before the remaining absolute budget. If the absolute deadline is earlier or equal, it remains the sole timer and authority; no duplicate readiness timer can race it, change the reported failure class, or issue a competing kill request. Ownership waiting still consumes the original preparation budget rather than starting a new one.
 
 Preparation failure retains the partial fixture and `preparation-failure.json`. Diagnostics include the command, working directory, PID, ownership and kill state, root-close and tree-exit results, and bounded stdout/stderr. This preserves useful npm evidence without allowing an unbounded post-timeout wait.
 
@@ -122,7 +128,7 @@ The Playwright configuration loads the native-ESM worker ledger with an ESM impo
 
 The configuration logs the resolved worker count and its source: explicit measurement override, inherited ledger grant, fresh reservation, or fallback. The wrapper also emits bounded top-ten slow file and spec totals, including retries, from the existing JSON report before successful run-root deletion. These diagnostics explain throughput and host-contention failures without changing scheduling, timeouts, assertions, or retry policy. Use `BOBBIT_V2_PLAYWRIGHT_WORKERS` only for controlled measurement.
 
-Operationally, Browser uses three Playwright project lanes in one invocation: real-MCP specs and special isolated-fixture specs each have a one-worker project, while ordinary canonical journeys use the shared browser worker grant. This lets narrow identities start without allowing real-MCP cases to overlap. In the full E2E coordinator, Group A uses two Node files, Playwright Groups B and C default to two workers, and Group D uses at most two Vitest forks. The packed-cache seed completes before Group A; only packed finalization overlaps Group B. Groups C and D wait for both owners, preserving bounded host load and the shared run-local transform cache.
+Operationally, Browser uses three Playwright project lanes in one invocation: real-MCP specs and special isolated-fixture specs each have a one-worker project, while ordinary canonical journeys use the shared browser worker grant. This lets narrow identities start without allowing real-MCP cases to overlap. In the full E2E coordinator, Group A uses two Node files, Playwright Groups B and C default to two workers, and Group D uses at most two Vitest forks. The packed-cache seed completes before Group A; only packed finalization overlaps Group B. Group C waits for both successful owners, while independent Group D remains last even if C is blocked, preserving bounded host load and the shared run-local transform cache.
 
 ## Verification commands
 
@@ -148,7 +154,7 @@ Before these changes, cleanup policy was split across synchronous removal, fixtu
 
 One later pre-fix full E2E run passed all assertions in 874.5 seconds but was killed near 903.6 seconds while deleting duplicated packed-consumer trees. A representative installed tree contained 35,479 files and 5,131 directories and occupied 620,922,686 bytes. Secure cleanup of that tree took 16.807 seconds; larger thread-pool or traversal-concurrency variants improved this by at most 0.773%, so final-root cleanup retains traversal concurrency 128 with a 32-thread isolated pool. One-shot consumption removes an entire duplicate tree and its recursive-copy cost instead of relying on marginal deletion tuning.
 
-At final implementation commit `a60becc6e`, a focused production-lock seed passed in 24.071 seconds:
+At cache-protocol qualification commit `a60becc6e`, a focused production-lock seed passed in 24.071 seconds:
 
 - 287 selected identities;
 - 282 exact CAS hardlinks;
@@ -159,3 +165,16 @@ At final implementation commit `a60becc6e`, a focused production-lock seed passe
 One independent full Windows E2E repetition at the same commit passed with `BOBBIT_V2_RETRY_FREE=1` and retry count zero. The fixed 900-second suite completed in 888.7 seconds: Group A took 70.5 seconds, B 337.2 seconds, C 336.4 seconds, and D 93.4 seconds. Packed seed plus finalization consumed 180.638 seconds of active preparation time, and successful shared root cleanup took 23.132 seconds. The log contained no `EBUSY`, `EPERM`, `ENOTEMPTY`, `cleanup-deferred`, or `timed out after 600000ms` npm signature.
 
 This is **one** independent retry-free repetition, not three. Earlier full or qualifying runs that were not retry-free, and failed runs affected by host starvation, remain useful historical evidence only; they do not satisfy or combine into three retry-free repetitions. The final result demonstrates removal of the known signatures in the recorded run, not universal flake elimination or a portable performance guarantee.
+
+### Hosted PR-check repair qualification
+
+At repair head `523cfed7b`, focused local verification passed:
+
+- E2E scheduling plus prepared-consumer unit coverage: 91 of 91 tests;
+- offline/deadline plus prepared-consumer unit coverage: 82 of 82 tests;
+- browser-harness Group C ordering coverage: 12 of 12 tests;
+- real packed-cache helper shutdown coverage: 4 of 4 tests.
+
+These tests pin failure-safe phase settlement, Group C blocking with Group D continuation, sampler/report/final-cleanup reachability, 8.3 alias identity and reparse rejection, the 90-second readiness cap's subordination to the 300-second deadline, and full helper-tree joining. The workflow implementation gate also passed at that repair head.
+
+This repair qualification is local workflow evidence. Hosted PR checks were not refreshed for this round, and the round did not add another complete retry-free full E2E repetition; the retry-free evidence therefore remains the single run recorded above.
