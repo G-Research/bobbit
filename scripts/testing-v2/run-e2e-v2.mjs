@@ -756,6 +756,120 @@ export async function runSeedThenGroupAAndPrebundle({
 	return Object.freeze({ seed, groupA, prebundle });
 }
 
+/**
+ * Run the hosted phase graph without letting one phase exception bypass the
+ * sampler, report, or owned-root finalizer in main(). C depends on successful B
+ * and packed-consumer finalization; D is independent but remains strictly last.
+ */
+export async function runHostedE2ESchedule({
+	seedPackedConsumer,
+	runGroupA,
+	preparePrebundle,
+	runGroupB,
+	finalizePackedConsumer,
+	runGroupC,
+	runGroupD,
+	onGroupSettled = () => {},
+	onPhaseFailure = () => {},
+	onGroupBlocked = () => {},
+}) {
+	const failures = [];
+	const settlePhase = async (phase, operation, group = null) => {
+		const startedAt = performance.now();
+		try {
+			const value = await startConcurrentOperation(operation);
+			if (group) onGroupSettled(group, value);
+			return Object.freeze({ status: "fulfilled", value });
+		} catch (error) {
+			const failure = Object.freeze({
+				phase,
+				error,
+				wallMs: Math.round(performance.now() - startedAt),
+			});
+			failures.push(failure);
+			onPhaseFailure(failure);
+			return Object.freeze({ status: "rejected", reason: error });
+		}
+	};
+
+	let seed;
+	let groupA;
+	let prebundle;
+	let groupB;
+	let packedConsumer;
+	let groupC;
+	let groupD;
+	let blockedBy = null;
+
+	const seedSettlement = await settlePhase("packed-cache-seed", seedPackedConsumer);
+	if (seedSettlement.status === "fulfilled") {
+		seed = seedSettlement.value;
+		const groupASettlement = await settlePhase("A", () => runGroupA({ seed }), "A");
+		if (groupASettlement.status === "fulfilled") {
+			groupA = groupASettlement.value;
+			const prebundleSettlement = await settlePhase("prebundle", () => preparePrebundle({ seed, groupA }));
+			if (prebundleSettlement.status === "fulfilled") {
+				prebundle = prebundleSettlement.value;
+			} else {
+				blockedBy = "prebundle failure";
+			}
+		} else {
+			blockedBy = "Group A exception";
+		}
+	} else {
+		blockedBy = "packed-cache seed failure";
+	}
+
+	if (!blockedBy) {
+		const context = { seed, groupA, prebundle };
+		const groupBPromise = settlePhase("B", () => runGroupB(context), "B");
+		const packedConsumerPromise = settlePhase(
+			"packed-consumer-finalization",
+			() => finalizePackedConsumer(context),
+		);
+		const [groupBSettlement, packedConsumerSettlement] = await Promise.all([
+			groupBPromise,
+			packedConsumerPromise,
+		]);
+		if (groupBSettlement.status === "fulfilled") groupB = groupBSettlement.value;
+		if (packedConsumerSettlement.status === "fulfilled") packedConsumer = packedConsumerSettlement.value;
+
+		if (groupBSettlement.status === "rejected") blockedBy = "Group B exception";
+		else if (groupB.code !== 0) blockedBy = `Group B exit code ${groupB.code}`;
+		if (packedConsumerSettlement.status === "rejected") {
+			blockedBy = blockedBy
+				? `${blockedBy} and packed-consumer finalization failure`
+				: "packed-consumer finalization failure";
+		}
+	}
+
+	if (blockedBy) {
+		onGroupBlocked("C", blockedBy);
+	} else {
+		const groupCSettlement = await settlePhase(
+			"C",
+			() => runGroupC({ seed, groupA, prebundle, groupB, packedConsumer }),
+			"C",
+		);
+		if (groupCSettlement.status === "fulfilled") groupC = groupCSettlement.value;
+	}
+
+	const groupDSettlement = await settlePhase("D", runGroupD, "D");
+	if (groupDSettlement.status === "fulfilled") groupD = groupDSettlement.value;
+
+	return Object.freeze({
+		seed,
+		groupA,
+		prebundle,
+		groupB,
+		packedConsumer,
+		groupC,
+		groupD,
+		blockedBy,
+		failures: Object.freeze([...failures]),
+	});
+}
+
 /** Backward-compatible test seam; new scheduling names the finalization phase. */
 export function runGroupBWithPackedConsumerPreparation(options) {
 	return runGroupBWithPackedConsumerFinalization({
@@ -990,52 +1104,71 @@ async function main() {
 	} else {
 		// Hosted runners cannot reliably absorb cache seeding under later test or
 		// prebundle load. Seed first, keep its original deadline ticking through A
-		// and prebundle, then overlap only finalization with B. C and D remain behind
-		// the all-settled barrier.
+		// and prebundle, then overlap only finalization with B. C depends on both;
+		// independent D remains strictly last even when an earlier phase fails.
 		console.log("[e2e-v2] schedule: packed-cache seed → A → prebundle → (B ∥ packed finalization) → C → D (B/C share run-local transform cache)");
 		// Keep B's server selector in a frozen snapshot. The separate C environment
 		// is mutable only while preparation publishes its descriptor, then frozen
 		// before any worker receives it.
 		const sharedPlaywrightEnv = createSerialPlaywrightEnvironment(coordinatorEnv);
 		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
-		const prerequisites = await runSeedThenGroupAAndPrebundle({
-			seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
-			runGroupA: () => runGroupA(A, coordinatorEnv),
-			onGroupASettled: (groupAResult) => {
-				results.push(groupAResult);
-				captureLatestProfile("A");
-			},
-			preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv),
-		});
-		bundle = prerequisites.prebundle;
-		if (bundle.fallback) {
-			console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
-		} else {
-			console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
-		}
-		const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(sharedPlaywrightEnv,
-			bundle.bundlePath ? { BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundle.bundlePath } : {}));
 		const retries = resolveE2ERetryCount(coordinatorEnv);
 		const groupBWorkers = resolveE2ePlaywrightWorkers();
 		const groupCWorkers = resolveE2ePlaywrightWorkers();
-		const paired = await runGroupBWithPackedConsumerFinalization({
-			runGroupB: () => runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries),
-			finalizePackedConsumer: () => finalizeGroupCPackedConsumer(prerequisites.seed, sharedPlaywrightEnv, paths),
-			onGroupBSettled: (groupBResult) => {
-				results.push(groupBResult);
-				captureLatestProfile("B");
+		const phaseLabels = {
+			"packed-cache-seed": "packed-cache-seed",
+			A: "A/node-real-fidelity",
+			prebundle: "B/dist-prebundle",
+			B: "B/e2e-relocate",
+			"packed-consumer-finalization": "C/packed-consumer-finalization",
+			C: "C/browser-fidelity",
+			D: "D/vitest-real-fidelity",
+		};
+		const schedule = await runHostedE2ESchedule({
+			seedPackedConsumer: () => seedGroupCPackedConsumer(C, sharedPlaywrightEnv, paths),
+			runGroupA: () => runGroupA(A, coordinatorEnv),
+			preparePrebundle: () => prepareE2EDistServerPrebundle(paths, coordinatorEnv),
+			runGroupB: ({ prebundle }) => {
+				bundle = prebundle;
+				if (bundle.fallback) {
+					console.log(`[e2e-v2] Group B dist prebundle unavailable; launching raw B: ${bundle.error}`);
+				} else {
+					console.log(`[e2e-v2] Group B dist prebundle ${bundle.status}: ${bundle.key} in ${(bundle.buildWallMs / 1000).toFixed(1)}s`);
+				}
+				const groupBEnvironment = Object.freeze(composeE2EChildEnvironment(sharedPlaywrightEnv,
+					bundle.bundlePath ? { BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE: bundle.bundlePath } : {}));
+				return runSerialGroupB(B, groupBEnvironment, paths, groupBWorkers, retries);
+			},
+			finalizePackedConsumer: ({ seed }) => finalizeGroupCPackedConsumer(seed, sharedPlaywrightEnv, paths),
+			runGroupC: ({ packedConsumer: preparedPackedConsumer }) => {
+				packedConsumer = preparedPackedConsumer;
+				// Preserve the explicit C-side fail-closed guard even though its environment
+				// was never given B's selector. Existing source-order pins protect this line.
+				deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
+				Object.freeze(sharedPlaywrightEnv);
+				serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
+				return runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath);
+			},
+			runGroupD: () => runGroupD(D, { coordinatorEnv }),
+			onGroupSettled: (group, result) => {
+				results.push(result);
+				captureLatestProfile(group);
+			},
+			onPhaseFailure: ({ phase, error, wallMs: phaseWallMs }) => {
+				const formatted = formatFailure(error);
+				if (phase === "prebundle") bundle = { ...bundle, status: "failed", error: formatted };
+				if (phase === "packed-consumer-finalization") {
+					packedConsumer = { selected: C.includes(PACKAGED_CONSUMER_SPEC), failed: true, error: formatted, descriptorPath: null, wallMs: phaseWallMs };
+				}
+				results.push({ label: phaseLabels[phase] ?? phase, code: 1, wallMs: phaseWallMs, error: formatted });
+				if (phase === "A" || phase === "B" || phase === "C" || phase === "D") captureLatestProfile(phase);
+			},
+			onGroupBlocked: (_group, reason) => {
+				results.push({ label: "C/browser-fidelity", code: 0, wallMs: 0, skipped: true, error: `blocked: ${reason}` });
 			},
 		});
-		packedConsumer = paired.packedConsumer;
-		// Preserve the explicit C-side fail-closed guard even though its environment
-		// was never given B's selector. Existing source-order pins protect this line.
-		deleteEnvironmentValue(sharedPlaywrightEnv, "BOBBIT_V2_E2E_DIST_SERVER_PREBUNDLE");
-		Object.freeze(sharedPlaywrightEnv);
-		serialTransformCache = fanOutSerialTransformCache(paths.cacheRoot, paths.root);
-		results.push(await runSerialGroupC(C, sharedPlaywrightEnv, paths, groupCWorkers, retries, serialTransformCache.snapshotPath));
-		captureLatestProfile("C");
-		results.push(await runGroupD(D, { coordinatorEnv }));
-		captureLatestProfile("D");
+		if (schedule.prebundle) bundle = schedule.prebundle;
+		if (schedule.packedConsumer) packedConsumer = schedule.packedConsumer;
 	}
 
 	const sample = sampler.stop();
@@ -1120,9 +1253,11 @@ async function main() {
 			},
 			packedConsumer: packedConsumer.delegated
 				? { state: "delegated-to-nested-coordinator" }
-				: packedConsumer.selected
-					? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
-					: { state: "not-selected" },
+				: packedConsumer.failed
+					? { state: "failed", error: packedConsumer.error }
+					: packedConsumer.selected
+						? { state: "prepared", descriptorPath: packedConsumer.descriptorPath }
+						: { state: "not-selected" },
 		},
 	});
 	process.exit(exitCode);
