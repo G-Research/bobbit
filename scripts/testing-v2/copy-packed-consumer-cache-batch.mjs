@@ -151,24 +151,31 @@ function withProgress(error, progress) {
 	return error;
 }
 
+function inspectEntry(path, inspectPath) {
+	return inspectPath(path, { bigint: true });
+}
+
 async function inspectOptional(path, inspectPath) {
 	try {
-		return await inspectPath(path);
+		return await inspectEntry(path, inspectPath);
 	} catch (error) {
 		if (error?.code === "ENOENT") return undefined;
 		throw error;
 	}
 }
 
+function hasFilesystemIdentity(entry) {
+	return typeof entry?.dev === "bigint" && typeof entry?.ino === "bigint" && entry.ino !== 0n;
+}
+
 function sameFilesystemIdentity(left, right) {
-	return left?.dev !== undefined && left?.ino !== undefined &&
-		right?.dev !== undefined && right?.ino !== undefined &&
+	return hasFilesystemIdentity(left) && hasFilesystemIdentity(right) &&
 		left.dev === right.dev && left.ino === right.ino;
 }
 
 async function requireCanonicalEntry(path, inspectPath, canonicalPath, label, kind) {
 	const absolute = resolve(path);
-	const entry = await inspectPath(absolute);
+	const entry = await inspectEntry(absolute, inspectPath);
 	const hasExpectedKind = kind === "directory" ? entry?.isDirectory?.() : entry?.isFile?.();
 	if (!hasExpectedKind || entry.isSymbolicLink?.()) throw new Error(`${label} must be a non-reparse ${kind}`);
 	const canonical = resolve(await canonicalPath(absolute));
@@ -176,7 +183,7 @@ async function requireCanonicalEntry(path, inspectPath, canonicalPath, label, ki
 		// Windows realpath expands an ordinary 8.3 component (for example
 		// RUNNER~1) to its long spelling. Accept that alias only when lstat proves
 		// both names identify the same entry; a junction/symlink is rejected above.
-		const canonicalEntry = await inspectPath(canonical);
+		const canonicalEntry = await inspectEntry(canonical, inspectPath);
 		const canonicalHasExpectedKind = kind === "directory"
 			? canonicalEntry?.isDirectory?.()
 			: canonicalEntry?.isFile?.();
@@ -253,7 +260,7 @@ async function ensureDestinationParent(fixtureRoot, destinationContentCache, des
 			"cache-copy destination ancestry",
 		);
 	}
-	return inspectPath(targetParent);
+	return inspectEntry(targetParent, inspectPath);
 }
 
 function isExactLookup(info, expectedKey, integrity) {
@@ -395,7 +402,7 @@ export async function copyPackedConsumerCacheBatch(authoritativeFixtureRoot, aut
 						status = "copied";
 					}
 				}
-				const published = await inspectPath(artifact.destinationPath);
+				const published = await inspectEntry(artifact.destinationPath, inspectPath);
 				if (!published?.isFile?.() || published.isSymbolicLink?.()) throw new Error("cache-copy publication must be a non-reparse regular file");
 				if (status === "linked" && source.ino !== undefined && published.ino !== undefined &&
 					(source.dev !== published.dev || source.ino !== published.ino)) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createWriteStream, existsSync } from "node:fs";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -143,6 +143,11 @@ function requireApi<K extends keyof PackedConsumerApi>(name: K): NonNullable<Pac
 function isStrictChild(root: string, candidate: string): boolean {
 	const child = relative(resolve(root), resolve(candidate));
 	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+function filesystemPathKey(path: string): string {
+	const absolute = resolve(path);
+	return process.platform === "win32" ? absolute.toLowerCase() : absolute;
 }
 
 function consumerPath(result: string | { consumerDir: string }): string {
@@ -1102,17 +1107,19 @@ describe("prepared packed consumer", () => {
 		const crossVolume = { ...baseArtifact, destinationPath: join(fixtureRoot, "npm-cache", "_cacache", "content", "different-device") };
 		let crossVolumeLinks = 0;
 		let crossVolumeCopies = 0;
-		const inspectWithDifferentSourceDevice = async (path: string) => {
-			const entry = await lstat(path);
-			if (path !== sourcePath) return entry;
+		const destinationParentCanonical = resolve(await realpath(dirname(crossVolume.destinationPath)));
+		const inspectWithDifferentDestinationDevice = async (path: string, options?: { bigint?: boolean }) => {
+			assert.equal(options?.bigint, true, `${FAILURE_PREFIX}: identity-bearing inspection must request bigint stats`);
+			const entry = await lstat(path, { bigint: true });
+			if (filesystemPathKey(await realpath(path)) !== filesystemPathKey(destinationParentCanonical)) return entry;
 			return new Proxy(entry, { get(target, property, receiver) {
-				if (property === "dev") return target.dev + 1;
+				if (property === "dev") return target.dev + 1n;
 				return Reflect.get(target, property, receiver);
 			} });
 		};
 		const crossVolumeResult = await copyPackedConsumerCacheBatch(fixtureRoot, ambientCache, publishRequest([crossVolume]), {
 			lookup: async () => ({ key: expectedKey, integrity: crossVolume.integrity, path: sourcePath }),
-			inspectPath: inspectWithDifferentSourceDevice,
+			inspectPath: inspectWithDifferentDestinationDevice,
 			linkFile: async () => { crossVolumeLinks++; },
 			copyPhysical: async (source: string, destination: string) => { crossVolumeCopies++; await copyFile(source, destination, 1); },
 			readDigest: async () => Buffer.from("physical bytes"),
@@ -1172,11 +1179,11 @@ describe("prepared packed consumer", () => {
 			lookup: async () => ({ key: expectedKey, integrity: safe.integrity, path: sourcePath }),
 			inspectPath: async (path: string) => path === reparsePath
 				? { isDirectory: () => true, isSymbolicLink: () => true }
-				: originalLstat(path),
+				: originalLstat(path, { bigint: true }),
 		}), (error: unknown) => error instanceof AggregateError && error.errors.some(failure => /destination ancestry/.test(failure.message)));
 	});
 
-	it("accepts an ordinary lexical 8.3-style ancestor alias only when filesystem identity matches", async () => {
+	it("accepts an ordinary lexical 8.3-style ancestor alias only with exact nonzero BigInt identity", async () => {
 		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-short-alias-unit-"));
 		roots.push(fixtureRoot);
 		const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
@@ -1198,10 +1205,20 @@ describe("prepared packed consumer", () => {
 			return absolute;
 		};
 		let canonicalAliasInspections = 0;
-		const inspectPath = async (path: string) => {
+		let nextInode = 1n;
+		const inodes = new Map<string, bigint>();
+		const inspectPath = async (path: string, options?: { bigint?: boolean }) => {
+			assert.equal(options?.bigint, true, `${FAILURE_PREFIX}: identity-bearing inspection must request bigint stats`);
 			const remapped = remapFromCanonicalAlias(path);
 			if (remapped !== resolve(path)) canonicalAliasInspections++;
-			return lstat(remapped);
+			const entry = await lstat(remapped, { bigint: true });
+			const key = filesystemPathKey(remapped);
+			if (!inodes.has(key)) inodes.set(key, nextInode++);
+			return new Proxy(entry, { get(target, property, receiver) {
+				if (property === "dev") return 73n;
+				if (property === "ino") return inodes.get(key)!;
+				return Reflect.get(target, property, receiver);
+			} });
 		};
 		const artifact = {
 			integrity: "sha512-short-alias",
@@ -1221,9 +1238,10 @@ describe("prepared packed consumer", () => {
 		assert.deepEqual(result.results, [{ integrity: artifact.integrity, status: "verified" }]);
 		assert.ok(canonicalAliasInspections > 0,
 			`${FAILURE_PREFIX}: a changed canonical spelling must be accepted only after same-entry inspection`);
+		assert.ok([...inodes.values()].every(inode => inode > 0n));
 	});
 
-	it("rejects canonical spelling changes with mismatched identity and real reparse entries", async () => {
+	it("rejects canonical spelling changes with mismatched identity and real reparse entries before work admission", async () => {
 		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-identity-unit-"));
 		const externalRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-external-unit-"));
 		roots.push(fixtureRoot, externalRoot);
@@ -1234,15 +1252,60 @@ describe("prepared packed consumer", () => {
 			operation: "verify" as const,
 			artifacts: [{ integrity: "sha512-alias-identity", destinationPath: join(destinationCache, "identity") }],
 		};
+		let digestReads = 0;
 
 		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, undefined, request, {
 			canonicalPath: async (path: string) => resolve(path) === resolve(fixtureRoot) ? externalRoot : resolve(path),
+			readDigest: async () => { digestReads++; return Buffer.from("unexpected"); },
 		}), /authoritative fixture root must not traverse a reparse point/);
+		assert.equal(digestReads, 0);
 		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, undefined, request, {
 			inspectPath: async (path: string) => resolve(path) === resolve(fixtureRoot)
 				? { isDirectory: () => true, isSymbolicLink: () => true }
-				: lstat(path),
+				: lstat(path, { bigint: true }),
+			readDigest: async () => { digestReads++; return Buffer.from("unexpected"); },
 		}), /authoritative fixture root must be a non-reparse directory/);
+		assert.equal(digestReads, 0);
+	});
+
+	it.each([
+		["zero", 9n, 0n],
+		["unknown", undefined, undefined],
+	] as const)("rejects %s canonical alias identity before work admission", async (_label, dev, ino) => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-unavailable-unit-"));
+		const canonicalRoot = await mkdtemp(join(tmpdir(), "bobbit-cache-alias-unavailable-canonical-unit-"));
+		roots.push(fixtureRoot, canonicalRoot);
+		const destinationCache = join(fixtureRoot, "npm-cache", "_cacache");
+		await mkdir(destinationCache, { recursive: true });
+		let digestReads = 0;
+		let inspections = 0;
+		const inspectPath = async (path: string, options?: { bigint?: boolean }) => {
+			assert.equal(options?.bigint, true, `${FAILURE_PREFIX}: identity-bearing inspection must request bigint stats`);
+			inspections++;
+			const absolute = resolve(path);
+			if (absolute === resolve(fixtureRoot) || absolute === resolve(canonicalRoot)) {
+				return {
+					dev,
+					ino,
+					isDirectory: () => true,
+					isFile: () => false,
+					isSymbolicLink: () => false,
+				};
+			}
+			return lstat(path, { bigint: true });
+		};
+
+		await assert.rejects(copyPackedConsumerCacheBatch(fixtureRoot, undefined, {
+			version: 4,
+			operation: "verify",
+			artifacts: [{ integrity: `sha512-${_label}-alias`, destinationPath: join(destinationCache, _label) }],
+		}, {
+			inspectPath,
+			canonicalPath: async (path: string) => resolve(path) === resolve(fixtureRoot) ? canonicalRoot : resolve(path),
+			readDigest: async () => { digestReads++; return Buffer.from("unexpected"); },
+		}), /authoritative fixture root must not traverse a reparse point/);
+		assert.ok(inspections > 0);
+		assert.equal(digestReads, 0);
 	});
 
 	it("copies many real cacache digests through public retained destination entries without mutating ambient indexes", async () => {
