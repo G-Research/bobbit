@@ -475,15 +475,22 @@ export async function runOwnedCommand(command, args, {
 	const remainingOwnershipBudgetMs = totalTimeoutMs === undefined
 		? Number.POSITIVE_INFINITY
 		: Math.max(1, Math.ceil(totalTimeoutMs - Math.max(0, now() - totalStartedAt)));
-	const ownershipReadinessTimeoutMs = Math.min(ownershipEstablishmentTimeoutMs, remainingOwnershipBudgetMs);
-	const ownershipTimeoutError = new Error(`${rendered} ownership readiness timed out after ${ownershipReadinessTimeoutMs}ms`);
+	// The readiness cap is independent only when it can expire first. Otherwise
+	// the already-armed absolute timer remains the sole authority for the same or
+	// shorter remaining budget, preserving its deadline error and kill request.
+	const ownershipReadinessTimeoutMs = ownershipEstablishmentTimeoutMs < remainingOwnershipBudgetMs
+		? ownershipEstablishmentTimeoutMs
+		: undefined;
+	const ownershipTimeoutError = ownershipReadinessTimeoutMs === undefined
+		? undefined
+		: new Error(`${rendered} ownership readiness timed out after ${ownershipReadinessTimeoutMs}ms`);
 	const terminationDuringOwnership = Symbol("termination-during-ownership");
 	try {
 		await Promise.race([
 			tracked.ownershipReady,
-			new Promise((_, reject) => {
+			...(ownershipReadinessTimeoutMs === undefined ? [] : [new Promise((_, reject) => {
 				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipReadinessTimeoutMs);
-			}),
+			})]),
 			killRequestedResult.then(() => { throw terminationDuringOwnership; }),
 		]);
 		ownershipState = "established";

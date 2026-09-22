@@ -1789,7 +1789,7 @@ describe("prepared packed consumer", () => {
 		assert.equal(kills, 0);
 	});
 
-	it("clamps pending ownership readiness to the absolute deadline and fully joins its killed tree", async () => {
+	it("leaves shorter pending ownership readiness to the absolute deadline and fully joins its killed tree", async () => {
 		const child = Object.assign(new EventEmitter(), {
 			pid: 3232,
 			stdout: new PassThrough(),
@@ -1828,8 +1828,8 @@ describe("prepared packed consumer", () => {
 			clearTimer: () => {},
 		});
 		await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
-		assert.equal(timers[0]?.timeoutMs, 50, `${FAILURE_PREFIX}: the first timer must remain the absolute deadline`);
-		assert.equal(timers[1]?.timeoutMs, 50, `${FAILURE_PREFIX}: ownership readiness must clamp to the absolute remainder`);
+		assert.equal(timers.length, 1, `${FAILURE_PREFIX}: readiness must not duplicate the shorter absolute deadline timer`);
+		assert.equal(timers[0]?.timeoutMs, 50, `${FAILURE_PREFIX}: the sole timer must remain the absolute deadline`);
 		timers[0]!.callback();
 
 		await assert.rejects(running, (error: unknown) => {
